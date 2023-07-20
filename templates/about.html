@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block variables %}
+{% endblock %}
+
+{% block content %}
+<div id="aboutwrap">
+    <div>
+        Arxiv-sanity-X: A robust enhancement of the arXiv-sanity-lite website that significantly expedites the process of academic research. It diligently polls the arXiv API for new papers, enabling users to conveniently tag papers of interest. Based on SVMs over tf-idf features of paper abstracts, it recommends novel papers for each tag. Users can set up keywords that the system will automatically track, enabling a personalized academic journey. The elegant web user interface allows for seamless searching, ranking, sorting, and analysis of results. Uniquely, Arxiv-sanity-X can dispatch daily emails containing recommendations for new papers based on your tags and keywords. Manage your tags and keywords, stay abreast with recent papers in your area, and never miss an important update!
+    </div>
+
+    <br>
+    <div>
+        This particular instance indexes papers from cs.CV, cs.CL, cs.LG, cs.AI, cs.NE, cs.RO, stat.ML, cs.GT, cs.HC, cs.MA, but only recent papers.
+    </div>
+
+    <br>
+    <div>The code for this website is open source at Github under <a href="">arxiv-sanity-X</a>.</div>
+
+    <br>
+    <div>Developed in spare time as a labor of love by <a href="">@Xihuai</a>.</div>
+</div>
+{% endblock %}
+
+{% block elements %}
+{% endblock %}

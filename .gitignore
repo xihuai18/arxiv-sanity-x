@@ -1,0 +1,11 @@
+__pycache__
+data
+secret_key.txt
+.DS_Store
+.ipynb_checkpoints
+*.ipynb
+*.log
+vars.py
+setup_host.sh
+.vscode
+llm.py
