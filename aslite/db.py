@@ -130,6 +130,15 @@ def get_tags_db(flag="r", autocommit=True):
     )
     return tdb
 
+
+def get_combined_tags_db(flag="r", autocommit=True):
+    assert flag in ["r", "c"]
+    tdb = CompressedSqliteDict(
+        DICT_DB_FILE, tablename="combined_tags", flag=flag, autocommit=autocommit
+    )
+    return tdb
+
+
 def get_keywords_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
     kdb = CompressedSqliteDict(
@@ -158,12 +167,13 @@ our "feature store" is currently just a pickle file, may want to consider hdf5 i
 """
 
 # stores tfidf features a bunch of other metadata
+FEATURES_FILE_NEW = os.path.join(DATA_DIR, "features_new.p")
 FEATURES_FILE = os.path.join(DATA_DIR, "features.p")
 
 
 def save_features(features):
     """takes the features dict and save it to disk in a simple pickle file"""
-    safe_pickle_dump(features, FEATURES_FILE)
+    safe_pickle_dump(features, FEATURES_FILE_NEW)
 
 
 def load_features():

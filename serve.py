@@ -25,6 +25,7 @@ from aslite.db import (
     get_papers_db,
     get_metas_db,
     get_tags_db,
+    get_combined_tags_db,
     get_last_active_db,
     get_email_db,
     get_keywords_db,
@@ -36,11 +37,12 @@ from collections import Counter
 from loguru import logger
 from multiprocessing import Pool, cpu_count
 from apscheduler.schedulers.background import BackgroundScheduler
+from sklearn.kernel_approximation import Nystroem, RBFSampler
 
 # -----------------------------------------------------------------------------
 # inits and globals
 
-RET_NUM = 25  # number of papers to return per page
+RET_NUM = 100  # number of papers to return per page
 
 app = Flask(__name__)
 
@@ -65,6 +67,18 @@ def get_tags():
             tags_dict = tags_db[g.user] if g.user in tags_db else {}
         g._tags = tags_dict
     return g._tags
+
+
+def get_combined_tags():
+    if g.user is None:
+        return {}
+    if not hasattr(g, "_combined_tags"):
+        with get_combined_tags_db() as combined_tags_db:
+            combined_tags_dict = (
+                combined_tags_db[g.user] if g.user in combined_tags_db else {}
+            )
+        g._combined_tags = combined_tags_dict
+    return g._combined_tags
 
 
 def get_keys():
@@ -100,8 +114,8 @@ get_all_papers()
 get_all_metas()
 
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-scheduler.add_job(get_all_papers, "cron", day_of_week="tue,wed,thu,fri,mon", hour=15)
-scheduler.add_job(get_all_metas, "cron", day_of_week="tue,wed,thu,fri,mon", hour=15)
+scheduler.add_job(get_all_papers, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
+scheduler.add_job(get_all_metas, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
 scheduler.start()
 
 
@@ -197,13 +211,14 @@ def time_rank():
     return pids, scores
 
 
-def svm_rank(tags: str = "", pid: str = "", C: float = 0.005):
+def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "and"):
     # tag can be one tag or a few comma-separated tags or 'all' for all tags we have in db
     # pid can be a specific paper id to set as positive for a kind of nearest neighbor search
-    if not (tags or pid):
+    if not (tags or s_pids):
         return [], [], []
 
     # load all of the features
+    s_time = time.time()
     features = load_features()
     x, pids = features["x"], features["pids"]
     n, d = x.shape
@@ -214,27 +229,60 @@ def svm_rank(tags: str = "", pid: str = "", C: float = 0.005):
 
     # construct the positive set
     y = np.zeros(n, dtype=np.float32)
-    if pid:
-        y[ptoi[pid]] = 1.0
+    if s_pids:
+        s_pids = set(map(str.strip, s_pids.split(",")))
+        for p_i, pid in enumerate(s_pids):
+            if logic == "and":
+                y[ptoi[pid]] = 1.0 + p_i
+            else:
+                y[ptoi[pid]] = 1.0
     elif tags:
         tags_db = get_tags()
         tags_filter_to = (
             tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
         )
-        for tag, pids in tags_db.items():
-            if tag in tags_filter_to:
-                for pid in pids:
+        for t_i, tag in enumerate(tags_filter_to):
+            t_pids = tags_db[tag]
+            for p_i, pid in enumerate(t_pids):
+                if logic == "and":
+                    y[ptoi[pid]] = 1.0 + t_i
+                else:
                     y[ptoi[pid]] = 1.0
+    e_time = time.time()
+
+    logger.debug(f"feature preparing for {e_time - s_time:.5f}s")
 
     if y.sum() == 0:
         return [], [], []  # there are no positives?
 
+    s_time = time.time()
+
     # classify
     clf = svm.LinearSVC(
-        class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=C
+        class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C
     )
+    # feature_map_nystroem = Nystroem(
+    #     random_state=0, n_components=100, n_jobs=-1
+    # )
+    # x = feature_map_nystroem.fit_transform(x)
+    # rbf_feature = RBFSampler(gamma=1, random_state=0, n_components=200)
+    # x = rbf_feature.fit_transform(x)
+    # e_time = time.time()
+    # logger.debug(f"Dimension reduction for {e_time - s_time:.5f}s")
+
     clf.fit(x, y)
-    s = clf.decision_function(x)
+    e_time = time.time()
+    logger.debug(f"SVM fitting data for {e_time - s_time:.5f}s")
+
+    if logic == "and":
+        s = clf.decision_function(x)
+        # logger.debug(f"svm_rank: {s.shape}")
+        if len(s.shape) > 1:
+            s = s[:, 1:].mean(axis=-1)
+    else:
+        s = clf.decision_function(x)
+    e_time = time.time()
+    logger.debug(f"SVM decsion function for {e_time - s_time:.5f}s")
     sortix = np.argsort(-s)
     pids = [itop[ix] for ix in sortix]
     scores = [100 * float(s[ix]) for ix in sortix]
@@ -243,6 +291,8 @@ def svm_rank(tags: str = "", pid: str = "", C: float = 0.005):
     ivocab = {v: k for k, v in features["vocab"].items()}  # index to word mapping
     weights = clf.coef_[0]  # (n_features,) weights of the trained svm
     sortix = np.argsort(-weights)
+    e_time = time.time()
+    logger.debug(f"rank calculation for {e_time - s_time:.5f}s")
     words = []
     for ix in list(sortix[:40]) + list(sortix[-20:]):
         words.append(
@@ -260,15 +310,15 @@ def count_match(q, pid_start, n_pids):
     qs = q.split()  # split query by spaces and lowercase
     sub_pairs = []
     match = lambda s: sum(min(3, s.lower().count(qp)) for qp in qs) / len(qs)
-    matchu = lambda s: sum(int(s.lower().count(qp) > 0) for qp in qs) / len(qs)
-    matcht = lambda s: int(q in s.lower())
+    # matchu = lambda s: sum(int(s.lower().count(qp) > 0) for qp in qs) / len(qs)
+    match_t = lambda s: int(q in s.lower())
     pdb = get_papers()
     for pid in get_pids()[pid_start : pid_start + n_pids]:
         p = pdb[pid]
         score = 0.0
-        score += 10.0 * matchu(" ".join([a["name"] for a in p["authors"]]))
-        score += 20.0 * matchu(p["title"])
-        score += 10.0 * matcht(p["title"])
+        score += 20.0 * match_t(" ".join([a["name"] for a in p["authors"]]))
+        score += 20.0 * match(p["title"])
+        score += 10.0 * match_t(p["title"])
         score += 5.0 * match(p["summary"])
         if score > 0:
             sub_pairs.append((score, pid))
@@ -312,6 +362,7 @@ def main():
     default_tags = ""
     default_time_filter = ""
     default_skip_have = "no"
+    default_logic = "and"
 
     # override variables with any provided options via the interface
     opt_rank = request.args.get(
@@ -328,6 +379,7 @@ def main():
     opt_skip_have = request.args.get(
         "skip_have", default_skip_have
     )  # hide papers we already have?
+    opt_logic = request.args.get("logic", default_logic)  # tags logic?
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
 
@@ -350,14 +402,16 @@ def main():
         logger.info(f"User {g.user} search {opt_q}, time {time.time() - t_s:.3f}s")
     elif opt_rank == "tags":
         t_s = time.time()
-        pids, scores, words = svm_rank(tags=opt_tags, C=C)
+        pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic)
         logger.info(
-            f"User {g.user} tags {opt_tags} C {C}, time {time.time() - t_s:.3f}s"
+            f"User {g.user} tags {opt_tags} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s"
         )
     elif opt_rank == "pid":
         t_s = time.time()
-        pids, scores, words = svm_rank(pid=opt_pid, C=C)
-        logger.info(f"User {g.user} pid {opt_pid} C {C}, time {time.time() - t_s:.3f}s")
+        pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic)
+        logger.info(
+            f"User {g.user} pid {opt_pid} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s"
+        )
     elif opt_rank == "time":
         t_s = time.time()
         pids, scores = time_rank()
@@ -376,7 +430,7 @@ def main():
             k: v for k, v in mdb.items()
         }  # read all of metas to memory at once, for efficiency
         tnow = time.time()
-        deltat = int(opt_time_filter) * 60 * 60 * 24  # allowed time delta in seconds
+        deltat = float(opt_time_filter) * 60 * 60 * 24  # allowed time delta in seconds
         keep = [i for i, pid in enumerate(pids) if (tnow - kv[pid]["_time"]) < deltat]
         pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
 
@@ -411,12 +465,17 @@ def main():
     keys = get_keys()
     rkeys = [{"name": k} for k, pids in keys.items()]
     rkeys.append({"name": "Artificial general intelligence"})
+
+    combined_tags = get_combined_tags()
+    rctags = [{"name": k} for k in combined_tags]
+
     # build the page context information and render
     context = default_context()
     context["papers"] = papers
     context["tags"] = rtags
     context["words"] = words
     context["keys"] = rkeys
+    context["combined_tags"] = rctags
 
     # test keys
     # context["keys"] = [
@@ -433,11 +492,12 @@ def main():
     context["gvars"]["pid"] = opt_pid
     context["gvars"]["time_filter"] = opt_time_filter
     context["gvars"]["skip_have"] = opt_skip_have
+    context["gvars"]["logic"] = opt_logic
     context["gvars"]["search_query"] = opt_q
     context["gvars"]["svm_c"] = str(C)
     context["gvars"]["page_number"] = str(page_number)
     logger.info(
-        f'User: {context["user"]}\ntags {context["tags"]}\nkeys {context["keys"]}'
+        f'User: {context["user"]}\ntags {context["tags"]}\nkeys {context["keys"]}\nctags {context["combined_tags"]}'
     )
     return render_template("index.html", **context)
 
@@ -636,6 +696,69 @@ def rename_tag(otag=None, ntag=None):
         tags_db[g.user] = d
 
     logger.info("renamed tag %s to %s for user %s" % (otag, ntag, g.user))
+    return "ok: " + str(d)  # return back the user library for debugging atm
+
+
+@app.route("/add_ctag/<ctag>")
+def add_ctag(ctag=None):
+    if g.user is None:
+        return "error, not logged in"
+    elif ctag == "null":
+        return "error, cannot add the ctag keyword 'null'"
+
+    tags = get_tags()
+    for tag in map(str.strip, ctag.split(",")):
+        if tag not in tags:
+            return "invalid ctag"
+        
+    
+    with get_combined_tags_db(flag="c") as ctags_db:
+        # logger.debug(f"{ctags_db}")
+        # create the user if we don't know about them yet with an empty library
+        if g.user not in ctags_db:
+            ctags_db[g.user] = set()
+            
+
+        # fetch the user library object
+        d = ctags_db[g.user]
+
+        # if isinstance(d, dict):
+        #     d = set(d.keys())
+            
+        # add the paper to the key
+        if ctag in d:
+            return "user has repeated keywords"
+
+        d.add(ctag)
+
+        # write back to database
+        ctags_db[g.user] = d
+
+    logger.info("added keyword %s for user %s" % (ctag, g.user))
+    return "ok: " + str(d)  # return back the user library for debugging atm
+
+
+@app.route("/del_ctag/<ctag>")
+def delete_ctag(ctag=None):
+    if g.user is None:
+        return "error, not logged in"
+
+    with get_combined_tags_db(flag="c") as ctags_db:
+        if g.user not in ctags_db:
+            return "user does not have a library"
+
+        d = ctags_db[g.user]
+
+        if ctag not in d:
+            return "user does not have this ctag"
+
+        # delete the tag
+        d.remove(ctag)
+
+        # write back to database
+        ctags_db[g.user] = d
+
+    logger.info("deleted ctag %s for user %s" % (ctag, g.user))
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 

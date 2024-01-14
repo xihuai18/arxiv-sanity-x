@@ -30,7 +30,20 @@ const Paper = props => {
     if (user) {
         utag_controls = (
             <div class='rel_utags'>
-                <div class="rel_utag rel_utag_add" onClick={adder}>+</div>
+                <div>
+                    <input
+                        list="tags-list"
+                        value={props.target_tag}
+                        onChange={props.onInputTag}
+                        placeholder="Add a tag"
+                    />
+                    <datalist id="tags-list">
+                        {tlst.map(tag => (
+                            <option key={tag} value={tag} />
+                        ))}
+                    </datalist>
+                    <button onClick={adder}>Add Tag</button>
+                </div>
                 <div class="rel_utag rel_utag_sub" onClick={subber}>-</div>
                 {utags}
             </div>
@@ -69,24 +82,28 @@ const PaperList = props => {
 class PaperComponent extends React.Component {
     constructor(props) {
         super(props);
-        this.state = { key: props.key, paper: props.paper, tags: props.tags };
+        this.state = { key: props.key, paper: props.paper, tags: props.tags, target_tag: '' };
         this.addTag = this.addTag.bind(this);
         this.subTag = this.subTag.bind(this);
     }
-    addTag(paper, renderlst) {
-        let tagname = prompt(`tag to add to this paper (User tags: ${renderlst.join(', ')}):\n`);
-        fetch("/add/" + paper.id + "/" + tagname)
+    handleTagInputChange = (event) => {
+        this.setState({ target_tag: event.target.value });
+    };
+    addTag() {
+        const { paper, tags, target_tag } = this.state
+        fetch("/add/" + paper.id + "/" + target_tag)
             .then(response => console.log(response.text()))
             .then(() => {
-                paper.utags = [...paper.utags, tagname];
+                paper.utags = [...paper.utags, target_tag];
                 this.setState((prevState) => ({
                     ...prevState,
                     paper: paper,
                 }));
             });
+        this.setState({ target_tag: '' })
     }
     subTag(paper, utlst) {
-        let tagname = prompt(`tag to subtract from this paper (Paper tags: ${utlst.join(', ')}):\n`);
+        let tagname = prompt(`tag to subtract from this paper, paper tags:\n${utlst.join('\n')}`);
         fetch("/sub/" + paper.id + "/" + tagname)
             .then(response => console.log(response.text()))
             .then(() => {
@@ -99,7 +116,7 @@ class PaperComponent extends React.Component {
     }
     render() {
         return (
-            <Paper key={this.state.key} paper={this.state.paper} tags={this.state.tags} addTag={this.addTag} subTag={this.subTag} />
+            <Paper key={this.state.key} paper={this.state.paper} tags={this.state.tags} onInputTag={this.handleTagInputChange} addTag={this.addTag} subTag={this.subTag} />
         );
     }
 }
@@ -122,8 +139,6 @@ const Tag = props => {
 const TagList = props => {
     const lst = props.tags;
     const tlst = lst.map((jtag, ix) => <Tag key={ix} tag={jtag} />);
-    // const deleter = () => fetch("/del/" + prompt("delete tag name:"))
-    //                       .then(response => console.log(response.text()));
     const deleter = props.deleteTag;
     const renamer = props.renameTag;
     // show the #wordwrap element if the user clicks inspect
@@ -155,7 +170,11 @@ class TagListComponent extends React.Component {
         const lst = this.state.tags;
         const filtered_lst = lst.filter(tag => tag.name !== 'all');
         const tlst = filtered_lst.map((jtag, ix) => jtag.name);
-        let tagname = prompt(`delete tag name (User tags: ${tlst.join(', ')}):\n`);
+        let tagname = prompt(`delete tag name:\n${tlst.join('\n')}`);
+        if (tagname === null) {
+            console.log("Tag deleting cancelled.");
+            return;
+        }
         fetch("/del/" + tagname)
             .then(response => {
                 this.setState((prevState) => ({
@@ -169,8 +188,17 @@ class TagListComponent extends React.Component {
         const lst = this.state.tags;
         const filtered_lst = lst.filter(tag => tag.name !== 'all');
         const tlst = filtered_lst.map((jtag, ix) => jtag.name);
-        let oldTagName = prompt(`Enter tag name to rename (User tags: ${tlst.join(', ')}):\n`);
+        let oldTagName = prompt(`Enter tag name to rename:\n${tlst.join('\n')}`);
+        if (oldTagName === null) {
+            console.log("Tag renaming 1 cancelled.");
+            return;
+        }
+
         let newTagName = prompt(`Enter new tag name for \`${oldTagName}\`:\n`);
+        if (newTagName === null) {
+            console.log("Tag renaming 2 cancelled.");
+            return;
+        }
         fetch("/rename/" + oldTagName + "/" + newTagName)
             .then(response => {
                 this.setState((prevState) => ({
@@ -183,6 +211,87 @@ class TagListComponent extends React.Component {
     render() {
         return (
             <TagList tags={this.state.tags} deleteTag={this.deleteTag} renameTag={this.renameTag} />
+        );
+    }
+}
+
+const CombinedTag = props => {
+    const t = props.comtag;
+    const turl = "/?rank=tags&logic=and&tags=" + encodeURIComponent(t.name);
+    const tag_class = 'rel_utag rel_utag_all'
+    return (
+        <div class={tag_class}>
+            <a href={turl}>
+                {t.name}
+            </a>
+        </div>
+    )
+}
+
+const CombinedTagList = props => {
+    const lst = props.combined_tags;
+    const tlst = lst.map((jtag, ix) => <CombinedTag key={ix} comtag={jtag} />);
+    const deleter = props.deleteTag;
+    const adder = props.addTag;
+    return (
+        <div>
+            <div>
+                <div class="rel_tag_rename" onClick={adder}>+</div>
+                <div class="rel_tag_sub" onClick={deleter}>-</div>
+            </div>
+            <div id="tagList" class="rel_utags">
+                {tlst}
+            </div>
+        </div>
+    )
+}
+
+class CombinedTagListComponent extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { combined_tags: props.combined_tags, tags: props.tags };
+        this.deleteTag = this.deleteTag.bind(this);
+        this.addTag = this.addTag.bind(this);
+    }
+    deleteTag() {
+        const lst = this.state.combined_tags;
+        const tlst = lst.map((jtag, ix) => jtag.name);
+        let ctagname = prompt(`delete combined tag:\n${tlst.join('\n')}`);
+        fetch("/del_ctag/" + ctagname)
+            .then(response => {
+                this.setState((prevState) => ({
+                    combined_tags: prevState.combined_tags.filter(tag => tag.name !== ctagname)
+                }), () => {
+                    console.log(response.text());
+                });
+            });
+    }
+    addTag() {
+        const lst = this.state.tags;
+        const tlst = lst.map((jtag, ix) => jtag.name);
+        let ctagname = prompt(`Register a combination of tags (seperated by ', '), existings tags:\n${tlst.join('\n')}`);
+        if (ctagname) {
+            fetch("/add_ctag/" + ctagname)
+                .then(response => response.text())
+                .then(text => {
+                    if (text.includes('ok')) {
+                        this.setState((prevState) => ({
+                            combined_tags: [...prevState.combined_tags, { name: ctagname }]
+                        }), () => {
+                            console.log(text);
+                        });
+                    } else {
+                        console.log("Response does not contain 'ok':", text);
+                    }
+                });
+        } else {
+            console.log("Tag addition cancelled.");
+        }
+
+    }
+    render() {
+        return (
+            <CombinedTagList combined_tags={this.state.combined_tags} deleteTag={this.deleteTag} addTag={this.addTag} />
         );
     }
 }
@@ -228,7 +337,7 @@ class KeyComponent extends React.Component {
     deleteKey() {
         const lst = this.state.keys;
         const klst = lst.map((jkey, ix) => jkey.name).filter(jkey => jkey !== "Artificial general intelligence");
-        let keyname = prompt(`delete a keyword (User keywords: ${klst.join(', ')}):\n`);
+        let keyname = prompt(`delete a keyword:\n${klst.join('\n')}`);
         fetch("/del_key/" + keyname)
             .then(response => {
                 this.setState((prevState) => ({
@@ -241,7 +350,6 @@ class KeyComponent extends React.Component {
     insertKey() {
         const lst = this.state.keys;
         const klst = lst.map((jkey, ix) => jkey.name);
-        // let keyname = prompt(`insert a keyword (User keywords: ${klst.join(', ')}):\n`);
         let keyname = prompt(`insert a keyword: `);
         fetch("/add_key/" + keyname)
             .then(response => {
@@ -277,3 +385,9 @@ let keywrap_elt = document.getElementById('keywrap');
 if (keywrap_elt) {
     ReactDOM.render(<KeyComponent keys={keys} />, keywrap_elt);
 }
+
+let tagcombwrap_elt = document.getElementById('tagcombwrap');
+if (tagcombwrap_elt) {
+    ReactDOM.render(<CombinedTagListComponent combined_tags={combined_tags} tags={tags} />, tagcombwrap_elt);
+}
+

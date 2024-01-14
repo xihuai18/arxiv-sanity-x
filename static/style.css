@@ -51,6 +51,11 @@ body {
     font-size: 18px;
 }
 
+#tagcombwrap {
+    margin: 10px 40px 0 40px;
+    font-size: 18px;
+}
+
 #wordwrap {
     margin: 10px 40px 0 40px;
     font-size: 14px;
@@ -395,7 +400,7 @@ body {
 }
 
 #pid_field {
-    width: 60px;
+    width: 80px;
 }
 
 #time_filter_field {
@@ -454,3 +459,4 @@ body {
     color: #009;
     text-decoration: underline;
 }
+

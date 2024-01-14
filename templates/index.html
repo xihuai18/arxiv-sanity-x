@@ -8,6 +8,7 @@ var words = {{ words | tojson }};
 var words_desc = {{ words_desc | tojson }};
 var gvars = {{ gvars | tojson }};
 var papers = {{ papers | tojson }};
+var combined_tags = {{ combined_tags | tojson }};
 
 /*
 JS code here handles pagination. I really don't super love this approach,
@@ -47,12 +48,18 @@ var move_page = function(int_offset) {
                     <option value="random" {{ gvars.rank == 'random' and 'selected' }}>random</option>
                 </select>
 
+                <label for="logic">logic (used in `tags`, `pids` ranks, seperated by `,`): </label>
+                <select name="logic" id="logic">
+                    <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
+                    <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
+                </select>
+
                 <!-- current tags, simply in a text field -->
                 <label for="tags">tags: </label>
                 <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}">
 
                 <!-- current pid, simply in a text field -->
-                <label for="pid">pid: </label>
+                <label for="pid">pids: </label>
                 <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}">
 
                 <!-- current time_filter, in a text field -->
@@ -92,15 +99,25 @@ var move_page = function(int_offset) {
 </div>
 {% endif %}
 
+
+
 {% if user and words %}
 <div id="wordwrap" style="display:none;">
 </div>
 {% endif %}
 
+
 {% if user %}
 <div id="keywrap">
 </div>
 {% endif %}
+
+{% if user and tags %}
+<div style="margin-top: 5pt;"><strong>Registered Tag Combinations</strong></div>
+<div id="tagcombwrap">
+</div>
+{% endif %}
+
 
 
 <!-- main content showing all the papers as a list -->

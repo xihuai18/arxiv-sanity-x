@@ -5,7 +5,12 @@ Arxiv-sanity-X: A robust enhancement of the [arXiv-sanity-lite](https://github.c
 
 ![Screenshot](arxiv-sanity-x.png)
 
-## To run
+## Table of Contents
+1. [To Run](#To-Run)
+2. [Documents](#Documents)
+
+
+## To Run
 
 ### Requirements
 
@@ -67,6 +72,39 @@ All of the database will be stored inside the `data` directory. The entire datab
 
 ### E-mail Notification
 (Optional) Finally, if you'd like to send periodic emails to users about new papers, see the `send_emails.py` script. The primitive SMTP method is used.
+
+
+## Documents
+
+### Login
+**You shold login to toggle the features!**
+
+### Search by Words
+Ranking metrics tuned for paper searching are used when you type in keywords and authors.
+
+### Search by Tags / Pids (Papers)
+An svm linear classifier will be trained to classify the papers: the papers with tags are labelled as positive.
+
+### Keywords Tracking
+Latest papers matched with the keywords added by the users will be recommended.
+
+### Tags Tracking
+Latest papers with high classification scores according to the tags and register combinations of tags will 
+be recommended.
+
+### Add Tags for A Paper
+
+![fig1](static/add_tag.png)
+
+![fig2](static/add_tag2.png)
+
+![fig3](static/add_tag3.png)
+
+### Register Tag Combinations
+
+![fig4](static/add_tag_comb.png)
+
+![fig5](static/add_tag_comb2.png)
 
 ### License
 
