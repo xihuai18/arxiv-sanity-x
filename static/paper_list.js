@@ -390,4 +390,3 @@ let tagcombwrap_elt = document.getElementById('tagcombwrap');
 if (tagcombwrap_elt) {
     ReactDOM.render(<CombinedTagListComponent combined_tags={combined_tags} tags={tags} />, tagcombwrap_elt);
 }
-

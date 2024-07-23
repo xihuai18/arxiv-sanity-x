@@ -11,14 +11,14 @@ to manually register with sendgrid yourself, get an API key and put it in the fi
 
 import argparse
 import os
-import random
 import sys
 import time
-from typing import Dict, List, Set
+from typing import Dict, Set
 
 import numpy as np
 from loguru import logger
 from sklearn import svm
+from vars import HOST
 
 from aslite.db import (
     get_email_db,
@@ -32,7 +32,6 @@ from aslite.db import (
 # -----------------------------------------------------------------------------
 # the html template for the email
 
-from vars import HOST
 
 WEB = "Arxiv Sanity X"
 
@@ -114,11 +113,7 @@ def calculate_recommendation(
         if len(tpids) == 0:
             continue
 
-        keep = [
-            i
-            for i, pid in enumerate(db_pids)
-            if (tnow - metas[pid]["_time"]) < deltat or pid in tpids
-        ]
+        keep = [i for i, pid in enumerate(db_pids) if (tnow - metas[pid]["_time"]) < deltat or pid in tpids]
         logger.debug(f"keep {len(keep)} papers according to time for tag {tag}")
         pids = [db_pids[i] for i in keep]
         x = db_x[keep]
@@ -133,9 +128,7 @@ def calculate_recommendation(
             y[ptoi[pid]] = 1.0
 
         # classify
-        clf = svm.LinearSVC(
-            class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1
-        )
+        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1)
         clf.fit(x, y)
         s = clf.decision_function(x)
         sortix = np.argsort(-s)
@@ -184,9 +177,7 @@ def search_rank(q: str = "", time_pids=[]):
     return pids, scores
 
 
-def search_keywords_recommendations(
-    user: str, keywords: Dict[str, Set[str]], time_delta: int = 3
-):
+def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], time_delta: int = 3):
     all_pids, all_scores = {}, {}
     deltat = time_delta * 60 * 60 * 24
     db_pids = pdb.keys()
@@ -341,12 +332,13 @@ def send_email(to_email, html):
         import smtplib
         from email.header import Header
         from email.mime.text import MIMEText
+
         from vars import (
+            email_passwd,
+            email_username,
             from_email,
             smtp_port,
             smtp_server,
-            email_username,
-            email_passwd,
         )
 
         from_email = from_email
@@ -442,19 +434,16 @@ if __name__ == "__main__":
         email = emails.get(user, None)
         logger.info(f"processing user {user} email {email}")
         if not email:
-            logger.info("skipping user %s, no email" % (user,))
+            logger.info(f"skipping user {user}, no email")
             continue
         if args.user and user != args.user:
-            logger.info("skipping user %s, not %s" % (user, args.user))
+            logger.info(f"skipping user {user}, not {args.user}")
             continue
 
         # verify that we have at least one positive example...
         num_papers_tagged = len(set().union(*tags.values()))
         if num_papers_tagged < args.min_papers:
-            logger.info(
-                "skipping user %s, only has %d papers tagged"
-                % (user, num_papers_tagged)
-            )
+            logger.info("skipping user %s, only has %d papers tagged" % (user, num_papers_tagged))
             continue
 
         # insert a fake entry in tags for the special "all" tag, which is the union of all papers
@@ -463,37 +452,24 @@ if __name__ == "__main__":
         # calculate the recommendations
         pids, scores = calculate_recommendation(tags, time_delta=args.time_delta)
         pids_set = set().union(*pids.values())
-        logger.info(
-            f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days"
-        )
+        logger.info(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
         ukeywords = keywords.get(user, {})
         # print("Keywords: ", ukeywords)
 
-        kpids, kscores = search_keywords_recommendations(
-            user, ukeywords, args.time_delta
-        )
+        kpids, kscores = search_keywords_recommendations(user, ukeywords, args.time_delta)
         pids_set = set().union(*kpids.values())
-        logger.info(
-            f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days"
-        )
+        logger.info(f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
-        if all(len(lst) == 0 for tag, lst in pids.items()) and all(
-            len(lst) == 0 for key, lst in kpids.items()
-        ):
-            logger.info("skipping user %s, no recommendations were produced" % (user,))
+        if all(len(lst) == 0 for tag, lst in pids.items()) and all(len(lst) == 0 for key, lst in kpids.items()):
+            logger.info(f"skipping user {user}, no recommendations were produced")
             continue
         # render the html
-        logger.info(
-            "rendering top max %d recommendations into a report for %s..."
-            % (args.num_recommendations, user)
-        )
-        html = render_recommendations(
-            user, tags, pids, scores, ukeywords, kpids, kscores
-        )
+        logger.info("rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user))
+        html = render_recommendations(user, tags, pids, scores, ukeywords, kpids, kscores)
         # temporarily for debugging write recommendations to disk for manual inspection
         if os.path.isdir("recco"):
-            with open("recco/%s.html" % (user,), "w") as f:
+            with open(f"recco/{user}.html", "w") as f:
                 f.write(html)
         # actually send the email
         logger.info("sending email...")

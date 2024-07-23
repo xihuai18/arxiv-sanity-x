@@ -17,6 +17,7 @@ Arxiv-sanity-X: A robust enhancement of the [arXiv-sanity-lite](https://github.c
  Install via requirements:
 
  ```bash
+#  requires python <= 3.9
  pip install -r requirements.txt
  ```
 
@@ -31,6 +32,20 @@ smtp_server = "smtp.mail.com"
 smtp_port = 465 # 25 for public, 465 for ssl
 email_username = "username"
 email_passwd = "passwd"
+```
+
+### Initialization
+
+Change Arxiv tags in `arxiv_daemon.py` and retrieve necessary paper data at the first time:
+
+```
+python arxiv_daemon.py -n XXXX -b XX -m XXXX -s XXXX
+```
+
+And compute the SVM weights:
+
+```
+python compute.py
 ```
 
 ### Daemons
@@ -63,7 +78,7 @@ gunicorn -w 4 -b 0.0.0.0:5000 serve:app
 ```
 For safety, setup your key by
 ```python
-import secrets; 
+import secrets;
 secrets.token_urlsafe(16)
 ```
 and put it into `secret_key.txt`.
@@ -89,7 +104,7 @@ An svm linear classifier will be trained to classify the papers: the papers with
 Latest papers matched with the keywords added by the users will be recommended.
 
 ### Tags Tracking
-Latest papers with high classification scores according to the tags and register combinations of tags will 
+Latest papers with high classification scores according to the tags and register combinations of tags will
 be recommended.
 
 ### Add Tags for A Paper

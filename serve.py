@@ -7,37 +7,30 @@ ideas:
 - special single-image search just for paper similarity
 """
 
-from collections import defaultdict
 import os
 import re
 import time
+from multiprocessing import Pool, cpu_count
 from random import shuffle
 
 import numpy as np
-from sklearn import svm
-
-from flask import Flask, request, redirect, url_for
-from flask import render_template
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask import g  # global session-level object
-from flask import session
+from flask import Flask, redirect, render_template, request, session, url_for
+from loguru import logger
+from sklearn import svm
+from tqdm import tqdm
 
 from aslite.db import (
-    get_papers_db,
-    get_metas_db,
-    get_tags_db,
     get_combined_tags_db,
-    get_last_active_db,
     get_email_db,
     get_keywords_db,
+    get_last_active_db,
+    get_metas_db,
+    get_papers_db,
+    get_tags_db,
+    load_features,
 )
-from aslite.db import load_features
-from pprint import pprint, pformat
-from tqdm import tqdm
-from collections import Counter
-from loguru import logger
-from multiprocessing import Pool, cpu_count
-from apscheduler.schedulers.background import BackgroundScheduler
-from sklearn.kernel_approximation import Nystroem, RBFSampler
 
 # -----------------------------------------------------------------------------
 # inits and globals
@@ -74,9 +67,7 @@ def get_combined_tags():
         return {}
     if not hasattr(g, "_combined_tags"):
         with get_combined_tags_db() as combined_tags_db:
-            combined_tags_dict = (
-                combined_tags_db[g.user] if g.user in combined_tags_db else {}
-            )
+            combined_tags_dict = combined_tags_db[g.user] if g.user in combined_tags_db else {}
         g._combined_tags = combined_tags_dict
     return g._combined_tags
 
@@ -238,9 +229,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
                 y[ptoi[pid]] = 1.0
     elif tags:
         tags_db = get_tags()
-        tags_filter_to = (
-            tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
-        )
+        tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
         for t_i, tag in enumerate(tags_filter_to):
             t_pids = tags_db[tag]
             for p_i, pid in enumerate(t_pids):
@@ -258,9 +247,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     s_time = time.time()
 
     # classify
-    clf = svm.LinearSVC(
-        class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C
-    )
+    clf = svm.LinearSVC(class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C)
     # feature_map_nystroem = Nystroem(
     #     random_state=0, n_components=100, n_jobs=-1
     # )
@@ -365,20 +352,12 @@ def main():
     default_logic = "and"
 
     # override variables with any provided options via the interface
-    opt_rank = request.args.get(
-        "rank", default_rank
-    )  # rank type. search|tags|pid|time|random
+    opt_rank = request.args.get("rank", default_rank)  # rank type. search|tags|pid|time|random
     opt_q = request.args.get("q", "")  # search request in the text box
-    opt_tags = request.args.get(
-        "tags", default_tags
-    )  # tags to rank by if opt_rank == 'tag'
+    opt_tags = request.args.get("tags", default_tags)  # tags to rank by if opt_rank == 'tag'
     opt_pid = request.args.get("pid", "")  # pid to find nearest neighbors to
-    opt_time_filter = request.args.get(
-        "time_filter", default_time_filter
-    )  # number of days to filter by
-    opt_skip_have = request.args.get(
-        "skip_have", default_skip_have
-    )  # hide papers we already have?
+    opt_time_filter = request.args.get("time_filter", default_time_filter)  # number of days to filter by
+    opt_skip_have = request.args.get("skip_have", default_skip_have)  # hide papers we already have?
     opt_logic = request.args.get("logic", default_logic)  # tags logic?
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
@@ -403,15 +382,11 @@ def main():
     elif opt_rank == "tags":
         t_s = time.time()
         pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic)
-        logger.info(
-            f"User {g.user} tags {opt_tags} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s"
-        )
+        logger.info(f"User {g.user} tags {opt_tags} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
     elif opt_rank == "pid":
         t_s = time.time()
         pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic)
-        logger.info(
-            f"User {g.user} pid {opt_pid} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s"
-        )
+        logger.info(f"User {g.user} pid {opt_pid} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
     elif opt_rank == "time":
         t_s = time.time()
         pids, scores = time_rank()
@@ -421,14 +396,12 @@ def main():
         pids, scores = random_rank()
         logger.info(f"User {g.user} random rank, time {time.time() - t_s:.3f}s")
     else:
-        raise ValueError("opt_rank %s is not a thing" % (opt_rank,))
+        raise ValueError(f"opt_rank {opt_rank} is not a thing")
 
     # filter by time
     if opt_time_filter:
         mdb = get_metas()
-        kv = {
-            k: v for k, v in mdb.items()
-        }  # read all of metas to memory at once, for efficiency
+        kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
         tnow = time.time()
         deltat = float(opt_time_filter) * 60 * 60 * 24  # allowed time delta in seconds
         keep = [i for i, pid in enumerate(pids) if (tnow - kv[pid]["_time"]) < deltat]
@@ -483,9 +456,9 @@ def main():
     #     {"name": "Zero-shot Coordination", "pids": []},
     # ]
 
-    context[
-        "words_desc"
-    ] = "Here are the top 40 most positive and bottom 20 most negative weights of the SVM. If they don't look great then try tuning the regularization strength hyperparameter of the SVM, svm_c, above. Lower C is higher regularization."
+    context["words_desc"] = (
+        "Here are the top 40 most positive and bottom 20 most negative weights of the SVM. If they don't look great then try tuning the regularization strength hyperparameter of the SVM, svm_c, above. Lower C is higher regularization."
+    )
     context["gvars"] = {}
     context["gvars"]["rank"] = opt_rank
     context["gvars"]["tags"] = opt_tags
@@ -533,9 +506,9 @@ def inspect():
     context = default_context()
     context["paper"] = paper
     context["words"] = words
-    context[
-        "words_desc"
-    ] = "The following are the tokens and their (tfidf) weight in the paper vector. This is the actual summary that feeds into the SVM to power recommendations, so hopefully it is good and representative!"
+    context["words_desc"] = (
+        "The following are the tokens and their (tfidf) weight in the paper vector. This is the actual summary that feeds into the SVM to power recommendations, so hopefully it is good and representative!"
+    )
     return render_template("inspect.html", **context)
 
 
@@ -552,9 +525,7 @@ def profile():
 def stats():
     context = default_context()
     mdb = get_metas()
-    kv = {
-        k: v for k, v in mdb.items()
-    }  # read all of metas to memory at once, for efficiency
+    kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
     times = [v["_time"] for v in kv.values()]
     tstr = lambda t: time.strftime("%b %d %Y", time.localtime(t))
 
@@ -609,7 +580,7 @@ def add(pid=None, tag=None):
         # write back to database
         tags_db[g.user] = d
 
-    logger.info("added paper %s to tag %s for user %s" % (pid, tag, g.user))
+    logger.info(f"added paper {pid} to tag {tag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -621,14 +592,14 @@ def sub(pid=None, tag=None):
     with get_tags_db(flag="c") as tags_db:
         # if the user doesn't have any tags, there is nothing to do
         if not g.user in tags_db:
-            return "user has no library of tags ¯\_(ツ)_/¯"
+            return r"user has no library of tags ¯\_(ツ)_/¯"
 
         # fetch the user library object
         d = tags_db[g.user]
 
         # add the paper to the tag
         if tag not in d:
-            return "user doesn't have the tag %s" % (tag,)
+            return f"user doesn't have the tag {tag}"
         else:
             if pid in d[tag]:
                 # remove this pid from the tag
@@ -640,9 +611,9 @@ def sub(pid=None, tag=None):
 
                 # write back the resulting dict to database
                 tags_db[g.user] = d
-                return "ok removed pid %s from tag %s" % (pid, tag)
+                return f"ok removed pid {pid} from tag {tag}"
             else:
-                return "user doesn't have paper %s in tag %s" % (pid, tag)
+                return f"user doesn't have paper {pid} in tag {tag}"
 
 
 @app.route("/del/<tag>")
@@ -665,7 +636,7 @@ def delete_tag(tag=None):
         # write back to database
         tags_db[g.user] = d
 
-    logger.info("deleted tag %s for user %s" % (tag, g.user))
+    logger.info(f"deleted tag {tag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -695,7 +666,7 @@ def rename_tag(otag=None, ntag=None):
         # write back to database
         tags_db[g.user] = d
 
-    logger.info("renamed tag %s to %s for user %s" % (otag, ntag, g.user))
+    logger.info(f"renamed tag {otag} to {ntag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -710,21 +681,19 @@ def add_ctag(ctag=None):
     for tag in map(str.strip, ctag.split(",")):
         if tag not in tags:
             return "invalid ctag"
-        
-    
+
     with get_combined_tags_db(flag="c") as ctags_db:
         # logger.debug(f"{ctags_db}")
         # create the user if we don't know about them yet with an empty library
         if g.user not in ctags_db:
             ctags_db[g.user] = set()
-            
 
         # fetch the user library object
         d = ctags_db[g.user]
 
         # if isinstance(d, dict):
         #     d = set(d.keys())
-            
+
         # add the paper to the key
         if ctag in d:
             return "user has repeated keywords"
@@ -734,7 +703,7 @@ def add_ctag(ctag=None):
         # write back to database
         ctags_db[g.user] = d
 
-    logger.info("added keyword %s for user %s" % (ctag, g.user))
+    logger.info(f"added keyword {ctag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -758,7 +727,7 @@ def delete_ctag(ctag=None):
         # write back to database
         ctags_db[g.user] = d
 
-    logger.info("deleted ctag %s for user %s" % (ctag, g.user))
+    logger.info(f"deleted ctag {ctag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -786,7 +755,7 @@ def add_key(keyword=None):
         # write back to database
         keys_db[g.user] = d
 
-    logger.info("added keyword %s for user %s" % (keyword, g.user))
+    logger.info(f"added keyword {keyword} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -810,7 +779,7 @@ def delete_key(keyword=None):
         # write back to database
         keys_db[g.user] = d
 
-    logger.info("deleted keyword %s for user %s" % (keyword, g.user))
+    logger.info(f"deleted keyword {keyword} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 
@@ -845,9 +814,7 @@ def register_email():
 
     if g.user:
         # do some basic input validation
-        proper_email = re.match(
-            r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}$", email, re.IGNORECASE
-        )
+        proper_email = re.match(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}$", email, re.IGNORECASE)
         if email == "" or proper_email:  # allow empty email, meaning no email
             # everything checks out, write to the database
             with get_email_db(flag="c") as edb:

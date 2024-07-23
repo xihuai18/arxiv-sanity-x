@@ -5,9 +5,13 @@ Any of the file system I/O and the associated settings are in this single file.
 """
 
 import os
-import sqlite3, zlib, pickle, tempfile
-from sqlitedict import SqliteDict
+import pickle
+import sqlite3
+import tempfile
+import zlib
 from contextlib import contextmanager
+
+from sqlitedict import SqliteDict
 from vars import DATA_DIR
 
 # -----------------------------------------------------------------------------
@@ -84,9 +88,7 @@ class CompressedSqliteDict(SqliteDict):
 
     def __init__(self, *args, **kwargs):
         def encode(obj):
-            return sqlite3.Binary(
-                zlib.compress(pickle.dumps(obj, pickle.HIGHEST_PROTOCOL))
-            )
+            return sqlite3.Binary(zlib.compress(pickle.dumps(obj, pickle.HIGHEST_PROTOCOL)))
 
         def decode(obj):
             return pickle.loads(zlib.decompress(bytes(obj)))
@@ -109,49 +111,37 @@ DICT_DB_FILE = os.path.join(DATA_DIR, "dict.db")
 
 def get_papers_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    pdb = CompressedSqliteDict(
-        PAPERS_DB_FILE, tablename="papers", flag=flag, autocommit=autocommit
-    )
+    pdb = CompressedSqliteDict(PAPERS_DB_FILE, tablename="papers", flag=flag, autocommit=autocommit)
     return pdb
 
 
 def get_metas_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    mdb = SqliteDict(
-        PAPERS_DB_FILE, tablename="metas", flag=flag, autocommit=autocommit
-    )
+    mdb = SqliteDict(PAPERS_DB_FILE, tablename="metas", flag=flag, autocommit=autocommit)
     return mdb
 
 
 def get_tags_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    tdb = CompressedSqliteDict(
-        DICT_DB_FILE, tablename="tags", flag=flag, autocommit=autocommit
-    )
+    tdb = CompressedSqliteDict(DICT_DB_FILE, tablename="tags", flag=flag, autocommit=autocommit)
     return tdb
 
 
 def get_combined_tags_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    tdb = CompressedSqliteDict(
-        DICT_DB_FILE, tablename="combined_tags", flag=flag, autocommit=autocommit
-    )
+    tdb = CompressedSqliteDict(DICT_DB_FILE, tablename="combined_tags", flag=flag, autocommit=autocommit)
     return tdb
 
 
 def get_keywords_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    kdb = CompressedSqliteDict(
-        DICT_DB_FILE, tablename="keywords", flag=flag, autocommit=autocommit
-    )
+    kdb = CompressedSqliteDict(DICT_DB_FILE, tablename="keywords", flag=flag, autocommit=autocommit)
     return kdb
 
 
 def get_last_active_db(flag="r", autocommit=True):
     assert flag in ["r", "c"]
-    ladb = SqliteDict(
-        DICT_DB_FILE, tablename="last_active", flag=flag, autocommit=autocommit
-    )
+    ladb = SqliteDict(DICT_DB_FILE, tablename="last_active", flag=flag, autocommit=autocommit)
     return ladb
 
 

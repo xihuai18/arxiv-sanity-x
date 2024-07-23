@@ -6,11 +6,13 @@ or something like that.
 """
 
 import os
-import time
 import random
-import requests
+import time
 from subprocess import Popen
-from aslite.db import get_papers_db, get_metas_db
+
+import requests
+
+from aslite.db import get_metas_db, get_papers_db
 
 # create the tmp directory if it does not exist, where we will do temporary work
 TMP_DIR = "tmp"
@@ -63,7 +65,7 @@ for i, key in enumerate(keys):
             f1 = os.path.join(TMP_DIR, "thumb-%d.png" % (i,))
             f2 = os.path.join(TMP_DIR, "thumbbuf-%d.png" % (i,))
             if os.path.isfile(f1):
-                cmd = "mv %s %s" % (f1, f2)
+                cmd = f"mv {f1} {f2}"
                 os.system(cmd)
 
     # convert pdf to png images per page. spawn async because convert can unfortunately enter an infinite loop, have to handle this.
@@ -72,7 +74,7 @@ for i, key in enumerate(keys):
     pp = Popen(
         [
             "convert",
-            "%s[0-7]" % ("tmp/paper.pdf",),
+            "{}[0-7]".format("tmp/paper.pdf"),
             "-thumbnail",
             "x156",
             os.path.join(TMP_DIR, "thumb.png"),
@@ -100,7 +102,7 @@ for i, key in enumerate(keys):
         continue
     else:
         # otherwise concatenate the 8 images into one
-        cmd = "montage -mode concatenate -quality 80 -tile x1 %s %s" % (
+        cmd = "montage -mode concatenate -quality 80 -tile x1 {} {}".format(
             os.path.join(TMP_DIR, "thumb-*.png"),
             thumb_path,
         )

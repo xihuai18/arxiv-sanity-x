@@ -2,12 +2,12 @@
 Utils for dealing with arxiv API and related processing
 """
 
-import time
 import logging
+import time
 import urllib.request
-import feedparser
 from collections import OrderedDict
-import tqdm
+
+import feedparser
 
 logger = logging.getLogger(__name__)
 

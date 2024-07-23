@@ -4,17 +4,17 @@ it checks for any new arxiv papers via the arxiv API and stashes
 them into a sqlite database.
 """
 
+import argparse
+import logging
+import os
+import random
 import sys
 import time
-import random
-import logging
+
 import tqdm
-import argparse
 
 from aslite.arxiv import get_response, parse_response
-from aslite.db import get_papers_db, get_metas_db
-import os
-
+from aslite.db import get_metas_db, get_papers_db
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -27,22 +27,16 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="Arxiv Daemon")
-    parser.add_argument(
-        "-n", "--num", type=int, default=1000, help="up to how many papers to fetch"
-    )
-    parser.add_argument(
-        "-s", "--start", type=int, default=0, help="start at what index"
-    )
+    parser.add_argument("-n", "--num", type=int, default=2000, help="up to how many papers to fetch")
+    parser.add_argument("-s", "--start", type=int, default=0, help="start at what index")
     parser.add_argument(
         "-b",
         "--break-after",
         type=int,
-        default=5,
+        default=20,
         help="how many 0 new papers in a row would cause us to stop early? or 0 to disable.",
     )
-    parser.add_argument(
-        "-i", "--init", action="store_true", default=False, help="init database"
-    )
+    parser.add_argument("-i", "--init", action="store_true", default=False, help="init database")
     parser.add_argument(
         "-m",
         "--max_r",
@@ -59,13 +53,7 @@ if __name__ == "__main__":
     """
 
     # query string of papers to look for
-    q = "cat:cs.CV+OR+cat:cs.CL+OR+cat:cs.LG+OR+cat:cs.AI+OR+cat:cs.NE+OR+cat:cs.RO+OR+cat:stat.ML+OR+cat:cs.GT+OR+cat:cs.HC+OR+cat:cs.MA"
-    # 20000
-    # q = "cat:cs.CV+OR+cat:cs.CL+OR+cat:cs.RO"
-    # 50000
-    # q = "cat:cs.LG+OR+cat:cs.AI+OR+cat:stat.ML"
-    # 10000
-    # q = "cat:cs.NE+OR+cat:cs.GT+OR+cat:cs.HC+OR+cat:cs.MA"
+    q = "cat:cs.CL+OR+cat:cs.LG+OR+cat:cs.AI+OR+cat:cs.RO+OR+cat:stat.ML+OR+cat:cs.GT+OR+cat:cs.HC+OR+cat:cs.MA"
 
     if args.init:
         keywords = [
@@ -77,7 +65,8 @@ if __name__ == "__main__":
         q_lst = [q_i for q_i in q_lst if q_i]
         q_lst += keywords
     else:
-        q_lst = [q]
+        # q_lst = [q]
+        q_lst = q.split("+OR+")
     # example
     # https://export.arxiv.org/api/query?search_query=(cat:cs.LG+OR+cat:cs.CL+OR+cat:cs.AI+OR+Large%20Language%20Model)&start=0&max_results=100
 
@@ -96,18 +85,14 @@ if __name__ == "__main__":
         break_p_each = False
         k = args.start
         while k < args.num:
-            logging.info(
-                "querying arxiv api for query %s at start_index %d" % (q_each, k)
-            )
+            logging.info("querying arxiv api for query %s at start_index %d" % (q_each, k))
 
             # attempt to fetch a batch of papers from arxiv api
             ntried = 0
             nempty = 0
             while True:
                 try:
-                    resp = get_response(
-                        search_query=q_each, start_index=k, max_r=args.max_r
-                    )
+                    resp = get_response(search_query=q_each, start_index=k, max_r=args.max_r)
                     papers = parse_response(resp)
                     time.sleep(0.5)
                     logging.info(f"fetch {len(papers)} papers")
@@ -115,10 +100,8 @@ if __name__ == "__main__":
                         k += len(papers)
                         break  # otherwise we have to try again
                     nempty += 1
-                    if nempty > 50:
-                        logging.error(
-                            "ok we tried 50 times, nothing is fetched. exitting."
-                        )
+                    if nempty > args.break_after:
+                        logging.error(f"ok we tried {args.break_after} times, nothing is fetched. exitting.")
                         # sys.exit()
                         break_p_each = True
                         break  # otherwise we have to try again
@@ -126,10 +109,8 @@ if __name__ == "__main__":
                     logging.warning(e)
                     logging.warning("will try again in a bit...")
                     ntried += 1
-                    if ntried > 50:
-                        logging.error(
-                            "ok we tried 50 times, something is srsly wrong. exitting."
-                        )
+                    if ntried > args.break_after:
+                        logging.error(f"ok we tried {args.break_after} times, something is srsly wrong. exitting.")
                         # sys.exit()
                         break_p_each = True
                         break  # otherwise we have to try again
@@ -168,15 +149,10 @@ if __name__ == "__main__":
             if nnew == 0:
                 zero_updates_in_a_row += 1
                 if args.break_after > 0 and zero_updates_in_a_row >= args.break_after:
-                    logging.info(
-                        "breaking out early, no new papers %d times in a row"
-                        % (args.break_after,)
-                    )
+                    logging.info("breaking out early, no new papers %d times in a row" % (args.break_after,))
                     break
                 elif k == 0:
-                    logging.info(
-                        "our very first call for the latest there were no new papers, exitting"
-                    )
+                    logging.info("our very first call for the latest there were no new papers, exitting")
                     break
             else:
                 zero_updates_in_a_row = 0

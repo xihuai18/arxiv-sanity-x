@@ -7,16 +7,15 @@ from random import shuffle
 
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
+from tqdm import tqdm
 
 from aslite.db import get_papers_db, save_features
-from tqdm import tqdm
+
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arxiv Computor")
-    parser.add_argument(
-        "-n", "--num", type=int, default=20000, help="number of tfidf features"
-    )
+    parser.add_argument("-n", "--num", type=int, default=20000, help="number of tfidf features")
     parser.add_argument("--min_df", type=int, default=1, help="min df")
     parser.add_argument("--max_df", type=float, default=0.05, help="max df")
     parser.add_argument(
