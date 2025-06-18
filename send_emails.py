@@ -13,14 +13,14 @@ import argparse
 import os
 import sys
 import time
-from typing import Dict, Set
+from typing import Dict, List, Set
 
 import numpy as np
 from loguru import logger
 from sklearn import svm
-from vars import HOST
 
 from aslite.db import (
+    get_combined_tags_db,
     get_email_db,
     get_keywords_db,
     get_metas_db,
@@ -28,6 +28,7 @@ from aslite.db import (
     get_tags_db,
     load_features,
 )
+from vars import HOST
 
 # -----------------------------------------------------------------------------
 # the html template for the email
@@ -79,6 +80,15 @@ body {
 <br>
 
 <div>
+    <b>__STATS_CTAG__</b>
+</div>
+
+<div>
+    __CONTENT_CTAG__
+</div>
+<br>
+
+<div>
     <b>__STATS_KEYWORD__</b>
 </div>
 
@@ -98,9 +108,69 @@ To stop these emails remove your email in your <a href="__HOST__/profile">accoun
 """
 
 
+def calculate_ctag_recommendation(
+    ctags: List[str],
+    tags: dict,
+    time_delta: int = 3,
+):
+    db_x, db_pids = features["x"], features["pids"]
+    all_pids, all_scores = {}, {}
+    deltat = time_delta * 60 * 60 * 24  # allowed time delta in seconds
+    for ctag in ctags:
+        _tags = list(map(str.strip, ctag.split(",")))
+        ctag_tpids = []
+        for t_i, tag in enumerate(_tags):
+            tpids = tags[tag]
+            if len(tpids) == 0:
+                continue
+
+            ctag_tpids += tpids
+
+        keep = [i for i, pid in enumerate(db_pids) if (tnow - metas[pid]["_time"]) < deltat or pid in ctag_tpids]
+        logger.debug(f"Keep {len(keep)} pids for ctag {ctag}")
+        if len(keep) == len(ctag_tpids):
+            continue
+
+        pids = [db_pids[i] for i in keep]
+
+        x = db_x[keep]
+        n = x.shape[0]
+        # construct the positive set for this tag
+        ptoi, itop = {}, {}
+        for i, p in enumerate(pids):
+            ptoi[p] = i
+            itop[i] = p
+        y = np.zeros(n, dtype=np.float32)
+        for t_i, tag in enumerate(_tags):
+            tpids = tags[tag]
+            for pid in tpids:
+                y[ptoi[pid]] = 1.0 + t_i
+        # classify
+        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1, dual="auto")
+        clf.fit(x, y)
+        s = clf.decision_function(x)
+        if len(s.shape) > 1:
+            s = s[:, 1:].mean(axis=-1)
+        sortix = np.argsort(-s)
+        sortix = [ix for ix in sortix if s[ix] >= -0.25]
+        pids = [itop[ix] for ix in sortix]
+        scores = [100 * float(s[ix]) for ix in sortix]
+
+        # finally exclude the papers we already have tagged
+        have = set().union(*tags.values())
+        keep = [i for i, pid in enumerate(pids) if pid not in have]
+        pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
+
+        # store results
+        all_pids[ctag] = pids
+        all_scores[ctag] = scores
+
+    return all_pids, all_scores
+
+
 def calculate_recommendation(
-    tags,
-    time_delta=3,  # how recent papers are we recommending? in days
+    tags: dict,
+    time_delta: int = 3,  # how recent papers are we recommending? in days
 ):
     # tags: Dict[str, set()]
     # a bit of preprocessing
@@ -114,6 +184,8 @@ def calculate_recommendation(
             continue
 
         keep = [i for i, pid in enumerate(db_pids) if (tnow - metas[pid]["_time"]) < deltat or pid in tpids]
+        if len(keep) == len(tpids):
+            continue
         logger.debug(f"keep {len(keep)} papers according to time for tag {tag}")
         pids = [db_pids[i] for i in keep]
         x = db_x[keep]
@@ -128,7 +200,7 @@ def calculate_recommendation(
             y[ptoi[pid]] = 1.0
 
         # classify
-        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1)
+        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1, dual="auto")
         clf.fit(x, y)
         s = clf.decision_function(x)
         sortix = np.argsort(-s)
@@ -195,7 +267,18 @@ def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], ti
 # -----------------------------------------------------------------------------
 
 
-def render_recommendations(user, tags, tag_pids, tag_scores, keywords, kpids, kscores):
+def render_recommendations(
+    user,
+    tags,
+    tag_pids,
+    tag_scores,
+    ctags,
+    ctag_pids,
+    ctag_scores,
+    keywords,
+    kpids,
+    kscores,
+):
     out = template
     out = out.replace("__USER__", user)
     out = out.replace("__HOST__", HOST)
@@ -228,18 +311,20 @@ def render_recommendations(user, tags, tag_pids, tag_scores, keywords, kpids, ks
                 summary += "..."
             # create the url that will feature this paper on top and also show the most similar papers
             url = f"{HOST}/?rank=pid&pid=" + pid
+            arxiv_url = f"https://arxiv.org/abs/{pid}"
+
             parts.append(
                 """
     <tr>
     <td valign="top"><div class="s">%.2f</div></td>
     <td>
-    <a href="%s">%s</a> <div class="f">(%s)</div>
+    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
     <div class="a">%s</div>
     <div class="u">%s</div>
     </td>
     </tr>
     """
-                % (score, url, p["title"], max_source_tag[pid], authors, summary)
+                % (score, max_source_tag[pid], p["title"], url, arxiv_url, authors, summary)
             )
 
         # render the recommendations
@@ -258,6 +343,65 @@ def render_recommendations(user, tags, tag_pids, tag_scores, keywords, kpids, ks
     else:
         out = out.replace("__CONTENT_TAG__", "")
         out = out.replace("__STATS_TAG__", "")
+
+    if sum(len(ctag_pids[ctag]) for ctag in ctags) > 0:
+        # first we are going to merge all of the papers / scores together using a MAX
+        max_score = {}
+        max_source_ctag = {}
+        for ctag in ctag_pids:
+            for pid, score in zip(ctag_pids[ctag], ctag_scores[ctag]):
+                max_score[pid] = max(max_score.get(pid, -99999), score)  # lol
+                if max_score[pid] == score:
+                    max_source_ctag[pid] = ctag
+
+        # now we have a dict of pid -> max score. sort by score
+        max_score_list = sorted(max_score.items(), key=lambda x: x[1], reverse=True)
+        pids, scores = zip(*max_score_list)
+
+        # now render the html for each individual recommendation
+        parts = []
+        n = min(len(scores), args.num_recommendations)
+        for score, pid in zip(scores[:n], pids[:n]):
+            p = pdb[pid]
+            authors = ", ".join(a["name"] for a in p["authors"])
+            # crop the abstract
+            summary = p["summary"]
+            summary = summary[: min(500, len(summary))]
+            if len(summary) == 500:
+                summary += "..."
+            # create the url that will feature this paper on top and also show the most similar papers
+            url = f"{HOST}/?rank=pid&pid=" + pid
+            arxiv_url = f"https://arxiv.org/abs/{pid}"
+            parts.append(
+                """
+    <tr>
+    <td valign="top"><div class="s">%.2f</div></td>
+    <td>
+    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
+    <div class="a">%s</div>
+    <div class="u">%s</div>
+    </td>
+    </tr>
+    """
+                % (score, max_source_ctag[pid], p["title"], url, arxiv_url, authors, summary)
+            )
+
+        # render the recommendations
+        final = "<table>" + "".join(parts) + "</table>"
+        out = out.replace("__CONTENT_CTAG__", final)
+
+        # render the stats
+        num_papers_ctagged = len(set().union(*tags.values()))
+        ctags_str = ", ".join(['"%s"' % (t) for t in ctags])
+        stats = f"We took the {num_papers_ctagged} papers across your {len(ctags)} registered combined tags ({ctags_str}) and \
+                ranked {len(pids)} papers that showed up on arxiv over the last \
+                {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
+                top {n} papers. Remember that the more you tag, \
+                the better this gets:"
+        out = out.replace("__STATS_CTAG__", stats)
+    else:
+        out = out.replace("__CONTENT_CTAG__", "")
+        out = out.replace("__STATS_CTAG__", "")
 
     if sum(len(kpids[keyword]) for keyword in keywords) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
@@ -286,18 +430,19 @@ def render_recommendations(user, tags, tag_pids, tag_scores, keywords, kpids, ks
                 summary += "..."
             # create the url that will feature this paper on top and also show the most similar papers
             url = f"{HOST}/?rank=pid&pid=" + pid
+            arxiv_url = f"https://arxiv.org/abs/{pid}"
             parts.append(
                 """
     <tr>
     <td valign="top"><div class="s">%.2f</div></td>
     <td>
-    <a href="%s">%s</a> <div class="f">(%s)</div>
+    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
     <div class="a">%s</div>
     <div class="u">%s</div>
     </td>
     </tr>
     """
-                % (score, url, p["title"], max_source_keyword[pid], authors, summary)
+                % (score, max_source_keyword[pid], p["title"], url, arxiv_url, authors, summary)
             )
 
         # render the recommendations
@@ -399,6 +544,7 @@ if __name__ == "__main__":
     if args.dry_run:
         logger.add(sys.stdout, level="DEBUG")
     else:
+        # logger.add(sys.stdout, level="DEBUG")
         logger.add(sys.stdout, level="INFO")
     logger.info(args)
 
@@ -408,6 +554,9 @@ if __name__ == "__main__":
     # read entire db simply into RAM
     with get_tags_db() as tags_db:
         tags = {k: v for k, v in tags_db.items()}
+
+    with get_combined_tags_db() as ctags_db:
+        ctags = {k: v for k, v in ctags_db.items()}
 
         # read entire db simply into RAM
     with get_keywords_db() as keywords_db:
@@ -429,56 +578,68 @@ if __name__ == "__main__":
 
     # iterate all users, create recommendations, send emails
     num_sent = 0
-    for user, tags in tags.items():
+    if args.user:
+        tags = {args.user: tags[args.user]}
+    for user, utags in tags.items():
         # verify that we have an email for this user
         email = emails.get(user, None)
-        logger.info(f"processing user {user} email {email}")
+        logger.debug(f"processing user {user} email {email}")
         if not email:
-            logger.info(f"skipping user {user}, no email")
+            logger.debug(f"skipping user {user}, no email")
             continue
         if args.user and user != args.user:
-            logger.info(f"skipping user {user}, not {args.user}")
+            logger.debug(f"skipping user {user}, not {args.user}")
             continue
 
         # verify that we have at least one positive example...
-        num_papers_tagged = len(set().union(*tags.values()))
+        num_papers_tagged = len(set().union(*utags.values()))
         if num_papers_tagged < args.min_papers:
-            logger.info("skipping user %s, only has %d papers tagged" % (user, num_papers_tagged))
+            logger.debug("skipping user %s, only has %d papers tagged" % (user, num_papers_tagged))
             continue
-
-        # insert a fake entry in tags for the special "all" tag, which is the union of all papers
-        # tags['all'] = set().union(*tags.values())
 
         # calculate the recommendations
-        pids, scores = calculate_recommendation(tags, time_delta=args.time_delta)
-        pids_set = set().union(*pids.values())
-        logger.info(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
+        try:
+            pids, scores = calculate_recommendation(utags, time_delta=args.time_delta)
+            pids_set = set().union(*pids.values())
+            logger.debug(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
-        ukeywords = keywords.get(user, {})
-        # print("Keywords: ", ukeywords)
+            u_ctag = ctags.get(user, set())
+            cpids, cscores = calculate_ctag_recommendation(u_ctag, utags, time_delta=args.time_delta)
 
-        kpids, kscores = search_keywords_recommendations(user, ukeywords, args.time_delta)
-        pids_set = set().union(*kpids.values())
-        logger.info(f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days")
+            cpids_set = set().union(*cpids.values())
+            logger.debug(f"From ctags, found {len(cpids_set)} papers for {user} within {args.time_delta} days")
 
-        if all(len(lst) == 0 for tag, lst in pids.items()) and all(len(lst) == 0 for key, lst in kpids.items()):
-            logger.info(f"skipping user {user}, no recommendations were produced")
-            continue
-        # render the html
-        logger.info("rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user))
-        html = render_recommendations(user, tags, pids, scores, ukeywords, kpids, kscores)
-        # temporarily for debugging write recommendations to disk for manual inspection
-        if os.path.isdir("recco"):
-            with open(f"recco/{user}.html", "w") as f:
-                f.write(html)
-        # actually send the email
-        logger.info("sending email...")
-        send_email(email, html)
-        if not args.dry_run:
-            num_sent += 1
+            ukeywords = keywords.get(user, {})
 
-        # zzz?
-        # time.sleep(1 + random.uniform(0, 2))
+            kpids, kscores = search_keywords_recommendations(user, ukeywords, args.time_delta)
+            pids_set = set().union(*kpids.values())
+            logger.debug(f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
-    logger.info("done.")
-    logger.info("sent %d emails" % (num_sent,))
+            if all(len(lst) == 0 for tag, lst in pids.items()) and all(len(lst) == 0 for key, lst in kpids.items()):
+                logger.info(f"skipping user {user}, no recommendations were produced")
+                continue
+            # render the html
+            logger.info(
+                "rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user)
+            )
+            html = render_recommendations(user, utags, pids, scores, u_ctag, cpids, cscores, ukeywords, kpids, kscores)
+            # temporarily for debugging write recommendations to disk for manual inspection
+            if os.path.isdir("recco"):
+                with open(f"recco/{user}.html", "w") as f:
+                    f.write(html)
+            # actually send the email
+            logger.info("sending email...")
+            n_send_try = 0
+            while n_send_try < 3:
+                try:
+                    send_email(email, html)
+                    break
+                except:
+                    n_send_try += 1
+            if not args.dry_run:
+                num_sent += 1
+        except Exception as e:
+            logger.error(f"meeting errors {str(e)} in processing user {user}")
+
+    logger.success("done.")
+    logger.success("sent %d emails" % (num_sent,))

@@ -9,7 +9,7 @@
 <!-- CSS -->
 <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
 <!-- Favicon -->
-<link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}" />
+<link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon-x.png') }}" />
 
 <script>
 var user = {{ user | tojson }};
@@ -22,14 +22,15 @@ var user = {{ user | tojson }};
 <body>
 <div id="header">
     <a href="/" id="home-link">arxiv-sanity-X</a>
-    <a id="hint">
-        {{ 'Login to Enjoy!' if not user else '' }}
-    </a>
-    <a href="/profile" id="login-link">
-        {{ 'profile' if user else 'login' }}
-    </a>
-    <a href="/stats" id="stats-link">stats</a>
-    <a href="/about" id="stats-link">about</a>
+    <a id="hint">{{ 'Login to Enjoy!' if not user else '' }}</a>
+
+    <!-- Right navigation area -->
+    <div class="nav-right">
+        <a href="/profile" id="login-link">{{ 'profile' if user else 'login' }}</a>
+        <a href="/stats" class="nav-link">stats</a>
+        <a href="/about" class="nav-link">about</a>
+        <button id="theme-toggle" aria-label="Toggle dark mode">🌓</button>
+    </div>
 </div>
 
 {% block content %}
@@ -43,6 +44,41 @@ var user = {{ user | tojson }};
 <!-- Load our React component -->
 {% block elements %}
 {% endblock %}
+<!-- Theme toggle script -->
+<script>
+(function () {
+    // initialize theme
+    const stored = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const current = stored || (prefersDark ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', current);
+
+    // toggle handler
+    const btn = document.getElementById('theme-toggle');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+        });
+    }
+})();
+</script>
 
 </body>
 </html>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Advanced filter expand/collapse
+    var advBtn = document.getElementById('adv-filter-toggle');
+    var advPanel = document.getElementById('adv-filter-panel');
+    if (advBtn && advPanel) {
+        advBtn.addEventListener('click', function() {
+            var expanded = advBtn.getAttribute('aria-expanded') === 'true';
+            advBtn.setAttribute('aria-expanded', !expanded);
+            advPanel.style.display = expanded ? 'none' : 'flex';
+        });
+    }
+});
+</script>

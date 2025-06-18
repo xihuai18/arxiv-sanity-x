@@ -19,6 +19,234 @@ var move_page = function(int_offset) {
     queryParams.set("page_number", Math.max(1, parseInt(gvars.page_number) + int_offset));
     window.location.href = '/?' + queryParams.toString();
 }
+
+// Search box optimization logic
+var SearchBoxController = {
+    // Initialize search box features
+    init: function() {
+        this.setupSearchBox();
+        this.setupFilters();
+        this.setupShortcuts();
+        this.setupFormValidation();
+    },
+
+    // Setup search box functionality
+    setupSearchBox: function() {
+        var searchInput = document.getElementById('qfield');
+        var searchForm = searchInput.closest('form');
+
+        // Auto focus search box (if no query)
+        if (searchInput && !searchInput.value.trim()) {
+            searchInput.focus();
+        }
+
+        // Press Enter to search quickly
+        searchInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                SearchBoxController.performSearch();
+            }
+        });
+
+        // Search suggestions and history functionality removed
+
+        // Clear search button
+        this.addClearButton(searchInput);
+    },
+
+    // Search suggestions functionality removed
+
+    // Add clear button
+    addClearButton: function(searchInput) {
+        if (searchInput.value.trim()) {
+            var clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.className = 'search-clear-btn';
+            clearBtn.innerHTML = '×';
+            clearBtn.title = 'Clear search';
+
+            clearBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                searchInput.focus();
+                clearBtn.remove();
+            });
+
+            searchInput.parentNode.style.position = 'relative';
+            searchInput.parentNode.appendChild(clearBtn);
+        }
+    },
+
+    // Search suggestions functionality removed
+    hideSuggestions: function() {
+        // Keep this function for ESC key functionality
+        var existing = document.getElementById('search-suggestions');
+        if (existing) {
+            existing.remove();
+        }
+    },
+
+    // Setup filter interactions
+    setupFilters: function() {
+        var rankSelect = document.getElementById('rank_select');
+        var tagsField = document.getElementById('tags_field');
+        var pidField = document.getElementById('pid_field');
+
+        // Auto expand advanced filters when rank is tags
+        rankSelect.addEventListener('change', function() {
+            var advancedFilters = document.querySelector('.advanced-filters');
+            if (this.value === 'tags' || this.value === 'pid') {
+                advancedFilters.open = true;
+            }
+        });
+
+        // Tag field smart suggestions
+        if (typeof tags !== 'undefined' && tags.length > 0) {
+            this.setupTagSuggestions(tagsField);
+        }
+    },
+
+    // Setup tag suggestions
+    setupTagSuggestions: function(tagsField) {
+        var availableTags = tags.map(tag => tag.name).filter(name => name !== 'all');
+
+        tagsField.addEventListener('input', function() {
+            var input = this.value;
+            var lastComma = input.lastIndexOf(',');
+            var currentTag = lastComma >= 0 ? input.substring(lastComma + 1).trim() : input.trim();
+
+            if (currentTag.length >= 1) {
+                var matches = availableTags.filter(tag =>
+                    tag.toLowerCase().includes(currentTag.toLowerCase())
+                ).slice(0, 8);
+
+                SearchBoxController.showTagSuggestions(tagsField, matches, lastComma, currentTag);
+            } else {
+                SearchBoxController.hideTagSuggestions();
+            }
+        });
+    },
+
+    // Show tag suggestions
+    showTagSuggestions: function(input, suggestions, lastCommaIndex, currentTag) {
+        this.hideTagSuggestions();
+
+        if (suggestions.length === 0) return;
+
+        var dropdown = document.createElement('div');
+        dropdown.className = 'tag-suggestions';
+        dropdown.id = 'tag-suggestions';
+
+        suggestions.forEach(function(tag) {
+            var item = document.createElement('div');
+            item.className = 'tag-suggestion-item';
+            item.textContent = tag;
+
+            item.addEventListener('click', function() {
+                var newValue = lastCommaIndex >= 0 ?
+                    input.value.substring(0, lastCommaIndex + 1) + ' ' + tag :
+                    tag;
+                input.value = newValue;
+                SearchBoxController.hideTagSuggestions();
+                input.focus();
+            });
+            dropdown.appendChild(item);
+        });
+
+        input.parentNode.style.position = 'relative';
+        input.parentNode.appendChild(dropdown);
+    },
+
+    // Hide tag suggestions
+    hideTagSuggestions: function() {
+        var existing = document.getElementById('tag-suggestions');
+        if (existing) {
+            existing.remove();
+        }
+    },
+
+    // Setup shortcuts
+    setupShortcuts: function() {
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            // Ctrl/Cmd + K focus search box
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                document.getElementById('qfield').focus();
+            }
+
+            // ESC key hide suggestions and close popups
+            if (e.key === 'Escape') {
+                SearchBoxController.hideSuggestions();
+                SearchBoxController.hideTagSuggestions();
+
+                // Close all modals
+                var modals = document.querySelectorAll('.modal-overlay');
+                modals.forEach(function(modal) {
+                    if (modal.style.display !== 'none') {
+                        modal.click(); // Trigger mask layer click event
+                    }
+                });
+
+                // Close all multi-select dropdowns
+                var dropdowns = document.querySelectorAll('.multi-select-dropdown-menu');
+                dropdowns.forEach(function(dropdown) {
+                    var trigger = dropdown.parentNode.querySelector('.multi-select-trigger');
+                    if (trigger && dropdown.style.display !== 'none') {
+                        trigger.click(); // Trigger dropdown close
+                    }
+                });
+            }
+        });
+    },
+
+    // Form validation
+    setupFormValidation: function() {
+        var form = document.querySelector('#cbox form');
+        var timeFilterField = document.getElementById('time_filter_field');
+        var svmCField = document.getElementById('svm_c_field');
+
+        // Number field validation
+        timeFilterField.addEventListener('input', function() {
+            var value = this.value.trim();
+            if (value && !/^\d+(\.\d+)?$/.test(value)) {
+                this.style.borderColor = '#f55';
+                this.title = 'Please enter a valid number';
+            } else {
+                this.style.borderColor = '';
+                this.title = '';
+            }
+        });
+
+        svmCField.addEventListener('input', function() {
+            var value = this.value.trim();
+            if (value && !/^\d*\.?\d+$/.test(value)) {
+                this.style.borderColor = '#f55';
+                this.title = 'Please enter a valid number';
+            } else {
+                this.style.borderColor = '';
+                this.title = '';
+            }
+        });
+    },
+
+    // Perform search
+    performSearch: function() {
+        var query = document.getElementById('qfield').value.trim();
+
+        // Auto set rank to search
+        if (query) {
+            document.getElementById('rank_select').value = 'search';
+        }
+
+        // Submit form
+        document.querySelector('#cbox form').submit();
+    }
+};
+
+// Initialize after DOM loaded
+document.addEventListener('DOMContentLoaded', function() {
+    SearchBoxController.init();
+});
 </script>
 {% endblock %}
 
@@ -34,59 +262,78 @@ var move_page = function(int_offset) {
         <!-- the choice box, allowing us to sort, rank, slice and dice papers -->
         <div id="cbox">
             <form action="/" method="get">
-
-                <!-- the search box, allowing us to search by keywords -->
-                <input name="q" type="text" id="qfield" value="{{ gvars.search_query }}">
-
-                <!-- rank type: one of tags, pid, time, or random -->
-                <label for="rank_type">Rank by:</label>
-                <select name="rank" id="rank_select">
-                    <option value="search" {{ gvars.rank == 'search' and 'selected' }}>search</option>
-                    <option value="tags" {{ gvars.rank == 'tags' and 'selected' }}>tags</option>
-                    <option value="pid" {{ gvars.rank == 'pid' and 'selected' }}>pid</option>
-                    <option value="time" {{ gvars.rank == 'time' and 'selected' }}>time</option>
-                    <option value="random" {{ gvars.rank == 'random' and 'selected' }}>random</option>
-                </select>
-
-                <label for="logic">logic (used in `tags`, `pids` ranks, seperated by `,`): </label>
-                <select name="logic" id="logic">
-                    <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
-                    <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
-                </select>
-
-                <!-- current tags, simply in a text field -->
-                <label for="tags">tags: </label>
-                <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}">
-
-                <!-- current pid, simply in a text field -->
-                <label for="pid">pids: </label>
-                <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}">
-
-                <!-- current time_filter, in a text field -->
-                <label for="time_filter">time_filter (days): </label>
-                <input name="time_filter" type="text" id="time_filter_field" value="{{ gvars.time_filter }}">
-
-                <!-- current svm_c, in a text field -->
-                <label for="svm_c">svm_c: </label>
-                <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}">
-
-                <!-- current skip_have: one of yes or no -->
-                <label for="skip_have">skip_have: </label>
-                <select name="skip_have" id="skip_have_select">
-                    <option value="yes" {{ gvars.skip_have == 'yes' and 'selected' }}>yes</option>
-                    <option value="no" {{ gvars.skip_have == 'no' and 'selected' }}>no</option>
-                </select>
-
-                <input type="submit" value="Submit">
+                <div class="search-row">
+                    <input name="q" type="text" id="qfield" class="search-input" placeholder="Search arXiv papers… (Ctrl+K)" value="{{ gvars.search_query }}">
+                    <button type="submit" class="primary-btn">Search</button>
+                </div>
+                <div class="filter-row">
+                    <div class="filter-group primary-filters">
+                        <div class="filter-item">
+                            <label for="rank_select">Rank by:</label>
+                            <select name="rank" id="rank_select">
+                                <option value="search" {{ gvars.rank == 'search' and 'selected' }}>search</option>
+                                <option value="tags" {{ gvars.rank == 'tags' and 'selected' }}>tags</option>
+                                <option value="pid" {{ gvars.rank == 'pid' and 'selected' }}>pid</option>
+                                <option value="time" {{ gvars.rank == 'time' and 'selected' }}>time</option>
+                                <option value="random" {{ gvars.rank == 'random' and 'selected' }}>random</option>
+                            </select>
+                        </div>
+                        <div class="filter-item">
+                            <label for="time_filter_field">Time filter (days):</label>
+                            <input name="time_filter" type="text" id="time_filter_field" value="{{ gvars.time_filter }}">
+                        </div>
+                        <div class="filter-item">
+                            <label for="skip_have_select">Skip seen:</label>
+                            <select name="skip_have" id="skip_have_select">
+                                <option value="yes" {{ gvars.skip_have == 'yes' and 'selected' }}>yes</option>
+                                <option value="no" {{ gvars.skip_have == 'no' and 'selected' }}>no</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="filter-item">
+                        <button type="button" id="adv-filter-toggle" class="adv-filter-btn" aria-expanded="false" aria-controls="adv-filter-panel">
+                            <span class="adv-filter-icon">⚙️</span>
+                            <span class="adv-filter-text">Advanced Filter</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="adv-filter-container">
+                    <div id="adv-filter-panel" class="adv-filter-panel" style="display:none;">
+                        <div class="filter-item">
+                            <label for="tags_field">Tags:</label>
+                            <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}" placeholder="Comma separated tags">
+                        </div>
+                        <div class="filter-item">
+                            <label for="pid_field">PIDs:</label>
+                            <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}" placeholder="Comma separated author IDs">
+                        </div>
+                        <div class="filter-item">
+                            <label for="logic">Logic Inside Tags and PIDs:</label>
+                            <select name="logic" id="logic" title="Logical relation inside Tags and PIDs; OR if both filled">
+                                <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
+                                <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
+                            </select>
+                        </div>
+                        <div class="filter-item">
+                            <label for="svm_c_field">SVM C:</label>
+                            <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}" placeholder="0.005">
+                        </div>
+                        <div class="filter-note">
+                            <small>💡 When both Tags and PIDs are filled, either matches will be present.</small>
+                        </div>
+                    </div>
+                </div>
+                <!-- some hand-coded common choices for faster and more convenient operation -->
+                <div id="cbox_fast">
+                    <span class="shortcut-label">Shortcuts:</span>
+                    <div class="shortcut-buttons">
+                        <button class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=7&skip_have=yes'">Recommend last week</button>
+                        <button class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=3&skip_have=yes'">Recommend last 3 days</button>
+                        <button class="shortcut-btn" onclick="window.location.href='/?rank=time'">Recent</button>
+                        <button class="shortcut-btn" onclick="window.location.href='/?rank=random&time_filter=7'">Random last week</button>
+                    </div>
+                </div>
             </form>
-        </div>
-        <!-- some hand-coded common choices for faster and more convenient operation -->
-        <div id="cbox_fast">
-            Shortcuts:
-            <a href="/?rank=tags&tags=all&time_filter=7&skip_have=yes">recommend over last week</a>
-            <a href="/?rank=tags&tags=all&time_filter=3&skip_have=yes">recommend over last 3 days</a>
-            <a href="/?rank=time">recent</a>
-            <a href="/?rank=random&time_filter=7">random last week</a>
         </div>
     </div>
     <div>
@@ -107,14 +354,12 @@ var move_page = function(int_offset) {
 {% endif %}
 
 
-{% if user %}
-<div id="keywrap">
-</div>
+{% if user and tags %}
+<div id="tagcombwrap"></div>
 {% endif %}
 
-{% if user and tags %}
-<div style="margin-top: 5pt;"><strong>Registered Tag Combinations</strong></div>
-<div id="tagcombwrap">
+{% if user %}
+<div id="keywrap">
 </div>
 {% endif %}
 

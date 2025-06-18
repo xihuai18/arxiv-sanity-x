@@ -107,20 +107,6 @@ Latest papers matched with the keywords added by the users will be recommended.
 Latest papers with high classification scores according to the tags and register combinations of tags will
 be recommended.
 
-### Add Tags for A Paper
-
-![fig1](static/add_tag.png)
-
-![fig2](static/add_tag2.png)
-
-![fig3](static/add_tag3.png)
-
-### Register Tag Combinations
-
-![fig4](static/add_tag_comb.png)
-
-![fig5](static/add_tag_comb2.png)
-
 ### License
 
 MIT

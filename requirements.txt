@@ -1,9 +1,10 @@
-feedparser==6.0.8
-Flask==2.0.2
-numpy==1.21.4
-scikit-learn==1.0.1
-sqlitedict==1.7.0
-Werkzeug==2.3.7
+feedparser
+Flask
+numpy
+scikit-learn
+scikit-learn-intelex
+sqlitedict
+Werkzeug
 tqdm
 pytz
 schedule
@@ -14,3 +15,4 @@ tiktoken
 gunicorn
 apscheduler
 pre-commit
+holidays

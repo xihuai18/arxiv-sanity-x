@@ -7,21 +7,44 @@ ideas:
 - special single-image search just for paper similarity
 """
 
+# Multi-core optimization configuration - Ubuntu system
 import os
-import re
-import time
 from multiprocessing import Pool, cpu_count
+
+from loguru import logger
+
+# Set multi-threading environment variables
+num_threads = min(cpu_count(), 192)  # Reasonable thread limit
+os.environ["OMP_NUM_THREADS"] = str(num_threads)
+os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
+os.environ["MKL_NUM_THREADS"] = str(num_threads)
+os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
+
+# Try to use Intel extensions (if available)
+try:
+    from sklearnex import patch_sklearn
+
+    patch_sklearn()
+    logger.info(f"Intel scikit-learn extension enabled with {num_threads} threads")
+    USE_INTEL_EXT = True
+except ImportError:
+    logger.info(f"Using standard sklearn with {num_threads} threads")
+    USE_INTEL_EXT = False
+
+import re
+import sys
+import time
 from random import shuffle
 
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import g  # global session-level object
 from flask import Flask, redirect, render_template, request, session, url_for
-from loguru import logger
 from sklearn import svm
 from tqdm import tqdm
 
 from aslite.db import (
+    FEATURES_FILE,
     get_combined_tags_db,
     get_email_db,
     get_keywords_db,
@@ -36,6 +59,12 @@ from aslite.db import (
 # inits and globals
 
 RET_NUM = 100  # number of papers to return per page
+MAX_RESULTS = RET_NUM * 10  # Process at most 10 pages of results, avoid processing all data
+
+# Feature cache related global variables
+FEATURES_CACHE = None
+FEATURES_FILE_MTIME = 0  # Feature file modification time
+FEATURES_CACHE_TIME = 0  # Cache creation time
 
 app = Flask(__name__)
 
@@ -162,6 +191,62 @@ def close_connection(error=None):
 
 
 # -----------------------------------------------------------------------------
+# Intelligent feature caching functionality
+
+
+def get_features_cached():
+    """
+    Intelligent feature cache loading function
+    - Detect if feature file is updated
+    - Automatically reload updated features
+    - Record detailed cache status logs
+    """
+    global FEATURES_CACHE, FEATURES_FILE_MTIME, FEATURES_CACHE_TIME
+
+    current_time = time.time()
+
+    # Check if feature file exists
+    if not os.path.exists(FEATURES_FILE):
+        logger.error(f"Features file not found: {FEATURES_FILE}")
+        raise FileNotFoundError(f"Features file not found: {FEATURES_FILE}")
+
+    # Get current modification time of feature file
+    current_file_mtime = os.path.getmtime(FEATURES_FILE)
+
+    # Determine if features need to be reloaded
+    need_reload = FEATURES_CACHE is None or current_file_mtime > FEATURES_FILE_MTIME  # First load  # File updated
+
+    if need_reload:
+        logger.info(f"Loading features from disk...")
+        if FEATURES_CACHE is not None:
+            logger.info(f"Features file updated (old mtime: {FEATURES_FILE_MTIME}, new mtime: {current_file_mtime})")
+
+        start_time = time.time()
+
+        try:
+            # Load features
+            FEATURES_CACHE = load_features()
+            FEATURES_FILE_MTIME = current_file_mtime
+            FEATURES_CACHE_TIME = current_time
+
+            load_time = time.time() - start_time
+            logger.info(f"Features loaded successfully in {load_time:.3f}s")
+            logger.info(f"Feature matrix shape: {FEATURES_CACHE['x'].shape}")
+            logger.info(f"Number of papers: {len(FEATURES_CACHE['pids'])}")
+            logger.info(f"Vocabulary size: {len(FEATURES_CACHE['vocab'])}")
+
+        except Exception as e:
+            logger.error(f"Failed to load features: {e}")
+            raise
+    else:
+        # Use cache
+        cache_age = current_time - FEATURES_CACHE_TIME
+        logger.debug(f"Using cached features (age: {cache_age:.1f}s)")
+
+    return FEATURES_CACHE
+
+
+# -----------------------------------------------------------------------------
 # ranking utilities for completing the search/rank/filter requests
 
 
@@ -185,17 +270,29 @@ def render_pid(pid):
     )
 
 
-def random_rank():
+def random_rank(limit=None):
     mdb = get_metas()
     pids = list(mdb.keys())
     shuffle(pids)
+
+    # If limit is specified, only take first limit results
+    if limit is not None:
+        pids = pids[:limit]
+        logger.debug(f"Random rank limited to {limit} results")
+
     scores = [0 for _ in pids]
     return pids, scores
 
 
-def time_rank():
+def time_rank(limit=None):
     mdb = get_metas()
     ms = sorted(mdb.items(), key=lambda kv: kv[1]["_time"], reverse=True)
+
+    # If limit is specified, only take first limit results
+    if limit is not None:
+        ms = ms[:limit]
+        logger.debug(f"Time rank limited to {limit} results")
+
     tnow = time.time()
     pids = [k for k, v in ms]
     scores = [(tnow - v["_time"]) / 60 / 60 / 24 for k, v in ms]  # time delta in days
@@ -208,9 +305,9 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     if not (tags or s_pids):
         return [], [], []
 
-    # load all of the features
+    # Use intelligent cache to load features
     s_time = time.time()
-    features = load_features()
+    features = get_features_cached()  # Replace: features = load_features()
     x, pids = features["x"], features["pids"]
     n, d = x.shape
     ptoi, itop = {}, {}
@@ -220,26 +317,35 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
 
     # construct the positive set
     y = np.zeros(n, dtype=np.float32)
+    weight_offset = 0.0
+    
+    # Process PIDs
     if s_pids:
         s_pids = set(map(str.strip, s_pids.split(",")))
         for p_i, pid in enumerate(s_pids):
-            if logic == "and":
-                y[ptoi[pid]] = 1.0 + p_i
-            else:
-                y[ptoi[pid]] = 1.0
-    elif tags:
+            if pid in ptoi:  # Ensure PID exists
+                if logic == "and":
+                    y[ptoi[pid]] = 1.0 + p_i + weight_offset
+                else:
+                    y[ptoi[pid]] = max(y[ptoi[pid]], 1.0)
+        weight_offset += len(s_pids)  # Reserve space for tags weight
+
+    # Process Tags (can coexist with PIDs)
+    if tags:
         tags_db = get_tags()
         tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
         for t_i, tag in enumerate(tags_filter_to):
-            t_pids = tags_db[tag]
-            for p_i, pid in enumerate(t_pids):
-                if logic == "and":
-                    y[ptoi[pid]] = 1.0 + t_i
-                else:
-                    y[ptoi[pid]] = 1.0
+            if tag in tags_db:  # Ensure tag exists
+                t_pids = tags_db[tag]
+                for p_i, pid in enumerate(t_pids):
+                    if pid in ptoi:  # Ensure PID exists
+                        if logic == "and":
+                            y[ptoi[pid]] = max(y[ptoi[pid]], 1.0 + t_i + weight_offset)
+                        else:
+                            y[ptoi[pid]] = max(y[ptoi[pid]], 1.0)
     e_time = time.time()
 
-    logger.debug(f"feature preparing for {e_time - s_time:.5f}s")
+    logger.debug(f"feature loading/caching for {e_time - s_time:.5f}s")
 
     if y.sum() == 0:
         return [], [], []  # there are no positives?
@@ -247,7 +353,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     s_time = time.time()
 
     # classify
-    clf = svm.LinearSVC(class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C)
+    clf = svm.LinearSVC(class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C, dual="auto")
     # feature_map_nystroem = Nystroem(
     #     random_state=0, n_components=100, n_jobs=-1
     # )
@@ -312,7 +418,7 @@ def count_match(q, pid_start, n_pids):
     return sub_pairs
 
 
-def search_rank(q: str = ""):
+def search_rank(q: str = "", limit=None):
     if not q:
         return [], []  # no query? no results
     n_pids = len(get_pids())
@@ -326,6 +432,12 @@ def search_rank(q: str = ""):
         pairs = sum(sub_pairs_list, [])
 
     pairs.sort(reverse=True)
+
+    # If limit is specified, only take first limit results
+    if limit is not None:
+        pairs = pairs[:limit]
+        logger.debug(f"Search rank limited to {limit} results")
+
     pids = [p[1] for p in pairs]
     scores = [p[0] for p in pairs]
     return pids, scores
@@ -350,6 +462,8 @@ def main():
     default_time_filter = ""
     default_skip_have = "no"
     default_logic = "and"
+    logger.remove()
+    logger.add(sys.stdout, level="INFO")
 
     # override variables with any provided options via the interface
     opt_rank = request.args.get("rank", default_rank)  # rank type. search|tags|pid|time|random
@@ -373,27 +487,59 @@ def main():
     except ValueError:
         C = 0.005  # sensible default, i think
 
+    # Calculate required number of results (considering pagination and possible need for more results after filtering)
+    try:
+        page_number = max(1, int(opt_page_number))
+    except ValueError:
+        page_number = 1
+
+    # Calculate how many results to get to support current page display
+    # Basic requirement: results needed for current page = RET_NUM * page_number
+    base_needed = RET_NUM * page_number
+
+    # Consider that filtering conditions will reduce available results, so need to get more
+    buffer_multiplier = 1
+    if opt_time_filter:
+        buffer_multiplier += 2  # Time filtering may remove many results, take 2x more
+    if opt_skip_have == "yes":
+        buffer_multiplier += 1  # skip_have will also remove some, take 1x more
+
+    # Final limit = basic requirement * buffer multiplier, but not exceeding maximum
+    dynamic_limit = min(MAX_RESULTS, base_needed * buffer_multiplier)
+
+    logger.debug(
+        f"Page {page_number}, base_needed={base_needed}, buffer_multiplier={buffer_multiplier}, dynamic_limit={dynamic_limit}"
+    )
+
     # rank papers: by tags, by time, by random
     words = []  # only populated in the case of svm rank
     if opt_rank == "search":
         t_s = time.time()
-        pids, scores = search_rank(q=opt_q)
+        pids, scores = search_rank(q=opt_q, limit=dynamic_limit)
         logger.info(f"User {g.user} search {opt_q}, time {time.time() - t_s:.3f}s")
     elif opt_rank == "tags":
         t_s = time.time()
         pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic)
         logger.info(f"User {g.user} tags {opt_tags} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
+        # SVM results are usually already sorted, trim early
+        if len(pids) > dynamic_limit:
+            pids = pids[:dynamic_limit]
+            scores = scores[:dynamic_limit]
     elif opt_rank == "pid":
         t_s = time.time()
         pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic)
         logger.info(f"User {g.user} pid {opt_pid} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
+        # SVM results are usually already sorted, trim early
+        if len(pids) > dynamic_limit:
+            pids = pids[:dynamic_limit]
+            scores = scores[:dynamic_limit]
     elif opt_rank == "time":
         t_s = time.time()
-        pids, scores = time_rank()
+        pids, scores = time_rank(limit=dynamic_limit)
         logger.info(f"User {g.user} time rank, time {time.time() - t_s:.3f}s")
     elif opt_rank == "random":
         t_s = time.time()
-        pids, scores = random_rank()
+        pids, scores = random_rank(limit=dynamic_limit)
         logger.info(f"User {g.user} random rank, time {time.time() - t_s:.3f}s")
     else:
         raise ValueError(f"opt_rank {opt_rank} is not a thing")
@@ -414,15 +560,13 @@ def main():
         keep = [i for i, pid in enumerate(pids) if pid not in have]
         pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
 
-    # crop the number of results to RET_NUM, and paginate
-    try:
-        page_number = max(1, int(opt_page_number))
-    except ValueError:
-        page_number = 1
+    # Pagination processing (page_number already calculated above)
     start_index = (page_number - 1) * RET_NUM  # desired starting index
     end_index = min(start_index + RET_NUM, len(pids))  # desired ending index
     pids = pids[start_index:end_index]
     scores = scores[start_index:end_index]
+
+    logger.debug(f"Final pagination: start={start_index}, end={end_index}, got {len(pids)} papers")
 
     # render all papers to just the information we need for the UI
     papers = [render_pid(pid) for pid in pids]
@@ -445,10 +589,11 @@ def main():
     # build the page context information and render
     context = default_context()
     context["papers"] = papers
-    context["tags"] = rtags
     context["words"] = words
-    context["keys"] = rkeys
-    context["combined_tags"] = rctags
+
+    context["tags"] = sorted(rtags, key=lambda item: item["name"])
+    context["keys"] = sorted(rkeys, key=lambda item: item["name"])
+    context["combined_tags"] = sorted(rctags, key=lambda item: item["name"])
 
     # test keys
     # context["keys"] = [
@@ -483,8 +628,8 @@ def inspect():
     if pid not in pdb:
         return "error, malformed pid"  # todo: better error handling
 
-    # load the tfidf vectors, the vocab, and the idf table
-    features = load_features()
+    # Use intelligent cache to load features
+    features = get_features_cached()  # Replace: features = load_features()
     x = features["x"]
     idf = features["idf"]
     ivocab = {v: k for k, v in features["vocab"].items()}
@@ -542,6 +687,12 @@ def stats():
     for thr in [1, 6, 12, 24, 48, 72, 96]:
         context["thr_%d" % thr] = len([t for t in times if t > tnow - thr * 60 * 60])
 
+    context["thr_week"] = len([t for t in times if t > tnow - 7 * 24 * 60 * 60])
+    context["thr_month"] = len([t for t in times if t > tnow - 30.25 * 24 * 60 * 60])
+    context["thr_quarter"] = len([t for t in times if t > tnow - 91.5 * 24 * 60 * 60])
+    context["thr_semiannual"] = len([t for t in times if t > tnow - 182.5 * 24 * 60 * 60])
+    context["thr_year"] = len([t for t in times if t > tnow - 365 * 24 * 60 * 60])
+
     return render_template("stats.html", **context)
 
 
@@ -549,6 +700,46 @@ def stats():
 def about():
     context = default_context()
     return render_template("about.html", **context)
+
+
+@app.route("/cache_status")
+def cache_status():
+    """Debug endpoint to display cache status"""
+    if not g.user:
+        return "Access denied"
+
+    global FEATURES_CACHE, FEATURES_FILE_MTIME, FEATURES_CACHE_TIME
+
+    status = {
+        "features_cached": FEATURES_CACHE is not None,
+        "cache_time": FEATURES_CACHE_TIME,
+        "file_mtime": FEATURES_FILE_MTIME,
+        "current_time": time.time(),
+    }
+
+    if FEATURES_CACHE:
+        status.update(
+            {
+                "cache_age_seconds": time.time() - FEATURES_CACHE_TIME,
+                "feature_shape": str(FEATURES_CACHE["x"].shape),
+                "num_papers": len(FEATURES_CACHE["pids"]),
+                "vocab_size": len(FEATURES_CACHE["vocab"]),
+            }
+        )
+
+    if os.path.exists(FEATURES_FILE):
+        current_mtime = os.path.getmtime(FEATURES_FILE)
+        status.update(
+            {
+                "file_exists": True,
+                "current_file_mtime": current_mtime,
+                "file_is_newer": current_mtime > FEATURES_FILE_MTIME,
+            }
+        )
+    else:
+        status["file_exists"] = False
+
+    return status
 
 
 # -----------------------------------------------------------------------------
@@ -622,19 +813,26 @@ def delete_tag(tag=None):
         return "error, not logged in"
 
     with get_tags_db(flag="c") as tags_db:
-        if g.user not in tags_db:
-            return "user does not have a library"
+        with get_combined_tags_db(flag="c") as ctags_db:
+            if g.user not in tags_db:
+                return "user does not have a library"
 
-        d = tags_db[g.user]
+            d = tags_db[g.user]
 
-        if tag not in d:
-            return "user does not have this tag"
+            if tag not in d:
+                return "user does not have this tag"
 
-        # delete the tag
-        del d[tag]
+            # delete the tag
+            del d[tag]
 
-        # write back to database
-        tags_db[g.user] = d
+            # write back to database
+            tags_db[g.user] = d
+            # remove ctag
+            d = ctags_db[g.user]
+            for ctag in d:
+                if tag in ctag.split(","):
+                    d.remove(ctag)
+            ctags_db[g.user] = d
 
     logger.info(f"deleted tag {tag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
@@ -646,25 +844,39 @@ def rename_tag(otag=None, ntag=None):
         return "error, not logged in"
 
     with get_tags_db(flag="c") as tags_db:
-        if g.user not in tags_db:
-            return "user does not have a library"
+        with get_combined_tags_db(flag="c") as ctags_db:
+            if g.user not in tags_db:
+                return "user does not have a library"
 
-        d = tags_db[g.user]
+            d = tags_db[g.user]
 
-        if otag not in d:
-            return "user does not have this tag"
+            if otag not in d:
+                return "user does not have this tag"
 
-        # logger.debug(d)
-        o_pids = d[otag]
-        del d[otag]
-        if ntag not in d:
-            d[ntag] = o_pids
-        else:
-            d[ntag] = d[ntag].union(o_pids)
-        # logger.debug(d)
+            # logger.debug(d)
+            o_pids = d[otag]
+            del d[otag]
+            if ntag not in d:
+                d[ntag] = o_pids
+            else:
+                d[ntag] = d[ntag].union(o_pids)
+            # logger.debug(d)
 
-        # write back to database
-        tags_db[g.user] = d
+            # write back to database
+            tags_db[g.user] = d
+
+            # rename ctag
+            d = ctags_db[g.user]
+            # logger.error(d)
+            for ctag in d:
+                # logger.error(f"{ctag}, {otag}, {ctag.split(',')}")
+                if otag in (ctag_split := ctag.split(",")):
+                    ctag_split = [ct_s if ct_s != otag else ntag for ct_s in ctag_split]
+                    n_ctag = ",".join(ctag_split)
+                    # logger.error(f"{ctag}, {n_ctag}")
+                    d.remove(ctag)
+                    d.add(n_ctag)
+            ctags_db[g.user] = d
 
     logger.info(f"renamed tag {otag} to {ntag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
@@ -675,7 +887,7 @@ def add_ctag(ctag=None):
     if g.user is None:
         return "error, not logged in"
     elif ctag == "null":
-        return "error, cannot add the ctag keyword 'null'"
+        return "error, cannot add the ctag 'null'"
 
     tags = get_tags()
     for tag in map(str.strip, ctag.split(",")):
@@ -696,14 +908,14 @@ def add_ctag(ctag=None):
 
         # add the paper to the key
         if ctag in d:
-            return "user has repeated keywords"
+            return "user has repeated ctag"
 
         d.add(ctag)
 
         # write back to database
         ctags_db[g.user] = d
 
-    logger.info(f"added keyword {ctag} for user {g.user}")
+    logger.info(f"added ctag {ctag} for user {g.user}")
     return "ok: " + str(d)  # return back the user library for debugging atm
 
 

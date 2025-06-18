@@ -12,6 +12,7 @@ import zlib
 from contextlib import contextmanager
 
 from sqlitedict import SqliteDict
+
 from vars import DATA_DIR
 
 # -----------------------------------------------------------------------------
