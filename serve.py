@@ -299,7 +299,7 @@ def time_rank(limit=None):
     return pids, scores
 
 
-def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "and"):
+def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "and", time_filter: str = ""):
     # tag can be one tag or a few comma-separated tags or 'all' for all tags we have in db
     # pid can be a specific paper id to set as positive for a kind of nearest neighbor search
     if not (tags or s_pids):
@@ -309,6 +309,31 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     s_time = time.time()
     features = get_features_cached()  # Replace: features = load_features()
     x, pids = features["x"], features["pids"]
+
+    # Apply time filtering first to reduce computation
+    if time_filter:
+        mdb = get_metas()
+        kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
+        tnow = time.time()
+        deltat = float(time_filter) * 60 * 60 * 24  # allowed time delta in seconds
+
+        # Find indices of papers that meet time criteria
+        time_valid_indices = []
+        time_valid_pids = []
+        for i, pid in enumerate(pids):
+            if pid in kv and (tnow - kv[pid]["_time"]) < deltat:
+                time_valid_indices.append(i)
+                time_valid_pids.append(pid)
+
+        # Filter features and pids based on time
+        if time_valid_indices:
+            x = x[time_valid_indices]
+            pids = time_valid_pids
+            logger.debug(f"Time filter reduced dataset from {len(features['pids'])} to {len(pids)} papers")
+        else:
+            logger.debug("No papers match time filter criteria")
+            return [], [], []
+
     n, d = x.shape
     ptoi, itop = {}, {}
     for i, p in enumerate(pids):
@@ -318,7 +343,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     # construct the positive set
     y = np.zeros(n, dtype=np.float32)
     weight_offset = 0.0
-    
+
     # Process PIDs
     if s_pids:
         s_pids = set(map(str.strip, s_pids.split(",")))
@@ -352,8 +377,18 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
 
     s_time = time.time()
 
-    # classify
-    clf = svm.LinearSVC(class_weight="balanced", verbose=0, max_iter=10000, tol=1e-4, C=C, dual="auto")
+    # classify - 优化参数加速训练，保持准确率
+    clf = svm.LinearSVC(
+        class_weight="balanced",
+        verbose=0,
+        max_iter=5000,  # 适当减少迭代次数
+        tol=1e-3,
+        C=C,
+        dual=False,  # 对高维特征更快
+        random_state=42,  # 确保结果可重现
+        fit_intercept=True,  # 通常提高准确率
+        multi_class="ovr",  # 一对其余，对二分类更快
+    )
     # feature_map_nystroem = Nystroem(
     #     random_state=0, n_components=100, n_jobs=-1
     # )
@@ -383,15 +418,22 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.005, logic: str = "a
     # get the words that score most positively and most negatively for the svm
     ivocab = {v: k for k, v in features["vocab"].items()}  # index to word mapping
     weights = clf.coef_[0]  # (n_features,) weights of the trained svm
-    sortix = np.argsort(-weights)
+
+    # Only analyze TF-IDF part weights (vocab size), ignore embedding dimensions
+    vocab_size = len(ivocab)
+    tfidf_weights = weights[:vocab_size]  # Only TF-IDF weights
+
+    sortix = np.argsort(-tfidf_weights)
     e_time = time.time()
     logger.debug(f"rank calculation for {e_time - s_time:.5f}s")
+    logger.debug(f"Total features: {len(weights)}, TF-IDF features: {vocab_size}")
+
     words = []
     for ix in list(sortix[:40]) + list(sortix[-20:]):
         words.append(
             {
                 "word": ivocab[ix],
-                "weight": weights[ix],
+                "weight": float(tfidf_weights[ix]),
             }
         )
 
@@ -481,11 +523,16 @@ def main():
     if opt_q:
         opt_rank = "search"
 
+    # if using svm_rank (tags or pid) and no time filter is specified, default to 365 days
+    if opt_rank in ["tags", "pid"] and not opt_time_filter:
+        opt_time_filter = "365"
+        logger.debug(f"Applied default 365-day time filter for SVM ranking ({opt_rank})")
+
     # try to parse opt_svm_c into something sensible (a float)
     try:
         C = float(opt_svm_c)
     except ValueError:
-        C = 0.005  # sensible default, i think
+        C = 0.02  # sensible default, i think
 
     # Calculate required number of results (considering pagination and possible need for more results after filtering)
     try:
@@ -519,16 +566,20 @@ def main():
         logger.info(f"User {g.user} search {opt_q}, time {time.time() - t_s:.3f}s")
     elif opt_rank == "tags":
         t_s = time.time()
-        pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic)
-        logger.info(f"User {g.user} tags {opt_tags} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
+        pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic, time_filter=opt_time_filter)
+        logger.info(
+            f"User {g.user} tags {opt_tags} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
+        )
         # SVM results are usually already sorted, trim early
         if len(pids) > dynamic_limit:
             pids = pids[:dynamic_limit]
             scores = scores[:dynamic_limit]
     elif opt_rank == "pid":
         t_s = time.time()
-        pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic)
-        logger.info(f"User {g.user} pid {opt_pid} C {C} logic {opt_logic}, time {time.time() - t_s:.3f}s")
+        pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic, time_filter=opt_time_filter)
+        logger.info(
+            f"User {g.user} pid {opt_pid} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
+        )
         # SVM results are usually already sorted, trim early
         if len(pids) > dynamic_limit:
             pids = pids[:dynamic_limit]
@@ -544,8 +595,8 @@ def main():
     else:
         raise ValueError(f"opt_rank {opt_rank} is not a thing")
 
-    # filter by time
-    if opt_time_filter:
+    # filter by time (now handled within svm_rank for SVM-based rankings)
+    if opt_time_filter and opt_rank not in ["tags", "pid"]:
         mdb = get_metas()
         kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
         tnow = time.time()
@@ -630,7 +681,9 @@ def inspect():
 
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
-    x = features["x"]
+
+    # 使用原始 TF-IDF 矩阵进行 inspect（如果存在）
+    x = features.get("x_tfidf", features["x"])
     idf = features["idf"]
     ivocab = {v: k for k, v in features["vocab"].items()}
     pix = features["pids"].index(pid)

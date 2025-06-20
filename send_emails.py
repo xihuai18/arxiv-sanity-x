@@ -9,14 +9,35 @@ You'll notice that the file sendgrid_api_key.txt is not in the repo, you'd have
 to manually register with sendgrid yourself, get an API key and put it in the file.
 """
 
-import argparse
 import os
+from multiprocessing import cpu_count
+
+from loguru import logger
+
+# Set multi-threading environment variables
+num_threads = min(cpu_count(), 192)  # Reasonable thread limit
+os.environ["OMP_NUM_THREADS"] = str(num_threads)
+os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
+os.environ["MKL_NUM_THREADS"] = str(num_threads)
+os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
+
+# Try to use Intel extensions (if available)
+try:
+    from sklearnex import patch_sklearn
+
+    patch_sklearn()
+    logger.info(f"Intel scikit-learn extension enabled with {num_threads} threads")
+    USE_INTEL_EXT = True
+except ImportError:
+    logger.info(f"Using standard sklearn with {num_threads} threads")
+    USE_INTEL_EXT = False
+
+import argparse
 import sys
 import time
 from typing import Dict, List, Set
 
 import numpy as np
-from loguru import logger
 from sklearn import svm
 
 from aslite.db import (
@@ -145,8 +166,18 @@ def calculate_ctag_recommendation(
             tpids = tags[tag]
             for pid in tpids:
                 y[ptoi[pid]] = 1.0 + t_i
-        # classify
-        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1, dual="auto")
+        # classify - 优化参数加速训练，保持准确率
+        clf = svm.LinearSVC(
+            class_weight="balanced",
+            verbose=0,
+            max_iter=5000,  # 适当减少迭代次数
+            tol=1e-3,
+            C=0.1,
+            dual=True,  # 对高维特征更快
+            random_state=42,  # 确保结果可重现
+            fit_intercept=True,  # 通常提高准确率
+            multi_class="ovr",  # 一对其余，对二分类更快
+        )
         clf.fit(x, y)
         s = clf.decision_function(x)
         if len(s.shape) > 1:
@@ -199,8 +230,18 @@ def calculate_recommendation(
         for pid in tpids:
             y[ptoi[pid]] = 1.0
 
-        # classify
-        clf = svm.LinearSVC(class_weight="balanced", verbose=False, max_iter=10000, tol=1e-5, C=0.1, dual="auto")
+        # classify - 优化参数加速训练，保持准确率
+        clf = svm.LinearSVC(
+            class_weight="balanced",
+            verbose=0,
+            max_iter=5000,  # 适当减少迭代次数
+            tol=1e-3,
+            C=0.1,
+            dual=True,  # 对高维特征更快
+            random_state=42,  # 确保结果可重现
+            fit_intercept=True,  # 通常提高准确率
+            multi_class="ovr",  # 一对其余，对二分类更快
+        )
         clf.fit(x, y)
         s = clf.decision_function(x)
         sortix = np.argsort(-s)
