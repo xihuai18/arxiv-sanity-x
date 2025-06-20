@@ -1,6 +1,8 @@
 
 # arxiv-sanity-X
 
+[中文](README_CN.md) | [English](README.md)
+
 A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) that significantly accelerates academic research workflows. This enhanced version features intelligent paper discovery through advanced machine learning techniques, personalized recommendation systems, and automated research tracking capabilities.
 
 ![Screenshot](arxiv-sanity-x.png)
