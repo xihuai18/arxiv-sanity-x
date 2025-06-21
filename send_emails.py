@@ -9,10 +9,25 @@ You'll notice that the file sendgrid_api_key.txt is not in the repo, you'd have
 to manually register with sendgrid yourself, get an API key and put it in the file.
 """
 
+import argparse
 import os
+import sys
+import time
 from multiprocessing import cpu_count
+from typing import Dict, List, Set
 
+import requests
 from loguru import logger
+
+from aslite.db import (
+    get_combined_tags_db,
+    get_email_db,
+    get_keywords_db,
+    get_metas_db,
+    get_papers_db,
+    get_tags_db,
+)
+from vars import HOST
 
 # Set multi-threading environment variables
 num_threads = min(cpu_count(), 192)  # Reasonable thread limit
@@ -32,24 +47,9 @@ except ImportError:
     logger.info(f"Using standard sklearn with {num_threads} threads")
     USE_INTEL_EXT = False
 
-import argparse
-import sys
-import time
-from typing import Dict, List, Set
-
-import numpy as np
-from sklearn import svm
-
-from aslite.db import (
-    get_combined_tags_db,
-    get_email_db,
-    get_keywords_db,
-    get_metas_db,
-    get_papers_db,
-    get_tags_db,
-    load_features,
-)
-from vars import HOST
+# API调用配置
+API_BASE_URL = "http://localhost:55555"  # serve.py默认端口
+API_TIMEOUT = 30  # API请求超时时间（秒）
 
 # -----------------------------------------------------------------------------
 # the html template for the email
@@ -132,131 +132,89 @@ To stop these emails remove your email in your <a href="__HOST__/profile">accoun
 def calculate_ctag_recommendation(
     ctags: List[str],
     tags: dict,
+    user: str,  # 添加user参数
     time_delta: int = 3,
 ):
-    db_x, db_pids = features["x"], features["pids"]
+    """使用API调用联合tag推荐"""
     all_pids, all_scores = {}, {}
-    deltat = time_delta * 60 * 60 * 24  # allowed time delta in seconds
+
     for ctag in ctags:
         _tags = list(map(str.strip, ctag.split(",")))
-        ctag_tpids = []
-        for t_i, tag in enumerate(_tags):
-            tpids = tags[tag]
-            if len(tpids) == 0:
-                continue
+        # 过滤出有效的tags（有论文的）
+        valid_tags = [tag for tag in _tags if tag in tags and len(tags[tag]) > 0]
 
-            ctag_tpids += tpids
-
-        keep = [i for i, pid in enumerate(db_pids) if (tnow - metas[pid]["_time"]) < deltat or pid in ctag_tpids]
-        logger.debug(f"Keep {len(keep)} pids for ctag {ctag}")
-        if len(keep) == len(ctag_tpids):
+        if not valid_tags:
             continue
 
-        pids = [db_pids[i] for i in keep]
+        try:
+            # 调用API，传递tag名称列表和用户信息
+            response = requests.post(
+                f"{API_BASE_URL}/api/tags_search",
+                json={
+                    "tags": valid_tags,  # tag名称列表
+                    "user": user,  # 用户名
+                    "logic": "and",
+                    "time_delta": time_delta,
+                    "limit": 1000,
+                    "C": 0.1,
+                },
+                timeout=API_TIMEOUT,
+            )
 
-        x = db_x[keep]
-        n = x.shape[0]
-        # construct the positive set for this tag
-        ptoi, itop = {}, {}
-        for i, p in enumerate(pids):
-            ptoi[p] = i
-            itop[i] = p
-        y = np.zeros(n, dtype=np.float32)
-        for t_i, tag in enumerate(_tags):
-            tpids = tags[tag]
-            for pid in tpids:
-                y[ptoi[pid]] = 1.0 + t_i
-        # classify - 优化参数加速训练，保持准确率
-        clf = svm.LinearSVC(
-            class_weight="balanced",
-            verbose=0,
-            max_iter=5000,  # 适当减少迭代次数
-            tol=1e-3,
-            C=0.1,
-            dual=True,  # 对高维特征更快
-            random_state=42,  # 确保结果可重现
-            fit_intercept=True,  # 通常提高准确率
-            multi_class="ovr",  # 一对其余，对二分类更快
-        )
-        clf.fit(x, y)
-        s = clf.decision_function(x)
-        if len(s.shape) > 1:
-            s = s[:, 1:].mean(axis=-1)
-        sortix = np.argsort(-s)
-        sortix = [ix for ix in sortix if s[ix] >= -0.25]
-        pids = [itop[ix] for ix in sortix]
-        scores = [100 * float(s[ix]) for ix in sortix]
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    all_pids[ctag] = result["pids"]
+                    all_scores[ctag] = result["scores"]
+                else:
+                    logger.error(f"API error for ctag {ctag}: {result.get('error')}")
+            else:
+                logger.error(f"API request failed for ctag {ctag}: {response.status_code}")
 
-        # finally exclude the papers we already have tagged
-        have = set().union(*tags.values())
-        keep = [i for i, pid in enumerate(pids) if pid not in have]
-        pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
-
-        # store results
-        all_pids[ctag] = pids
-        all_scores[ctag] = scores
+        except requests.RequestException as e:
+            logger.error(f"API request exception for ctag {ctag}: {e}")
 
     return all_pids, all_scores
 
 
 def calculate_recommendation(
     tags: dict,
+    user: str,  # 添加user参数
     time_delta: int = 3,  # how recent papers are we recommending? in days
 ):
-    # tags: Dict[str, set()]
-    # a bit of preprocessing
-    db_x, db_pids = features["x"], features["pids"]
-
-    # loop over all the tags
+    """使用API调用单个tag推荐"""
     all_pids, all_scores = {}, {}
-    deltat = time_delta * 60 * 60 * 24  # allowed time delta in seconds
+
     for tag, tpids in tags.items():
         if len(tpids) == 0:
             continue
 
-        keep = [i for i, pid in enumerate(db_pids) if (tnow - metas[pid]["_time"]) < deltat or pid in tpids]
-        if len(keep) == len(tpids):
-            continue
-        logger.debug(f"keep {len(keep)} papers according to time for tag {tag}")
-        pids = [db_pids[i] for i in keep]
-        x = db_x[keep]
-        n = x.shape[0]
-        # construct the positive set for this tag
-        ptoi, itop = {}, {}
-        for i, p in enumerate(pids):
-            ptoi[p] = i
-            itop[i] = p
-        y = np.zeros(n, dtype=np.float32)
-        for pid in tpids:
-            y[ptoi[pid]] = 1.0
+        try:
+            # 调用API，传递tag名称和用户信息
+            response = requests.post(
+                f"{API_BASE_URL}/api/tag_search",
+                json={
+                    "tag_name": tag,  # tag名称
+                    "user": user,  # 用户名
+                    "time_delta": time_delta,
+                    "limit": 1000,
+                    "C": 0.1,
+                },
+                timeout=API_TIMEOUT,
+            )
 
-        # classify - 优化参数加速训练，保持准确率
-        clf = svm.LinearSVC(
-            class_weight="balanced",
-            verbose=0,
-            max_iter=5000,  # 适当减少迭代次数
-            tol=1e-3,
-            C=0.1,
-            dual=True,  # 对高维特征更快
-            random_state=42,  # 确保结果可重现
-            fit_intercept=True,  # 通常提高准确率
-            multi_class="ovr",  # 一对其余，对二分类更快
-        )
-        clf.fit(x, y)
-        s = clf.decision_function(x)
-        sortix = np.argsort(-s)
-        sortix = [ix for ix in sortix if s[ix] >= -0.25]
-        pids = [itop[ix] for ix in sortix]
-        scores = [100 * float(s[ix]) for ix in sortix]
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    all_pids[tag] = result["pids"]
+                    all_scores[tag] = result["scores"]
+                else:
+                    logger.error(f"API error for tag {tag}: {result.get('error')}")
+            else:
+                logger.error(f"API request failed for tag {tag}: {response.status_code}")
 
-        # finally exclude the papers we already have tagged
-        have = set().union(*tags.values())
-        keep = [i for i, pid in enumerate(pids) if pid not in have]
-        pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
-
-        # store results
-        all_pids[tag] = pids
-        all_scores[tag] = scores
+        except requests.RequestException as e:
+            logger.error(f"API request exception for tag {tag}: {e}")
 
     return all_pids, all_scores
 
@@ -264,44 +222,39 @@ def calculate_recommendation(
 # -----------------------------------------------------------------------------
 # Keywords recommendation
 # -----------------------------------------------------------------------------
-def search_rank(q: str = "", time_pids=[]):
-    if not q:
-        return [], []  # no query? no results
-    q = q.lower().strip()
-    qs = q.split()  # split query by spaces and lowercase
-
-    match = lambda s: sum(min(3, s.lower().count(qp)) for qp in qs) / len(qs)
-    matchu = lambda s: sum(int(s.lower().count(qp) > 0) for qp in qs) / len(qs)
-    matcht = lambda s: int(q in s.lower())
-    pairs = []
-    for pid in time_pids:
-        p = pdb[pid]
-        score = 0.0
-        score += 10.0 * matchu(" ".join([a["name"] for a in p["authors"]]))
-        score += 20.0 * matchu(p["title"])
-        score += 10.0 * matcht(p["title"])
-        score += 5.0 * match(p["summary"])
-        if score >= 10:
-            pairs.append((score, pid))
-
-    pairs.sort(reverse=True)
-    pids = [p[1] for p in pairs]
-    scores = [p[0] for p in pairs]
-    return pids, scores
-
-
 def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], time_delta: int = 3):
+    """使用API调用关键词搜索"""
     all_pids, all_scores = {}, {}
-    deltat = time_delta * 60 * 60 * 24
-    db_pids = pdb.keys()
-    for keyword, pids in keywords.items():
-        time_pids = [pid for pid in db_pids if (tnow - metas[pid]["_time"]) < deltat]
-        s_pids, s_scores = search_rank(keyword, time_pids)
-        keep = [i for i, s_pid in enumerate(s_pids) if s_pid not in pids]
-        s_pids, s_scores = [s_pids[i] for i in keep], [s_scores[i] for i in keep]
 
-        all_pids[keyword] = s_pids
-        all_scores[keyword] = s_scores
+    for keyword, pids in keywords.items():
+        try:
+            # 调用API
+            response = requests.post(
+                f"{API_BASE_URL}/api/keyword_search",
+                json={"keyword": keyword, "time_delta": time_delta, "limit": 1000},
+                timeout=API_TIMEOUT,
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("success"):
+                    # 排除已有的论文
+                    rec_pids = result["pids"]
+                    rec_scores = result["scores"]
+                    keep = [i for i, pid in enumerate(rec_pids) if pid not in pids]
+                    rec_pids = [rec_pids[i] for i in keep]
+                    rec_scores = [rec_scores[i] for i in keep]
+
+                    all_pids[keyword] = rec_pids
+                    all_scores[keyword] = rec_scores
+                else:
+                    logger.error(f"API error for keyword {keyword}: {result.get('error')}")
+            else:
+                logger.error(f"API request failed for keyword {keyword}: {response.status_code}")
+
+        except requests.RequestException as e:
+            logger.error(f"API request exception for keyword {keyword}: {e}")
+
     return all_pids, all_scores
 
 
@@ -432,7 +385,15 @@ def render_recommendations(
         out = out.replace("__CONTENT_CTAG__", final)
 
         # render the stats
-        num_papers_ctagged = len(set().union(*tags.values()))
+        # 计算联合tags涉及的所有论文数量
+        ctag_papers = set()
+        for ctag in ctags:
+            _tags = list(map(str.strip, ctag.split(",")))
+            for tag in _tags:
+                if tag in tags:
+                    ctag_papers.update(tags[tag])
+        num_papers_ctagged = len(ctag_papers)
+
         ctags_str = ", ".join(['"%s"' % (t) for t in ctags])
         stats = f"We took the {num_papers_ctagged} papers across your {len(ctags)} registered combined tags ({ctags_str}) and \
                 ranked {len(pids)} papers that showed up on arxiv over the last \
@@ -611,9 +572,6 @@ if __name__ == "__main__":
     with get_email_db() as edb:
         emails = {k: v for k, v in edb.items()}
 
-    # read tfidf features into RAM
-    features = load_features()
-
     # keep the papers as only a handle, since this can be larger
     pdb = get_papers_db()
 
@@ -640,12 +598,12 @@ if __name__ == "__main__":
 
         # calculate the recommendations
         try:
-            pids, scores = calculate_recommendation(utags, time_delta=args.time_delta)
+            pids, scores = calculate_recommendation(utags, user=user, time_delta=args.time_delta)
             pids_set = set().union(*pids.values())
             logger.debug(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
             u_ctag = ctags.get(user, set())
-            cpids, cscores = calculate_ctag_recommendation(u_ctag, utags, time_delta=args.time_delta)
+            cpids, cscores = calculate_ctag_recommendation(u_ctag, utags, user=user, time_delta=args.time_delta)
 
             cpids_set = set().union(*cpids.values())
             logger.debug(f"From ctags, found {len(cpids_set)} papers for {user} within {args.time_delta} days")
@@ -656,7 +614,12 @@ if __name__ == "__main__":
             pids_set = set().union(*kpids.values())
             logger.debug(f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
-            if all(len(lst) == 0 for tag, lst in pids.items()) and all(len(lst) == 0 for key, lst in kpids.items()):
+            # 检查是否有任何推荐结果
+            has_tag_recs = any(len(lst) > 0 for tag, lst in pids.items())
+            has_ctag_recs = any(len(lst) > 0 for ctag, lst in cpids.items())
+            has_keyword_recs = any(len(lst) > 0 for key, lst in kpids.items())
+
+            if not (has_tag_recs or has_ctag_recs or has_keyword_recs):
                 logger.info(f"skipping user {user}, no recommendations were produced")
                 continue
             # render the html
@@ -675,7 +638,8 @@ if __name__ == "__main__":
                 try:
                     send_email(email, html)
                     break
-                except:
+                except Exception as e:
+                    logger.warning(f"Failed to send email attempt {n_send_try + 1}: {e}")
                     n_send_try += 1
             if not args.dry_run:
                 num_sent += 1

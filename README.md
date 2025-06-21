@@ -1,6 +1,8 @@
 
 # arxiv-sanity-X
 
+[中文](README_CN.md) | [English](README.md)
+
 A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) that significantly accelerates academic research workflows. This enhanced version features intelligent paper discovery through advanced machine learning techniques, personalized recommendation systems, and automated research tracking capabilities.
 
 ![Screenshot](arxiv-sanity-x.png)
@@ -9,12 +11,14 @@ A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](http
 
 ### Core Functionality
 - **Intelligent Paper Recommendations**: Hybrid feature system combining TF-IDF with modern embedding vectors, powered by SVM classifiers
+- **Semantic Search**: Support for keyword, semantic, and hybrid search modes with configurable semantic weights
 - **Personalized Tagging System**: Individual and combined tag management for fine-grained interest tracking
 - **Keyword Monitoring**: Automatic tracking of specified research keywords with real-time paper matching
 - **Email Recommendation Service**: Daily personalized paper recommendations delivered to your inbox
 - **Multi-dimensional Search**: Advanced search capabilities across titles, authors, abstracts, and more
 - **Multi-logic Recommendations**: Support for AND/OR logic in tag combination recommendations
 - **Time-based Filtering**: Focus on recent publications with configurable time windows
+- **API Support**: RESTful API endpoints for keyword and tag recommendations
 
 ### Performance Optimizations
 - **Multi-core Processing**: Parallel computation support utilizing all available CPU cores
@@ -22,11 +26,19 @@ A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](http
 
 ### Machine Learning Capabilities
 - **Hybrid Feature Architecture**: Sparse TF-IDF features combined with dense embedding vectors
-- **Modern Embedding Models**: Support for Qwen3 and other state-of-the-art embedding models
+- **Modern Embedding Models**: Support for Qwen3 and other state-of-the-art embedding models via API client
 - **Dynamic Classifiers**: Per-tag SVM classifiers trained dynamically for personalized recommendations
+- **VLLM Integration**: High-performance model serving with vLLM for embedding generation
 
 
 ##  Changelog
+
+### v2.1 - API & Semantic Search
+- ✨ **New**: Semantic search with keyword, semantic, and hybrid modes
+- 🔗 **API Integration**: RESTful API endpoints for recommendations
+- 🚀 **VLLM Support**: High-performance model serving with vLLM
+- 🎯 **Enhanced Search**: Configurable semantic weights for hybrid search
+- 🔧 **Refactored Architecture**: API client implementation for embedding models
 
 ### v2.0 - Enhanced ML Features
 - ✨ **New**: Hybrid TF-IDF + embedding vector features
@@ -150,6 +162,7 @@ arxiv-sanity-X/
 ├── compute.py            # Feature computation (TF-IDF + embeddings)
 ├── send_emails.py        # Email recommendation service
 ├── daemon.py             # Scheduler for automated tasks
+├── vllm_serve.sh         # vLLM model server startup script
 ├── aslite/               # Core library
 │   ├── db.py            # Database operations
 │   └── arxiv.py         # arXiv API interface
@@ -195,7 +208,9 @@ python daemon.py
 - **Profile Setup**: Configure email for recommendations in profile settings
 
 #### 2. Paper Discovery
-- **Keyword Search**: Search across titles, authors, and abstracts with optimized ranking
+- **Keyword Search**: Traditional search across titles, authors, and abstracts with optimized ranking
+- **Semantic Search**: Advanced semantic search using embedding models for better relevance
+- **Hybrid Search**: Combine keyword and semantic search with configurable weights
 - **Tag-based Recommendations**: SVM-powered recommendations based on your tagged papers
 - **Time Filtering**: Focus on papers from specific time periods
 - **Similarity Search**: Find papers similar to a specific paper ID
@@ -207,10 +222,12 @@ python daemon.py
 - **Tag Management**: Rename, delete, and organize your tag system
 
 #### 4. Recommendation Modes
-- **Search**: Keyword-based paper discovery
+- **Search**: Keyword-based paper discovery with semantic search options
 - **Tags**: SVM recommendations based on tagged papers
 - **Time**: Chronological browsing of recent papers
 - **Random**: Serendipitous paper discovery
+- **Semantic**: Pure semantic search using embedding models
+- **Hybrid**: Combined keyword and semantic search
 
 ### Email Recommendations
 
@@ -224,14 +241,29 @@ Set up your email in the profile to receive:
 
 ### Embedding Vector Integration
 
-Support for modern embedding models like Qwen3:
+Support for modern embedding models like Qwen3 with API client architecture:
 
 ```bash
 # Download embedding model (example)
 huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
 
-# Enable embedding computation
+# Start vLLM model server
+bash vllm_serve.sh
+
+# Enable embedding computation with API client
 python compute.py --embed_model ./qwen3-embed-0.6B
+```
+
+### VLLM Model Serving
+
+High-performance model serving with vLLM:
+
+```bash
+# Start embedding model server
+bash vllm_serve.sh
+
+# The script runs:
+# vllm serve ./qwen3-embed-0.6B --task embed --hf-overrides '{"is_matryoshka": true}' --gpu-memory-utilization 0.2 --port 51000 --served-model-name qwen3-embed-0.6B
 ```
 
 ### Performance Optimization
@@ -254,9 +286,15 @@ The system automatically optimizes for your hardware:
 
 #### Search & Recommendations
 - `GET /?rank=search&q=<query>` - Keyword search
+- `GET /?rank=search&q=<query>&search_type=semantic` - Semantic search
+- `GET /?rank=search&q=<query>&search_type=hybrid&semantic_weight=<weight>` - Hybrid search
 - `GET /?rank=tags&tags=<tag_list>` - Tag-based recommendations
 - `GET /?rank=time&time_filter=<days>` - Time-filtered papers
 - `GET /?rank=pid&pid=<paper_id>` - Similar papers
+
+#### API Endpoints
+- `GET /api/recommend/keywords/<keyword>` - Get keyword-based recommendations
+- `GET /api/recommend/tags/<tag_list>` - Get tag-based recommendations via API
 
 #### Tag Management
 - `GET /add/<pid>/<tag>` - Add tag to paper

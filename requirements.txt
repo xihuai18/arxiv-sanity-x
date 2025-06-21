@@ -1,18 +1,30 @@
-feedparser
+# Web框架和服务器
 Flask
+Werkzeug
+gunicorn
+
+# 机器学习和AI
 numpy
 scikit-learn==1.6.1
 scikit-learn-intelex
-sqlitedict
-Werkzeug
-tqdm
-pytz
-schedule
-backoff
 openai
-loguru
 tiktoken
-gunicorn
+vllm
+
+# 数据处理和存储
+feedparser
+sqlitedict
+
+# 任务调度和时间处理
+schedule
 apscheduler
-pre-commit
+pytz
 holidays
+
+# 工具和实用程序
+tqdm
+backoff
+loguru
+
+# 开发工具
+pre-commit

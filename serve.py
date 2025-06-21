@@ -54,6 +54,7 @@ from aslite.db import (
     get_tags_db,
     load_features,
 )
+from compute import Qwen3EmbeddingVllm
 
 # -----------------------------------------------------------------------------
 # inits and globals
@@ -485,6 +486,198 @@ def search_rank(q: str = "", limit=None):
     return pids, scores
 
 
+# 全局语义搜索相关变量
+_semantic_model = None
+_cached_embeddings = None
+
+
+def get_semantic_model():
+    """获取语义模型实例（通过 API 调用）"""
+    global _semantic_model
+    if _semantic_model is None:
+        try:
+            logger.info("Initializing semantic model API client for query encoding...")
+            _semantic_model = Qwen3EmbeddingVllm(
+                model_name_or_path="./qwen3-embed-0.6B",
+                instruction="Extract key concepts from this query to search computer science and AI paper",
+                api_base="http://localhost:51000/v1",
+            )
+            if not _semantic_model.initialize():
+                logger.error("Failed to initialize semantic model API client")
+                _semantic_model = None
+        except Exception as e:
+            logger.error(f"Error initializing semantic model API client: {e}")
+            _semantic_model = None
+    return _semantic_model
+
+
+def get_paper_embeddings():
+    """获取论文嵌入向量（从特征文件加载）"""
+    global _cached_embeddings
+    if _cached_embeddings is not None:
+        return _cached_embeddings
+
+    try:
+        features = get_features_cached()
+        if features.get("feature_type") == "hybrid_sparse_dense" and "x_embeddings" in features:
+            logger.info("Using pre-computed embeddings from features file")
+            _cached_embeddings = {"embeddings": features["x_embeddings"], "pids": features["pids"]}
+            return _cached_embeddings
+        else:
+            logger.warning("No embeddings found in features file")
+            return None
+    except Exception as e:
+        logger.error(f"Failed to load embeddings: {e}")
+        return None
+
+
+get_semantic_model()
+get_paper_embeddings()
+
+
+def semantic_search_rank(q: str = "", limit=None):
+    """执行纯语义搜索"""
+    if not q:
+        return [], []
+
+    # 获取论文嵌入
+    paper_data = get_paper_embeddings()
+    if paper_data is None:
+        logger.error("No paper embeddings available")
+        return [], []
+
+    # 获取模型
+    model = get_semantic_model()
+    if model is None:
+        logger.error("Semantic model not available")
+        return [], []
+
+    try:
+        # 编码查询
+        logger.debug(f"Encoding query: {q}")
+        query_embedding = model.encode(
+            [model.get_detailed_instruct(q)],
+            dim=512,
+        )
+        if query_embedding is None:
+            logger.error("Failed to encode query")
+            return [], []
+        query_embedding = query_embedding.cpu().numpy()
+
+        # 计算相似度
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        similarities = cosine_similarity(query_embedding, paper_data["embeddings"])[0]
+
+        # 获取top-k结果
+        if limit:
+            top_indices = np.argpartition(-similarities, min(limit, len(similarities) - 1))[:limit]
+            top_indices = top_indices[np.argsort(-similarities[top_indices])]
+        else:
+            top_indices = np.argsort(-similarities)
+
+        pids = [paper_data["pids"][i] for i in top_indices]
+        scores = [float(similarities[i]) * 100 for i in top_indices]
+
+        return pids, scores
+
+    except Exception as e:
+        logger.error(f"Semantic search failed: {e}")
+        return [], []
+
+
+def hybrid_search_rank(q: str = "", limit=None, semantic_weight=0.5):
+    """混合搜索：融合关键词和语义搜索结果"""
+    if not q:
+        return [], [], {}
+
+    # 并行执行两种搜索
+    keyword_pids, keyword_scores = search_rank(q, limit=limit * 2 if limit else None)
+    semantic_pids, semantic_scores = semantic_search_rank(q, limit=limit * 2 if limit else None)
+
+    # 创建分数映射
+    keyword_score_map = {pid: score for pid, score in zip(keyword_pids, keyword_scores)} if keyword_pids else {}
+    semantic_score_map = {pid: score for pid, score in zip(semantic_pids, semantic_scores)} if semantic_pids else {}
+
+    # 融合结果
+    combined_scores = {}
+    score_details = {}  # 保存每个paper的详细分数信息
+
+    # 归一化参数
+    max_keyword = max(keyword_scores) if keyword_scores else 1.0
+    max_semantic = max(semantic_scores) if semantic_scores else 1.0
+
+    # 获取所有涉及的PIDs
+    all_pids = set(keyword_pids + semantic_pids)
+
+    for pid in all_pids:
+        keyword_score = keyword_score_map.get(pid, 0.0)
+        semantic_score = semantic_score_map.get(pid, 0.0)
+
+        # 归一化分数
+        normalized_keyword = keyword_score / max_keyword if max_keyword > 0 else 0.0
+        normalized_semantic = semantic_score / max_semantic if max_semantic > 0 else 0.0
+
+        # 计算加权分数
+        weighted_keyword = (1 - semantic_weight) * normalized_keyword
+        weighted_semantic = semantic_weight * normalized_semantic
+        final_score = weighted_keyword + weighted_semantic
+
+        combined_scores[pid] = final_score
+
+        # 保存详细信息，用于显示
+        score_details[pid] = {
+            "keyword_score": keyword_score,
+            "semantic_score": semantic_score,
+            "keyword_weight": 1 - semantic_weight,  # 转换为百分制
+            "semantic_weight": semantic_weight,  # 转换为百分制
+            "final_score": final_score * 100,
+        }
+
+    # 排序并限制结果数量
+    sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
+    if limit:
+        sorted_results = sorted_results[:limit]
+
+    # 分离PIDs和分数
+    pids = [pid for pid, _ in sorted_results]
+    scores = [score * 100 for _, score in sorted_results]
+
+    return pids, scores, score_details
+
+
+def enhanced_search_rank(q: str = "", limit=None, search_mode="keyword", semantic_weight=0.5):
+    """
+    增强的搜索函数，支持多种搜索模式
+
+    Args:
+        q: 搜索查询
+        limit: 结果数量限制
+        search_mode: 搜索模式 ('keyword', 'semantic', 'hybrid')
+        semantic_weight: 语义搜索权重 (0-1)，仅在 hybrid 模式下使用
+
+    Returns:
+        (paper_ids, scores) 元组
+    """
+    if not q:
+        return [], []
+
+    if search_mode == "keyword":
+        # 使用现有的关键词搜索
+        return search_rank(q, limit)
+
+    elif search_mode == "semantic":
+        # 纯语义搜索
+        return semantic_search_rank(q, limit)
+
+    elif search_mode == "hybrid":
+        # 混合搜索
+        return hybrid_search_rank(q, limit, semantic_weight)
+
+    else:
+        raise ValueError(f"Unknown search mode: {search_mode}")
+
+
 # -----------------------------------------------------------------------------
 # primary application endpoints
 
@@ -517,6 +710,8 @@ def main():
     opt_logic = request.args.get("logic", default_logic)  # tags logic?
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
+    opt_search_mode = request.args.get("search_mode", "hybrid")  # search mode: keyword|semantic|hybrid
+    opt_semantic_weight = request.args.get("semantic_weight", "0.5")  # semantic weight for hybrid search
 
     # if a query is given, override rank to be of type "search"
     # this allows the user to simply hit ENTER in the search field and have the correct thing happen
@@ -560,10 +755,27 @@ def main():
 
     # rank papers: by tags, by time, by random
     words = []  # only populated in the case of svm rank
+    score_details = {}  # 保存详细分数信息，仅在 hybrid 模式下使用
+
     if opt_rank == "search":
         t_s = time.time()
-        pids, scores = search_rank(q=opt_q, limit=dynamic_limit)
-        logger.info(f"User {g.user} search {opt_q}, time {time.time() - t_s:.3f}s")
+        # 使用增强的搜索函数
+        try:
+            semantic_weight = float(opt_semantic_weight)
+        except ValueError:
+            semantic_weight = 0.5
+
+        if opt_search_mode == "hybrid":
+            pids, scores, score_details = enhanced_search_rank(
+                q=opt_q, limit=dynamic_limit, search_mode=opt_search_mode, semantic_weight=semantic_weight
+            )
+        else:
+            pids, scores = enhanced_search_rank(
+                q=opt_q, limit=dynamic_limit, search_mode=opt_search_mode, semantic_weight=semantic_weight
+            )
+        logger.info(
+            f"User {g.user} {opt_search_mode} search '{opt_q}' weight={semantic_weight}, time {time.time() - t_s:.3f}s"
+        )
     elif opt_rank == "tags":
         t_s = time.time()
         pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic, time_filter=opt_time_filter)
@@ -624,6 +836,23 @@ def main():
     for i, p in enumerate(papers):
         p["weight"] = float(scores[i])
 
+        # 如果是 hybrid 搜索模式，添加详细分数信息
+        if opt_rank == "search" and opt_search_mode == "hybrid" and score_details:
+            pid = p["id"]
+            if pid in score_details:
+                details = score_details[pid]
+                # 格式化显示：A: {(1 - semantic_weight)} Keyword {Score} + {semantic_weight} Semantic {Score}
+                try:
+                    semantic_weight = float(opt_semantic_weight)
+                except ValueError:
+                    semantic_weight = 0.5
+
+                keyword_weight = 1 - semantic_weight
+                p["score_breakdown"] = (
+                    f"{keyword_weight:.1f} Keyword {details['keyword_score']:.2f} + "
+                    f"{semantic_weight:.1f} Semantic {details['semantic_score']:.2f}"
+                )
+
     # build the current tags for the user, and append the special 'all' tag
     tags = get_tags()
     rtags = [{"name": t, "n": len(pids)} for t, pids in tags.items()]
@@ -665,6 +894,9 @@ def main():
     context["gvars"]["search_query"] = opt_q
     context["gvars"]["svm_c"] = str(C)
     context["gvars"]["page_number"] = str(page_number)
+    context["gvars"]["search_mode"] = opt_search_mode
+    context["gvars"]["semantic_weight"] = opt_semantic_weight
+    context["show_score_breakdown"] = opt_rank == "search" and opt_search_mode == "hybrid"
     logger.info(
         f'User: {context["user"]}\ntags {context["tags"]}\nkeys {context["keys"]}\nctags {context["combined_tags"]}'
     )
@@ -753,6 +985,157 @@ def stats():
 def about():
     context = default_context()
     return render_template("about.html", **context)
+
+
+# -----------------------------------------------------------------------------
+# API endpoints for email recommendation system
+# -----------------------------------------------------------------------------
+
+
+@app.route("/api/keyword_search", methods=["POST"])
+def api_keyword_search():
+    """API接口：单个关键词搜索"""
+    try:
+        from flask import jsonify, request
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        keyword = data.get("keyword", "")
+        time_delta = data.get("time_delta", 3)  # 天数
+        limit = data.get("limit", 50)
+
+        if not keyword:
+            return jsonify({"error": "Keyword is required"}), 400
+
+        # 使用增强搜索
+        pids, scores = enhanced_search_rank(
+            q=keyword, limit=limit * 5, search_mode="keyword"  # 多取一些，因为需要时间过滤
+        )
+
+        # 应用时间过滤
+        if time_delta:
+            mdb = get_metas()
+            kv = {k: v for k, v in mdb.items()}
+            tnow = time.time()
+            deltat = float(time_delta) * 60 * 60 * 24
+            keep = [i for i, pid in enumerate(pids) if pid in kv and (tnow - kv[pid]["_time"]) < deltat]
+            pids = [pids[i] for i in keep]
+            scores = [scores[i] for i in keep]
+
+        # 限制最终结果数量
+        if len(pids) > limit:
+            pids = pids[:limit]
+            scores = scores[:limit]
+
+        return jsonify({"success": True, "pids": pids, "scores": scores, "total_count": len(pids)})
+
+    except Exception as e:
+        logger.error(f"API keyword search error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/tag_search", methods=["POST"])
+def api_tag_search():
+    """API接口：单个tag推荐"""
+    try:
+        from flask import jsonify, request
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        tag_name = data.get("tag_name", "")  # tag名称
+        user = data.get("user", "")  # 用户名
+        time_delta = data.get("time_delta", 3)  # 天数
+        limit = data.get("limit", 50)
+        C = data.get("C", 0.1)
+
+        if not tag_name:
+            return jsonify({"error": "tag_name is required"}), 400
+        if not user:
+            return jsonify({"error": "user is required"}), 400
+
+        # 使用tag名称进行推荐
+        rec_pids, rec_scores, words = svm_rank(
+            tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta)  # 传入tag名称  # 不使用s_pids
+        )
+
+        # 获取该用户该tag已标记的论文，用于排除
+        with get_tags_db() as tags_db:
+            user_tags = tags_db.get(user, {})
+            if tag_name in user_tags:
+                tagged_pids = user_tags[tag_name]
+                tagged_set = set(tagged_pids)
+                keep = [i for i, pid in enumerate(rec_pids) if pid not in tagged_set]
+                rec_pids = [rec_pids[i] for i in keep]
+                rec_scores = [rec_scores[i] for i in keep]
+
+        # 限制结果数量
+        if len(rec_pids) > limit:
+            rec_pids = rec_pids[:limit]
+            rec_scores = rec_scores[:limit]
+
+        return jsonify({"success": True, "pids": rec_pids, "scores": rec_scores, "total_count": len(rec_pids)})
+
+    except Exception as e:
+        logger.error(f"API tag search error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/tags_search", methods=["POST"])
+def api_tags_search():
+    """API接口：联合tag推荐"""
+    try:
+        from flask import jsonify, request
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON data provided"}), 400
+
+        tags_list = data.get("tags", [])  # List[tag_name]
+        user = data.get("user", "")  # 用户名
+        logic = data.get("logic", "and")  # and|or
+        time_delta = data.get("time_delta", 3)  # 天数
+        limit = data.get("limit", 50)
+        C = data.get("C", 0.1)
+
+        if not tags_list:
+            return jsonify({"error": "Tags list is required"}), 400
+        if not user:
+            return jsonify({"error": "user is required"}), 400
+
+        # 将tag列表转换为逗号分隔的字符串
+        tags_str = ",".join(tags_list)
+
+        # 使用SVM推荐
+        rec_pids, rec_scores, words = svm_rank(
+            tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta)  # 传入tag名称列表  # 不使用s_pids
+        )
+
+        # 获取该用户所有相关tags的已标记论文，用于排除
+        with get_tags_db() as tags_db:
+            user_tags = tags_db.get(user, {})
+            all_tagged = set()
+            for tag in tags_list:
+                if tag in user_tags:
+                    all_tagged.update(user_tags[tag])
+
+        keep = [i for i, pid in enumerate(rec_pids) if pid not in all_tagged]
+        rec_pids = [rec_pids[i] for i in keep]
+        rec_scores = [rec_scores[i] for i in keep]
+
+        # 限制结果数量
+        if len(rec_pids) > limit:
+            rec_pids = rec_pids[:limit]
+            rec_scores = rec_scores[:limit]
+
+        return jsonify({"success": True, "pids": rec_pids, "scores": rec_scores, "total_count": len(rec_pids)})
+
+    except Exception as e:
+        logger.error(f"API tags search error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/cache_status")

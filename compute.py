@@ -76,53 +76,68 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 
 
 class Qwen3EmbeddingVllm:
-    """Qwen3 嵌入模型的简化实现"""
+    """Qwen3 嵌入模型的 API 客户端实现"""
 
-    def __init__(self, model_name_or_path, instruction=None):
+    def __init__(self, model_name_or_path, instruction=None, api_base="http://localhost:51000/v1"):
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
-        self.model = None
+        self.client = None
         self.model_path = model_name_or_path
+        self.api_base = api_base
+        self.model_name = None
 
     def initialize(self):
-        """初始化模型"""
+        """初始化 API 客户端"""
         try:
-            from vllm import LLM
+            from openai import OpenAI
 
-            logger.info(f"正在加载嵌入模型: {self.model_path}")
-            self.model = LLM(model=self.model_path, task="embed", hf_overrides={"is_matryoshka": True})
-            logger.info("嵌入模型初始化成功")
+            logger.info(f"正在连接 vLLM API 服务器: {self.api_base}")
+            self.client = OpenAI(api_key="EMPTY", base_url=self.api_base)  # vLLM 不需要真实的 API key
+
+            # 获取可用模型列表
+            try:
+                models = self.client.models.list()
+                if models.data:
+                    self.model_name = models.data[0].id
+                    logger.info(f"使用模型: {self.model_name}")
+                else:
+                    logger.error("未找到可用模型")
+                    return False
+            except Exception as e:
+                logger.error(f"获取模型列表失败: {e}")
+                return False
+
+            logger.info("嵌入 API 客户端初始化成功")
             return True
         except ImportError as e:
-            logger.error(f"导入 vLLM 库失败: {e}")
-            logger.error("请确保已安装 vllm: pip install vllm")
-            return False
-        except FileNotFoundError as e:
-            logger.error(f"找不到嵌入模型文件: {e}")
-            logger.error(f"请检查模型路径: {self.model_path}")
+            logger.error(f"导入 OpenAI 库失败: {e}")
+            logger.error("请确保已安装 openai: pip install openai")
             return False
         except Exception as e:
-            logger.error(f"初始化嵌入模型时发生未知错误: {e}")
-            logger.error(f"模型路径: {self.model_path}")
+            logger.error(f"初始化 API 客户端时发生错误: {e}")
+            logger.error(f"API 地址: {self.api_base}")
             return False
 
     def get_detailed_instruct(self, query: str) -> str:
         """为文档添加指令前缀"""
-        return f"Instruct: {self.instruction}\nQuery:{query}"
+        return f"Instruct: {self.instruction}\nQuery: {query}"
 
     def encode(self, sentences, dim=1024):
-        """编码文本为嵌入向量"""
+        """通过 API 编码文本为嵌入向量"""
         try:
-            import torch
-            from vllm import PoolingParams
+            import numpy as np
 
-            if self.model is None:
-                logger.error("模型未初始化，无法进行编码")
+            if self.client is None:
+                logger.error("API 客户端未初始化，无法进行编码")
                 return None
 
             if not sentences:
                 logger.error("输入文本列表为空")
+                return None
+
+            if not self.model_name:
+                logger.error("模型名称未设置")
                 return None
 
             # 添加指令前缀
@@ -132,16 +147,22 @@ class Qwen3EmbeddingVllm:
                 logger.error(f"添加指令前缀时出错: {e}")
                 return None
 
-            # 生成嵌入
+            # 调用 API 生成嵌入
             try:
-                outputs = self.model.embed(instructed_sentences, pooling_params=PoolingParams(dimensions=dim))
-                embeddings = torch.tensor([o.outputs.embedding for o in outputs])
-                return embeddings
-            except RuntimeError as e:
-                logger.error(f"模型推理时发生运行时错误: {e}")
-                return None
-            except MemoryError as e:
-                logger.error(f"内存不足，无法处理 {len(sentences)} 个文本: {e}")
+                response = self.client.embeddings.create(
+                    input=instructed_sentences, model=self.model_name, dimensions=dim
+                )
+
+                # 提取嵌入向量
+                embeddings = np.array([data.embedding for data in response.data], dtype=np.float32)
+
+                # 转换为 torch tensor 以保持与原有接口兼容
+                import torch
+
+                return torch.from_numpy(embeddings)
+
+            except Exception as e:
+                logger.error(f"API 调用失败: {e}")
                 return None
 
         except ImportError as e:
@@ -154,28 +175,13 @@ class Qwen3EmbeddingVllm:
             return None
 
     def stop(self):
-
+        """清理客户端资源"""
         try:
-            # 清理 vLLM 资源
-            from vllm.distributed.parallel_state import destroy_model_parallel
-
-            destroy_model_parallel()
-            logger.debug("vLLM 模型资源清理完成")
-        except ImportError as e:
-            logger.warning(f"导入 destroy_model_parallel 失败: {e}")
+            # API 客户端不需要特殊清理
+            self.client = None
+            logger.debug("API 客户端资源清理完成")
         except Exception as e:
-            logger.error(f"清理 vLLM 资源时出错: {e}")
-
-        """清理模型资源"""
-        try:
-            # 清理 PyTorch 分布式资源
-            import torch.distributed as dist
-
-            if dist.is_initialized():
-                dist.destroy_process_group()
-                logger.debug("PyTorch 分布式进程组清理完成")
-        except Exception as e:
-            logger.warning(f"清理分布式进程组时出错: {e}")
+            logger.warning(f"清理 API 客户端时出错: {e}")
 
 
 def load_existing_embeddings(embed_dim=512):
@@ -215,7 +221,12 @@ def load_existing_embeddings(embed_dim=512):
 
 
 def generate_embeddings_incremental(
-    all_pids, all_texts, model_path="./qwen3-embed-0.6B", embed_dim=512, batch_size=512
+    all_pids,
+    all_texts,
+    model_path="./qwen3-embed-0.6B",
+    embed_dim=512,
+    batch_size=512,
+    api_base="http://localhost:51000/v1",
 ):
     """
     增量生成嵌入向量
@@ -226,6 +237,7 @@ def generate_embeddings_incremental(
         model_path: 嵌入模型路径
         embed_dim: 嵌入维度
         batch_size: 批处理大小
+        api_base: vLLM 服务器 API 地址
 
     Returns:
         embeddings: numpy数组 (n_samples, embed_dim)
@@ -269,11 +281,11 @@ def generate_embeddings_incremental(
 
     # 生成新嵌入
     if len(new_texts) > 0:
-        logger.info(f"初始化嵌入模型: {model_path}")
-        model = Qwen3EmbeddingVllm(model_path)
+        logger.info(f"初始化嵌入 API 客户端: {api_base}")
+        model = Qwen3EmbeddingVllm(model_name_or_path=model_path, api_base=api_base)
 
         if not model.initialize():
-            logger.error("模型初始化失败，使用随机嵌入")
+            logger.error("API 客户端初始化失败，使用随机嵌入")
             new_embeddings = np.random.randn(len(new_texts), embed_dim).astype(np.float32)
         else:
             # 批量生成新嵌入
@@ -346,6 +358,9 @@ if __name__ == "__main__":
     parser.add_argument("--embed_model", type=str, default="./qwen3-embed-0.6B", help="嵌入模型路径")
     parser.add_argument("--embed_dim", type=int, default=512, help="嵌入向量维度")
     parser.add_argument("--embed_batch_size", type=int, default=2048, help="嵌入生成批大小")
+    parser.add_argument(
+        "--embed_api_base", type=str, default="http://localhost:51000/v1", help="vLLM 嵌入服务器 API 地址"
+    )
 
     args = parser.parse_args()
     print(args)
@@ -429,7 +444,12 @@ if __name__ == "__main__":
 
         # 增量生成嵌入向量
         embeddings = generate_embeddings_incremental(
-            pids, corpus_texts, model_path=args.embed_model, embed_dim=args.embed_dim, batch_size=args.embed_batch_size
+            pids,
+            corpus_texts,
+            model_path=args.embed_model,
+            embed_dim=args.embed_dim,
+            batch_size=args.embed_batch_size,
+            api_base=args.embed_api_base,
         )
 
         if embeddings is not None:

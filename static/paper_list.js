@@ -144,7 +144,14 @@ const Paper = props => {
 
     return (
         <div class='rel_paper'>
-            <div class="rel_score">{p.weight.toFixed(2)}</div>
+            <div class="rel_score">
+                {p.weight.toFixed(2)}
+                {p.score_breakdown && (
+                    <div class="score_breakdown" style={{fontSize: '0.8em', color: '#666', marginTop: '2px'}}>
+                        {p.score_breakdown}
+                    </div>
+                )}
+            </div>
             <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id}>{p.title}</a></div>
             <div class='rel_authors'>{p.authors}</div>
             <div class="rel_time">{p.time}</div>
@@ -586,7 +593,7 @@ class TagListComponent extends React.Component {
         // Should call Add tag API here
         console.log('Adding new tag:', newTagName.trim());
         // TODO: Implement Add tag logic
-        
+
         this.setState({
             showAddModal: false,
             newTagName: ''

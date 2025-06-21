@@ -8,12 +8,14 @@
 
 ### 主要特性
 - **智能论文推荐**：结合 TF-IDF 与现代嵌入向量的混合特征系统，由 SVM 分类器驱动
+- **语义搜索**：支持关键词、语义和混合搜索模式，具有可配置的语义权重
 - **个性化标签系统**：个人和组合标签管理，实现精细化兴趣跟踪
 - **关键词监控**：自动跟踪指定的研究关键词，实时匹配相关论文
 - **邮件推荐服务**：每日个性化论文推荐直接发送到您的收件箱
 - **多维度搜索**：跨标题、作者、摘要等的高级搜索功能
 - **多逻辑推荐**：支持标签组合推荐中的 AND/OR 逻辑
 - **时间筛选**：专注于近期发表的论文，可配置时间窗口
+- **API 支持**：提供 RESTful API 端点用于关键词和标签推荐
 
 ### 性能优化
 - **多核处理**：并行计算支持，充分利用所有可用 CPU 核心
@@ -21,12 +23,20 @@
 
 ### 机器学习能力
 - **混合特征架构**：稀疏 TF-IDF 特征与密集嵌入向量相结合
-- **现代嵌入模型**：支持 Qwen3 等先进嵌入模型
+- **现代嵌入模型**：通过 API 客户端支持 Qwen3 等先进嵌入模型
 - **动态分类器**：为个性化推荐动态训练每个标签的 SVM 分类器
+- **VLLM 集成**：使用 vLLM 进行高性能模型服务和嵌入生成
 
 
 
 ##  更新日志
+
+### v2.1 - API 与语义搜索
+- ✨ **新功能**：语义搜索，支持关键词、语义和混合模式
+- 🔗 **API 集成**：提供 RESTful API 端点用于推荐
+- 🚀 **VLLM 支持**：使用 vLLM 进行高性能模型服务
+- 🎯 **增强搜索**：混合搜索的可配置语义权重
+- 🔧 **重构架构**：嵌入模型的 API 客户端实现
 
 ### v2.0 - 增强机器学习功能
 - ✨ **新功能**：混合 TF-IDF + 嵌入向量特征
@@ -151,6 +161,7 @@ arxiv-sanity-X/
 ├── compute.py            # 特征计算（TF-IDF + 嵌入）
 ├── send_emails.py        # 邮件推荐服务
 ├── daemon.py             # 自动化任务调度器
+├── vllm_serve.sh         # vLLM 模型服务器启动脚本
 ├── aslite/               # 核心库
 │   ├── db.py            # 数据库操作
 │   └── arxiv.py         # arXiv API 接口
@@ -196,7 +207,9 @@ python daemon.py
 - **个人资料设置**：在个人资料设置中配置推荐邮箱
 
 #### 2. 论文发现
-- **关键词搜索**：跨标题、作者和摘要搜索，具有优化排序
+- **关键词搜索**：传统的跨标题、作者和摘要搜索，具有优化排序
+- **语义搜索**：使用嵌入模型的高级语义搜索，提供更好的相关性
+- **混合搜索**：结合关键词和语义搜索，具有可配置权重
 - **基于标签的推荐**：基于您标记的论文的 SVM 驱动推荐
 - **时间筛选**：专注于特定时间段的论文
 - **相似性搜索**：查找与特定论文 ID 相似的论文
@@ -208,10 +221,12 @@ python daemon.py
 - **标签管理**：重命名、删除和组织您的标签系统
 
 #### 4. 推荐模式
-- **搜索**：基于关键词的论文发现
+- **搜索**：基于关键词的论文发现，支持语义搜索选项
 - **标签**：基于标记论文的 SVM 推荐
 - **时间**：按时间顺序浏览最近论文
 - **随机**：偶然的论文发现
+- **语义**：使用嵌入模型的纯语义搜索
+- **混合**：结合关键词和语义搜索
 
 ### 邮件推荐
 
@@ -225,14 +240,29 @@ python daemon.py
 
 ### 嵌入向量集成
 
-支持现代嵌入模型如 Qwen3：
+通过 API 客户端架构支持现代嵌入模型如 Qwen3：
 
 ```bash
 # 下载嵌入模型（示例）
 huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
 
-# 启用嵌入计算
+# 启动 vLLM 模型服务器
+bash vllm_serve.sh
+
+# 使用 API 客户端启用嵌入计算
 python compute.py --embed_model ./qwen3-embed-0.6B
+```
+
+### VLLM 模型服务
+
+使用 vLLM 进行高性能模型服务：
+
+```bash
+# 启动嵌入模型服务器
+bash vllm_serve.sh
+
+# 该脚本运行：
+# vllm serve ./qwen3-embed-0.6B --task embed --hf-overrides '{"is_matryoshka": true}' --gpu-memory-utilization 0.2 --port 51000 --served-model-name qwen3-embed-0.6B
 ```
 
 ### 性能优化
@@ -255,9 +285,15 @@ python compute.py --embed_model ./qwen3-embed-0.6B
 
 #### 搜索与推荐
 - `GET /?rank=search&q=<query>` - 关键词搜索
+- `GET /?rank=search&q=<query>&search_type=semantic` - 语义搜索
+- `GET /?rank=search&q=<query>&search_type=hybrid&semantic_weight=<weight>` - 混合搜索
 - `GET /?rank=tags&tags=<tag_list>` - 基于标签的推荐
 - `GET /?rank=time&time_filter=<days>` - 时间筛选论文
 - `GET /?rank=pid&pid=<paper_id>` - 相似论文
+
+#### API 端点
+- `GET /api/recommend/keywords/<keyword>` - 获取基于关键词的推荐
+- `GET /api/recommend/tags/<tag_list>` - 通过 API 获取基于标签的推荐
 
 #### 标签管理
 - `GET /add/<pid>/<tag>` - 为论文添加标签
