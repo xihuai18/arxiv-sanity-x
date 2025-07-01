@@ -342,8 +342,11 @@ def time_rank(limit=None):
     return pids, scores
 
 
-def _filter_by_time(pids, time_filter):
-    """Filter papers by time - returns filtered pids and their indices"""
+def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
+    """
+    智能时间过滤：保留有标签的论文（即使超出时间窗口）和时间窗口内的论文
+    Filter papers by time but keep tagged papers even if outside time window
+    """
     if not time_filter:
         return pids, list(range(len(pids)))
 
@@ -352,15 +355,34 @@ def _filter_by_time(pids, time_filter):
     tnow = time.time()
     deltat = float(time_filter) * 60 * 60 * 24
 
-    # Find indices of papers that meet time criteria
-    time_valid_indices = []
-    time_valid_pids = []
-    for i, pid in enumerate(pids):
-        if pid in kv and (tnow - kv[pid]["_time"]) < deltat:
-            time_valid_indices.append(i)
-            time_valid_pids.append(pid)
+    # 获取用户标记的所有论文ID集合
+    tagged_set = set()
+    if user_tagged_pids:
+        tagged_set = user_tagged_pids
 
-    return time_valid_pids, time_valid_indices
+    # Find indices of papers that meet criteria:
+    # 1. 在时间窗口内的论文，或
+    # 2. 用户已标记的论文（即使超出时间窗口）
+    valid_indices = []
+    valid_pids = []
+    for i, pid in enumerate(pids):
+        if pid in kv:
+            # 检查是否在时间窗口内
+            in_time_window = (tnow - kv[pid]["_time"]) < deltat
+            # 检查是否被用户标记
+            is_tagged = pid in tagged_set
+
+            # 满足任一条件即保留
+            if in_time_window or is_tagged:
+                valid_indices.append(i)
+                valid_pids.append(pid)
+
+    return valid_pids, valid_indices
+
+
+def _filter_by_time(pids, time_filter):
+    """原始时间过滤函数，保持向后兼容"""
+    return _filter_by_time_with_tags(pids, time_filter, None)
 
 
 def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "and", time_filter: str = ""):
@@ -374,12 +396,25 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
     features = get_features_cached()  # Replace: features = load_features()
     x, pids = features["x"], features["pids"]
 
-    # Apply time filtering first to reduce computation
+    # 收集用户标记的所有论文ID，用于智能时间过滤
+    user_tagged_pids = set()
+    if tags:
+        tags_db = get_tags()
+        tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
+        for tag in tags_filter_to:
+            if tag in tags_db:
+                user_tagged_pids.update(tags_db[tag])
+
+    if s_pids:
+        user_tagged_pids.update(map(str.strip, s_pids.split(",")))
+
+    # 应用智能时间过滤：保留有标签的论文和时间窗口内的论文
     if time_filter:
-        pids, time_valid_indices = _filter_by_time(pids, time_filter)
+        pids, time_valid_indices = _filter_by_time_with_tags(pids, time_filter, user_tagged_pids)
         if not pids:
             return [], [], []
         x = x[time_valid_indices]
+        logger.trace(f"智能时间过滤后保留 {len(pids)} 篇论文 (包含标记论文和{time_filter}天内论文)")
 
     n, d = x.shape
     ptoi, itop = {}, {}
@@ -857,12 +892,15 @@ def main():
 
     # filter by time (now handled within svm_rank for SVM-based rankings)
     if opt_time_filter and opt_rank not in ["tags", "pid"]:
-        mdb = get_metas()
-        kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
-        tnow = time.time()
-        deltat = float(opt_time_filter) * 60 * 60 * 24  # allowed time delta in seconds
-        keep = [i for i, pid in enumerate(pids) if (tnow - kv[pid]["_time"]) < deltat]
-        pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
+        # 收集用户标记的论文，用于智能时间过滤
+        user_tagged_pids = set()
+        tags = get_tags()
+        for tag_pids in tags.values():
+            user_tagged_pids.update(tag_pids)
+
+        # 使用智能时间过滤
+        pids, time_valid_indices = _filter_by_time_with_tags(pids, opt_time_filter, user_tagged_pids)
+        scores = [scores[i] for i in time_valid_indices]
 
     # optionally hide papers we already have
     if opt_skip_have == "yes":

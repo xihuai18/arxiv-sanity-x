@@ -59,71 +59,256 @@ WEB = "Arxiv Sanity X"
 
 template = """
 <!DOCTYPE HTML>
-<html>
+<html lang="en">
 
 <head>
-<style>
-body {
-    font-family: Arial, sans-serif;
-}
-.s {
-    font-weight: bold;
-    margin-right: 10px;
-}
-.a {
-    color: #333;
-}
-.u {
-    font-size: 12px;
-    color: #333;
-    margin-bottom: 10px;
-}
-.f {
-    color: #933;
-    display: inline-block;
-}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arxiv Sanity X Recommendations</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7fa;
+            margin: 0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #dc3545;
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 24px;
+            font-weight: 600;
+        }
+        
+        .content {
+            padding: 20px;
+        }
+        
+        .greeting {
+            font-size: 16px;
+            margin-bottom: 20px;
+            color: #2c3e50;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #e74c3c;
+        }
+        
+        .section-stats {
+            background-color: #f8f9fa;
+            padding: 10px 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            font-size: 13px;
+            color: #6c757d;
+            border-left: 3px solid #007bff;
+        }
+        
+        .paper-item {
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            padding: 15px;
+            background-color: #ffffff;
+        }
+        
+        .paper-item:hover {
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .paper-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        
+        .score {
+            background: transparent;
+            color: #000000;
+            padding: 3px 6px;
+            border-radius: 10px;
+            font-weight: 500;
+            font-size: 11px;
+            display: inline-block;
+            margin-right: 6px;
+        }
+        
+        .paper-source {
+            display: inline-block;
+            background-color: #b3d9ff;
+            color: #0056b3;
+            padding: 3px 6px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 500;
+            margin-right: 6px;
+            border: 1px solid #87ceeb;
+        }
+        
+        .paper-source.keyword-source {
+            background-color: #ffd280;
+            color: #b8860b;
+            border: 1px solid #daa520;
+        }
+        
+        .paper-title {
+            font-size: 15px;
+            font-weight: 500;
+            color: #2c3e50;
+            margin: 8px 0;
+            line-height: 1.3;
+        }
+        
+        .paper-links {
+            margin-bottom: 8px;
+        }
+        
+        .paper-links a {
+            display: inline-block;
+            background-color: #dc3545;
+            color: white;
+            text-decoration: none;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+            margin-right: 6px;
+            transition: background-color 0.2s ease;
+        }
+        
+        .paper-links a:hover {
+            background-color: #c82333;
+        }
+        
+        .paper-links a.arxiv-link {
+            background-color: #b31b1b;
+        }
+        
+        .paper-links a.arxiv-link:hover {
+            background-color: #9a1717;
+        }
+        
+        .paper-authors {
+            font-size: 13px;
+            color: #6c757d;
+            margin-bottom: 6px;
+            font-style: italic;
+        }
+        
+        .paper-date {
+            font-size: 12px;
+            color: #28a745;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+        
+        .paper-summary {
+            font-size: 13px;
+            color: #495057;
+            line-height: 1.4;
+            text-align: justify;
+        }
+        
+        .footer {
+            background-color: #f8f9fa;
+            padding: 25px 30px;
+            text-align: center;
+            border-top: 1px solid #e9ecef;
+        }
+        
+        .footer p {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #6c757d;
+        }
+        
+        .footer .brand {
+            font-weight: 600;
+            color: #2c3e50;
+            font-size: 16px;
+        }
+        
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            
+            .container {
+                border-radius: 8px;
+            }
+            
+            .header, .content, .footer {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 24px;
+            }
+            
+            .score-cell {
+                width: 60px;
+                padding: 15px 10px;
+            }
+            
+            .paper-cell {
+                padding: 15px 10px;
+            }
+        }
+    </style>
 </head>
 
 <body>
-
-<br><br>
-<div>Hi! __USER__. Here are your <a href="__HOST__">__WEB__</a> recommendations.</div>
-<br>
-
-<div>
-    <b>__STATS_TAG__</b>
-</div>
-
-<div>
-    __CONTENT_TAG__
-</div>
-<br>
-
-<div>
-    <b>__STATS_CTAG__</b>
-</div>
-
-<div>
-    __CONTENT_CTAG__
-</div>
-<br>
-
-<div>
-    <b>__STATS_KEYWORD__</b>
-</div>
-
-<div>
-    __CONTENT_KEYWORD__
-</div>
-
-
-<br><br>
-<div>
-To stop these emails remove your email in your <a href="__HOST__/profile">account</a> settings. (your account is __ACCOUNT__).
-</div>
-<div> __WEB__ </div>
-
+    <div class="container">
+        <div class="header">
+            <h1>Arxiv Sanity X</h1>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">
+                Hi <strong>__USER__</strong>! Here are your personalized <a href="__HOST__" style="color: #007bff; text-decoration: none;">__WEB__</a> recommendations.
+            </div>
+            
+            __SECTION_TAG__
+            
+            __SECTION_CTAG__
+            
+            __SECTION_KEYWORD__
+        </div>
+        
+        <div class="footer">
+            <p>To stop these emails, remove your email in your <a href="__HOST__/profile" style="color: #667eea; text-decoration: none;">account settings</a>.</p>
+            <p>Your account: <strong>__ACCOUNT__</strong></p>
+            <div class="brand">__WEB__</div>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -277,13 +462,77 @@ def render_recommendations(
     out = out.replace("__USER__", user)
     out = out.replace("__HOST__", HOST)
     out = out.replace("__WEB__", WEB)
-    # render the paper recommendations into the html template
+
+    # 收集所有推荐的论文，按优先级去重: tag > ctag > keyword
+    tag_papers = set()  # tag推荐的论文
+    ctag_papers = set()  # ctag推荐的论文
+    keyword_papers = set()  # keyword推荐的论文
+
+    # 先收集tag推荐的论文
     if sum(len(tag_pids[tag]) for tag in tag_pids) > 0:
+        for tag in tag_pids:
+            tag_papers.update(tag_pids[tag])
+
+    # 收集ctag推荐的论文，排除已在tag中的
+    if sum(len(ctag_pids[ctag]) for ctag in ctag_pids) > 0:
+        for ctag in ctag_pids:
+            ctag_papers.update(ctag_pids[ctag])
+        ctag_papers -= tag_papers  # 去重：排除tag中已有的
+
+    # 收集keyword推荐的论文，排除已在tag和ctag中的
+    if sum(len(kpids[keyword]) for keyword in keywords) > 0:
+        for keyword in kpids:
+            keyword_papers.update(kpids[keyword])
+        keyword_papers -= tag_papers  # 去重：排除tag中已有的
+        keyword_papers -= ctag_papers  # 去重：排除ctag中已有的
+
+    # 应用去重后的结果，修改原有的推荐数据
+    # 处理tag推荐
+    filtered_tag_pids = {}
+    filtered_tag_scores = {}
+    for tag in tag_pids:
+        filtered_pids = []
+        filtered_scores = []
+        for pid, score in zip(tag_pids[tag], tag_scores[tag]):
+            if pid in tag_papers:  # 只保留在tag_papers中的论文
+                filtered_pids.append(pid)
+                filtered_scores.append(score)
+        filtered_tag_pids[tag] = filtered_pids
+        filtered_tag_scores[tag] = filtered_scores
+
+    # 处理ctag推荐
+    filtered_ctag_pids = {}
+    filtered_ctag_scores = {}
+    for ctag in ctag_pids:
+        filtered_pids = []
+        filtered_scores = []
+        for pid, score in zip(ctag_pids[ctag], ctag_scores[ctag]):
+            if pid in ctag_papers:  # 只保留在ctag_papers中的论文
+                filtered_pids.append(pid)
+                filtered_scores.append(score)
+        filtered_ctag_pids[ctag] = filtered_pids
+        filtered_ctag_scores[ctag] = filtered_scores
+
+    # 处理keyword推荐
+    filtered_kpids = {}
+    filtered_kscores = {}
+    for keyword in kpids:
+        filtered_pids = []
+        filtered_scores = []
+        for pid, score in zip(kpids[keyword], kscores[keyword]):
+            if pid in keyword_papers:  # 只保留在keyword_papers中的论文
+                filtered_pids.append(pid)
+                filtered_scores.append(score)
+        filtered_kpids[keyword] = filtered_pids
+        filtered_kscores[keyword] = filtered_scores
+
+    # render the paper recommendations into the html template
+    if sum(len(filtered_tag_pids[tag]) for tag in filtered_tag_pids) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
         max_score = {}
         max_source_tag = {}
-        for tag in tag_pids:
-            for pid, score in zip(tag_pids[tag], tag_scores[tag]):
+        for tag in filtered_tag_pids:
+            for pid, score in zip(filtered_tag_pids[tag], filtered_tag_scores[tag]):
                 max_score[pid] = max(max_score.get(pid, -99999), score)  # lol
                 if max_score[pid] == score:
                     max_source_tag[pid] = tag
@@ -313,22 +562,27 @@ def render_recommendations(
 
             parts.append(
                 """
-    <tr>
-    <td valign="top"><div class="s">%.2f</div></td>
-    <td>
-    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
-    <div class="a">%s</div>
-    <div class="u">%s</div>
-    </td>
-    </tr>
+    <div class="paper-item">
+        <div class="paper-header">
+            <div class="paper-source">%s</div>
+            <div class="score">%.2f</div>
+        </div>
+        <div class="paper-title">%s</div>
+        <div class="paper-links">
+            <a href="%s">Sanity Link</a>
+            <a href="%s" class="arxiv-link">Arxiv Link</a>
+        </div>
+        <div class="paper-authors">%s</div>
+        <div class="paper-date">📅 %s</div>
+        <div class="paper-summary">%s</div>
+    </div>
     """
-                % (score, max_source_tag[pid], p["title"], url, arxiv_url, authors, summary)
+                % (max_source_tag[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
             )
 
         # render the recommendations
-        final = "<table>" + "".join(parts) + "</table>"
-        out = out.replace("__CONTENT_TAG__", final)
-
+        final = "".join(parts)
+        
         # render the stats
         num_papers_tagged = len(set().union(*tags.values()))
         tags_str = ", ".join(['"%s" (%d)' % (t, len(tags[t])) for t in tags.keys()])
@@ -337,17 +591,24 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more you tag, \
                 the better this gets:"
-        out = out.replace("__STATS_TAG__", stats)
+        
+        # render the complete section
+        section_html = f"""
+            <div class="section">
+                <div class="section-title">Tag-based Recommendations</div>
+                <div class="section-stats">{stats}</div>
+                <div>{final}</div>
+            </div>"""
+        out = out.replace("__SECTION_TAG__", section_html)
     else:
-        out = out.replace("__CONTENT_TAG__", "")
-        out = out.replace("__STATS_TAG__", "")
+        out = out.replace("__SECTION_TAG__", "")
 
-    if sum(len(ctag_pids[ctag]) for ctag in ctag_pids) > 0:
+    if sum(len(filtered_ctag_pids[ctag]) for ctag in filtered_ctag_pids) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
         max_score = {}
         max_source_ctag = {}
-        for ctag in ctag_pids:
-            for pid, score in zip(ctag_pids[ctag], ctag_scores[ctag]):
+        for ctag in filtered_ctag_pids:
+            for pid, score in zip(filtered_ctag_pids[ctag], filtered_ctag_scores[ctag]):
                 max_score[pid] = max(max_score.get(pid, -99999), score)  # lol
                 if max_score[pid] == score:
                     max_source_ctag[pid] = ctag
@@ -376,22 +637,27 @@ def render_recommendations(
             arxiv_url = f"https://arxiv.org/abs/{pid}"
             parts.append(
                 """
-    <tr>
-    <td valign="top"><div class="s">%.2f</div></td>
-    <td>
-    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
-    <div class="a">%s</div>
-    <div class="u">%s</div>
-    </td>
-    </tr>
+    <div class="paper-item">
+        <div class="paper-header">
+            <div class="paper-source">%s</div>
+            <div class="score">%.2f</div>
+        </div>
+        <div class="paper-title">%s</div>
+        <div class="paper-links">
+            <a href="%s">Sanity Link</a>
+            <a href="%s" class="arxiv-link">Arxiv Link</a>
+        </div>
+        <div class="paper-authors">%s</div>
+        <div class="paper-date">📅 %s</div>
+        <div class="paper-summary">%s</div>
+    </div>
     """
-                % (score, max_source_ctag[pid], p["title"], url, arxiv_url, authors, summary)
+                % (max_source_ctag[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
             )
 
         # render the recommendations
-        final = "<table>" + "".join(parts) + "</table>"
-        out = out.replace("__CONTENT_CTAG__", final)
-
+        final = "".join(parts)
+        
         # render the stats
         # 计算联合tags涉及的所有论文数量
         ctag_papers = set()
@@ -408,17 +674,24 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more you tag, \
                 the better this gets:"
-        out = out.replace("__STATS_CTAG__", stats)
+        
+        # render the complete section
+        section_html = f"""
+            <div class="section">
+                <div class="section-title">Combined Tag Recommendations</div>
+                <div class="section-stats">{stats}</div>
+                <div>{final}</div>
+            </div>"""
+        out = out.replace("__SECTION_CTAG__", section_html)
     else:
-        out = out.replace("__CONTENT_CTAG__", "")
-        out = out.replace("__STATS_CTAG__", "")
+        out = out.replace("__SECTION_CTAG__", "")
 
-    if sum(len(kpids[keyword]) for keyword in keywords) > 0:
+    if sum(len(filtered_kpids[keyword]) for keyword in filtered_kpids) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
         max_score = {}
         max_source_keyword = {}
-        for keyword in kpids:
-            for pid, score in zip(kpids[keyword], kscores[keyword]):
+        for keyword in filtered_kpids:
+            for pid, score in zip(filtered_kpids[keyword], filtered_kscores[keyword]):
                 max_score[pid] = max(max_score.get(pid, -99999), score)  # lol
                 if max_score[pid] == score:
                     max_source_keyword[pid] = keyword
@@ -447,22 +720,27 @@ def render_recommendations(
             arxiv_url = f"https://arxiv.org/abs/{pid}"
             parts.append(
                 """
-    <tr>
-    <td valign="top"><div class="s">%.2f</div></td>
-    <td>
-    <div class="f">(%s)</div> %s <a href="%s">Sanity Link</a> <a href="%s">Arxiv Link</a>
-    <div class="a">%s</div>
-    <div class="u">%s</div>
-    </td>
-    </tr>
+    <div class="paper-item">
+        <div class="paper-header">
+            <div class="paper-source keyword-source">%s</div>
+            <div class="score">%.2f</div>
+        </div>
+        <div class="paper-title">%s</div>
+        <div class="paper-links">
+            <a href="%s">Sanity Link</a>
+            <a href="%s" class="arxiv-link">Arxiv Link</a>
+        </div>
+        <div class="paper-authors">%s</div>
+        <div class="paper-date">📅 %s</div>
+        <div class="paper-summary">%s</div>
+    </div>
     """
-                % (score, max_source_keyword[pid], p["title"], url, arxiv_url, authors, summary)
+                % (max_source_keyword[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
             )
 
         # render the recommendations
-        final = "<table>" + "".join(parts) + "</table>"
-        out = out.replace("__CONTENT_KEYWORD__", final)
-
+        final = "".join(parts)
+        
         # render the stats
         keywords_str = ", ".join(['"%s"' % k for k, pids in keywords.items()])
         stats = f"We search your {len(keywords)} keywords ({keywords_str}) and \
@@ -470,10 +748,17 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more keywords, \
                 the better this gets:"
-        out = out.replace("__STATS_KEYWORD__", stats)
+        
+        # render the complete section
+        section_html = f"""
+            <div class="section">
+                <div class="section-title">Keyword-based Recommendations</div>
+                <div class="section-stats">{stats}</div>
+                <div>{final}</div>
+            </div>"""
+        out = out.replace("__SECTION_KEYWORD__", section_html)
     else:
-        out = out.replace("__CONTENT_KEYWORD__", "")
-        out = out.replace("__STATS_KEYWORD__", "")
+        out = out.replace("__SECTION_KEYWORD__", "")
 
     # render the account
     out = out.replace("__ACCOUNT__", user)
