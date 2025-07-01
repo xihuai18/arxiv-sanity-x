@@ -33,6 +33,15 @@ A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](http
 
 ##  Changelog
 
+### v2.2 - Performance & Stability Improvements
+- ⚡ **Performance**: Enhanced data caching system with intelligent auto-reload
+- 🔧 **Optimized Embedding**: Streamlined embedding generation pipeline in [`compute.py`](compute.py)
+- 📈 **Scheduler Enhancement**: Increased fetch frequency from daily to 4x daily (6AM, 11AM, 4PM, 9PM)
+- 🛠️ **Bug Fixes**: Fixed email recommendation system edge cases and empty result handling
+- 🧠 **Smart Caching**: Unified papers and metas data caching with automatic file change detection
+- 📊 **API Improvements**: Enhanced tag search API with better error handling and logging
+- 🚀 **Memory Optimization**: Reduced memory footprint and improved query performance
+
 ### v2.1 - API & Semantic Search
 - ✨ **New**: Semantic search with keyword, semantic, and hybrid modes
 - 🔗 **API Integration**: RESTful API endpoints for recommendations

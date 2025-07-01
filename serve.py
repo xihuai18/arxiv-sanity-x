@@ -39,7 +39,7 @@ from random import shuffle
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import g  # global session-level object
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 from sklearn import svm
 from tqdm import tqdm
 
@@ -67,6 +67,16 @@ FEATURES_CACHE = None
 FEATURES_FILE_MTIME = 0  # Feature file modification time
 FEATURES_CACHE_TIME = 0  # Cache creation time
 
+# Papers and metas cache related global variables (存储在同一个数据库文件中)
+PAPERS_CACHE = None
+METAS_CACHE = None
+PIDS_CACHE = None
+PAPERS_DB_FILE_MTIME = 0  # Papers数据库文件修改时间
+PAPERS_DB_CACHE_TIME = 0  # 数据库缓存创建时间
+
+# Database file path
+from aslite.db import PAPERS_DB_FILE as PAPERS_DB_PATH
+
 app = Flask(__name__)
 
 # set the secret key so we can cryptographically sign cookies and maintain sessions
@@ -81,94 +91,128 @@ app.secret_key = sk
 
 
 # -----------------------------------------------------------------------------
-# globals that manage the (lazy) loading of various state for a request
-def get_tags():
+# Helper function to reduce code duplication
+def _get_user_data(db_func, attr_name):
+    """Generic function to get user data from database"""
     if g.user is None:
         return {}
-    if not hasattr(g, "_tags"):
-        with get_tags_db() as tags_db:
-            tags_dict = tags_db[g.user] if g.user in tags_db else {}
-        g._tags = tags_dict
-    return g._tags
+    if not hasattr(g, attr_name):
+        with db_func() as db:
+            data = db[g.user] if g.user in db else {}
+        setattr(g, attr_name, data)
+    return getattr(g, attr_name)
+
+
+# globals that manage the (lazy) loading of various state for a request
+def get_tags():
+    return _get_user_data(get_tags_db, "_tags")
 
 
 def get_combined_tags():
-    if g.user is None:
-        return {}
-    if not hasattr(g, "_combined_tags"):
-        with get_combined_tags_db() as combined_tags_db:
-            combined_tags_dict = combined_tags_db[g.user] if g.user in combined_tags_db else {}
-        g._combined_tags = combined_tags_dict
-    return g._combined_tags
+    return _get_user_data(get_combined_tags_db, "_combined_tags")
 
 
 def get_keys():
-    if g.user is None:
-        return {}
-    if not hasattr(g, "_keys"):
-        with get_keywords_db() as keys_db:
-            keys_dict = keys_db[g.user] if g.user in keys_db else {}
-        g._keys = keys_dict
-    return g._keys
+    return _get_user_data(get_keywords_db, "_keys")
 
 
 # -----------------------------------------------------------------------------
-# init papers and meta db
-def get_all_papers():
-    if "db_papers" not in globals():
-        global db_papers
-    with get_papers_db() as papers_db:
-        db_papers = {k: v for k, v in tqdm(papers_db.items(), desc="initing papers db")}
+# Intelligent unified data caching functionality
 
 
-def get_all_metas():
-    if "db_metas" not in globals():
-        global db_metas
-    if "db_pids" not in globals():
-        global db_pids
-    with get_metas_db() as metas_db:
-        db_metas = {k: v for k, v in tqdm(metas_db.items(), desc="initing metas db")}
-        db_pids = list(db_metas.keys())
+def get_data_cached():
+    """
+    智能统一数据缓存加载函数
+    - 统一管理papers和metas数据的加载
+    - 检测数据库文件更新并自动重新加载
+    - 记录详细的缓存状态日志
+    """
+    global PAPERS_CACHE, METAS_CACHE, PIDS_CACHE
+    global PAPERS_DB_FILE_MTIME, PAPERS_DB_CACHE_TIME
+
+    current_time = time.time()
+
+    # 检查数据库文件是否存在
+    if not os.path.exists(PAPERS_DB_PATH):
+        logger.error(f"Papers database file not found: {PAPERS_DB_PATH}")
+        raise FileNotFoundError(f"Papers database file not found: {PAPERS_DB_PATH}")
+
+    # 获取当前数据库文件修改时间
+    current_file_mtime = os.path.getmtime(PAPERS_DB_PATH)
+
+    # 检查是否需要重新加载（首次加载或文件更新）
+    need_reload = (
+        PAPERS_CACHE is None  # 首次加载
+        or METAS_CACHE is None  # 首次加载
+        or current_file_mtime > PAPERS_DB_FILE_MTIME  # 文件更新
+    )
+
+    if need_reload:
+        logger.info("Loading papers and metas from database...")
+        if PAPERS_CACHE is not None:
+            logger.trace(f"Database file updated (old mtime: {PAPERS_DB_FILE_MTIME}, new mtime: {current_file_mtime})")
+
+        start_time = time.time()
+
+        try:
+            # 同时加载papers和metas数据
+            with get_papers_db() as papers_db:
+                PAPERS_CACHE = {k: v for k, v in tqdm(papers_db.items(), desc="loading papers db")}
+
+            with get_metas_db() as metas_db:
+                METAS_CACHE = {k: v for k, v in tqdm(metas_db.items(), desc="loading metas db")}
+                PIDS_CACHE = list(METAS_CACHE.keys())
+
+            # 更新缓存时间戳
+            PAPERS_DB_FILE_MTIME = current_file_mtime
+            PAPERS_DB_CACHE_TIME = current_time
+
+            load_time = time.time() - start_time
+            logger.info(f"Data loaded successfully in {load_time:.3f}s")
+            logger.trace(f"Number of papers: {len(PAPERS_CACHE)}")
+            logger.trace(f"Number of metas: {len(METAS_CACHE)}")
+            logger.trace(f"Number of pids: {len(PIDS_CACHE)}")
+
+        except Exception as e:
+            logger.error(f"Failed to load papers and metas: {e}")
+            raise
+    else:
+        # 使用缓存
+        pass
+
+    return PAPERS_CACHE, METAS_CACHE, PIDS_CACHE
 
 
-get_all_papers()
-get_all_metas()
-
-scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-scheduler.add_job(get_all_papers, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
-scheduler.add_job(get_all_metas, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
-scheduler.start()
+# -----------------------------------------------------------------------------
+# Cached data access functions
 
 
 def get_pids():
-    if not hasattr(g, "_pids"):
-        if "db_pids" in globals():
-            g._pids = db_pids
-        else:
-            g._pids = list(get_metas().keys())
-    return g._pids
+    """获取所有论文ID列表"""
+    get_data_cached()  # 确保缓存已加载
+    return PIDS_CACHE
 
 
 def get_papers():
-    if not hasattr(g, "_pdb"):
-        if "db_papers" in globals():
-            g._pdb = db_papers
-        else:
-            # logger.warning("reading papers db from disk")
-            g._pdb = get_papers_db()
-        # g._pdb = {k: v for k, v in g._pdb.items()}
-    return g._pdb
+    """获取论文数据库"""
+    get_data_cached()  # 确保缓存已加载
+    return PAPERS_CACHE
 
 
 def get_metas():
-    if not hasattr(g, "_mdb"):
-        if "db_metas" in globals():
-            g._mdb = db_metas
-        else:
-            # logger.warning("reading metas db from disk")
-            g._mdb = get_metas_db()
-        # g._mdb = {k: v for k, v in g._mdb.items()}
-    return g._mdb
+    """获取元数据数据库"""
+    get_data_cached()  # 确保缓存已加载
+    return METAS_CACHE
+
+
+# 初始化缓存（在应用启动时预加载）
+logger.info("Initializing unified data caches on startup...")
+get_data_cached()
+
+# 设置定时刷新缓存的调度器
+scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+scheduler.add_job(get_data_cached, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
+scheduler.start()
 
 
 @app.before_request
@@ -184,11 +228,9 @@ def before_request():
 
 @app.teardown_request
 def close_connection(error=None):
-    # close any opened database connections
-    if hasattr(g, "_pdb") and not isinstance(g._pdb, dict):
-        g._pdb.close()
-    if hasattr(g, "_mdb") and not isinstance(g._mdb, dict):
-        g._mdb.close()
+    # papers和metas现在使用全局缓存，无需清理
+    # 所有数据访问都直接使用全局变量
+    pass
 
 
 # -----------------------------------------------------------------------------
@@ -220,7 +262,7 @@ def get_features_cached():
     if need_reload:
         logger.info(f"Loading features from disk...")
         if FEATURES_CACHE is not None:
-            logger.info(f"Features file updated (old mtime: {FEATURES_FILE_MTIME}, new mtime: {current_file_mtime})")
+            logger.trace(f"Features file updated (old mtime: {FEATURES_FILE_MTIME}, new mtime: {current_file_mtime})")
 
         start_time = time.time()
 
@@ -232,17 +274,18 @@ def get_features_cached():
 
             load_time = time.time() - start_time
             logger.info(f"Features loaded successfully in {load_time:.3f}s")
-            logger.info(f"Feature matrix shape: {FEATURES_CACHE['x'].shape}")
-            logger.info(f"Number of papers: {len(FEATURES_CACHE['pids'])}")
-            logger.info(f"Vocabulary size: {len(FEATURES_CACHE['vocab'])}")
+            logger.trace(f"Feature matrix shape: {FEATURES_CACHE['x'].shape}")
+            logger.trace(f"Number of papers: {len(FEATURES_CACHE['pids'])}")
+            logger.trace(f"Vocabulary size: {len(FEATURES_CACHE['vocab'])}")
 
         except Exception as e:
             logger.error(f"Failed to load features: {e}")
             raise
     else:
         # Use cache
-        cache_age = current_time - FEATURES_CACHE_TIME
-        logger.debug(f"Using cached features (age: {cache_age:.1f}s)")
+        pass
+        # cache_age = current_time - FEATURES_CACHE_TIME
+        # logger.trace(f"Using cached features (age: {cache_age:.1f}s)")
 
     return FEATURES_CACHE
 
@@ -271,33 +314,53 @@ def render_pid(pid):
     )
 
 
+def _apply_limit(pids, scores, limit):
+    """Apply limit to results if specified"""
+    if limit is not None and len(pids) > limit:
+        return pids[:limit], scores[:limit]
+    return pids, scores
+
+
 def random_rank(limit=None):
     mdb = get_metas()
     pids = list(mdb.keys())
     shuffle(pids)
-
-    # If limit is specified, only take first limit results
-    if limit is not None:
-        pids = pids[:limit]
-        logger.debug(f"Random rank limited to {limit} results")
-
     scores = [0 for _ in pids]
-    return pids, scores
+    return _apply_limit(pids, scores, limit)
 
 
 def time_rank(limit=None):
     mdb = get_metas()
     ms = sorted(mdb.items(), key=lambda kv: kv[1]["_time"], reverse=True)
 
-    # If limit is specified, only take first limit results
     if limit is not None:
         ms = ms[:limit]
-        logger.debug(f"Time rank limited to {limit} results")
 
     tnow = time.time()
     pids = [k for k, v in ms]
     scores = [(tnow - v["_time"]) / 60 / 60 / 24 for k, v in ms]  # time delta in days
     return pids, scores
+
+
+def _filter_by_time(pids, time_filter):
+    """Filter papers by time - returns filtered pids and their indices"""
+    if not time_filter:
+        return pids, list(range(len(pids)))
+
+    mdb = get_metas()
+    kv = {k: v for k, v in mdb.items()}
+    tnow = time.time()
+    deltat = float(time_filter) * 60 * 60 * 24
+
+    # Find indices of papers that meet time criteria
+    time_valid_indices = []
+    time_valid_pids = []
+    for i, pid in enumerate(pids):
+        if pid in kv and (tnow - kv[pid]["_time"]) < deltat:
+            time_valid_indices.append(i)
+            time_valid_pids.append(pid)
+
+    return time_valid_pids, time_valid_indices
 
 
 def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "and", time_filter: str = ""):
@@ -313,27 +376,10 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
 
     # Apply time filtering first to reduce computation
     if time_filter:
-        mdb = get_metas()
-        kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
-        tnow = time.time()
-        deltat = float(time_filter) * 60 * 60 * 24  # allowed time delta in seconds
-
-        # Find indices of papers that meet time criteria
-        time_valid_indices = []
-        time_valid_pids = []
-        for i, pid in enumerate(pids):
-            if pid in kv and (tnow - kv[pid]["_time"]) < deltat:
-                time_valid_indices.append(i)
-                time_valid_pids.append(pid)
-
-        # Filter features and pids based on time
-        if time_valid_indices:
-            x = x[time_valid_indices]
-            pids = time_valid_pids
-            logger.debug(f"Time filter reduced dataset from {len(features['pids'])} to {len(pids)} papers")
-        else:
-            logger.debug("No papers match time filter criteria")
+        pids, time_valid_indices = _filter_by_time(pids, time_filter)
+        if not pids:
             return [], [], []
+        x = x[time_valid_indices]
 
     n, d = x.shape
     ptoi, itop = {}, {}
@@ -359,19 +405,27 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
     # Process Tags (can coexist with PIDs)
     if tags:
         tags_db = get_tags()
+        logger.trace(f"Available tags in tags_db: {list(tags_db.keys())}")
         tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
+        logger.trace(f"Tags to filter: {tags_filter_to}")
         for t_i, tag in enumerate(tags_filter_to):
             if tag in tags_db:  # Ensure tag exists
                 t_pids = tags_db[tag]
+                logger.trace(f"Tag '{tag}' has {len(t_pids)} papers")
+                found_count = 0
                 for p_i, pid in enumerate(t_pids):
                     if pid in ptoi:  # Ensure PID exists
+                        found_count += 1
                         if logic == "and":
                             y[ptoi[pid]] = max(y[ptoi[pid]], 1.0 + t_i + weight_offset)
                         else:
                             y[ptoi[pid]] = max(y[ptoi[pid]], 1.0)
+                logger.trace(f"Found {found_count} papers from tag '{tag}' in current features")
+            else:
+                logger.trace(f"Tag '{tag}' not found in tags_db")
     e_time = time.time()
 
-    logger.debug(f"feature loading/caching for {e_time - s_time:.5f}s")
+    logger.trace(f"feature loading/caching for {e_time - s_time:.5f}s")
 
     if y.sum() == 0:
         return [], [], []  # there are no positives?
@@ -397,21 +451,21 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
     # rbf_feature = RBFSampler(gamma=1, random_state=0, n_components=200)
     # x = rbf_feature.fit_transform(x)
     # e_time = time.time()
-    # logger.debug(f"Dimension reduction for {e_time - s_time:.5f}s")
+    # logger.trace(f"Dimension reduction for {e_time - s_time:.5f}s")
 
     clf.fit(x, y)
     e_time = time.time()
-    logger.debug(f"SVM fitting data for {e_time - s_time:.5f}s")
+    logger.trace(f"SVM fitting data for {e_time - s_time:.5f}s")
 
     if logic == "and":
         s = clf.decision_function(x)
-        # logger.debug(f"svm_rank: {s.shape}")
+        # logger.trace(f"svm_rank: {s.shape}")
         if len(s.shape) > 1:
             s = s[:, 1:].mean(axis=-1)
     else:
         s = clf.decision_function(x)
     e_time = time.time()
-    logger.debug(f"SVM decsion function for {e_time - s_time:.5f}s")
+    logger.trace(f"SVM decsion function for {e_time - s_time:.5f}s")
     sortix = np.argsort(-s)
     pids = [itop[ix] for ix in sortix]
     scores = [100 * float(s[ix]) for ix in sortix]
@@ -426,8 +480,8 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
 
     sortix = np.argsort(-tfidf_weights)
     e_time = time.time()
-    logger.debug(f"rank calculation for {e_time - s_time:.5f}s")
-    logger.debug(f"Total features: {len(weights)}, TF-IDF features: {vocab_size}")
+    logger.trace(f"rank calculation for {e_time - s_time:.5f}s")
+    # logger.trace(f"Total features: {len(weights)}, TF-IDF features/: {vocab_size}")
 
     words = []
     for ix in list(sortix[:40]) + list(sortix[-20:]):
@@ -475,15 +529,9 @@ def search_rank(q: str = "", limit=None):
         pairs = sum(sub_pairs_list, [])
 
     pairs.sort(reverse=True)
-
-    # If limit is specified, only take first limit results
-    if limit is not None:
-        pairs = pairs[:limit]
-        logger.debug(f"Search rank limited to {limit} results")
-
     pids = [p[1] for p in pairs]
     scores = [p[0] for p in pairs]
-    return pids, scores
+    return _apply_limit(pids, scores, limit)
 
 
 # 全局语义搜索相关变量
@@ -520,7 +568,7 @@ def get_paper_embeddings():
     try:
         features = get_features_cached()
         if features.get("feature_type") == "hybrid_sparse_dense" and "x_embeddings" in features:
-            logger.info("Using pre-computed embeddings from features file")
+            logger.trace("Using pre-computed embeddings from features file")
             _cached_embeddings = {"embeddings": features["x_embeddings"], "pids": features["pids"]}
             return _cached_embeddings
         else:
@@ -554,7 +602,7 @@ def semantic_search_rank(q: str = "", limit=None):
 
     try:
         # 编码查询
-        logger.debug(f"Encoding query: {q}")
+        # logger.trace(f"Encoding query: {q}")
         query_embedding = model.encode(
             [model.get_detailed_instruct(q)],
             dim=512,
@@ -721,7 +769,7 @@ def main():
     # if using svm_rank (tags or pid) and no time filter is specified, default to 365 days
     if opt_rank in ["tags", "pid"] and not opt_time_filter:
         opt_time_filter = "365"
-        logger.debug(f"Applied default 365-day time filter for SVM ranking ({opt_rank})")
+        # logger.trace(f"Applied default 365-day time filter for SVM ranking ({opt_rank})")
 
     # try to parse opt_svm_c into something sensible (a float)
     try:
@@ -749,9 +797,9 @@ def main():
     # Final limit = basic requirement * buffer multiplier, but not exceeding maximum
     dynamic_limit = min(MAX_RESULTS, base_needed * buffer_multiplier)
 
-    logger.debug(
-        f"Page {page_number}, base_needed={base_needed}, buffer_multiplier={buffer_multiplier}, dynamic_limit={dynamic_limit}"
-    )
+    # logger.trace(
+    #     f"Page {page_number}, base_needed={base_needed}, buffer_multiplier={buffer_multiplier}, dynamic_limit={dynamic_limit}"
+    # )
 
     # rank papers: by tags, by time, by random
     words = []  # only populated in the case of svm rank
@@ -829,7 +877,7 @@ def main():
     pids = pids[start_index:end_index]
     scores = scores[start_index:end_index]
 
-    logger.debug(f"Final pagination: start={start_index}, end={end_index}, got {len(pids)} papers")
+    # logger.trace(f"Final pagination: start={start_index}, end={end_index}, got {len(pids)} papers")
 
     # render all papers to just the information we need for the UI
     papers = [render_pid(pid) for pid in pids]
@@ -897,7 +945,7 @@ def main():
     context["gvars"]["search_mode"] = opt_search_mode
     context["gvars"]["semantic_weight"] = opt_semantic_weight
     context["show_score_breakdown"] = opt_rank == "search" and opt_search_mode == "hybrid"
-    logger.info(
+    logger.trace(
         f'User: {context["user"]}\ntags {context["tags"]}\nkeys {context["keys"]}\nctags {context["combined_tags"]}'
     )
     return render_template("index.html", **context)
@@ -988,6 +1036,44 @@ def about():
 
 
 # -----------------------------------------------------------------------------
+# Helper for API endpoints
+# -----------------------------------------------------------------------------
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _temporary_user_context(user):
+    """Context manager to temporarily set g.user and g._tags for API calls"""
+    original_user = getattr(g, "user", None)
+    original_tags = getattr(g, "_tags", None)
+
+    try:
+        # Get user tags
+        with get_tags_db() as tags_db:
+            user_tags = tags_db.get(user, {})
+
+        # Set temporary context
+        g.user = user
+        g._tags = user_tags
+
+        yield user_tags
+
+    finally:
+        # Restore original context
+        if original_user is not None:
+            g.user = original_user
+        else:
+            if hasattr(g, "user"):
+                delattr(g, "user")
+        if original_tags is not None:
+            g._tags = original_tags
+        else:
+            if hasattr(g, "_tags"):
+                delattr(g, "_tags")
+
+
+# -----------------------------------------------------------------------------
 # API endpoints for email recommendation system
 # -----------------------------------------------------------------------------
 
@@ -996,9 +1082,8 @@ def about():
 def api_keyword_search():
     """API接口：单个关键词搜索"""
     try:
-        from flask import jsonify, request
-
         data = request.get_json()
+        # logger.info(f"API keyword search data: {data}")
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -1028,7 +1113,7 @@ def api_keyword_search():
         if len(pids) > limit:
             pids = pids[:limit]
             scores = scores[:limit]
-
+        # logger.trace(f"API keyword search results: {len(pids)} papers found")
         return jsonify({"success": True, "pids": pids, "scores": scores, "total_count": len(pids)})
 
     except Exception as e:
@@ -1040,9 +1125,8 @@ def api_keyword_search():
 def api_tag_search():
     """API接口：单个tag推荐"""
     try:
-        from flask import jsonify, request
-
         data = request.get_json()
+        logger.trace(f"API tag search data: {data}")
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -1057,26 +1141,65 @@ def api_tag_search():
         if not user:
             return jsonify({"error": "user is required"}), 400
 
-        # 使用tag名称进行推荐
-        rec_pids, rec_scores, words = svm_rank(
-            tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta)  # 传入tag名称  # 不使用s_pids
-        )
-
-        # 获取该用户该tag已标记的论文，用于排除
+        # 获取该用户的标签数据
         with get_tags_db() as tags_db:
             user_tags = tags_db.get(user, {})
+
+        # 检查用户是否有该标签
+        if tag_name not in user_tags or len(user_tags[tag_name]) == 0:
+            logger.warning(f"User {user} has no papers tagged with '{tag_name}'")
+            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+
+        logger.trace(f"User {user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
+
+        # 临时设置g.user和g._tags，让svm_rank能正确工作
+        original_user = getattr(g, "user", None)
+        original_tags = getattr(g, "_tags", None)
+
+        g.user = user
+        g._tags = user_tags
+
+        try:
+            # 使用tag名称进行推荐
+            rec_pids, rec_scores, words = svm_rank(
+                tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta)
+            )
+
+            logger.trace(f"svm_rank returned {len(rec_pids)} results before filtering")
+
+            # 获取该用户该tag已标记的论文，用于排除
             if tag_name in user_tags:
                 tagged_pids = user_tags[tag_name]
                 tagged_set = set(tagged_pids)
+                logger.trace(f"User has {len(tagged_set)} papers tagged with '{tag_name}'")
+
+                # 计算推荐结果和已标记论文的交集
+                intersection = [pid for pid in rec_pids if pid in tagged_set]
+                logger.trace(f"Found {len(intersection)} recommended papers that are already tagged")
+
                 keep = [i for i, pid in enumerate(rec_pids) if pid not in tagged_set]
                 rec_pids = [rec_pids[i] for i in keep]
                 rec_scores = [rec_scores[i] for i in keep]
+
+                logger.trace(f"After filtering out tagged papers: {len(rec_pids)} papers remain")
+        finally:
+            # 恢复原始的g.user和g._tags
+            if original_user is not None:
+                g.user = original_user
+            else:
+                if hasattr(g, "user"):
+                    delattr(g, "user")
+            if original_tags is not None:
+                g._tags = original_tags
+            else:
+                if hasattr(g, "_tags"):
+                    delattr(g, "_tags")
 
         # 限制结果数量
         if len(rec_pids) > limit:
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
-
+        logger.trace(f"API tag search results: {len(rec_pids)} papers found")
         return jsonify({"success": True, "pids": rec_pids, "scores": rec_scores, "total_count": len(rec_pids)})
 
     except Exception as e:
@@ -1088,9 +1211,8 @@ def api_tag_search():
 def api_tags_search():
     """API接口：联合tag推荐"""
     try:
-        from flask import jsonify, request
-
         data = request.get_json()
+        logger.trace(f"API combined tags search data: {data}")
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -1106,30 +1228,60 @@ def api_tags_search():
         if not user:
             return jsonify({"error": "user is required"}), 400
 
-        # 将tag列表转换为逗号分隔的字符串
-        tags_str = ",".join(tags_list)
-
-        # 使用SVM推荐
-        rec_pids, rec_scores, words = svm_rank(
-            tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta)  # 传入tag名称列表  # 不使用s_pids
-        )
-
-        # 获取该用户所有相关tags的已标记论文，用于排除
+        # 获取该用户的标签数据
         with get_tags_db() as tags_db:
             user_tags = tags_db.get(user, {})
+
+        # 检查用户是否有任一标签
+        valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
+        if not valid_tags:
+            logger.warning(f"User {user} has no papers tagged with any of {tags_list}")
+            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+
+        # 将tag列表转换为逗号分隔的字符串
+        tags_str = ",".join(valid_tags)
+
+        # 临时设置g.user和g._tags，让svm_rank能正确工作
+        original_user = getattr(g, "user", None)
+        original_tags = getattr(g, "_tags", None)
+
+        g.user = user
+        g._tags = user_tags
+
+        try:
+            # 使用SVM推荐
+            rec_pids, rec_scores, words = svm_rank(
+                tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta)
+            )
+
+            # 获取该用户所有相关tags的已标记论文，用于排除
             all_tagged = set()
-            for tag in tags_list:
+            for tag in valid_tags:
                 if tag in user_tags:
                     all_tagged.update(user_tags[tag])
 
-        keep = [i for i, pid in enumerate(rec_pids) if pid not in all_tagged]
-        rec_pids = [rec_pids[i] for i in keep]
-        rec_scores = [rec_scores[i] for i in keep]
+            keep = [i for i, pid in enumerate(rec_pids) if pid not in all_tagged]
+            rec_pids = [rec_pids[i] for i in keep]
+            rec_scores = [rec_scores[i] for i in keep]
+        finally:
+            # 恢复原始的g.user和g._tags
+            if original_user is not None:
+                g.user = original_user
+            else:
+                if hasattr(g, "user"):
+                    delattr(g, "user")
+            if original_tags is not None:
+                g._tags = original_tags
+            else:
+                if hasattr(g, "_tags"):
+                    delattr(g, "_tags")
 
         # 限制结果数量
         if len(rec_pids) > limit:
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
+
+        logger.trace(f"API combined tags search results: {len(rec_pids)} papers found")
 
         return jsonify({"success": True, "pids": rec_pids, "scores": rec_scores, "total_count": len(rec_pids)})
 
@@ -1145,16 +1297,26 @@ def cache_status():
         return "Access denied"
 
     global FEATURES_CACHE, FEATURES_FILE_MTIME, FEATURES_CACHE_TIME
+    global PAPERS_CACHE, METAS_CACHE, PIDS_CACHE, PAPERS_DB_FILE_MTIME, PAPERS_DB_CACHE_TIME
 
     status = {
-        "features_cached": FEATURES_CACHE is not None,
-        "cache_time": FEATURES_CACHE_TIME,
-        "file_mtime": FEATURES_FILE_MTIME,
         "current_time": time.time(),
+        "features": {
+            "cached": FEATURES_CACHE is not None,
+            "cache_time": FEATURES_CACHE_TIME,
+            "file_mtime": FEATURES_FILE_MTIME,
+        },
+        "papers_and_metas": {
+            "papers_cached": PAPERS_CACHE is not None,
+            "metas_cached": METAS_CACHE is not None,
+            "cache_time": PAPERS_DB_CACHE_TIME,
+            "db_file_mtime": PAPERS_DB_FILE_MTIME,
+        },
     }
 
+    # Features details
     if FEATURES_CACHE:
-        status.update(
+        status["features"].update(
             {
                 "cache_age_seconds": time.time() - FEATURES_CACHE_TIME,
                 "feature_shape": str(FEATURES_CACHE["x"].shape),
@@ -1165,7 +1327,7 @@ def cache_status():
 
     if os.path.exists(FEATURES_FILE):
         current_mtime = os.path.getmtime(FEATURES_FILE)
-        status.update(
+        status["features"].update(
             {
                 "file_exists": True,
                 "current_file_mtime": current_mtime,
@@ -1173,7 +1335,31 @@ def cache_status():
             }
         )
     else:
-        status["file_exists"] = False
+        status["features"]["file_exists"] = False
+
+    # Papers and metas details (unified since they share the same db file)
+    if PAPERS_CACHE and METAS_CACHE:
+        status["papers_and_metas"].update(
+            {
+                "cache_age_seconds": time.time() - PAPERS_DB_CACHE_TIME,
+                "num_papers": len(PAPERS_CACHE),
+                "num_metas": len(METAS_CACHE),
+                "num_pids": len(PIDS_CACHE) if PIDS_CACHE else 0,
+            }
+        )
+
+    # Database file details
+    if os.path.exists(PAPERS_DB_PATH):
+        current_db_mtime = os.path.getmtime(PAPERS_DB_PATH)
+        status["papers_and_metas"].update(
+            {
+                "db_file_exists": True,
+                "current_db_file_mtime": current_db_mtime,
+                "db_file_is_newer": current_db_mtime > PAPERS_DB_FILE_MTIME,
+            }
+        )
+    else:
+        status["papers_and_metas"]["db_file_exists"] = False
 
     return status
 
@@ -1289,14 +1475,14 @@ def rename_tag(otag=None, ntag=None):
             if otag not in d:
                 return "user does not have this tag"
 
-            # logger.debug(d)
+            # logger.trace(d)
             o_pids = d[otag]
             del d[otag]
             if ntag not in d:
                 d[ntag] = o_pids
             else:
                 d[ntag] = d[ntag].union(o_pids)
-            # logger.debug(d)
+            # logger.trace(d)
 
             # write back to database
             tags_db[g.user] = d
@@ -1331,7 +1517,7 @@ def add_ctag(ctag=None):
             return "invalid ctag"
 
     with get_combined_tags_db(flag="c") as ctags_db:
-        # logger.debug(f"{ctags_db}")
+        # logger.trace(f"{ctags_db}")
         # create the user if we don't know about them yet with an empty library
         if g.user not in ctags_db:
             ctags_db[g.user] = set()
