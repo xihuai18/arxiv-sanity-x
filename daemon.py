@@ -67,7 +67,10 @@ def backup_user_data():
 
 
 scheduler = BlockingScheduler(timezone="Asia/Shanghai")
-scheduler.add_job(fetch_compute, "cron", day_of_week="tue,wed,thu,fri,mon", hour=16)
+scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=6)
+scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=11)
+scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=16)
+scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=21)
 scheduler.add_job(send_email, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
 scheduler.add_job(backup_user_data, "cron", hour=19)
 scheduler.start()

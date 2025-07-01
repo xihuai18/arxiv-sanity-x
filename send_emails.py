@@ -278,7 +278,7 @@ def render_recommendations(
     out = out.replace("__HOST__", HOST)
     out = out.replace("__WEB__", WEB)
     # render the paper recommendations into the html template
-    if sum(len(tag_pids[tag]) for tag in tags) > 0:
+    if sum(len(tag_pids[tag]) for tag in tag_pids) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
         max_score = {}
         max_source_tag = {}
@@ -290,10 +290,14 @@ def render_recommendations(
 
         # now we have a dict of pid -> max score. sort by score
         max_score_list = sorted(max_score.items(), key=lambda x: x[1], reverse=True)
-        pids, scores = zip(*max_score_list)
+        if max_score_list:
+            pids, scores = zip(*max_score_list)
+        else:
+            pids, scores = [], []
 
         # now render the html for each individual recommendation
         parts = []
+        # 每个tag推荐类型各自最多推荐num_recommendations个论文
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -327,7 +331,7 @@ def render_recommendations(
 
         # render the stats
         num_papers_tagged = len(set().union(*tags.values()))
-        tags_str = ", ".join(['"%s" (%d)' % (t, len(pids)) for t, pids in tags.items()])
+        tags_str = ", ".join(['"%s" (%d)' % (t, len(tags[t])) for t in tags.keys()])
         stats = f"We took the {num_papers_tagged} papers across your {len(tags)} tags ({tags_str}) and \
                 ranked {len(pids)} papers that showed up on arxiv over the last \
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
@@ -338,7 +342,7 @@ def render_recommendations(
         out = out.replace("__CONTENT_TAG__", "")
         out = out.replace("__STATS_TAG__", "")
 
-    if sum(len(ctag_pids[ctag]) for ctag in ctags) > 0:
+    if sum(len(ctag_pids[ctag]) for ctag in ctag_pids) > 0:
         # first we are going to merge all of the papers / scores together using a MAX
         max_score = {}
         max_source_ctag = {}
@@ -350,10 +354,14 @@ def render_recommendations(
 
         # now we have a dict of pid -> max score. sort by score
         max_score_list = sorted(max_score.items(), key=lambda x: x[1], reverse=True)
-        pids, scores = zip(*max_score_list)
+        if max_score_list:
+            pids, scores = zip(*max_score_list)
+        else:
+            pids, scores = [], []
 
         # now render the html for each individual recommendation
         parts = []
+        # 每个ctag推荐类型各自最多推荐num_recommendations个论文
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -417,10 +425,14 @@ def render_recommendations(
 
         # now we have a dict of pid -> max score. sort by score
         max_score_list = sorted(max_score.items(), key=lambda x: x[1], reverse=True)
-        pids, scores = zip(*max_score_list)
+        if max_score_list:
+            pids, scores = zip(*max_score_list)
+        else:
+            pids, scores = [], []
 
         # now render the html for each individual recommendation
         parts = []
+        # 每个keyword推荐类型各自最多推荐num_recommendations个论文
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -599,20 +611,20 @@ if __name__ == "__main__":
         # calculate the recommendations
         try:
             pids, scores = calculate_recommendation(utags, user=user, time_delta=args.time_delta)
-            pids_set = set().union(*pids.values())
+            pids_set = set().union(*pids.values()) if pids.values() else set()
             logger.debug(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
             u_ctag = ctags.get(user, set())
             cpids, cscores = calculate_ctag_recommendation(u_ctag, utags, user=user, time_delta=args.time_delta)
 
-            cpids_set = set().union(*cpids.values())
+            cpids_set = set().union(*cpids.values()) if cpids.values() else set()
             logger.debug(f"From ctags, found {len(cpids_set)} papers for {user} within {args.time_delta} days")
 
             ukeywords = keywords.get(user, {})
 
             kpids, kscores = search_keywords_recommendations(user, ukeywords, args.time_delta)
-            pids_set = set().union(*kpids.values())
-            logger.debug(f"From keywords, found {len(pids_set)} papers for {user} within {args.time_delta} days")
+            kpids_set = set().union(*kpids.values()) if kpids.values() else set()
+            logger.debug(f"From keywords, found {len(kpids_set)} papers for {user} within {args.time_delta} days")
 
             # 检查是否有任何推荐结果
             has_tag_recs = any(len(lst) > 0 for tag, lst in pids.items())

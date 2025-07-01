@@ -126,8 +126,6 @@ class Qwen3EmbeddingVllm:
     def encode(self, sentences, dim=1024):
         """通过 API 编码文本为嵌入向量"""
         try:
-            import numpy as np
-
             if self.client is None:
                 logger.error("API 客户端未初始化，无法进行编码")
                 return None
@@ -222,18 +220,18 @@ def load_existing_embeddings(embed_dim=512):
 
 def generate_embeddings_incremental(
     all_pids,
-    all_texts,
+    pdb,
     model_path="./qwen3-embed-0.6B",
     embed_dim=512,
     batch_size=512,
     api_base="http://localhost:51000/v1",
 ):
     """
-    增量生成嵌入向量
+    增量生成嵌入向量，优化语料准备顺序
 
     Args:
         all_pids: 所有论文ID列表
-        all_texts: 所有论文文本列表
+        pdb: 论文数据库对象
         model_path: 嵌入模型路径
         embed_dim: 嵌入维度
         batch_size: 批处理大小
@@ -249,17 +247,17 @@ def generate_embeddings_incremental(
         existing_pids_set = set(existing["pids"])
         logger.info(f"找到 {len(existing_pids_set)} 个现有嵌入")
 
-        # 找出需要新生成的论文
+        # 找出需要新生成的论文ID
+        new_pids = []
         new_indices = []
-        new_texts = []
         for i, pid in enumerate(all_pids):
             if pid not in existing_pids_set:
+                new_pids.append(pid)
                 new_indices.append(i)
-                new_texts.append(all_texts[i])
 
-        logger.info(f"需要生成 {len(new_texts)} 个新嵌入")
+        logger.info(f"需要生成 {len(new_pids)} 个新嵌入")
 
-        if len(new_texts) == 0:
+        if len(new_pids) == 0:
             logger.info("所有论文已有嵌入，直接返回现有嵌入")
             # 重新排序以匹配当前 pids 顺序
             ordered_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
@@ -273,13 +271,34 @@ def generate_embeddings_incremental(
                     ordered_embeddings[i] = np.random.randn(embed_dim).astype(np.float32)
 
             return ordered_embeddings
+
+        # 只为需要更新的论文准备语料
+        logger.info(f"为 {len(new_pids)} 个新论文准备嵌入语料...")
+        new_texts = []
+        for pid in tqdm(new_pids, desc="准备新论文嵌入语料"):
+            d = pdb[pid]
+            # 构建用于嵌入的文本
+            text = f"Title: {d['title']}\n"
+            text += f"Abstract: {d['summary']}"
+            new_texts.append(text)
     else:
         logger.info("未找到现有嵌入，将生成全部嵌入")
         existing_pids_set = set()
+        new_pids = all_pids
         new_indices = list(range(len(all_pids)))
-        new_texts = all_texts
+
+        # 为所有论文准备语料
+        logger.info(f"为所有 {len(all_pids)} 个论文准备嵌入语料...")
+        new_texts = []
+        for pid in tqdm(all_pids, desc="准备嵌入语料"):
+            d = pdb[pid]
+            # 构建用于嵌入的文本
+            text = f"Title: {d['title']}\n"
+            text += f"Abstract: {d['summary']}"
+            new_texts.append(text)
 
     # 生成新嵌入
+    new_embeddings = None
     if len(new_texts) > 0:
         logger.info(f"初始化嵌入 API 客户端: {api_base}")
         model = Qwen3EmbeddingVllm(model_name_or_path=model_path, api_base=api_base)
@@ -324,10 +343,11 @@ def generate_embeddings_incremental(
                 final_embeddings[i] = existing["embeddings"][pid_to_idx[pid]]
 
     # 填充新生成的嵌入
-    new_embed_idx = 0
-    for i in new_indices:
-        final_embeddings[i] = new_embeddings[new_embed_idx]
-        new_embed_idx += 1
+    if new_embeddings is not None:
+        new_embed_idx = 0
+        for i in new_indices:
+            final_embeddings[i] = new_embeddings[new_embed_idx]
+            new_embed_idx += 1
 
     logger.info(f"增量嵌入生成完成: 总计 {final_embeddings.shape}")
     return final_embeddings
@@ -429,23 +449,10 @@ if __name__ == "__main__":
     if args.use_embeddings:
         logger.info("生成嵌入向量特征...")
 
-        # 准备语料库文本（与TF-IDF保持一致的格式）
-        corpus_texts = []
-        for pid in tqdm(pids, desc="准备嵌入语料"):
-            d = pdb[pid]
-
-            # 获取类别信息
-            category = d.get("arxiv_primary_category", {}).get("term", "")
-
-            # 构建用于嵌入的文本
-            text = f"Title: {d['title']}\n"
-            text += f"Abstract: {d['summary']}"
-            corpus_texts.append(text)
-
-        # 增量生成嵌入向量
+        # 增量生成嵌入向量（语料准备在函数内部完成）
         embeddings = generate_embeddings_incremental(
             pids,
-            corpus_texts,
+            pdb,
             model_path=args.embed_model,
             embed_dim=args.embed_dim,
             batch_size=args.embed_batch_size,
