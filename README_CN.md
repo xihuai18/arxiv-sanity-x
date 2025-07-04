@@ -1,18 +1,20 @@
 # arxiv-sanity-X
 
-增强型 arXiv 论文推荐系统，集成 AI 智能总结、语义搜索和个性化推荐功能。
+基于混合机器学习特征的增强型 arXiv 论文推荐系统，集成 AI 智能总结、语义搜索和智能个性化推荐功能。
 
 ![Screenshot](arxiv-sanity-x.png)
 
 ## 🚀 核心功能
 
-- **AI 论文总结**：集成 LLM 和 minerU 的自动化论文总结，支持智能缓存
-- **语义搜索**：关键词、语义和混合搜索，支持嵌入模型
-- **智能推荐**：TF-IDF + 嵌入向量混合特征，SVM 分类器驱动
-- **个性化标签**：个人和组合标签管理，支持 AND/OR 逻辑
-- **邮件服务**：每日个性化推荐和关键词提醒
-- **性能优化**：多核处理、Intel 扩展、vLLM 集成
-- **API 支持**：RESTful 端点，支持推荐和总结功能
+- **🤖 AI 论文总结**：完整处理管道，包含 minerU PDF 解析、LLM 生成和智能缓存
+- **🔍 高级搜索**：关键词、语义和混合搜索模式，支持可配置权重
+- **🎯 智能推荐**：混合 TF-IDF + 嵌入特征，动态 SVM 分类器
+- **🏷️ 标签管理**：个人/组合标签，支持 AND/OR 逻辑和关键词监控
+- **📧 邮件服务**：自动化每日推荐，个性化 HTML 模板
+- **⚡ 性能优化**：多核处理、Intel 扩展、增量更新、vLLM 集成
+- **🔗 API 与界面**：RESTful API、响应式 Web 界面、异步加载总结
+- **🔄 自动调度**：内置调度器，支持获取、计算、邮件和备份
+
 
 
 ##  更新日志
@@ -231,17 +233,41 @@ python daemon.py
 
 ## 🤖 AI 论文总结
 
-### 使用方法
-- **单篇总结**：点击任意论文的"总结"链接（`/summary?pid=<paper_id>`）
-- **批量生成**：`python generate_latest_summaries.py --num_papers 100`
-- **功能特性**：MathJax 公式渲染、智能缓存、异步加载
+### 完整 AI 处理管道
+1. **PDF 下载**：自动获取 arXiv 论文
+2. **minerU 解析**：高级 PDF 文本提取，支持结构识别
+3. **LLM 处理**：使用 GLM-4-Flash 或兼容模型生成全面总结
+4. **质量控制**：中文文本比例验证和内容过滤
+5. **智能缓存**：智能缓存机制，自动质量检查
+
+### 使用命令
+```bash
+# 单篇论文总结（Web 界面）
+# 点击"总结"链接或访问：/summary?pid=<paper_id>
+
+# 批量处理（最新论文）
+python generate_latest_summaries.py --num_papers 100
+
+# 高级批量处理，自定义工作线程
+python batch_paper_summarizer.py --num_papers 200 --max_workers 4 --skip_cached
+
+# 检查处理状态
+python batch_paper_summarizer.py --dry_run  # 预览模式
+```
 
 ### 配置
 ```python
-# 在 vars.py 中 - 添加 LLM API 配置
-LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # 智谱 AI 示例
+# 在 vars.py 中 - LLM API 设置
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # 智谱 AI 或 OpenAI 兼容
 LLM_API_KEY = "your_api_key_here"
 ```
+
+### 功能特性
+- **MathJax 支持**：完整的 LaTeX 数学公式渲染
+- **Markdown 输出**：丰富格式，包含标题、列表、代码块
+- **异步加载**：非阻塞 Web 界面，配有进度指示器
+- **错误恢复**：自动重试机制，详细失败日志
+- **线程安全**：并发处理，minerU 锁管理
 
 ## 🔧 高级功能
 
