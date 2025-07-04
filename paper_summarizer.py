@@ -19,7 +19,7 @@ import openai
 import requests
 from loguru import logger
 
-from vars import DATA_DIR, LLM_API_KEY, LLM_BASE_URL
+from vars import DATA_DIR, LLM_API_KEY, LLM_BASE_URL, LLM_SUMMARY_LANG
 
 
 class PaperSummarizer:
@@ -55,21 +55,21 @@ class PaperSummarizer:
 
             # 如果文件已存在，直接返回
             if pdf_path.exists():
-                logger.trace(f"PDF 文件已存在: {pdf_path}")
+                logger.trace(f"PDF file already exists: {pdf_path}")
                 return pdf_path
 
-            logger.trace(f"正在下载论文 {pid} ...")
+            logger.trace(f"Downloading paper {pid} ...")
             response = requests.get(pdf_url, stream=True, timeout=30)
             response.raise_for_status()
 
             with open(pdf_path, "wb") as f:
                 shutil.copyfileobj(response.raw, f)
 
-            logger.trace(f"论文下载完成: {pdf_path}")
+            logger.trace(f"Paper download complete: {pdf_path}")
             return pdf_path
 
         except Exception as e:
-            logger.trace(f"下载论文失败 {pid}: {e}")
+            logger.trace(f"Failed to download paper {pid}: {e}")
             return None
 
     def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
@@ -89,83 +89,83 @@ class PaperSummarizer:
             # 检查是否已经解析过
             expected_md_path = output_dir / pdf_name / "auto" / f"{pdf_name}.md"
             if expected_md_path.exists():
-                logger.trace(f"Markdown 文件已存在: {expected_md_path}")
+                logger.trace(f"Markdown file already exists: {expected_md_path}")
                 return expected_md_path
 
             # 获取鎖，確保只有一個 minerU 進程在運行
-            logger.trace(f"等待 minerU 鎖以解析 PDF: {pdf_path}")
+            logger.trace(f"Waiting for minerU lock to parse PDF: {pdf_path}")
             with self._mineru_lock:
-                logger.trace(f"已獲得 minerU 鎖，開始解析 PDF: {pdf_path}")
+                logger.trace(f"Acquired minerU lock, start parsing PDF: {pdf_path}")
 
                 # 再次检查是否已经解析过（避免等待锁期间其他进程已完成解析）
                 if expected_md_path.exists():
-                    logger.trace(f"等待鎖期間文件已生成: {expected_md_path}")
+                    logger.trace(f"File generated during lock wait: {expected_md_path}")
                     return expected_md_path
 
                 # 构建 minerU 命令
                 cmd = ["mineru", "-p", str(pdf_path), "-o", str(output_dir), "-l", "en", "-d", "cuda", "--vram", "2"]
 
-                logger.trace(f"执行命令: {' '.join(cmd)}")
+                logger.trace(f"Executing command: {' '.join(cmd)}")
                 start_time = time.time()
 
                 # 执行命令
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
                 elapsed_time = time.time() - start_time
-                logger.trace(f"minerU 執行完成，耗時 {elapsed_time:.2f} 秒")
+                logger.trace(f"minerU execution complete, elapsed {elapsed_time:.2f} seconds")
 
                 if result.returncode != 0:
-                    logger.trace(f"minerU 执行失败: {result.stderr}")
+                    logger.trace(f"minerU execution failed: {result.stderr}")
                     # minerU 解析失败时删除 PDF 文件
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"解析失败，已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
                 # 检查生成的 Markdown 文件
                 if expected_md_path.exists():
-                    logger.trace(f"PDF 解析完成: {expected_md_path}")
+                    logger.trace(f"PDF parse complete: {expected_md_path}")
 
                     # 解析完成后删除 PDF 文件以节省空间
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
 
                     # 清理除了 images 和 markdown 之外的其他文件
                     self._cleanup_mineru_output(output_dir / pdf_name)
 
                     return expected_md_path
                 else:
-                    logger.trace(f"未找到生成的 Markdown 文件: {expected_md_path}")
+                    logger.trace(f"Generated Markdown file not found: {expected_md_path}")
                     # 解析失败时删除 PDF 文件
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"解析失败，已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
         except subprocess.TimeoutExpired:
-            logger.trace("minerU 执行超时")
+            logger.trace("minerU execution timeout")
             # 解析超时时删除 PDF 文件
             try:
                 pdf_path.unlink()
-                logger.trace(f"解析超时，已删除 PDF 源文件: {pdf_path}")
+                logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
             except Exception as e:
-                logger.trace(f"删除 PDF 文件失败: {e}")
+                logger.trace(f"Failed to delete PDF file: {e}")
             return None
         except Exception as e:
-            logger.trace(f"PDF 解析失败: {e}")
+            logger.trace(f"PDF parse failed: {e}")
             # 解析异常时删除 PDF 文件
             try:
                 pdf_path.unlink()
-                logger.trace(f"解析异常，已删除 PDF 源文件: {pdf_path}")
+                logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
             except Exception as e:
-                logger.trace(f"删除 PDF 文件失败: {e}")
+                logger.trace(f"Failed to delete PDF file: {e}")
             return None
 
     def _cleanup_mineru_output(self, output_path: Path):
@@ -202,15 +202,15 @@ class PaperSummarizer:
                 try:
                     if item.is_dir():
                         shutil.rmtree(item, ignore_errors=True)
-                        logger.trace(f"已删除目录: {item}")
+                        logger.trace(f"Deleted directory: {item}")
                     else:
                         item.unlink(missing_ok=True)
-                        logger.trace(f"已删除文件: {item}")
+                        logger.trace(f"Deleted file: {item}")
                 except Exception as e:
-                    logger.trace(f"删除 {item} 失败: {e}")
+                    logger.trace(f"Failed to delete {item}: {e}")
 
         except Exception as e:
-            logger.trace(f"清理 minerU 输出失败: {e}")
+            logger.trace(f"Failed to clean minerU output: {e}")
 
     def extract_main_content(self, markdown_content: str) -> str:
         """
@@ -247,14 +247,14 @@ class PaperSummarizer:
 
             # 如果截取后的内容太短，返回原内容
             if len(main_content.strip()) < len(markdown_content.strip()) * 0.25:
-                logger.trace("截取的正文内容过短，使用原始内容")
+                logger.trace("Extracted main content too short, using original content")
                 return markdown_content
 
-            logger.trace(f"论文内容从 {len(markdown_content)} 字符截取到 {len(main_content)} 字符")
+            logger.trace(f"Paper content truncated from {len(markdown_content)} to {len(main_content)} characters")
             return main_content
 
         except Exception as e:
-            logger.trace(f"截取正文失败: {e}")
+            logger.trace(f"Failed to extract main content: {e}")
             return markdown_content
 
     def summarize_with_llm(self, markdown_content: str) -> str:
@@ -268,8 +268,41 @@ class PaperSummarizer:
             论文总结
         """
         try:
-            # 构建提示词
-            prompt = f"""
+            # 根据配置选择语言 prompt
+            if LLM_SUMMARY_LANG == "en":
+                # 英文 prompt
+                prompt = f"""
+You are a senior researcher in deep learning and computer science, skilled at analyzing and summarizing academic papers. Please carefully read the following paper content and provide a professional, accurate, and structured **English** summary.
+
+<Summary Requirements>
+1. Use academic and rigorous language, formulas are allowed
+2. Use `$…$` (inline) or `$$…$$` (block) for all formulas
+3. Each section should have specific content, avoid vague descriptions
+4. Use appropriate subheadings, lists, and emphasis to organize content
+</Summary Requirements>
+
+<Paper Content>
+{markdown_content}
+</Paper Content>
+
+Output should contain two parts, detailed summary and TL;DR, in the following format:
+<Output Format>
+## Detailed Paper Summary
+Your detailed summary of this paper
+
+## TL;DR
+Your brief summary of this paper
+</Output Format>
+
+<Notes>
+1. Ensure the summary accurately reflects the paper content, **do not add information not in the paper** except for personal insights
+2. Do not guess or fabricate data, rather skip quantitative analysis than summarize incorrect data
+3. Please summarize in **English**
+</Notes>
+"""
+            else:
+                # 中文 prompt (默认)
+                prompt = f"""
 你是一位深度学习和计算机科学领域的资深研究员，擅长分析和总结学术论文。请仔细阅读以下论文内容，并提供一个专业、准确、结构化的**中文**总结。
 
 <总结要求>
@@ -300,7 +333,7 @@ class PaperSummarizer:
 """
 
             modelid = "glm-z1-flash"
-            logger.trace(f"正在调用 {modelid} 生成论文总结...")
+            logger.trace(f"Calling {modelid} to generate paper summary...")
 
             response = self.client.chat.completions.create(
                 model=modelid,
@@ -321,11 +354,11 @@ class PaperSummarizer:
 
             # 解析详细总结和TL;DR部分
             parsed_summary = self._parse_summary_sections(summary)
-            logger.trace("论文总结生成完成")
+            logger.trace("Paper summary generation complete")
             return parsed_summary
 
         except Exception as e:
-            logger.trace(f"LLM 总结失败: {e}")
+            logger.trace(f"LLM summary failed: {e}")
             return f"# 错误\n\n总结生成失败: {str(e)}"
 
     def _parse_summary_sections(self, summary: str) -> str:
@@ -368,11 +401,11 @@ class PaperSummarizer:
                 return f"## TL;DR\n\n{tldr_summary}"
             else:
                 # 如果都没有提取到，返回原始内容
-                logger.trace("未能解析到详细总结和TL;DR，返回原始内容")
+                logger.trace("Failed to parse detailed summary and TL;DR, returning original content")
                 return summary
 
         except Exception as e:
-            logger.trace(f"解析总结部分失败: {e}")
+            logger.trace(f"Failed to parse summary sections: {e}")
             return summary
 
     def generate_summary(self, pid: str) -> str:
@@ -389,7 +422,7 @@ class PaperSummarizer:
             # Step 0: 预先检查是否已有解析结果
             expected_md_path = self.mineru_dir / pid / "auto" / f"{pid}.md"
             if expected_md_path.exists():
-                logger.trace(f"发现已存在的解析结果: {expected_md_path}")
+                logger.trace(f"Found existing parse result: {expected_md_path}")
                 # 直接读取 Markdown 内容
                 with open(expected_md_path, encoding="utf-8") as f:
                     markdown_content = f.read()
@@ -398,20 +431,20 @@ class PaperSummarizer:
                     # Step 3: 截取论文正文
                     main_content = self.extract_main_content(markdown_content)
                     # Step 4: 使用 LLM 生成总结
-                    logger.info(f"summaring {pid}.pdf ...")
+                    logger.info(f"Summarizing {pid}.pdf ...")
                     summary = self.summarize_with_llm(main_content)
                     return summary
                 else:
-                    logger.trace("已存在的 Markdown 文件内容为空，重新解析")
+                    logger.trace("Existing Markdown file content is empty, re-parsing")
 
             # Step 1: 下载论文 PDF
-            logger.info(f"downloading {pid}.pdf ...")
+            logger.info(f"Downloading {pid}.pdf ...")
             pdf_path = self.download_arxiv_paper(pid)
             if not pdf_path:
                 return "# 错误\n\n无法下载论文 PDF"
 
             # Step 2: 使用 minerU 解析为 Markdown
-            logger.info(f"parsing {pid}.pdf ...")
+            logger.info(f"Parsing {pid}.pdf ...")
             md_path = self.parse_pdf_with_mineru(pdf_path)
             if not md_path:
                 return "# 错误\n\n无法解析 PDF 为 Markdown"
@@ -427,14 +460,14 @@ class PaperSummarizer:
             main_content = self.extract_main_content(markdown_content)
 
             # Step 5: 使用 LLM 生成总结
-            logger.info(f"summaring {pid}.pdf ...")
+            logger.info(f"Summarizing {pid}.pdf ...")
             summary = self.summarize_with_llm(main_content)
 
             return summary
 
         except Exception as e:
-            logger.error(f"生成论文总结时发生错误: {e}")
-            return f"# 错误\n\n生成总结失败: {str(e)}"
+            logger.error(f"Error occurred while generating paper summary: {e}")
+            return f"# Error\n\nFailed to generate summary: {str(e)}"
 
 
 # 全局实例
@@ -471,12 +504,12 @@ if __name__ == "__main__":
     logger.add(sys.stderr, level="TRACE")
     if len(sys.argv) > 1:
         test_pid = sys.argv[1]
-        logger.trace(f"测试论文 ID: {test_pid}")
+        logger.trace(f"Test paper ID: {test_pid}")
         summary = generate_paper_summary(test_pid)
         logger.trace("\n" + "=" * 50)
-        logger.trace("论文总结：")
+        logger.trace("Paper summary:")
         logger.trace("=" * 50)
         logger.trace(summary)
     else:
-        logger.trace("用法: python paper_summarizer.py <论文ID>")
-        logger.trace("例如: python paper_summarizer.py 2301.00001")
+        logger.trace("Usage: python paper_summarizer.py <paper_id>")
+        logger.trace("Example: python paper_summarizer.py 2301.00001")

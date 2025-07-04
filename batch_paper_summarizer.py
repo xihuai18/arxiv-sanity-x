@@ -26,7 +26,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from aslite.db import get_metas_db, get_papers_db
-from vars import DATA_DIR, LLM_API_KEY, LLM_BASE_URL
+from vars import DATA_DIR, LLM_API_KEY, LLM_BASE_URL, LLM_SUMMARY_LANG
 
 
 def calculate_chinese_ratio(text: str) -> float:
@@ -107,21 +107,21 @@ class BatchPaperSummarizer:
 
             # 如果文件已存在，直接返回
             if pdf_path.exists():
-                logger.trace(f"PDF 文件已存在: {pdf_path}")
+                logger.trace(f"PDF file already exists: {pdf_path}")
                 return pdf_path
 
-            logger.trace(f"正在下载论文 {pid} ...")
+            logger.trace(f"Downloading paper {pid} ...")
             response = requests.get(pdf_url, stream=True, timeout=300)
             response.raise_for_status()
 
             with open(pdf_path, "wb") as f:
                 shutil.copyfileobj(response.raw, f)
 
-            logger.trace(f"论文下载完成: {pdf_path}")
+            logger.trace(f"Paper download complete: {pdf_path}")
             return pdf_path
 
         except Exception as e:
-            error_msg = f"下载论文失败 {pid}: {str(e)}"
+            error_msg = f"Failed to download paper {pid}: {str(e)}"
             logger.error(error_msg)
             # 记录详细错误信息
             self._record_failure_detail(pid, "download_failed", error_msg, e)
@@ -145,7 +145,7 @@ class BatchPaperSummarizer:
             # 检查是否已经解析过
             expected_md_path = output_dir / pdf_name / "auto" / f"{pdf_name}.md"
             if expected_md_path.exists():
-                logger.trace(f"Markdown 文件已存在: {expected_md_path}")
+                logger.trace(f"Markdown file already exists: {expected_md_path}")
                 return expected_md_path
 
             # 使用文件級別的鎖，避免同一論文的並發解析
@@ -154,21 +154,21 @@ class BatchPaperSummarizer:
             # 嘗試創建鎖文件
             try:
                 lock_file.touch(exist_ok=False)
-                logger.trace(f"獲得解析鎖: {pdf_name}")
+                logger.trace(f"Acquired parse lock: {pdf_name}")
             except FileExistsError:
                 # 鎖文件已存在，等待其他進程完成
-                logger.trace(f"等待其他進程解析 {pdf_name}...")
+                logger.trace(f"Waiting for other process to parse {pdf_name}...")
                 max_wait = 600  # 最多等待10分鐘
                 wait_time = 0
                 while lock_file.exists() and wait_time < max_wait:
                     time.sleep(5)
                     wait_time += 5
                     if expected_md_path.exists():
-                        logger.trace(f"其他進程已完成解析: {expected_md_path}")
+                        logger.trace(f"Other process finished parsing: {expected_md_path}")
                         return expected_md_path
 
                 if wait_time >= max_wait:
-                    logger.warning(f"等待解析鎖超時: {pdf_name}")
+                    logger.warning(f"Timeout waiting for parse lock: {pdf_name}")
                     # 清理可能的死鎖
                     try:
                         lock_file.unlink(missing_ok=True)
@@ -176,22 +176,22 @@ class BatchPaperSummarizer:
                         pass
 
             try:
-                logger.trace(f"開始解析 PDF: {pdf_path}")
+                logger.trace(f"Start parsing PDF: {pdf_path}")
 
                 # 构建 minerU 命令
                 cmd = ["mineru", "-p", str(pdf_path), "-o", str(output_dir), "-l", "en", "-d", "cuda", "--vram", "2"]
 
-                logger.trace(f"执行命令: {' '.join(cmd)}")
+                logger.trace(f"Executing command: {' '.join(cmd)}")
                 start_time = time.time()
 
                 # 执行命令
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
                 elapsed_time = time.time() - start_time
-                logger.trace(f"minerU 執行完成，耗時 {elapsed_time:.2f} 秒")
+                logger.trace(f"minerU execution complete, elapsed {elapsed_time:.2f} seconds")
 
                 if result.returncode != 0:
-                    error_msg = f"minerU 执行失败 (返回码: {result.returncode}): {result.stderr}"
+                    error_msg = f"minerU execution failed (return code: {result.returncode}): {result.stderr}"
                     logger.error(error_msg)
                     # 记录详细错误信息
                     self._record_failure_detail(
@@ -203,28 +203,28 @@ class BatchPaperSummarizer:
                     # minerU 解析失败时删除 PDF 文件
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"解析失败，已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
                 # 检查生成的 Markdown 文件
                 if expected_md_path.exists():
-                    logger.trace(f"PDF 解析完成: {expected_md_path}")
+                    logger.trace(f"PDF parse complete: {expected_md_path}")
 
                     # 解析完成后删除 PDF 文件以节省空间
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
 
                     # 清理除了 images 和 markdown 之外的其他文件
                     self._cleanup_mineru_output(output_dir / pdf_name)
 
                     return expected_md_path
                 else:
-                    error_msg = f"未找到生成的 Markdown 文件: {expected_md_path}"
+                    error_msg = f"Generated Markdown file not found: {expected_md_path}"
                     logger.error(error_msg)
                     # 记录详细错误信息
                     self._record_failure_detail(
@@ -233,36 +233,36 @@ class BatchPaperSummarizer:
                     # 解析失败时删除 PDF 文件
                     try:
                         pdf_path.unlink()
-                        logger.trace(f"解析失败，已删除 PDF 源文件: {pdf_path}")
+                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
-                        logger.trace(f"删除 PDF 文件失败: {e}")
+                        logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
             finally:
                 # 清理鎖文件
                 try:
                     lock_file.unlink(missing_ok=True)
-                    logger.trace(f"釋放解析鎖: {pdf_name}")
+                    logger.trace(f"Released parse lock: {pdf_name}")
                 except Exception:
                     pass
 
         except subprocess.TimeoutExpired:
-            logger.trace("minerU 执行超时")
+            logger.trace("minerU execution timeout")
             # 解析超时时删除 PDF 文件
             try:
                 pdf_path.unlink()
-                logger.trace(f"解析超时，已删除 PDF 源文件: {pdf_path}")
+                logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
             except Exception as e:
-                logger.trace(f"删除 PDF 文件失败: {e}")
+                logger.trace(f"Failed to delete PDF file: {e}")
             return None
         except Exception as e:
-            logger.trace(f"PDF 解析失败: {e}")
+            logger.trace(f"PDF parse failed: {e}")
             # 解析异常时删除 PDF 文件
             try:
                 pdf_path.unlink()
-                logger.trace(f"解析异常，已删除 PDF 源文件: {pdf_path}")
+                logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
             except Exception as e:
-                logger.trace(f"删除 PDF 文件失败: {e}")
+                logger.trace(f"Failed to delete PDF file: {e}")
             return None
 
     def _cleanup_mineru_output(self, output_path: Path):
@@ -299,15 +299,15 @@ class BatchPaperSummarizer:
                 try:
                     if item.is_dir():
                         shutil.rmtree(item, ignore_errors=True)
-                        logger.trace(f"已删除目录: {item}")
+                        logger.trace(f"Deleted directory: {item}")
                     else:
                         item.unlink(missing_ok=True)
-                        logger.trace(f"已删除文件: {item}")
+                        logger.trace(f"Deleted file: {item}")
                 except Exception as e:
-                    logger.trace(f"删除 {item} 失败: {e}")
+                    logger.trace(f"Failed to delete {item}: {e}")
 
         except Exception as e:
-            logger.trace(f"清理 minerU 输出失败: {e}")
+            logger.trace(f"Failed to clean minerU output: {e}")
 
     def extract_main_content(self, markdown_content: str) -> str:
         """
@@ -344,14 +344,14 @@ class BatchPaperSummarizer:
 
             # 如果截取后的内容太短，返回原内容
             if len(main_content.strip()) < len(markdown_content.strip()) * 0.25:
-                logger.trace("截取的正文内容过短，使用原始内容")
+                logger.trace("Extracted main content too short, using original content")
                 return markdown_content
 
-            logger.trace(f"论文内容从 {len(markdown_content)} 字符截取到 {len(main_content)} 字符")
+            logger.trace(f"Paper content truncated from {len(markdown_content)} to {len(main_content)} characters")
             return main_content
 
         except Exception as e:
-            logger.trace(f"截取正文失败: {e}")
+            logger.trace(f"Failed to extract main content: {e}")
             return markdown_content
 
     def summarize_with_llm(self, markdown_content: str) -> str:
@@ -365,8 +365,41 @@ class BatchPaperSummarizer:
             论文总结
         """
         try:
-            # 构建提示词
-            prompt = f"""
+            # 根据配置选择语言 prompt
+            if LLM_SUMMARY_LANG == "en":
+                # 英文 prompt
+                prompt = f"""
+You are a senior researcher in deep learning and computer science, skilled at analyzing and summarizing academic papers. Please carefully read the following paper content and provide a professional, accurate, and structured **English** summary.
+
+<Summary Requirements>
+1. Use academic and rigorous language, formulas are allowed
+2. Use `$…$` (inline) or `$$…$$` (block) for all formulas
+3. Each section should have specific content, avoid vague descriptions
+4. Use appropriate subheadings, lists, and emphasis to organize content
+</Summary Requirements>
+
+<Paper Content>
+{markdown_content}
+</Paper Content>
+
+Output should contain two parts, detailed summary and TL;DR, in the following format:
+<Output Format>
+## Detailed Paper Summary
+Your detailed summary of this paper
+
+## TL;DR
+Your brief summary of this paper
+</Output Format>
+
+<Notes>
+1. Ensure the summary accurately reflects the paper content, **do not add information not in the paper** except for personal insights
+2. Do not guess or fabricate data, rather skip quantitative analysis than summarize incorrect data
+3. Please summarize in **English**
+</Notes>
+"""
+            else:
+                # 中文 prompt (默认)
+                prompt = f"""
 你是一位深度学习和计算机科学领域的资深研究员，擅长分析和总结学术论文。请仔细阅读以下论文内容，并提供一个专业、准确、结构化的**中文**总结。
 
 <总结要求>
@@ -397,7 +430,7 @@ class BatchPaperSummarizer:
 """
 
             modelid = "glm-z1-flash"
-            logger.trace(f"正在调用 {modelid} 生成论文总结...")
+            logger.trace(f"Calling {modelid} to generate paper summary...")
 
             response = self.client.chat.completions.create(
                 model=modelid,
@@ -417,11 +450,11 @@ class BatchPaperSummarizer:
 
             # 解析详细总结和TL;DR部分
             parsed_summary = self._parse_summary_sections(summary)
-            logger.trace("论文总结生成完成")
+            logger.trace("Paper summary generation complete")
             return parsed_summary
 
         except Exception as e:
-            logger.trace(f"LLM 总结失败: {e}")
+            logger.trace(f"LLM summary failed: {e}")
             return f"# 错误\n\n总结生成失败: {str(e)}"
 
     def _parse_summary_sections(self, summary: str) -> str:
@@ -464,11 +497,11 @@ class BatchPaperSummarizer:
                 return f"## TL;DR\n\n{tldr_summary}"
             else:
                 # 如果都没有提取到，返回原始内容
-                logger.trace("未能解析到详细总结和TL;DR，返回原始内容")
+                logger.trace("Failed to parse detailed summary and TL;DR, returning original content")
                 return summary
 
         except Exception as e:
-            logger.trace(f"解析总结部分失败: {e}")
+            logger.trace(f"Failed to parse summary sections: {e}")
             return summary
 
     def generate_summary(self, pid: str) -> str:
@@ -485,7 +518,7 @@ class BatchPaperSummarizer:
             # Step 0: 预先检查是否已有解析结果
             expected_md_path = self.mineru_dir / pid / "auto" / f"{pid}.md"
             if expected_md_path.exists():
-                logger.trace(f"发现已存在的解析结果: {expected_md_path}")
+                logger.trace(f"Found existing parse result: {expected_md_path}")
                 # 直接读取 Markdown 内容
                 with open(expected_md_path, encoding="utf-8") as f:
                     markdown_content = f.read()
@@ -498,7 +531,7 @@ class BatchPaperSummarizer:
                     summary = self.summarize_with_llm(main_content)
                     return summary
                 else:
-                    logger.trace("已存在的 Markdown 文件内容为空，重新解析")
+                    logger.trace("Existing Markdown file content is empty, re-parsing")
 
             # Step 1: 下载论文 PDF
             logger.trace(f"downloading {pid}.pdf ...")
@@ -529,8 +562,8 @@ class BatchPaperSummarizer:
             return summary
 
         except Exception as e:
-            logger.error(f"生成论文总结时发生错误: {e}")
-            return f"# 错误\n\n生成总结失败: {str(e)}"
+            logger.error(f"Error occurred while generating paper summary: {e}")
+            return f"# Error\n\nFailed to generate summary: {str(e)}"
 
 
 class BatchProcessor:
@@ -608,7 +641,7 @@ class BatchProcessor:
         Returns:
             List[Tuple[str, Dict]]: 論文 ID 和元數據的列表，按時間倒序排列
         """
-        logger.info(f"正在獲取最新的 {n} 篇論文...")
+        logger.info(f"Fetching the latest {n} papers...")
 
         # 獲取所有論文的元數據
         with get_metas_db() as metas_db:
@@ -620,13 +653,13 @@ class BatchProcessor:
                     pbar.update(1)
 
         # 按時間倒序排序（最新的在前）
-        logger.info("正在排序論文...")
+        logger.info("Sorting papers...")
         sorted_papers = sorted(metas.items(), key=lambda kv: kv[1]["_time"], reverse=True)
 
         # 取前 n 篇
         latest_papers = sorted_papers[:n]
 
-        logger.info(f"成功獲取 {len(latest_papers)} 篇最新論文")
+        logger.info(f"Successfully fetched {len(latest_papers)} latest papers")
 
         return latest_papers
 
@@ -661,22 +694,22 @@ class BatchProcessor:
             if not summary_content.startswith("# 錯誤") and not summary_content.startswith("# 错误"):
                 # Check Chinese ratio before caching
                 chinese_ratio = calculate_chinese_ratio(summary_content)
-                logger.trace(f"论文 {pid} 总结中文占比: {chinese_ratio:.2%}")
+                logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
 
                 if chinese_ratio >= 0.25:
                     with open(cache_file, "w", encoding="utf-8") as f:
                         f.write(summary_content)
-                    logger.debug(f"摘要已緩存到: {cache_file} (中文占比: {chinese_ratio:.2%})")
+                    logger.debug(f"Summary cached to: {cache_file} (Chinese ratio: {chinese_ratio:.2%})")
                     return True
                 else:
-                    logger.warning(f"摘要中文占比過低 ({chinese_ratio:.2%} < 50%)，不進行緩存: {pid}")
+                    logger.warning(f"Chinese ratio too low in summary ({chinese_ratio:.2%} < 50%), not caching: {pid}")
                     return False
             else:
-                logger.warning(f"摘要生成失敗，不進行緩存: {pid}")
+                logger.warning(f"Summary generation failed, not caching: {pid}")
                 return False
 
         except Exception as e:
-            logger.error(f"緩存摘要失敗 {pid}: {e}")
+            logger.error(f"Failed to cache summary {pid}: {e}")
             return False
 
     def process_single_paper(self, pid: str, paper_info: Dict, skip_cached: bool = True) -> Tuple[str, bool, str]:
@@ -694,7 +727,7 @@ class BatchProcessor:
         try:
             # 檢查是否已緩存
             if skip_cached and self.is_summary_cached(pid):
-                logger.trace(f"跳過已緩存的論文: {pid}")
+                logger.trace(f"Skipped cached paper: {pid}")
                 with self.stats_lock:
                     self.stats["cached"] += 1
                 return pid, True, "已緩存"
@@ -703,9 +736,9 @@ class BatchProcessor:
             title = paper_info.get("title", "未知標題")
             authors = ", ".join(a.get("name", "") for a in paper_info.get("authors", []))
 
-            logger.trace(f"開始處理論文: {pid}")
-            logger.trace(f"標題: {title}")
-            logger.debug(f"作者: {authors}")
+            logger.trace(f"Start processing paper: {pid}")
+            logger.trace(f"Title: {title}")
+            logger.debug(f"Authors: {authors}")
 
             # 為每個線程創建獨立的 BatchPaperSummarizer 實例，傳入processor用於錯誤記錄
             summarizer = BatchPaperSummarizer(processor=self)
@@ -717,7 +750,7 @@ class BatchProcessor:
 
             # 檢查是否成功生成摘要
             if summary_content.startswith("# 錯誤") or summary_content.startswith("# 错误"):
-                logger.error(f"摘要生成失敗: {pid}")
+                logger.error(f"Summary generation failed: {pid}")
                 with self.stats_lock:
                     self.stats["failed"] += 1
                 return pid, False, summary_content
@@ -726,12 +759,12 @@ class BatchProcessor:
             cache_success = self.cache_summary(pid, summary_content)
 
             if cache_success:
-                logger.success(f"論文處理成功: {pid} (耗時: {end_time - start_time:.2f}秒)")
+                logger.success(f"Paper processed successfully: {pid} (elapsed: {end_time - start_time:.2f}s)")
                 with self.stats_lock:
                     self.stats["success"] += 1
                 return pid, True, summary_content
             else:
-                logger.error(f"摘要緩存失敗: {pid}")
+                logger.error(f"Summary cache failed: {pid}")
                 with self.stats_lock:
                     # 区分缓存失败的原因
                     chinese_ratio = calculate_chinese_ratio(summary_content)
@@ -742,7 +775,7 @@ class BatchProcessor:
                 return pid, False, "緩存失敗"
 
         except Exception as e:
-            logger.error(f"處理論文時發生錯誤 {pid}: {e}")
+            logger.error(f"Error occurred while processing paper {pid}: {e}")
             with self.stats_lock:
                 self.stats["failed"] += 1
             return pid, False, str(e)
@@ -773,7 +806,7 @@ class BatchProcessor:
         self.stats["total"] = len(papers)
 
         if dry_run:
-            logger.info("=== 乾運行模式 - 僅顯示論文信息 ===")
+            logger.info("=== Dry run mode - only displaying paper info ===")
 
             # 使用進度條顯示論文信息
             with tqdm(papers, desc="檢查論文", unit="篇", leave=True) as pbar:
@@ -787,19 +820,19 @@ class BatchProcessor:
                     pbar.set_postfix_str(f"{pid} ({cached_status})")
 
                     if logger.level("TRACE").no <= logger._core.min_level:
-                        logger.trace(f"標題: {title}")
-                        logger.trace(f"作者: {authors}")
-                        logger.trace(f"時間: {time_str}")
-                        logger.trace(f"狀態: {cached_status}")
+                        logger.trace(f"Title: {title}")
+                        logger.trace(f"Authors: {authors}")
+                        logger.trace(f"Time: {time_str}")
+                        logger.trace(f"Status: {cached_status}")
                         logger.trace("-" * 80)
 
             return self.stats
 
         # 實際處理模式
-        logger.trace(f"=== 開始批量處理 {len(papers)} 篇論文 ===")
-        logger.trace(f"最大工作線程數: {self.max_workers}")
-        logger.trace(f"跳過已緩存: {'是' if skip_cached else '否'}")
-        logger.trace(f"最大重試次數: {max_retries}")
+        logger.trace(f"=== Start batch processing {len(papers)} papers ===")
+        logger.trace(f"Max worker threads: {self.max_workers}")
+        logger.trace(f"Skip cached: {'yes' if skip_cached else 'no'}")
+        logger.trace(f"Max retries: {max_retries}")
 
         start_time = time.time()
 
@@ -812,10 +845,10 @@ class BatchProcessor:
             processing_queue = []
 
             if round_num > 1:
-                logger.info(f"=== 第 {round_num} 輪處理 (重試) ===")
-                logger.info(f"重試論文數量: {len(current_round_papers)}")
+                logger.info(f"=== Round {round_num} processing (retry) ===")
+                logger.info(f"Number of papers to retry: {len(current_round_papers)}")
             else:
-                logger.info(f"=== 開始第 {round_num} 輪處理 ===")
+                logger.info(f"=== Starting round {round_num} processing ===")
 
             # 創建進度條
             desc = f"第{round_num}輪處理" if round_num > 1 else "處理論文"
@@ -856,14 +889,16 @@ class BatchProcessor:
                         if not success and message != "已緩存":
                             # 處理失敗，檢查是否需要重試
                             if retry_count < max_retries:
-                                logger.warning(f"處理失敗，將重試 ({retry_count + 1}/{max_retries}): {result_pid}")
+                                logger.warning(
+                                    f"Processing failed, will retry ({retry_count + 1}/{max_retries}): {result_pid}"
+                                )
                                 processing_queue.append((pid, meta, retry_count + 1))
                             else:
-                                logger.error(f"處理失敗，已達最大重試次數: {result_pid} - {message}")
+                                logger.error(f"Processing failed, reached max retries: {result_pid} - {message}")
                                 # 最終失敗統計已在 process_single_paper 中更新
 
                     except Exception as e:
-                        logger.error(f"任務執行異常 {pid}: {e}")
+                        logger.error(f"Task execution exception {pid}: {e}")
                         # 更新計數器和進度條
                         round_failed += 1
                         pbar.set_postfix_str(f"✓{round_success} ✗{round_failed} | ✗ {pid} (異常)")
@@ -871,10 +906,10 @@ class BatchProcessor:
 
                         # 異常也需要重試
                         if retry_count < max_retries:
-                            logger.warning(f"任務異常，將重試 ({retry_count + 1}/{max_retries}): {pid}")
+                            logger.warning(f"Task exception, will retry ({retry_count + 1}/{max_retries}): {pid}")
                             processing_queue.append((pid, meta, retry_count + 1))
                         else:
-                            logger.error(f"任務異常，已達最大重試次數: {pid}")
+                            logger.error(f"Task exception, reached max retries: {pid}")
                             with self.stats_lock:
                                 self.stats["failed"] += 1
 
@@ -885,7 +920,7 @@ class BatchProcessor:
 
             # 避免無限重試
             if round_num > max_retries + 1:
-                logger.warning("已達最大重試輪數，停止處理")
+                logger.warning("Reached max retry rounds, stopping processing")
                 break
 
         end_time = time.time()
@@ -899,24 +934,24 @@ class BatchProcessor:
     def print_final_stats(self, total_time: float):
         """打印最終統計信息"""
         logger.success("=" * 60)
-        logger.success("處理完成！統計信息:")
-        logger.success(f"總論文數量: {self.stats['total']}")
-        logger.success(f"成功處理: {self.stats['success']}")
-        logger.success(f"處理失敗: {self.stats['failed']}")
-        logger.success(f"已緩存跳過: {self.stats['cached']}")
-        logger.success(f"中文占比過低: {self.stats['low_chinese']}")
-        logger.success(f"總耗時: {total_time:.2f} 秒")
+        logger.success("Processing complete! Statistics:")
+        logger.success(f"Total papers: {self.stats['total']}")
+        logger.success(f"Successfully processed: {self.stats['success']}")
+        logger.success(f"Failed: {self.stats['failed']}")
+        logger.success(f"Skipped cached: {self.stats['cached']}")
+        logger.success(f"Low Chinese ratio: {self.stats['low_chinese']}")
+        logger.success(f"Total time: {total_time:.2f} s")
 
         processed_count = self.stats["success"] + self.stats["failed"]
         if processed_count > 0:
             avg_time = total_time / processed_count
-            logger.success(f"平均處理時間: {avg_time:.2f} 秒/篇")
+            logger.success(f"Average processing time: {avg_time:.2f} s/paper")
 
         if self.stats["total"] > 0:
             success_rate = (self.stats["success"] / self.stats["total"]) * 100
-            logger.success(f"成功率: {success_rate:.1f}%")
+            logger.success(f"Success rate: {success_rate:.1f}%")
 
-        logger.success(f"摘要已保存到: {self.cache_dir}")
+        logger.success(f"Summaries saved to: {self.cache_dir}")
         logger.success("=" * 60)
 
 
@@ -941,17 +976,19 @@ def main():
 
     # 參數驗證
     if args.workers > 8:
-        logger.warning("工作線程數過多可能導致 GPU 記憶體不足或資源競爭，建議不超過 8")
+        logger.warning(
+            "Too many worker threads may cause GPU memory shortage or resource contention, recommended not to exceed 8"
+        )
     elif args.workers < 1:
-        logger.error("工作線程數必須至少為 1")
+        logger.error("Number of worker threads must be at least 1")
         sys.exit(1)
 
     if args.num_papers <= 0:
-        logger.error("論文數量必須大於 0")
+        logger.error("Number of papers must be greater than 0")
         sys.exit(1)
 
     if args.max_retries < 0:
-        logger.error("重試次數不能為負數")
+        logger.error("Retry count cannot be negative")
         sys.exit(1)
 
     try:
@@ -962,7 +999,7 @@ def main():
         latest_papers = processor.get_latest_papers(args.num_papers)
 
         if not latest_papers:
-            logger.warning("沒有找到任何論文")
+            logger.warning("No papers found")
             return
 
         # 批量處理
@@ -973,14 +1010,14 @@ def main():
 
         # 返回適當的退出碼
         if not args.dry_run and results["failed"] > 0:
-            logger.warning("部分論文處理失敗")
+            logger.warning("Some papers failed to process")
             sys.exit(1)
 
     except KeyboardInterrupt:
-        logger.warning("用戶中斷程序")
+        logger.warning("User interrupted the program")
         sys.exit(130)
     except Exception as e:
-        logger.error(f"程序執行過程中發生錯誤: {e}")
+        logger.error(f"Error occurred during program execution: {e}")
         sys.exit(1)
 
 

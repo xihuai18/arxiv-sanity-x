@@ -8,7 +8,7 @@ from loguru import logger
 
 def gen_summary():
     logger.info("generate summary")
-    subprocess.call(["python", "batch_paper_summarizer.py", "-n", "2000", "-w", "2"])
+    subprocess.call(["python", "batch_paper_summarizer.py", "-n", "500", "-w", "2"])
 
 
 def fetch_compute():
