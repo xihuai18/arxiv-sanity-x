@@ -1,64 +1,62 @@
-
 # arxiv-sanity-X
 
 [中文](README_CN.md) | [English](README.md)
 
-Enhanced arXiv paper recommendation system with AI-powered summarization, semantic search, and intelligent personalized recommendations built on hybrid ML features.
+A comprehensive arXiv paper browsing and recommendation system featuring AI-powered summarization, hybrid search capabilities, and personalized recommendations. Built with modern ML techniques including TF-IDF, semantic embeddings, and LLM integration.
 
 ![Screenshot](arxiv-sanity-x.png)
 
-## 🚀 Key Features
+## 🚀 Core Features
 
-- **🤖 AI Paper Summarization**: Complete pipeline with minerU PDF parsing, LLM generation, and intelligent caching
-- **🔍 Advanced Search**: Keyword, semantic, and hybrid search modes with configurable weights
-- **🎯 Smart Recommendations**: Hybrid TF-IDF + embedding features with dynamic SVM classifiers
-- **🏷️ Tag Management**: Individual/combined tags with AND/OR logic and keyword monitoring
-- **📧 Email Service**: Automated daily recommendations with personalized HTML templates
-- **⚡ Performance**: Multi-core processing, Intel extensions, incremental updates, vLLM integration
-- **🔗 API & Web**: RESTful APIs, responsive web interface, async loading summaries
-- **🔄 Automation**: Built-in scheduler for fetching, computing, emailing, and backup
+- **🤖 AI Paper Summarization**: Complete processing pipeline with `minerU` PDF parsing, LLM summarization, and intelligent caching system
+- **🔍 Advanced Search Engine**: Keyword, semantic, and hybrid search modes with configurable weights and intelligent time filtering
+- **🎯 Smart Recommendations**: Hybrid TF-IDF + embedding features with dynamic SVM classifiers trained on user preferences
+- **🏷️ Flexible Organization**: Personal tags, combined tags, keyword tracking with AND/OR logic operations
+- **📧 Email Intelligence**: Automated daily recommendations with personalized HTML templates and holiday-aware scheduling
+- **⚡ High Performance**: Multi-core processing, Intel extensions, incremental updates, vLLM integration, and smart caching
+- **🔗 Modern Architecture**: RESTful APIs, responsive web interface, async summary loading, and comprehensive error handling
+- **🔄 Full Automation**: Built-in scheduler managing fetch→compute→summarize→email pipeline with intelligent resource management
 
-
-##  Changelog
+## 📈 Changelog
 
 ### v2.3 - AI Paper Summarization
 - ✨ **New**: Complete AI-powered paper summarization system with [`paper_summarizer.py`](paper_summarizer.py)
-- 🧠 **MinerU Integration**: Advanced PDF parsing with minerU for better text extraction
+- 🧠 **MinerU Integration**: Advanced PDF parsing with minerU for better text extraction and structure recognition
 - 📝 **Summary Interface**: New `/summary` route with async loading and markdown rendering
-- 🔧 **Batch Processing**: [`batch_paper_summarizer.py`](batch_paper_summarizer.py) for parallel summary generation
-- ⚡ **Smart Caching**: Intelligent summary caching with Chinese text ratio validation
+- 🔧 **Batch Processing**: [`batch_paper_summarizer.py`](batch_paper_summarizer.py) for parallel summary generation with thread safety
+- ⚡ **Smart Caching**: Intelligent summary caching with Chinese text ratio validation and quality control
 - 🎨 **Enhanced UI**: New summary page design with MathJax support for mathematical formulas
 - 📊 **Configuration**: Added LLM API configuration in [`vars_template.py`](vars_template.py)
 - 🔄 **Auto Generation**: [`generate_latest_summaries.py`](generate_latest_summaries.py) for automated batch processing
 
 ### v2.2 - Performance & Stability Improvements
-- ⚡ **Performance**: Enhanced data caching system with intelligent auto-reload
-- 🔧 **Optimized Embedding**: Streamlined embedding generation pipeline in [`compute.py`](compute.py)
+- ⚡ **Performance**: Enhanced unified data caching system with intelligent auto-reload and file change detection
+- 🔧 **Optimized Embedding**: Streamlined embedding generation pipeline with incremental updates in [`compute.py`](compute.py)
 - 📈 **Scheduler Enhancement**: Increased fetch frequency from daily to 4x daily (6AM, 11AM, 4PM, 9PM)
 - 🛠️ **Bug Fixes**: Fixed email recommendation system edge cases and empty result handling
 - 🧠 **Smart Caching**: Unified papers and metas data caching with automatic file change detection
-- 📊 **API Improvements**: Enhanced tag search API with better error handling and logging
-- 🚀 **Memory Optimization**: Reduced memory footprint and improved query performance
+- 📊 **API Improvements**: Enhanced tag search API with better error handling and comprehensive logging
+- 🚀 **Memory Optimization**: Reduced memory footprint and improved query performance for large datasets
 
 ### v2.1 - API & Semantic Search
 - ✨ **New**: Semantic search with keyword, semantic, and hybrid modes
-- 🔗 **API Integration**: RESTful API endpoints for recommendations
-- 🚀 **VLLM Support**: High-performance model serving with vLLM
-- 🎯 **Enhanced Search**: Configurable semantic weights for hybrid search
-- 🔧 **Refactored Architecture**: API client implementation for embedding models
+- 🔗 **API Integration**: RESTful API endpoints for recommendations and paper summaries
+- 🚀 **VLLM Support**: High-performance model serving with vLLM for embedding generation
+- 🎯 **Enhanced Search**: Configurable semantic weights for hybrid search (0.0-1.0)
+- 🔧 **Refactored Architecture**: API client implementation for embedding models with proper error handling
 
 ### v2.0 - Enhanced ML Features
-- ✨ **New**: Hybrid TF-IDF + embedding vector features
-- ⚡ **Performance**: Multi-core optimization and Intel extensions
-- 🧠 **Smart Caching**: Intelligent feature cache management
-- 📈 **Incremental Processing**: Efficient embedding generation
-- 🎯 **Improved Algorithms**: Enhanced recommendation accuracy
-- 🔧 **Better Error Handling**: Comprehensive logging and debugging
+- ✨ **New**: Hybrid TF-IDF + embedding vector features with sparse-dense matrix concatenation
+- ⚡ **Performance**: Multi-core optimization and Intel scikit-learn extensions
+- 🧠 **Smart Caching**: Intelligent feature cache management with automatic reload detection
+- 📈 **Incremental Processing**: Efficient embedding generation with incremental updates
+- 🎯 **Improved Algorithms**: Enhanced recommendation accuracy with hybrid feature approach
+- 🔧 **Better Error Handling**: Comprehensive logging and debugging capabilities
 
 ### v1.0 - Foundation
-- 📚 arXiv paper fetching and storage
-- 🏷️ User tagging and keyword systems
-- 📧 Email recommendation service
+- 📚 arXiv paper fetching and storage with SQLite database
+- 🏷️ User tagging and keyword systems with flexible organization
+- 📧 Email recommendation service with HTML templates
 - 🌐 Web interface and search functionality
 - 🤖 SVM-based paper recommendations
 
@@ -74,10 +72,11 @@ Enhanced arXiv paper recommendation system with AI-powered summarization, semant
 ## 🛠 Installation & Setup
 
 ### System Requirements
-- Python 3.8 - 3.11
-- Recommended: SSD storage for database performance
-- Memory: 8GB+ recommended for large datasets
-- Optional: CUDA-capable GPU for embedding models
+- **Python**: 3.8 - 3.11
+- **Storage**: SSD recommended for database performance (handles 400k+ papers efficiently)
+- **Memory**: 8GB+ recommended (16GB+ for optimal performance with large feature matrices)
+- **GPU**: Optional CUDA-capable GPU for embedding models and minerU PDF parsing
+- **Network**: Stable internet for arXiv API, LLM API calls, and email services
 
 ### Quick Installation
 
@@ -110,10 +109,10 @@ print(secrets.token_urlsafe(16))
 
 3. **Initialize Database**
 ```bash
-# Fetch initial paper data
+# Fetch initial paper data (CS categories: AI, ML, CL, etc.)
 python arxiv_daemon.py -n 50000 -m 1000
 
-# Compute feature vectors
+# Compute hybrid feature vectors (TF-IDF + embeddings)
 python compute.py --num 50000 --embed_dim 512
 
 # Start web service
@@ -177,29 +176,33 @@ arxiv-sanity-X/
 ├── paper_summarizer.py         # AI paper summarization module
 ├── batch_paper_summarizer.py   # Batch processing for paper summaries
 ├── generate_latest_summaries.py # Auto-generate summaries for latest papers
+├── thumb_daemon.py             # Paper thumbnail generation
 ├── vllm_serve.sh               # vLLM model server startup script
 ├── aslite/                     # Core library
-│   ├── db.py                  # Database operations
+│   ├── db.py                  # Database operations (SQLite + compression)
 │   └── arxiv.py               # arXiv API interface
 ├── templates/                  # HTML templates
+│   ├── main.html              # Main interface template
 │   └── summary.html           # Paper summary page template
 ├── static/                     # Static web assets
+│   ├── paper_list.js          # Main interface JavaScript
 │   └── paper_summary.js       # Summary page JavaScript
 └── data/                       # Data storage
-    ├── papers.db              # Paper database
-    ├── features.pkl           # Feature cache
-    ├── dict.db                # User data
+    ├── papers.db              # Paper database (SQLite)
+    ├── features.p             # Feature cache (pickle)
+    ├── dict.db                # User data (SQLite)
     ├── pdfs/                  # Downloaded PDF files
     ├── mineru/                # MinerU parsed content
     └── summary/               # Cached paper summaries
 ```
 
 ### Data Flow Pipeline
-1. **Data Ingestion**: [`arxiv_daemon.py`](arxiv_daemon.py) fetches papers from arXiv API
-2. **Feature Processing**: [`compute.py`](compute.py) generates TF-IDF and embedding features
-3. **AI Summarization**: [`paper_summarizer.py`](paper_summarizer.py) processes papers with minerU and LLM
-4. **Web Service**: [`serve.py`](serve.py) provides user interface, recommendations, and summary display
-5. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations
+1. **Data Ingestion**: [`arxiv_daemon.py`](arxiv_daemon.py) fetches papers from arXiv API (4x daily: 6AM, 11AM, 4PM, 9PM)
+2. **Feature Processing**: [`compute.py`](compute.py) generates hybrid TF-IDF + embedding features with incremental updates
+3. **AI Summarization**: [`paper_summarizer.py`](paper_summarizer.py) downloads PDFs → minerU parsing → LLM summarization
+4. **Web Service**: [`serve.py`](serve.py) provides responsive UI, hybrid search, recommendations, and async summary loading
+5. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations with holiday-aware scheduling
+6. **Automation**: [`daemon.py`](daemon.py) orchestrates the entire pipeline with intelligent resource management
 
 ### Automated Scheduling
 
@@ -210,36 +213,54 @@ python daemon.py
 
 **Manual Cron Setup:**
 ```cron
-# Fetch and compute features (weekdays 4 PM)
-0 16 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 5000 && python compute.py
+# Fetch and compute features (weekdays 4x daily)
+0 6,11,16,21 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 5000 && python compute.py
 
 # Send email recommendations (weekdays 6 PM)
 0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python send_emails.py -t 1.5
 
-# Backup user data (daily 7 PM)
-0 19 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
+# Generate paper summaries (daily 7 PM)
+0 19 * * * cd /path/to/arxiv-sanity-x && python generate_latest_summaries.py --num_papers 100
+
+# Backup user data (daily 10 PM)
+0 22 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
 ```
 
 ## 📖 Usage Guide
 
 ### User Interface Features
 
-- **Account Setup**: Login required, configure email in profile for recommendations
-- **Search Modes**: Keyword, semantic, hybrid, tag-based, time-filtered, and similarity search
-- **Organization**: Personal tags, combined tags, keyword tracking, tag management
-- **AI Summaries**: Click "Summary" link for LLM-generated summaries with MathJax support
+- **Account System**: User authentication with profile management and email configuration
+- **Advanced Search**: 
+  - **Keyword Search**: Traditional text-based search with TF-IDF scoring
+  - **Semantic Search**: AI-powered similarity search using embedding vectors  
+  - **Hybrid Search**: Combines keyword + semantic with adjustable weights (0.0-1.0)
+  - **Tag-based**: SVM recommendations trained on your personal tags
+  - **Time Filtering**: Smart filtering that preserves tagged papers even outside time window
+- **Organization Tools**: 
+  - **Personal Tags**: Individual paper tagging with AND/OR logic
+  - **Combined Tags**: Multi-tag categories (e.g., "RL,NLP") for complex topics
+  - **Keywords**: Track specific terms across all papers
+- **AI Paper Summaries**: 
+  - Click "Summary" for LLM-generated summaries
+  - MathJax rendering for LaTeX formulas
+  - Async loading with progress indicators
+  - Cached for performance
 
-### Email Recommendations
-Configure email in profile for daily tag-based recommendations and keyword alerts.
+### Email Intelligence
+- **Daily Recommendations**: Personalized paper suggestions based on your tags
+- **Keyword Alerts**: Notifications when papers matching your keywords appear
+- **Holiday Awareness**: Adjusts recommendation frequency during holidays
+- **HTML Templates**: Rich email formatting with direct links to papers
 
 ## 🤖 AI Paper Summarization
 
 ### Complete AI Pipeline
-1. **PDF Download**: Automatic arXiv paper fetching
-2. **minerU Parsing**: Advanced PDF text extraction with structure recognition
+1. **PDF Download**: Automatic arXiv paper fetching with error handling
+2. **minerU Parsing**: Advanced PDF text extraction with structure recognition and image handling
 3. **LLM Processing**: Generate comprehensive summaries using GLM-4-Flash or compatible models
 4. **Quality Control**: Chinese text ratio validation and content filtering
-5. **Smart Caching**: Intelligent caching with automatic quality checks
+5. **Smart Caching**: Intelligent caching with automatic quality checks and storage optimization
 
 ### Usage Commands
 ```bash
@@ -264,11 +285,12 @@ LLM_API_KEY = "your_api_key_here"
 ```
 
 ### Features
-- **MathJax Support**: Full LaTeX math formula rendering
-- **Markdown Output**: Rich formatting with headers, lists, code blocks
-- **Async Loading**: Non-blocking web interface with progress indicators
-- **Error Recovery**: Automatic retry with detailed failure logging
-- **Thread Safety**: Concurrent processing with minerU lock management
+- **MathJax Support**: Full LaTeX math formula rendering in web interface
+- **Markdown Output**: Rich formatting with headers, lists, code blocks, and mathematical expressions
+- **Async Loading**: Non-blocking web interface with progress indicators and real-time updates
+- **Error Recovery**: Automatic retry with detailed failure logging and graceful degradation
+- **Thread Safety**: Concurrent processing with minerU lock management to prevent conflicts
+- **Storage Optimization**: Automatic cleanup of intermediate files and intelligent caching
 
 ## 🔧 Advanced Features
 
@@ -278,47 +300,78 @@ LLM_API_KEY = "your_api_key_here"
 huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
 bash vllm_serve.sh
 
-# Enable embedding computation
-python compute.py --embed_model ./qwen3-embed-0.6B
+# Enable embedding computation with API client
+python compute.py --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
 ```
 
-Features: Multi-core processing, Intel extensions, intelligent caching, incremental updates.
+Features: 
+- Multi-core processing optimization
+- Intel scikit-learn extensions for performance
+- Intelligent feature caching with automatic reload
+- Incremental embedding generation
+- Sparse-dense matrix concatenation for hybrid features
+
+### Performance Optimization
+- **Database**: Compressed SQLite storage with intelligent caching
+- **Features**: Hybrid sparse TF-IDF + dense embeddings with L2 normalization
+- **Memory**: Optimized for large datasets (400k+ papers) with streaming processing
+- **Compute**: Multi-threading with configurable worker pools and batch processing
 
 ## 📚 API Reference
 
 ### Core Endpoints
 
 #### Search & Recommendations
-- `GET /?rank=search&q=<query>` - Keyword search
-- `GET /?rank=search&q=<query>&search_type=semantic` - Semantic search
-- `GET /?rank=search&q=<query>&search_type=hybrid&semantic_weight=<weight>` - Hybrid search
-- `GET /?rank=tags&tags=<tag_list>` - Tag-based recommendations
-- `GET /?rank=time&time_filter=<days>` - Time-filtered papers
-- `GET /?rank=pid&pid=<paper_id>` - Similar papers
+- `GET /?rank=search&q=<query>` - Keyword search with TF-IDF scoring
+- `GET /?rank=search&q=<query>&search_mode=semantic` - Semantic search using embeddings
+- `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=<weight>` - Hybrid search with configurable weights
+- `GET /?rank=tags&tags=<tag_list>&logic=<and|or>` - Tag-based SVM recommendations
+- `GET /?rank=time&time_filter=<days>` - Time-filtered papers with smart tag preservation
+- `GET /?rank=pid&pid=<paper_id>` - Similar papers using nearest neighbor search
 
 #### API Endpoints
-- `GET /api/recommend/keywords/<keyword>` - Get keyword-based recommendations
-- `GET /api/recommend/tags/<tag_list>` - Get tag-based recommendations via API
+- `POST /api/keyword_search` - Keyword-based search via API
+- `POST /api/tag_search` - Single tag recommendations  
+- `POST /api/tags_search` - Multi-tag recommendations with logic operations
 - `POST /api/get_paper_summary` - Get AI-generated paper summary (JSON: `{"pid": "paper_id"}`)
 
 #### Paper Summarization
-- `GET /summary?pid=<paper_id>` - View AI-generated paper summary with async loading
+- `GET /summary?pid=<paper_id>` - View AI-generated paper summary with async loading and MathJax
 
 #### Tag Management
 - `GET /add/<pid>/<tag>` - Add tag to paper
 - `GET /sub/<pid>/<tag>` - Remove tag from paper
-- `GET /del/<tag>` - Delete tag
-- `GET /rename/<old_tag>/<new_tag>` - Rename tag
+- `GET /del/<tag>` - Delete tag (with confirmation)
+- `GET /rename/<old_tag>/<new_tag>` - Rename tag across all papers
 
 #### Keyword Management
 - `GET /add_key/<keyword>` - Add keyword for tracking
-- `GET /del_key/<keyword>` - Remove keyword
+- `GET /del_key/<keyword>` - Remove keyword from tracking
 
 #### System Information
-- `GET /stats` - System statistics
-- `GET /cache_status` - Cache status (authenticated users only)
+- `GET /stats` - System statistics and database info
+- `GET /cache_status` - Cache status and performance metrics (authenticated users only)
 
 ### SVM Parameters & Optimization
-- **SVM**: C=0.02 (regularization), logic modes: `and`/`or`, time filtering
-- **Performance**: SSD storage, 16GB+ RAM, Intel extensions, proper batch sizes
-- **Monitoring**: `/stats` and `/cache_status` endpoints
+- **SVM Configuration**: C=0.02 (regularization), balanced class weights, LinearSVC for speed
+- **Logic Modes**: `and` (weighted combination) / `or` (union) for multi-tag queries
+- **Performance Tuning**: SSD storage, 16GB+ RAM, Intel extensions, proper batch sizes
+- **Monitoring**: Real-time cache statistics and performance monitoring via `/cache_status`
+
+### Search Modes
+- **Keyword**: Traditional TF-IDF with multi-core parallel processing
+- **Semantic**: Cosine similarity using pre-computed embeddings
+- **Hybrid**: Weighted combination with normalization and configurable semantic weight (0.0-1.0)
+
+---
+
+## 📝 License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🤝 Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## ⭐ Acknowledgments
+- Original [arxiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) by Andrej Karpathy
+- [minerU](https://github.com/opendatalab/MinerU) for advanced PDF parsing
+- [vLLM](https://github.com/vllm-project/vllm) for high-performance model serving
