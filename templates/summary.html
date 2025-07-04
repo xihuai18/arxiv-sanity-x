@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block variables %}
+<script>
+var paper = {{ paper | tojson }};
+var pid = {{ pid | tojson }};
+</script>
+{% endblock %}
+
+{% block content %}
+<div id="wrap">
+    <div class="loading-placeholder">
+        <h2>Loading Summary...</h2>
+        <p>Please wait while we generate the paper summary.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block elements %}
+<script src="{{ url_for('static', filename='paper_summary.js') }}"></script>
+{% endblock %}

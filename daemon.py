@@ -6,10 +6,16 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
 
 
+def gen_summary():
+    logger.info("generate summary")
+    subprocess.call(["python", "batch_paper_summarizer.py", "-n", "2000", "-w", "2"])
+
+
 def fetch_compute():
     logger.info("featch and compute")
     subprocess.call(["python", "arxiv_daemon.py", "-n", "5000", "-m", "1000"])
     subprocess.call(["python", "compute.py"])
+    gen_summary()
 
 
 def send_email():
