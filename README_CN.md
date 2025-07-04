@@ -1,35 +1,31 @@
 # arxiv-sanity-X
 
-基于 [arXiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) 构建的强大 arXiv 论文推荐系统，通过先进的机器学习技术、个性化推荐系统和自动化研究跟踪功能，显著加速学术研究工作流程。
+增强型 arXiv 论文推荐系统，集成 AI 智能总结、语义搜索和个性化推荐功能。
 
 ![Screenshot](arxiv-sanity-x.png)
 
 ## 🚀 核心功能
 
-### 主要特性
-- **智能论文推荐**：结合 TF-IDF 与现代嵌入向量的混合特征系统，由 SVM 分类器驱动
-- **语义搜索**：支持关键词、语义和混合搜索模式，具有可配置的语义权重
-- **个性化标签系统**：个人和组合标签管理，实现精细化兴趣跟踪
-- **关键词监控**：自动跟踪指定的研究关键词，实时匹配相关论文
-- **邮件推荐服务**：每日个性化论文推荐直接发送到您的收件箱
-- **多维度搜索**：跨标题、作者、摘要等的高级搜索功能
-- **多逻辑推荐**：支持标签组合推荐中的 AND/OR 逻辑
-- **时间筛选**：专注于近期发表的论文，可配置时间窗口
-- **API 支持**：提供 RESTful API 端点用于关键词和标签推荐
-
-### 性能优化
-- **多核处理**：并行计算支持，充分利用所有可用 CPU 核心
-- **Intel 扩展支持**：可选的 Intel scikit-learn 扩展，加速机器学习计算
-
-### 机器学习能力
-- **混合特征架构**：稀疏 TF-IDF 特征与密集嵌入向量相结合
-- **现代嵌入模型**：通过 API 客户端支持 Qwen3 等先进嵌入模型
-- **动态分类器**：为个性化推荐动态训练每个标签的 SVM 分类器
-- **VLLM 集成**：使用 vLLM 进行高性能模型服务和嵌入生成
-
+- **AI 论文总结**：集成 LLM 和 minerU 的自动化论文总结，支持智能缓存
+- **语义搜索**：关键词、语义和混合搜索，支持嵌入模型
+- **智能推荐**：TF-IDF + 嵌入向量混合特征，SVM 分类器驱动
+- **个性化标签**：个人和组合标签管理，支持 AND/OR 逻辑
+- **邮件服务**：每日个性化推荐和关键词提醒
+- **性能优化**：多核处理、Intel 扩展、vLLM 集成
+- **API 支持**：RESTful 端点，支持推荐和总结功能
 
 
 ##  更新日志
+
+### v2.3 - AI 论文总结系统
+- ✨ **新功能**：完整的 AI 驱动论文总结系统，包含 [`paper_summarizer.py`](paper_summarizer.py)
+- 🧠 **MinerU 集成**：使用 minerU 进行高级 PDF 解析，提供更好的文本提取
+- 📝 **总结界面**：新的 `/summary` 路由，支持异步加载和 markdown 渲染
+- 🔧 **批量处理**：[`batch_paper_summarizer.py`](batch_paper_summarizer.py) 支持并行总结生成
+- ⚡ **智能缓存**：智能总结缓存，支持中文文本比例验证
+- 🎨 **界面增强**：新的总结页面设计，支持 MathJax 数学公式渲染
+- 📊 **配置完善**：在 [`vars_template.py`](vars_template.py) 中添加 LLM API 配置
+- 🔄 **自动生成**：[`generate_latest_summaries.py`](generate_latest_summaries.py) 支持自动化批量处理
 
 ### v2.2 - 性能与稳定性改进
 - ⚡ **性能提升**：增强数据缓存系统，支持智能自动重载
@@ -67,8 +63,9 @@
 2. [配置](#配置)
 3. [系统架构](#系统架构)
 4. [使用指南](#使用指南)
-5. [高级功能](#高级功能)
-6. [API 参考](#api-参考)
+5. [AI 论文总结](#ai-论文总结)
+6. [高级功能](#高级功能)
+7. [API 参考](#api-参考)
 
 
 ## 🛠 安装与设置
@@ -134,6 +131,10 @@ smtp_server = "smtp.example.com"
 smtp_port = 465  # SSL 端口 (465) 或 TLS 端口 (587)
 email_username = "your_username"
 email_passwd = "your_app_password"
+
+# LLM API 配置（用于 AI 总结功能）
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # 例如：智谱 AI API
+LLM_API_KEY = "your_llm_api_key"  # 您的 LLM API 密钥
 ```
 
 ### 高级参数
@@ -165,28 +166,37 @@ python send_emails.py \
 ### 组件概览
 ```
 arxiv-sanity-X/
-├── serve.py              # Flask 网络服务器和 API
-├── arxiv_daemon.py       # arXiv 数据获取守护进程
-├── compute.py            # 特征计算（TF-IDF + 嵌入）
-├── send_emails.py        # 邮件推荐服务
-├── daemon.py             # 自动化任务调度器
-├── vllm_serve.sh         # vLLM 模型服务器启动脚本
-├── aslite/               # 核心库
-│   ├── db.py            # 数据库操作
-│   └── arxiv.py         # arXiv API 接口
-├── templates/           # HTML 模板
-├── static/             # 静态网络资源
-└── data/               # 数据存储
-    ├── papers.db       # 论文数据库
-    ├── features.pkl    # 特征缓存
-    └── dict.db         # 用户数据
+├── serve.py                    # Flask 网络服务器和 API
+├── arxiv_daemon.py             # arXiv 数据获取守护进程
+├── compute.py                  # 特征计算（TF-IDF + 嵌入）
+├── send_emails.py              # 邮件推荐服务
+├── daemon.py                   # 自动化任务调度器
+├── paper_summarizer.py         # AI 论文总结模块
+├── batch_paper_summarizer.py   # 批量论文总结处理
+├── generate_latest_summaries.py # 自动生成最新论文总结
+├── vllm_serve.sh               # vLLM 模型服务器启动脚本
+├── aslite/                     # 核心库
+│   ├── db.py                  # 数据库操作
+│   └── arxiv.py               # arXiv API 接口
+├── templates/                  # HTML 模板
+│   └── summary.html           # 论文总结页面模板
+├── static/                     # 静态网络资源
+│   └── paper_summary.js       # 总结页面 JavaScript
+└── data/                       # 数据存储
+    ├── papers.db              # 论文数据库
+    ├── features.pkl           # 特征缓存
+    ├── dict.db                # 用户数据
+    ├── pdfs/                  # 下载的 PDF 文件
+    ├── mineru/                # MinerU 解析内容
+    └── summary/               # 缓存的论文总结
 ```
 
 ### 数据流管道
 1. **数据摄取**：[`arxiv_daemon.py`](arxiv_daemon.py) 从 arXiv API 获取论文
 2. **特征处理**：[`compute.py`](compute.py) 生成 TF-IDF 和嵌入特征
-3. **网络服务**：[`serve.py`](serve.py) 提供用户界面和推荐功能
-4. **邮件服务**：[`send_emails.py`](send_emails.py) 提供个性化推荐
+3. **AI 总结**：[`paper_summarizer.py`](paper_summarizer.py) 使用 minerU 和 LLM 处理论文
+4. **网络服务**：[`serve.py`](serve.py) 提供用户界面、推荐功能和总结显示
+5. **邮件服务**：[`send_emails.py`](send_emails.py) 提供个性化推荐
 
 ### 自动化调度
 
@@ -211,39 +221,27 @@ python daemon.py
 
 ### 用户界面功能
 
-#### 1. 账户管理
-- **需要登录**：完整功能需要用户认证
-- **个人资料设置**：在个人资料设置中配置推荐邮箱
-
-#### 2. 论文发现
-- **关键词搜索**：传统的跨标题、作者和摘要搜索，具有优化排序
-- **语义搜索**：使用嵌入模型的高级语义搜索，提供更好的相关性
-- **混合搜索**：结合关键词和语义搜索，具有可配置权重
-- **基于标签的推荐**：基于您标记的论文的 SVM 驱动推荐
-- **时间筛选**：专注于特定时间段的论文
-- **相似性搜索**：查找与特定论文 ID 相似的论文
-
-#### 3. 组织系统
-- **个人标签**：为感兴趣的论文创建个人标签
-- **组合标签**：注册标签组合以获得更复杂的推荐
-- **关键词跟踪**：设置研究关键词的自动监控
-- **标签管理**：重命名、删除和组织您的标签系统
-
-#### 4. 推荐模式
-- **搜索**：基于关键词的论文发现，支持语义搜索选项
-- **标签**：基于标记论文的 SVM 推荐
-- **时间**：按时间顺序浏览最近论文
-- **随机**：偶然的论文发现
-- **语义**：使用嵌入模型的纯语义搜索
-- **混合**：结合关键词和语义搜索
+- **账户设置**：需要登录，在个人资料中配置推荐邮箱
+- **搜索模式**：关键词、语义、混合、标签、时间筛选和相似性搜索
+- **组织管理**：个人标签、组合标签、关键词跟踪、标签管理
+- **AI 总结**：点击"总结"链接查看 LLM 生成的总结，支持 MathJax 渲染
 
 ### 邮件推荐
+在个人资料中配置邮箱，接收每日标签推荐和关键词提醒。
 
-在个人资料中设置您的邮箱以接收：
-- 基于您标签的每日推荐
-- 关键词匹配的论文提醒
-- 组合标签推荐
-- 可自定义的推荐频率
+## 🤖 AI 论文总结
+
+### 使用方法
+- **单篇总结**：点击任意论文的"总结"链接（`/summary?pid=<paper_id>`）
+- **批量生成**：`python generate_latest_summaries.py --num_papers 100`
+- **功能特性**：MathJax 公式渲染、智能缓存、异步加载
+
+### 配置
+```python
+# 在 vars.py 中 - 添加 LLM API 配置
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # 智谱 AI 示例
+LLM_API_KEY = "your_api_key_here"
+```
 
 ## 🔧 高级功能
 
@@ -262,31 +260,17 @@ bash vllm_serve.sh
 python compute.py --embed_model ./qwen3-embed-0.6B
 ```
 
-### VLLM 模型服务
-
-使用 vLLM 进行高性能模型服务：
-
+### 嵌入模型与性能
 ```bash
-# 启动嵌入模型服务器
+# 下载并启动嵌入模型
+huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
 bash vllm_serve.sh
 
-# 该脚本运行：
-# vllm serve ./qwen3-embed-0.6B --task embed --hf-overrides '{"is_matryoshka": true}' --gpu-memory-utilization 0.2 --port 51000 --served-model-name qwen3-embed-0.6B
+# 启用嵌入计算
+python compute.py --embed_model ./qwen3-embed-0.6B
 ```
 
-### 性能优化
-
-系统自动针对您的硬件进行优化：
-- **多核利用**：自动检测并使用所有 CPU 核心
-- **Intel 扩展**：使用 Intel scikit-learn 扩展的可选加速
-- **内存管理**：智能缓存和内存优化
-
-### 智能缓存
-
-- **自动重载**：文件更改时特征缓存自动更新
-- **增量处理**：仅为新论文计算嵌入
-- **内存数据库**：论文加载到内存中以进行快速查询
-- **智能缓存管理**：高效的缓存失效和更新
+特性：多核处理、Intel 扩展、智能缓存、增量更新。
 
 ## 📚 API 参考
 
@@ -303,6 +287,10 @@ bash vllm_serve.sh
 #### API 端点
 - `GET /api/recommend/keywords/<keyword>` - 获取基于关键词的推荐
 - `GET /api/recommend/tags/<tag_list>` - 通过 API 获取基于标签的推荐
+- `POST /api/get_paper_summary` - 获取 AI 生成的论文总结（JSON: `{"pid": "paper_id"}`）
+
+#### 论文总结
+- `GET /summary?pid=<paper_id>` - 查看 AI 生成的论文总结，支持异步加载
 
 #### 标签管理
 - `GET /add/<pid>/<tag>` - 为论文添加标签
@@ -318,30 +306,7 @@ bash vllm_serve.sh
 - `GET /stats` - 系统统计
 - `GET /cache_status` - 缓存状态（需认证用户）
 
-### SVM 参数
-
-- **C 参数**：正则化强度（默认：0.02）
-  - 较低值 = 更强正则化
-  - 较高值 = 较少正则化
-- **逻辑模式**：
-  - `and`：所有标签都必须相关
-  - `or`：任何标签都可以相关
-- **时间筛选**：将推荐限制为最近论文（天数）
-
-### 性能优化
-
-1. **使用 SSD 存储**：将 `DATA_DIR` 设置为 SSD 路径以获得更快的 I/O
-2. **足够内存**：推荐 16GB+ 内存用于大数据集
-3. **Intel 扩展**：安装 `scikit-learn-intelex` 以获得 CPU 加速
-4. **特征调优**：根据数据集大小调整 TF-IDF 特征数量
-5. **批处理**：为您的硬件优化批次大小
-
-### 监控与维护
-
-```bash
-# 检查系统状态
-curl http://localhost:5000/stats
-
-# 监控缓存性能
-curl http://localhost:5000/cache_status
-```
+### SVM 参数与优化
+- **SVM 参数**：C=0.02（正则化），逻辑模式：`and`/`or`，时间筛选
+- **性能优化**：SSD 存储、16GB+ 内存、Intel 扩展、合适的批次大小
+- **监控维护**：`/stats` 和 `/cache_status` 端点

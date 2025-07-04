@@ -34,6 +34,7 @@ except ImportError:
 import re
 import sys
 import time
+from pathlib import Path
 from random import shuffle
 
 import numpy as np
@@ -55,6 +56,9 @@ from aslite.db import (
     load_features,
 )
 from compute import Qwen3EmbeddingVllm
+from paper_summarizer import (
+    generate_paper_summary as generate_paper_summary_from_module,
+)
 
 # -----------------------------------------------------------------------------
 # inits and globals
@@ -88,6 +92,37 @@ else:
     logger.warning("no secret key found, using default `devkey`")
     sk = "devkey"
 app.secret_key = sk
+
+
+# -----------------------------------------------------------------------------
+# Helper function for Chinese text detection
+def calculate_chinese_ratio(text: str) -> float:
+    """
+    计算文本中中文字符的占比
+
+    Args:
+        text: 输入文本
+
+    Returns:
+        float: 中文字符占比 (0.0 到 1.0)
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    # 移除空白字符后的文本
+    clean_text = re.sub(r"\s+", "", text)
+    if not clean_text:
+        return 0.0
+
+    # 统计中文字符数量 (包括中文标点符号)
+    chinese_chars = re.findall(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", clean_text)
+    chinese_count = len(chinese_chars)
+
+    # 计算占比
+    total_chars = len(clean_text)
+    ratio = chinese_count / total_chars if total_chars > 0 else 0.0
+
+    return ratio
 
 
 # -----------------------------------------------------------------------------
@@ -1026,6 +1061,121 @@ def inspect():
         "The following are the tokens and their (tfidf) weight in the paper vector. This is the actual summary that feeds into the SVM to power recommendations, so hopefully it is good and representative!"
     )
     return render_template("inspect.html", **context)
+
+
+@app.route("/summary", methods=["GET"])
+def summary():
+    """
+    显示论文的 AI 生成的 markdown 格式总结
+    """
+    # 获取论文 ID
+    pid = request.args.get("pid", "")
+    logger.info(f"show paper summary page for paper {pid}")
+    pdb = get_papers()
+    if pid not in pdb:
+        return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
+
+    # 获取论文基本信息
+    paper = render_pid(pid)
+
+    # 构建页面上下文，不在这里调用 get_paper_summary
+    context = default_context()
+    context["paper"] = paper
+    context["pid"] = pid  # 传递 pid 给前端，用于异步获取 summary
+
+    return render_template("summary.html", **context)
+
+
+@app.route("/api/get_paper_summary", methods=["POST"])
+def api_get_paper_summary():
+    """
+    API endpoint: Get paper summary asynchronously
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+
+        pid = data.get("pid", "").strip()
+        if not pid:
+            return jsonify({"success": False, "error": "Paper ID is required"}), 400
+
+        logger.info(f"Getting paper summary for: {pid}")
+
+        # Check if paper exists
+        pdb = get_papers()
+        if pid not in pdb:
+            return jsonify({"success": False, "error": "Paper not found"}), 404
+
+        # Generate paper summary - currently returns placeholder
+        summary_content = generate_paper_summary(pid)
+
+        return jsonify({"success": True, "pid": pid, "summary_content": summary_content})
+
+    except Exception as e:
+        logger.error(f"Paper summary API error: {e}")
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+
+
+def generate_paper_summary(pid: str) -> str:
+    """
+    Generate paper summary with intelligent caching mechanism
+    1. Check if data/summary/{pid}.md exists
+    2. If exists, return cached summary
+    3. If not exists, call paper_summarizer to generate and cache the summary
+    """
+    try:
+        pdb = get_papers()
+        if pid not in pdb:
+            return "# 錯誤\n\n論文未找到。"
+
+        # Define cache file path
+        cache_dir = Path("data/summary")
+        cache_file = cache_dir / f"{pid}.md"
+
+        # Ensure cache directory exists
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Check if cached summary exists
+        if cache_file.exists():
+            logger.info(f"使用緩存的論文總結: {pid}")
+            try:
+                with open(cache_file, encoding="utf-8") as f:
+                    cached_summary = f.read()
+                if cached_summary.strip():
+                    return cached_summary
+                else:
+                    logger.warning(f"緩存文件為空，重新生成總結: {pid}")
+            except Exception as e:
+                logger.error(f"讀取緩存總結失敗: {e}")
+
+        # Generate new summary using paper_summarizer module
+        logger.info(f"生成新的論文總結: {pid}")
+        summary_content = generate_paper_summary_from_module(pid)
+
+        # Only cache successful summaries (not error messages)
+        if not summary_content.startswith("# 錯誤") and not summary_content.startswith("# 错误"):
+            # Check Chinese ratio before caching
+            chinese_ratio = calculate_chinese_ratio(summary_content)
+            logger.trace(f"论文 {pid} 总结中文占比: {chinese_ratio:.2%}")
+
+            if chinese_ratio >= 0.25:
+                try:
+                    with open(cache_file, "w", encoding="utf-8") as f:
+                        f.write(summary_content)
+                    logger.info(f"論文總結已緩存到: {cache_file} (中文占比: {chinese_ratio:.2%})")
+                except Exception as e:
+                    logger.error(f"緩存論文總結失敗: {e}")
+            else:
+                logger.warning(f"總結中文占比過低 ({chinese_ratio:.2%} < 50%)，不進行緩存: {pid}")
+        else:
+            logger.warning(f"總結生成失敗，不進行緩存: {pid}")
+
+        return summary_content
+
+    except Exception as e:
+        logger.error(f"生成論文總結時發生錯誤: {e}")
+        return f"# 錯誤\n\n生成總結失敗: {str(e)}"
 
 
 @app.route("/profile")

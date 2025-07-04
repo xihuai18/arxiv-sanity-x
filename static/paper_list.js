@@ -117,6 +117,7 @@ const Paper = props => {
 
     const similar_url = "/?rank=pid&pid=" + encodeURIComponent(p.id);
     const inspect_url = "/inspect?pid=" + encodeURIComponent(p.id);
+    const summary_url = "/summary?pid=" + encodeURIComponent(p.id);
     const thumb_img = p.thumb_url === '' ? null : <div class='rel_img'><img src={p.thumb_url} /></div>;
 
     // if the user is logged in then we can show the multi-select dropdown
@@ -152,7 +153,7 @@ const Paper = props => {
                     </div>
                 )}
             </div>
-            <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id}>{p.title}</a></div>
+            <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id} target="_blank" rel="noopener noreferrer">{p.title}</a></div>
             <div class='rel_authors'>{p.authors}</div>
             <div class="rel_time">{p.time}</div>
             <div class='rel_tags'>{p.tags}</div>
@@ -160,8 +161,11 @@ const Paper = props => {
             <div class='rel_abs'>{p.summary}</div>
             {utag_controls}
             <div class='paper-actions-footer'>
-                <div class='rel_more'><a href={similar_url}>Similar</a></div>
-                <div class='rel_inspect'><a href={inspect_url}>Inspect</a></div>
+                <div class='rel_more'><a href={similar_url} target="_blank" rel="noopener noreferrer">Similar</a></div>
+                <div class='rel_inspect'><a href={inspect_url} target="_blank" rel="noopener noreferrer">Inspect</a></div>
+                <div class='rel_summary'><a href={summary_url} target="_blank" rel="noopener noreferrer">Summary</a></div>
+                <div class='rel_alphaxiv'><a href={'https://www.alphaxiv.org/overview/' + p.id} target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
+                <div class='rel_cool'><a href={'https://papers.cool/arxiv/' + p.id} target="_blank" rel="noopener noreferrer">Cool</a></div>
             </div>
         </div>
     )

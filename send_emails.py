@@ -49,7 +49,7 @@ except ImportError:
 
 # API调用配置
 API_BASE_URL = "http://localhost:55555"  # serve.py默认端口
-API_TIMEOUT = 30  # API请求超时时间（秒）
+API_TIMEOUT = 120  # API请求超时时间（秒）
 
 # -----------------------------------------------------------------------------
 # the html template for the email
@@ -74,7 +74,7 @@ template = """
             margin: 0;
             padding: 20px;
         }
-        
+
         .container {
             max-width: 700px;
             margin: 0 auto;
@@ -83,34 +83,34 @@ template = """
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
             overflow: hidden;
         }
-        
+
         .header {
             background: #dc3545;
             color: white;
             padding: 20px;
             text-align: center;
         }
-        
+
         .header h1 {
             margin: 0;
             font-size: 24px;
             font-weight: 600;
         }
-        
+
         .content {
             padding: 20px;
         }
-        
+
         .greeting {
             font-size: 16px;
             margin-bottom: 20px;
             color: #2c3e50;
         }
-        
+
         .section {
             margin-bottom: 25px;
         }
-        
+
         .section-title {
             font-size: 18px;
             font-weight: 600;
@@ -119,7 +119,7 @@ template = """
             padding-bottom: 5px;
             border-bottom: 2px solid #e74c3c;
         }
-        
+
         .section-stats {
             background-color: #f8f9fa;
             padding: 10px 15px;
@@ -129,7 +129,7 @@ template = """
             color: #6c757d;
             border-left: 3px solid #007bff;
         }
-        
+
         .paper-item {
             border: 1px solid #e9ecef;
             border-radius: 5px;
@@ -137,11 +137,11 @@ template = """
             padding: 15px;
             background-color: #ffffff;
         }
-        
+
         .paper-item:hover {
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
-        
+
         .paper-header {
             display: flex;
             align-items: center;
@@ -149,7 +149,7 @@ template = """
             flex-wrap: wrap;
             gap: 8px;
         }
-        
+
         .score {
             background: transparent;
             color: #000000;
@@ -160,7 +160,7 @@ template = """
             display: inline-block;
             margin-right: 6px;
         }
-        
+
         .paper-source {
             display: inline-block;
             background-color: #b3d9ff;
@@ -172,13 +172,13 @@ template = """
             margin-right: 6px;
             border: 1px solid #87ceeb;
         }
-        
+
         .paper-source.keyword-source {
             background-color: #ffd280;
             color: #b8860b;
             border: 1px solid #daa520;
         }
-        
+
         .paper-title {
             font-size: 15px;
             font-weight: 500;
@@ -186,11 +186,14 @@ template = """
             margin: 8px 0;
             line-height: 1.3;
         }
-        
+
         .paper-links {
             margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
-        
+
         .paper-links a {
             display: inline-block;
             background-color: #dc3545;
@@ -200,84 +203,121 @@ template = """
             border-radius: 12px;
             font-size: 11px;
             font-weight: 500;
-            margin-right: 6px;
+            margin-right: 4px;
             transition: background-color 0.2s ease;
         }
-        
+
         .paper-links a:hover {
             background-color: #c82333;
         }
-        
+
         .paper-links a.arxiv-link {
             background-color: #b31b1b;
         }
-        
+
         .paper-links a.arxiv-link:hover {
             background-color: #9a1717;
         }
-        
+
+        .paper-links a.alphaxiv-link {
+            background-color: transparent;
+            color: #dc3545;
+            font-weight: bold;
+            padding: 0;
+            border-radius: 0;
+            font-size: 11px;
+            margin-right: 8px;
+        }
+
+        .paper-links a.alphaxiv-link:hover {
+            background-color: transparent;
+            color: #c82333;
+            text-decoration: underline;
+        }
+
+        .paper-links a.cool-link {
+            background-color: transparent;
+            color: #28a745;
+            font-weight: bold;
+            padding: 0;
+            border-radius: 0;
+            font-size: 11px;
+        }
+
+        .paper-links a.cool-link:hover {
+            background-color: transparent;
+            color: #218838;
+            text-decoration: underline;
+        }
+
+        .paper-links .right-links {
+            margin-left: auto;
+            display: flex;
+            gap: 6px;
+        }
+
         .paper-authors {
             font-size: 13px;
             color: #6c757d;
             margin-bottom: 6px;
             font-style: italic;
         }
-        
+
         .paper-date {
             font-size: 12px;
             color: #28a745;
             font-weight: 500;
             margin-bottom: 8px;
         }
-        
+
         .paper-summary {
             font-size: 13px;
             color: #495057;
             line-height: 1.4;
             text-align: justify;
         }
-        
+
         .footer {
             background-color: #f8f9fa;
             padding: 25px 30px;
             text-align: center;
             border-top: 1px solid #e9ecef;
         }
-        
+
         .footer p {
             margin: 0 0 10px 0;
             font-size: 14px;
             color: #6c757d;
         }
-        
+
         .footer .brand {
             font-weight: 600;
             color: #2c3e50;
             font-size: 16px;
         }
-        
+
         @media (max-width: 600px) {
             body {
                 padding: 10px;
             }
-            
+
             .container {
                 border-radius: 8px;
             }
-            
+
             .header, .content, .footer {
                 padding: 20px;
             }
-            
+
             .header h1 {
                 font-size: 24px;
             }
-            
+
             .score-cell {
                 width: 60px;
                 padding: 15px 10px;
             }
-            
+
             .paper-cell {
                 padding: 15px 10px;
             }
@@ -290,19 +330,19 @@ template = """
         <div class="header">
             <h1>Arxiv Sanity X</h1>
         </div>
-        
+
         <div class="content">
             <div class="greeting">
                 Hi <strong>__USER__</strong>! Here are your personalized <a href="__HOST__" style="color: #007bff; text-decoration: none;">__WEB__</a> recommendations.
             </div>
-            
+
             __SECTION_TAG__
-            
+
             __SECTION_CTAG__
-            
+
             __SECTION_KEYWORD__
         </div>
-        
+
         <div class="footer">
             <p>To stop these emails, remove your email in your <a href="__HOST__/profile" style="color: #667eea; text-decoration: none;">account settings</a>.</p>
             <p>Your account: <strong>__ACCOUNT__</strong></p>
@@ -446,6 +486,7 @@ def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], ti
 # -----------------------------------------------------------------------------
 
 
+# TODO: 链接跳转到 summary 界面
 def render_recommendations(
     user,
     tags,
@@ -569,20 +610,38 @@ def render_recommendations(
         </div>
         <div class="paper-title">%s</div>
         <div class="paper-links">
-            <a href="%s">Sanity Link</a>
-            <a href="%s" class="arxiv-link">Arxiv Link</a>
+            <a href="%s">Sanity</a>
+            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
+            <a href="%s" class="arxiv-link">Arxiv</a>
+            <div class="right-links">
+                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
+                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
+            </div>
         </div>
         <div class="paper-authors">%s</div>
         <div class="paper-date">📅 %s</div>
         <div class="paper-summary">%s</div>
     </div>
     """
-                % (max_source_tag[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
+                % (
+                    max_source_tag[pid],
+                    score,
+                    p["title"],
+                    url,
+                    HOST,
+                    pid,
+                    arxiv_url,
+                    pid,
+                    pid,
+                    authors,
+                    p["_time_str"],
+                    summary,
+                )
             )
 
         # render the recommendations
         final = "".join(parts)
-        
+
         # render the stats
         num_papers_tagged = len(set().union(*tags.values()))
         tags_str = ", ".join(['"%s" (%d)' % (t, len(tags[t])) for t in tags.keys()])
@@ -591,7 +650,7 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more you tag, \
                 the better this gets:"
-        
+
         # render the complete section
         section_html = f"""
             <div class="section">
@@ -644,20 +703,38 @@ def render_recommendations(
         </div>
         <div class="paper-title">%s</div>
         <div class="paper-links">
-            <a href="%s">Sanity Link</a>
-            <a href="%s" class="arxiv-link">Arxiv Link</a>
+            <a href="%s">Sanity</a>
+            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
+            <a href="%s" class="arxiv-link">Arxiv</a>
+            <div class="right-links">
+                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
+                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
+            </div>
         </div>
         <div class="paper-authors">%s</div>
         <div class="paper-date">📅 %s</div>
         <div class="paper-summary">%s</div>
     </div>
     """
-                % (max_source_ctag[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
+                % (
+                    max_source_ctag[pid],
+                    score,
+                    p["title"],
+                    url,
+                    HOST,
+                    pid,
+                    arxiv_url,
+                    pid,
+                    pid,
+                    authors,
+                    p["_time_str"],
+                    summary,
+                )
             )
 
         # render the recommendations
         final = "".join(parts)
-        
+
         # render the stats
         # 计算联合tags涉及的所有论文数量
         ctag_papers = set()
@@ -674,7 +751,7 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more you tag, \
                 the better this gets:"
-        
+
         # render the complete section
         section_html = f"""
             <div class="section">
@@ -727,20 +804,38 @@ def render_recommendations(
         </div>
         <div class="paper-title">%s</div>
         <div class="paper-links">
-            <a href="%s">Sanity Link</a>
-            <a href="%s" class="arxiv-link">Arxiv Link</a>
+            <a href="%s">Sanity</a>
+            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
+            <a href="%s" class="arxiv-link">Arxiv</a>
+            <div class="right-links">
+                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
+                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
+            </div>
         </div>
         <div class="paper-authors">%s</div>
         <div class="paper-date">📅 %s</div>
         <div class="paper-summary">%s</div>
     </div>
     """
-                % (max_source_keyword[pid], score, p["title"], url, arxiv_url, authors, p["_time_str"], summary)
+                % (
+                    max_source_keyword[pid],
+                    score,
+                    p["title"],
+                    url,
+                    HOST,
+                    pid,
+                    arxiv_url,
+                    pid,
+                    pid,
+                    authors,
+                    p["_time_str"],
+                    summary,
+                )
             )
 
         # render the recommendations
         final = "".join(parts)
-        
+
         # render the stats
         keywords_str = ", ".join(['"%s"' % k for k, pids in keywords.items()])
         stats = f"We search your {len(keywords)} keywords ({keywords_str}) and \
@@ -748,7 +843,7 @@ def render_recommendations(
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
                 top {n} papers. Remember that the more keywords, \
                 the better this gets:"
-        
+
         # render the complete section
         section_html = f"""
             <div class="section">

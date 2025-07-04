@@ -1,5 +1,6 @@
 __pycache__
-data
+data/*
+!data/dict.db
 secret_key.txt
 .DS_Store
 .ipynb_checkpoints
@@ -9,3 +10,5 @@ vars.py
 setup_host.sh
 .vscode
 llm.py
+qwen3*
+vllm-serve-args.md

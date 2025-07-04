@@ -11,6 +11,20 @@
 <!-- Favicon -->
 <link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon-x.png') }}" />
 
+<!-- 最简化版：只使用 Marked.js + MathJax -->
+<script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+<script>
+// 最简单的 MathJax 配置
+window.MathJax = {
+    tex: {
+        inlineMath: [['\\(', '\\)'], ['$', '$']],
+        displayMath: [['\\[', '\\]'], ['$$', '$$']],
+        processEscapes: true
+    }
+};
+</script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+
 <script>
 var user = {{ user | tojson }};
 </script>

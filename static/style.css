@@ -1239,11 +1239,12 @@ a:hover {
 
 .paper-actions-footer { /* New parent container */
     display: flex;
+    align-items: center; /* Ensure vertical alignment */
     gap: 8px; /* Spacing between buttons */
     margin-top: 12px; /* Spacing from elements above */
 }
 
-.rel_more a, .rel_inspect a {
+.rel_more a, .rel_inspect a, .rel_summary a {
     font-size: 0.8125rem; /* 13px */
     display: inline-block;
     /* margin-right: 12px;  Controlled by parent container's gap */
@@ -1256,11 +1257,39 @@ a:hover {
     border: 1px solid var(--btn-bg); /* Button border */
     transition: background-color 0.15s ease, border-color 0.15s ease;
 }
-.rel_more a:hover, .rel_inspect a:hover {
+.rel_more a:hover, .rel_inspect a:hover, .rel_summary a:hover {
     color: var(--primary-text);
     background-color: var(--btn-hover); /* Button hover background */
     border-color: var(--btn-hover); /* Button hover border */
     text-decoration: none; /* No underline on hover */
+}
+
+
+/* alphaXiv - red bold text link */
+.rel_alphaxiv {
+    margin-left: auto; /* Push alphaXiv and Cool to the right */
+}
+.rel_alphaxiv a {
+    color: #dc3545; /* Red color */
+    font-weight: bold;
+    font-size: 0.875rem; /* 14px */
+    text-decoration: none;
+}
+.rel_alphaxiv a:hover {
+    color: #c82333; /* Darker red on hover */
+    text-decoration: underline;
+}
+
+/* Cool - green bold text link */
+.rel_cool a {
+    color: #28a745; /* Green color */
+    font-weight: bold;
+    font-size: 0.875rem; /* 14px */
+    text-decoration: none;
+}
+.rel_cool a:hover {
+    color: #218838; /* Darker green on hover */
+    text-decoration: underline;
 }
 
 /* Button colors in dark mode are automatically handled through theme variables, no additional rules needed unless specific overrides are required */
@@ -2198,7 +2227,7 @@ a:hover {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 36px;
+    min-height: 0px;
 }
 
 .btn:disabled {
@@ -3131,4 +3160,591 @@ body {
 /* 进一步压缩搜索栏与controls之间的间距 */
 #wrap {
     margin-top: 4px !important;
+}
+
+/* ===== Summary Page Styles ===== */
+
+/* Summary page layout */
+.summary-page {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 0 16px;
+}
+
+/* Paper header section */
+.paper-header {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.paper-nav {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.nav-link {
+    color: var(--link-color);
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.nav-link:hover {
+    background-color: var(--body-bg);
+    color: var(--link-hover);
+    text-decoration: underline;
+}
+
+.paper-title-section {
+    margin-top: 16px;
+}
+
+.paper-title {
+    margin: 0 0 12px 0;
+    font-size: 24px;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+.paper-title a {
+    color: var(--text-color);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+
+.paper-title a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+}
+
+.paper-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.paper-authors {
+    font-size: 16px;
+    color: #5a5a5a;
+    font-style: normal;
+}
+
+[data-theme="dark"] .paper-authors {
+    color: #b0b0b0;
+}
+
+.paper-time {
+    font-size: 14px;
+    color: #006621;
+    font-weight: 500;
+}
+
+[data-theme="dark"] .paper-time {
+    color: #38a169;
+}
+
+.paper-id {
+    font-size: 14px;
+    color: var(--text-color);
+    opacity: 0.7;
+    font-family: monospace;
+}
+
+.paper-tags {
+    font-size: 14px;
+    color: var(--text-color);
+    margin-top: 8px;
+}
+
+/* Paper content section - styled like paper list item */
+.paper-content-section {
+    display: flex;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.paper-weight {
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--text-color);
+    min-width: 50px;
+    flex-shrink: 0;
+}
+
+.paper-main {
+    flex: 1;
+}
+
+.paper-authors-line {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 4px;
+    line-height: 1.4;
+}
+
+[data-theme="dark"] .paper-authors-line {
+    color: #b0b0b0;
+}
+
+.paper-meta-line {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+    font-size: 14px;
+}
+
+.paper-abstract {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-color);
+    margin-bottom: 16px;
+}
+
+/* Paper action buttons */
+.paper-action-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.btn {
+    display: inline-block;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    text-decoration: none;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+    border: none;
+    cursor: pointer;
+}
+
+.btn-similar, .btn-inspect {
+    font-size: 0.8125rem; /* 13px */
+    display: inline-block;
+    color: var(--primary-text); /* Button text color */
+    background-color: var(--btn-bg); /* Button background color */
+    opacity: 1; /* Ensure button is completely opaque */
+    text-decoration: none;
+    padding: 5px 12px; /* Button padding */
+    border-radius: 4px; /* Button border radius */
+    border: 1px solid var(--btn-bg); /* Button border */
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-similar:hover, .btn-inspect:hover {
+    color: var(--primary-text);
+    background-color: var(--btn-hover); /* Button hover background */
+    border-color: var(--btn-hover); /* Button hover border */
+    text-decoration: none; /* No underline on hover */
+}
+
+/* Fix tag and time alignment */
+.paper-meta-line .paper-time {
+    color: #038803;
+    font-weight: 500;
+}
+
+[data-theme="dark"] .paper-meta-line .paper-time {
+    color: #38a169;
+}
+
+.paper-meta-line .paper-tags {
+    color: #666;
+}
+
+[data-theme="dark"] .paper-meta-line .paper-tags {
+    color: #b0b0b0;
+}
+
+.btn-summary {
+    background-color: #666;
+    color: white;
+}
+
+.btn-active {
+    background-color: #333;
+    color: white;
+    cursor: default;
+}
+
+.btn-active:hover {
+    background-color: #333;
+}
+
+/* Summary content section */
+.summary-container {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.summary-header {
+    background-color: var(--primary-bg);
+    color: var(--primary-text);
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.summary-header h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.summary-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.summary-badge {
+    background-color: rgba(255, 255, 255, 0.2);
+    color: var(--primary-text);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.summary-note {
+    font-size: 13px;
+    opacity: 0.9;
+}
+
+/* Markdown content styling */
+.summary-content {
+    padding: 24px;
+    line-height: 1.6;
+}
+
+.markdown-content h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    color: var(--text-color);
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 8px;
+}
+
+.markdown-content h2 {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-color);
+}
+
+.markdown-content h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 20px 0 10px 0;
+    color: var(--text-color);
+}
+
+.markdown-content p {
+    margin: 0 0 16px 0;
+    color: var(--text-color);
+    font-size: 15px;
+}
+
+.markdown-content ul, .markdown-content ol {
+    margin: 0 0 16px 0;
+    padding-left: 20px;
+}
+
+.markdown-content li {
+    margin-bottom: 6px;
+    color: var(--text-color);
+    font-size: 15px;
+}
+
+.markdown-content code {
+    background-color: var(--body-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+    font-size: 13px;
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+}
+
+.markdown-content pre {
+    background-color: var(--body-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 16px;
+    overflow-x: auto;
+    margin: 0 0 16px 0;
+}
+
+.markdown-content pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
+.markdown-content hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 24px 0;
+}
+
+.markdown-content a {
+    color: var(--link-color);
+    text-decoration: none;
+}
+
+.markdown-content a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+}
+
+.markdown-content strong {
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.markdown-content em {
+    font-style: italic;
+    color: var(--text-color);
+}
+
+/* Responsive design for summary page */
+@media (max-width: 768px) {
+    .summary-page {
+        padding: 0 12px;
+    }
+
+    .paper-header {
+        padding: 16px;
+    }
+
+    .paper-nav {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .paper-title {
+        font-size: 20px;
+    }
+
+    .paper-meta {
+        font-size: 14px;
+    }
+
+    .summary-content {
+        padding: 16px;
+    }
+
+    .markdown-content h1 {
+        font-size: 20px;
+    }
+
+    .markdown-content h2 {
+        font-size: 18px;
+    }
+
+    .markdown-content h3 {
+        font-size: 16px;
+    }
+}
+
+/* ===== End Summary Page Styles ===== */
+
+/* Loading placeholder styles */
+.loading-placeholder {
+    text-align: center;
+    padding: 50px;
+    color: var(--text-color);
+    opacity: 0.7;
+}
+
+/* Loading indicator styles */
+.loading-indicator {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-color);
+}
+
+.loading-indicator p {
+    margin: 8px 0;
+    font-size: 16px;
+    color: var(--text-color);
+}
+
+.loading-note {
+    font-size: 14px;
+    opacity: 0.7;
+    font-style: italic;
+}
+
+/* Spinner animation */
+.spinner {
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 16px auto;
+    border: 3px solid var(--border-color);
+    border-top: 3px solid var(--primary-bg);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+[data-theme="dark"] .spinner {
+    border-color: var(--border-color);
+    border-top-color: var(--primary-bg);
+}
+
+/* Error message styles */
+.error-message {
+    text-align: center;
+    padding: 30px;
+    color: #dc3545;
+}
+
+.error-message p {
+    margin: 0 0 16px 0;
+    font-size: 16px;
+}
+
+.retry-button {
+    background-color: var(--btn-bg);
+    color: var(--primary-text);
+    border: 1px solid var(--btn-bg);
+    border-radius: 6px;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.retry-button:hover {
+    background-color: var(--btn-hover);
+    border-color: var(--btn-hover);
+}
+
+[data-theme="dark"] .error-message {
+    color: #e74c3c;
+}
+
+/* ===== Math Formula Styles (MathJax Only) ===== */
+
+/* MathJax specific styles */
+.MathJax {
+    font-size: 1em !important;
+    display: inline !important;
+    margin: 0 2px !important;
+}
+
+.MathJax_Display {
+    margin: 1em 0 !important;
+    text-align: center !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+}
+
+/* MathJax container styles */
+.MathJax_Preview {
+    color: transparent !important;
+}
+
+.MathJax_Processing {
+    visibility: hidden !important;
+}
+
+/* Support for MathJax v3 */
+mjx-container {
+    display: inline-block !important;
+    margin: 0 2px !important;
+}
+
+mjx-container[display="true"] {
+    display: block !important;
+    margin: 1em 0 !important;
+    text-align: center !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+}
+
+/* Fallback math styles for when MathJax is not available */
+.math-inline, .math-display {
+    font-family: 'Computer Modern', 'Latin Modern Math', 'Times New Roman', serif;
+    font-style: italic;
+    display: inline;
+    margin: 0 2px;
+}
+
+.math-display {
+    display: block;
+    margin: 1em 0;
+    text-align: center;
+    overflow-x: auto;
+}
+
+/* Dark theme adjustments for math */
+[data-theme="dark"] .MathJax,
+[data-theme="dark"] mjx-container {
+    color: var(--text-color) !important;
+}
+
+[data-theme="dark"] .math-inline,
+[data-theme="dark"] .math-display {
+    color: var(--text-color);
+}
+
+/* Ensure math formulas don't overflow in narrow containers */
+.markdown-content .MathJax_Display,
+.markdown-content mjx-container[display="true"] {
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.markdown-content .MathJax_Display .MathJax,
+.markdown-content mjx-container[display="true"] {
+    white-space: nowrap;
+}
+
+/* Fix MathJax display issues in markdown content */
+.markdown-content .MathJax {
+    vertical-align: baseline !important;
+}
+
+.markdown-content .MathJax_Display {
+    width: 100% !important;
+    margin: 1em 0 !important;
+}
+
+/* Responsive math formulas */
+@media (max-width: 768px) {
+    mjx-container,
+    .MathJax {
+        font-size: 0.9em !important;
+    }
+
+    mjx-container[display="true"],
+    .MathJax_Display {
+        font-size: 0.85em !important;
+    }
 }

@@ -3,35 +3,31 @@
 
 [中文](README_CN.md) | [English](README.md)
 
-A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) that significantly accelerates academic research workflows. This enhanced version features intelligent paper discovery through advanced machine learning techniques, personalized recommendation systems, and automated research tracking capabilities.
+Enhanced arXiv paper recommendation system with AI-powered summarization, semantic search, and personalized recommendations.
 
 ![Screenshot](arxiv-sanity-x.png)
 
 ## 🚀 Key Features
 
-### Core Functionality
-- **Intelligent Paper Recommendations**: Hybrid feature system combining TF-IDF with modern embedding vectors, powered by SVM classifiers
-- **Semantic Search**: Support for keyword, semantic, and hybrid search modes with configurable semantic weights
-- **Personalized Tagging System**: Individual and combined tag management for fine-grained interest tracking
-- **Keyword Monitoring**: Automatic tracking of specified research keywords with real-time paper matching
-- **Email Recommendation Service**: Daily personalized paper recommendations delivered to your inbox
-- **Multi-dimensional Search**: Advanced search capabilities across titles, authors, abstracts, and more
-- **Multi-logic Recommendations**: Support for AND/OR logic in tag combination recommendations
-- **Time-based Filtering**: Focus on recent publications with configurable time windows
-- **API Support**: RESTful API endpoints for keyword and tag recommendations
-
-### Performance Optimizations
-- **Multi-core Processing**: Parallel computation support utilizing all available CPU cores
-- **Intel Extension Support**: Optional Intel scikit-learn extensions for accelerated machine learning
-
-### Machine Learning Capabilities
-- **Hybrid Feature Architecture**: Sparse TF-IDF features combined with dense embedding vectors
-- **Modern Embedding Models**: Support for Qwen3 and other state-of-the-art embedding models via API client
-- **Dynamic Classifiers**: Per-tag SVM classifiers trained dynamically for personalized recommendations
-- **VLLM Integration**: High-performance model serving with vLLM for embedding generation
-
+- **AI Paper Summarization**: Automated LLM-powered summaries with minerU parsing and smart caching
+- **Semantic Search**: Keyword, semantic, and hybrid search with embedding models
+- **Smart Recommendations**: TF-IDF + embedding hybrid features with SVM classifiers
+- **Personalized Tags**: Individual and combined tag management with AND/OR logic
+- **Email Service**: Daily personalized recommendations and keyword alerts
+- **Performance**: Multi-core processing, Intel extensions, vLLM integration
+- **API Support**: RESTful endpoints for recommendations and summaries
 
 ##  Changelog
+
+### v2.3 - AI Paper Summarization
+- ✨ **New**: Complete AI-powered paper summarization system with [`paper_summarizer.py`](paper_summarizer.py)
+- 🧠 **MinerU Integration**: Advanced PDF parsing with minerU for better text extraction
+- 📝 **Summary Interface**: New `/summary` route with async loading and markdown rendering
+- 🔧 **Batch Processing**: [`batch_paper_summarizer.py`](batch_paper_summarizer.py) for parallel summary generation
+- ⚡ **Smart Caching**: Intelligent summary caching with Chinese text ratio validation
+- 🎨 **Enhanced UI**: New summary page design with MathJax support for mathematical formulas
+- 📊 **Configuration**: Added LLM API configuration in [`vars_template.py`](vars_template.py)
+- 🔄 **Auto Generation**: [`generate_latest_summaries.py`](generate_latest_summaries.py) for automated batch processing
 
 ### v2.2 - Performance & Stability Improvements
 - ⚡ **Performance**: Enhanced data caching system with intelligent auto-reload
@@ -69,8 +65,9 @@ A powerful arXiv paper recommendation system built upon [arXiv-sanity-lite](http
 2. [Configuration](#configuration)
 3. [System Architecture](#system-architecture)
 4. [Usage Guide](#usage-guide)
-5. [Advanced Features](#advanced-features)
-6. [API Reference](#api-reference)
+5. [AI Paper Summarization](#ai-paper-summarization)
+6. [Advanced Features](#advanced-features)
+7. [API Reference](#api-reference)
 
 ## 🛠 Installation & Setup
 
@@ -135,6 +132,10 @@ smtp_server = "smtp.example.com"
 smtp_port = 465  # SSL port (465) or TLS port (587)
 email_username = "your_username"
 email_passwd = "your_app_password"
+
+# LLM API Configuration (for AI summarization)
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # e.g., ZhipuAI API
+LLM_API_KEY = "your_llm_api_key"  # Your LLM API key
 ```
 
 ### Advanced Parameters
@@ -166,28 +167,37 @@ python send_emails.py \
 ### Component Overview
 ```
 arxiv-sanity-X/
-├── serve.py              # Flask web server & API
-├── arxiv_daemon.py       # arXiv data fetching daemon
-├── compute.py            # Feature computation (TF-IDF + embeddings)
-├── send_emails.py        # Email recommendation service
-├── daemon.py             # Scheduler for automated tasks
-├── vllm_serve.sh         # vLLM model server startup script
-├── aslite/               # Core library
-│   ├── db.py            # Database operations
-│   └── arxiv.py         # arXiv API interface
-├── templates/           # HTML templates
-├── static/             # Static web assets
-└── data/               # Data storage
-    ├── papers.db       # Paper database
-    ├── features.pkl    # Feature cache
-    └── dict.db         # User data
+├── serve.py                    # Flask web server & API
+├── arxiv_daemon.py             # arXiv data fetching daemon
+├── compute.py                  # Feature computation (TF-IDF + embeddings)
+├── send_emails.py              # Email recommendation service
+├── daemon.py                   # Scheduler for automated tasks
+├── paper_summarizer.py         # AI paper summarization module
+├── batch_paper_summarizer.py   # Batch processing for paper summaries
+├── generate_latest_summaries.py # Auto-generate summaries for latest papers
+├── vllm_serve.sh               # vLLM model server startup script
+├── aslite/                     # Core library
+│   ├── db.py                  # Database operations
+│   └── arxiv.py               # arXiv API interface
+├── templates/                  # HTML templates
+│   └── summary.html           # Paper summary page template
+├── static/                     # Static web assets
+│   └── paper_summary.js       # Summary page JavaScript
+└── data/                       # Data storage
+    ├── papers.db              # Paper database
+    ├── features.pkl           # Feature cache
+    ├── dict.db                # User data
+    ├── pdfs/                  # Downloaded PDF files
+    ├── mineru/                # MinerU parsed content
+    └── summary/               # Cached paper summaries
 ```
 
 ### Data Flow Pipeline
 1. **Data Ingestion**: [`arxiv_daemon.py`](arxiv_daemon.py) fetches papers from arXiv API
 2. **Feature Processing**: [`compute.py`](compute.py) generates TF-IDF and embedding features
-3. **Web Service**: [`serve.py`](serve.py) provides user interface and recommendations
-4. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations
+3. **AI Summarization**: [`paper_summarizer.py`](paper_summarizer.py) processes papers with minerU and LLM
+4. **Web Service**: [`serve.py`](serve.py) provides user interface, recommendations, and summary display
+5. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations
 
 ### Automated Scheduling
 
@@ -212,82 +222,41 @@ python daemon.py
 
 ### User Interface Features
 
-#### 1. Account Management
-- **Login Required**: Full functionality requires user authentication
-- **Profile Setup**: Configure email for recommendations in profile settings
-
-#### 2. Paper Discovery
-- **Keyword Search**: Traditional search across titles, authors, and abstracts with optimized ranking
-- **Semantic Search**: Advanced semantic search using embedding models for better relevance
-- **Hybrid Search**: Combine keyword and semantic search with configurable weights
-- **Tag-based Recommendations**: SVM-powered recommendations based on your tagged papers
-- **Time Filtering**: Focus on papers from specific time periods
-- **Similarity Search**: Find papers similar to a specific paper ID
-
-#### 3. Organization System
-- **Individual Tags**: Create personal tags for papers of interest
-- **Combined Tags**: Register tag combinations for more sophisticated recommendations
-- **Keyword Tracking**: Set up automatic monitoring for research keywords
-- **Tag Management**: Rename, delete, and organize your tag system
-
-#### 4. Recommendation Modes
-- **Search**: Keyword-based paper discovery with semantic search options
-- **Tags**: SVM recommendations based on tagged papers
-- **Time**: Chronological browsing of recent papers
-- **Random**: Serendipitous paper discovery
-- **Semantic**: Pure semantic search using embedding models
-- **Hybrid**: Combined keyword and semantic search
+- **Account Setup**: Login required, configure email in profile for recommendations
+- **Search Modes**: Keyword, semantic, hybrid, tag-based, time-filtered, and similarity search
+- **Organization**: Personal tags, combined tags, keyword tracking, tag management
+- **AI Summaries**: Click "Summary" link for LLM-generated summaries with MathJax support
 
 ### Email Recommendations
+Configure email in profile for daily tag-based recommendations and keyword alerts.
 
-Set up your email in the profile to receive:
-- Daily recommendations based on your tags
-- Keyword-matched paper alerts
-- Combined tag recommendations
-- Customizable recommendation frequency
+## 🤖 AI Paper Summarization
+
+### Usage
+- **Individual Summary**: Click "Summary" link on any paper (`/summary?pid=<paper_id>`)
+- **Batch Generation**: `python generate_latest_summaries.py --num_papers 100`
+- **Features**: MathJax formula rendering, intelligent caching, async loading
+
+### Configuration
+```python
+# In vars.py - Add LLM API configuration
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # ZhipuAI example
+LLM_API_KEY = "your_api_key_here"
+```
 
 ## 🔧 Advanced Features
 
-### Embedding Vector Integration
-
-Support for modern embedding models like Qwen3 with API client architecture:
-
+### Embedding Models & Performance
 ```bash
-# Download embedding model (example)
+# Download and start embedding model
 huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
-
-# Start vLLM model server
 bash vllm_serve.sh
 
-# Enable embedding computation with API client
+# Enable embedding computation
 python compute.py --embed_model ./qwen3-embed-0.6B
 ```
 
-### VLLM Model Serving
-
-High-performance model serving with vLLM:
-
-```bash
-# Start embedding model server
-bash vllm_serve.sh
-
-# The script runs:
-# vllm serve ./qwen3-embed-0.6B --task embed --hf-overrides '{"is_matryoshka": true}' --gpu-memory-utilization 0.2 --port 51000 --served-model-name qwen3-embed-0.6B
-```
-
-### Performance Optimization
-
-The system automatically optimizes for your hardware:
-- **Multi-core Utilization**: Automatically detects and uses all CPU cores
-- **Intel Extensions**: Optional acceleration with Intel scikit-learn extensions
-- **Memory Management**: Intelligent caching and memory optimization
-
-### Intelligent Caching
-
-- **Automatic Reload**: Feature cache automatically updates when files change
-- **Incremental Processing**: Only compute embeddings for new papers
-- **Memory Database**: Papers loaded into memory for fast queries
-- **Smart Cache Management**: Efficient cache invalidation and updates
+Features: Multi-core processing, Intel extensions, intelligent caching, incremental updates.
 
 ## 📚 API Reference
 
@@ -304,6 +273,10 @@ The system automatically optimizes for your hardware:
 #### API Endpoints
 - `GET /api/recommend/keywords/<keyword>` - Get keyword-based recommendations
 - `GET /api/recommend/tags/<tag_list>` - Get tag-based recommendations via API
+- `POST /api/get_paper_summary` - Get AI-generated paper summary (JSON: `{"pid": "paper_id"}`)
+
+#### Paper Summarization
+- `GET /summary?pid=<paper_id>` - View AI-generated paper summary with async loading
 
 #### Tag Management
 - `GET /add/<pid>/<tag>` - Add tag to paper
@@ -319,30 +292,7 @@ The system automatically optimizes for your hardware:
 - `GET /stats` - System statistics
 - `GET /cache_status` - Cache status (authenticated users only)
 
-### SVM Parameters
-
-- **C parameter**: Regularization strength (default: 0.02)
-  - Lower values = stronger regularization
-  - Higher values = less regularization
-- **Logic modes**:
-  - `and`: All tags must be relevant
-  - `or`: Any tag can be relevant
-- **Time filtering**: Limit recommendations to recent papers (in days)
-
-### Performance Optimization
-
-1. **Use SSD Storage**: Set `DATA_DIR` to SSD path for faster I/O
-2. **Adequate Memory**: 16GB+ RAM recommended for large datasets
-3. **Intel Extensions**: Install `scikit-learn-intelex` for CPU acceleration
-4. **Feature Tuning**: Adjust TF-IDF feature count based on dataset size
-5. **Batch Processing**: Optimize batch sizes for your hardware
-
-### Monitoring & Maintenance
-
-```bash
-# Check system status
-curl http://localhost:5000/stats
-
-# Monitor cache performance
-curl http://localhost:5000/cache_status
-```
+### SVM Parameters & Optimization
+- **SVM**: C=0.02 (regularization), logic modes: `and`/`or`, time filtering
+- **Performance**: SSD storage, 16GB+ RAM, Intel extensions, proper batch sizes
+- **Monitoring**: `/stats` and `/cache_status` endpoints
