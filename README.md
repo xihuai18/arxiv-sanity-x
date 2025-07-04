@@ -3,19 +3,21 @@
 
 [中文](README_CN.md) | [English](README.md)
 
-Enhanced arXiv paper recommendation system with AI-powered summarization, semantic search, and personalized recommendations.
+Enhanced arXiv paper recommendation system with AI-powered summarization, semantic search, and intelligent personalized recommendations built on hybrid ML features.
 
 ![Screenshot](arxiv-sanity-x.png)
 
 ## 🚀 Key Features
 
-- **AI Paper Summarization**: Automated LLM-powered summaries with minerU parsing and smart caching
-- **Semantic Search**: Keyword, semantic, and hybrid search with embedding models
-- **Smart Recommendations**: TF-IDF + embedding hybrid features with SVM classifiers
-- **Personalized Tags**: Individual and combined tag management with AND/OR logic
-- **Email Service**: Daily personalized recommendations and keyword alerts
-- **Performance**: Multi-core processing, Intel extensions, vLLM integration
-- **API Support**: RESTful endpoints for recommendations and summaries
+- **🤖 AI Paper Summarization**: Complete pipeline with minerU PDF parsing, LLM generation, and intelligent caching
+- **🔍 Advanced Search**: Keyword, semantic, and hybrid search modes with configurable weights
+- **🎯 Smart Recommendations**: Hybrid TF-IDF + embedding features with dynamic SVM classifiers
+- **🏷️ Tag Management**: Individual/combined tags with AND/OR logic and keyword monitoring
+- **📧 Email Service**: Automated daily recommendations with personalized HTML templates
+- **⚡ Performance**: Multi-core processing, Intel extensions, incremental updates, vLLM integration
+- **🔗 API & Web**: RESTful APIs, responsive web interface, async loading summaries
+- **🔄 Automation**: Built-in scheduler for fetching, computing, emailing, and backup
+
 
 ##  Changelog
 
@@ -232,17 +234,41 @@ Configure email in profile for daily tag-based recommendations and keyword alert
 
 ## 🤖 AI Paper Summarization
 
-### Usage
-- **Individual Summary**: Click "Summary" link on any paper (`/summary?pid=<paper_id>`)
-- **Batch Generation**: `python generate_latest_summaries.py --num_papers 100`
-- **Features**: MathJax formula rendering, intelligent caching, async loading
+### Complete AI Pipeline
+1. **PDF Download**: Automatic arXiv paper fetching
+2. **minerU Parsing**: Advanced PDF text extraction with structure recognition
+3. **LLM Processing**: Generate comprehensive summaries using GLM-4-Flash or compatible models
+4. **Quality Control**: Chinese text ratio validation and content filtering
+5. **Smart Caching**: Intelligent caching with automatic quality checks
+
+### Usage Commands
+```bash
+# Individual paper summary (web interface)
+# Click "Summary" link or visit: /summary?pid=<paper_id>
+
+# Batch processing (latest papers)
+python generate_latest_summaries.py --num_papers 100
+
+# Advanced batch processing with custom workers
+python batch_paper_summarizer.py --num_papers 200 --max_workers 4 --skip_cached
+
+# Check processing status
+python batch_paper_summarizer.py --dry_run  # Preview mode
+```
 
 ### Configuration
 ```python
-# In vars.py - Add LLM API configuration
-LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # ZhipuAI example
+# In vars.py - LLM API setup
+LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # ZhipuAI or OpenAI-compatible
 LLM_API_KEY = "your_api_key_here"
 ```
+
+### Features
+- **MathJax Support**: Full LaTeX math formula rendering
+- **Markdown Output**: Rich formatting with headers, lists, code blocks
+- **Async Loading**: Non-blocking web interface with progress indicators
+- **Error Recovery**: Automatic retry with detailed failure logging
+- **Thread Safety**: Concurrent processing with minerU lock management
 
 ## 🔧 Advanced Features
 
