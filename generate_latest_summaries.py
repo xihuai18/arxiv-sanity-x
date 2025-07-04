@@ -29,7 +29,7 @@ def get_latest_papers(n: int) -> List[Tuple[str, Dict]]:
     Returns:
         List[Tuple[str, Dict]]: 論文 ID 和元數據的列表，按時間倒序排列
     """
-    logger.info(f"正在獲取最新的 {n} 篇論文...")
+    logger.info(f"Fetching the latest {n} papers...")
 
     # 獲取所有論文的元數據
     with get_metas_db() as metas_db:
@@ -41,7 +41,7 @@ def get_latest_papers(n: int) -> List[Tuple[str, Dict]]:
     # 取前 n 篇
     latest_papers = sorted_papers[:n]
 
-    logger.info(f"成功獲取 {len(latest_papers)} 篇最新論文")
+    logger.info(f"Successfully fetched {len(latest_papers)} latest papers")
 
     return latest_papers
 
@@ -57,7 +57,7 @@ def generate_paper_summary_via_api(pid: str) -> Tuple[bool, str]:
         Tuple[bool, str]: (是否成功, 摘要內容或錯誤信息)
     """
     try:
-        logger.info(f"正在調用 API 生成論文摘要: {pid}")
+        logger.info(f"Calling API to generate paper summary: {pid}")
 
         # 調用 serve.py 的 API 接口
         response = requests.post(
@@ -70,27 +70,27 @@ def generate_paper_summary_via_api(pid: str) -> Tuple[bool, str]:
             result = response.json()
             if result.get("success"):
                 summary_content = result.get("summary_content", "")
-                logger.success(f"API 調用成功: {pid}")
+                logger.success(f"API call succeeded: {pid}")
                 return True, summary_content
             else:
                 error_msg = result.get("error", "未知錯誤")
-                logger.error(f"API 返回錯誤: {error_msg}")
-                return False, f"API 錯誤: {error_msg}"
+                logger.error(f"API returned error: {error_msg}")
+                return False, f"API error: {error_msg}"
         else:
             error_msg = f"HTTP 狀態碼: {response.status_code}"
-            logger.error(f"API 請求失敗: {error_msg}")
-            return False, f"請求失敗: {error_msg}"
+            logger.error(f"API request failed: {error_msg}")
+            return False, f"Request failed: {error_msg}"
 
     except requests.exceptions.Timeout:
-        error_msg = f"API 請求超時 (>{API_TIMEOUT}秒)"
+        error_msg = f"API request timed out (>{API_TIMEOUT}s)"
         logger.error(error_msg)
         return False, error_msg
     except requests.exceptions.ConnectionError:
-        error_msg = "無法連接到 API 服務器，請確保 serve.py 正在運行"
+        error_msg = "Unable to connect to API server, please make sure serve.py is running"
         logger.error(error_msg)
         return False, error_msg
     except Exception as e:
-        error_msg = f"API 調用異常: {str(e)}"
+        error_msg = f"API call exception: {str(e)}"
         logger.error(error_msg)
         return False, error_msg
 
@@ -118,14 +118,14 @@ def check_api_server():
     try:
         response = requests.get(f"{API_BASE_URL}/", timeout=5)
         if response.status_code == 200:
-            logger.info("API 服務器連接正常")
+            logger.info("API server connection is normal")
             return True
         else:
-            logger.warning(f"API 服務器響應異常: {response.status_code}")
+            logger.warning(f"API server abnormal response: {response.status_code}")
             return False
     except Exception as e:
-        logger.error(f"無法連接到 API 服務器: {e}")
-        logger.error("請確保 serve.py 正在運行並監聽 http://localhost:55555")
+        logger.error(f"Unable to connect to API server: {e}")
+        logger.error("Please make sure serve.py is running and listening on http://localhost:55555")
         return False
 
 
@@ -152,12 +152,12 @@ def main():
     else:
         logger.add(sys.stdout, level="INFO")
 
-    logger.info(f"開始處理最新的 {args.num_papers} 篇論文")
-    logger.info(f"API 服務器地址: {API_BASE_URL}")
+    logger.info(f"Start processing the latest {args.num_papers} papers")
+    logger.info(f"API server address: {API_BASE_URL}")
 
     # 檢查 API 服務器
     if not args.dry_run and not check_api_server():
-        logger.error("API 服務器不可用，請先啟動 serve.py")
+        logger.error("API server unavailable, please start serve.py first")
         sys.exit(1)
 
     try:
@@ -165,7 +165,7 @@ def main():
         latest_papers = get_latest_papers(args.num_papers)
 
         if not latest_papers:
-            logger.warning("沒有找到任何論文")
+            logger.warning("No papers found")
             return
 
         # 獲取論文詳細信息
@@ -183,13 +183,13 @@ def main():
             authors = ", ".join(a.get("name", "") for a in paper_info.get("authors", []))
             time_str = format_time_str(meta["_time"])
 
-            logger.info(f"\n[{i}/{len(latest_papers)}] 處理論文: {pid}")
-            logger.info(f"標題: {title}")
-            logger.info(f"作者: {authors}")
-            logger.info(f"時間: {time_str}")
+            logger.info(f"\n[{i}/{len(latest_papers)}] Processing paper: {pid}")
+            logger.info(f"Title: {title}")
+            logger.info(f"Authors: {authors}")
+            logger.info(f"Time: {time_str}")
 
             if args.dry_run:
-                logger.info("(乾運行模式 - 不生成摘要)")
+                logger.info("(Dry run mode - not generating summary)")
                 continue
 
             # 調用 API 生成摘要
@@ -198,7 +198,7 @@ def main():
             end_time = time.time()
 
             if success:
-                logger.success(f"摘要生成成功: {pid} (耗時: {end_time - start_time:.2f}秒)")
+                logger.success(f"Summary generated successfully: {pid} (time: {end_time - start_time:.2f}s)")
                 processed_count += 1
 
                 # 顯示摘要預覽（前200字符）
@@ -208,22 +208,22 @@ def main():
                         if len(summary_or_error) > 200
                         else summary_or_error
                     )
-                    logger.debug(f"摘要預覽: {preview}")
+                    logger.debug(f"Summary preview: {preview}")
             else:
-                logger.error(f"摘要生成失敗: {pid} - {summary_or_error}")
+                logger.error(f"Summary generation failed: {pid} - {summary_or_error}")
                 failed_count += 1
 
         # 顯示總結
-        logger.info("\n處理完成!")
-        logger.info(f"總論文數: {len(latest_papers)}")
-        logger.info(f"成功處理: {processed_count}")
-        logger.info(f"失敗數量: {failed_count}")
+        logger.info("\nProcessing complete!")
+        logger.info(f"Total papers: {len(latest_papers)}")
+        logger.info(f"Successfully processed: {processed_count}")
+        logger.info(f"Failed: {failed_count}")
 
         if not args.dry_run:
-            logger.info("摘要已緩存到: data/summary/ 目錄")
+            logger.info("Summaries have been cached to: data/summary/ directory")
 
     except Exception as e:
-        logger.error(f"處理過程中發生錯誤: {e}")
+        logger.error(f"Error occurred during processing: {e}")
         sys.exit(1)
 
 

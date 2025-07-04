@@ -66,10 +66,10 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
     concatenated_sparse = sp.hstack([tfidf_sparse, embedding_sparse], format="csr")
 
     logger.info(
-        f"稀疏-稠密拼接完成: TF-IDF {tfidf_sparse.shape} + Embedding {embedding_norm.shape} = {concatenated_sparse.shape}"
+        f"Sparse-dense concatenation complete: TF-IDF {tfidf_sparse.shape} + Embedding {embedding_norm.shape} = {concatenated_sparse.shape}"
     )
     logger.info(
-        f"拼接后稀疏度: {1 - concatenated_sparse.nnz / (concatenated_sparse.shape[0] * concatenated_sparse.shape[1]):.4f}"
+        f"Sparsity after concatenation: {1 - concatenated_sparse.nnz / (concatenated_sparse.shape[0] * concatenated_sparse.shape[1]):.4f}"
     )
 
     return concatenated_sparse
@@ -92,7 +92,7 @@ class Qwen3EmbeddingVllm:
         try:
             from openai import OpenAI
 
-            logger.info(f"正在连接 vLLM API 服务器: {self.api_base}")
+            logger.info(f"Connecting to vLLM API server: {self.api_base}")
             self.client = OpenAI(api_key="EMPTY", base_url=self.api_base)  # vLLM 不需要真实的 API key
 
             # 获取可用模型列表
@@ -100,23 +100,23 @@ class Qwen3EmbeddingVllm:
                 models = self.client.models.list()
                 if models.data:
                     self.model_name = models.data[0].id
-                    logger.info(f"使用模型: {self.model_name}")
+                    logger.info(f"Using model: {self.model_name}")
                 else:
-                    logger.error("未找到可用模型")
+                    logger.error("No available model found")
                     return False
             except Exception as e:
-                logger.error(f"获取模型列表失败: {e}")
+                logger.error(f"Failed to get model list: {e}")
                 return False
 
-            logger.info("嵌入 API 客户端初始化成功")
+            logger.info("Embedding API client initialized successfully")
             return True
         except ImportError as e:
-            logger.error(f"导入 OpenAI 库失败: {e}")
-            logger.error("请确保已安装 openai: pip install openai")
+            logger.error(f"Failed to import OpenAI library: {e}")
+            logger.error("Please make sure openai is installed: pip install openai")
             return False
         except Exception as e:
-            logger.error(f"初始化 API 客户端时发生错误: {e}")
-            logger.error(f"API 地址: {self.api_base}")
+            logger.error(f"Error occurred while initializing API client: {e}")
+            logger.error(f"API address: {self.api_base}")
             return False
 
     def get_detailed_instruct(self, query: str) -> str:
@@ -127,22 +127,22 @@ class Qwen3EmbeddingVllm:
         """通过 API 编码文本为嵌入向量"""
         try:
             if self.client is None:
-                logger.error("API 客户端未初始化，无法进行编码")
+                logger.error("API client not initialized, cannot encode")
                 return None
 
             if not sentences:
-                logger.error("输入文本列表为空")
+                logger.error("Input sentence list is empty")
                 return None
 
             if not self.model_name:
-                logger.error("模型名称未设置")
+                logger.error("Model name not set")
                 return None
 
             # 添加指令前缀
             try:
                 instructed_sentences = [self.get_detailed_instruct(sent) for sent in sentences]
             except Exception as e:
-                logger.error(f"添加指令前缀时出错: {e}")
+                logger.error(f"Error adding instruction prefix: {e}")
                 return None
 
             # 调用 API 生成嵌入
@@ -160,16 +160,16 @@ class Qwen3EmbeddingVllm:
                 return torch.from_numpy(embeddings)
 
             except Exception as e:
-                logger.error(f"API 调用失败: {e}")
+                logger.error(f"API call failed: {e}")
                 return None
 
         except ImportError as e:
-            logger.error(f"导入必要库失败: {e}")
+            logger.error(f"Failed to import required library: {e}")
             return None
         except Exception as e:
-            logger.error(f"编码过程中发生未知错误: {e}")
-            logger.error(f"输入文本数量: {len(sentences) if sentences else 0}")
-            logger.error(f"目标维度: {dim}")
+            logger.error(f"Unknown error occurred during encoding: {e}")
+            logger.error(f"Input sentence count: {len(sentences) if sentences else 0}")
+            logger.error(f"Target dimension: {dim}")
             return None
 
     def stop(self):
@@ -177,9 +177,9 @@ class Qwen3EmbeddingVllm:
         try:
             # API 客户端不需要特殊清理
             self.client = None
-            logger.debug("API 客户端资源清理完成")
+            logger.debug("API client resources cleaned up")
         except Exception as e:
-            logger.warning(f"清理 API 客户端时出错: {e}")
+            logger.warning(f"Error occurred while cleaning up API client: {e}")
 
 
 def load_existing_embeddings(embed_dim=512):
@@ -200,20 +200,22 @@ def load_existing_embeddings(embed_dim=512):
             # 检查嵌入参数是否匹配
             embed_params = features.get("embedding_params", {})
             if embed_params.get("embed_dim") == embed_dim:
-                logger.info(f"加载现有嵌入特征: {features['x_embeddings'].shape}")
+                logger.info(f"Loaded existing embedding features: {features['x_embeddings'].shape}")
                 return {"pids": features["pids"], "embeddings": features["x_embeddings"], "params": embed_params}
             else:
-                logger.warning(f"嵌入维度不匹配: 现有 {embed_params.get('embed_dim')} vs 目标 {embed_dim}")
-                logger.warning("将重新生成所有嵌入")
+                logger.warning(
+                    f"Embedding dimension mismatch: existing {embed_params.get('embed_dim')} vs target {embed_dim}"
+                )
+                logger.warning("Will regenerate all embeddings")
 
     except FileNotFoundError:
-        logger.info("未找到现有特征文件")
+        logger.info("No existing feature file found")
     except Exception as e:
-        logger.error(f"加载现有嵌入时发生错误: {e}")
-        logger.error(f"文件路径: {FEATURES_FILE}")
+        logger.error(f"Error occurred while loading existing embeddings: {e}")
+        logger.error(f"File path: {FEATURES_FILE}")
         import traceback
 
-        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        logger.error(f"Detailed error info: {traceback.format_exc()}")
 
     return None
 
@@ -240,12 +242,12 @@ def generate_embeddings_incremental(
     Returns:
         embeddings: numpy数组 (n_samples, embed_dim)
     """
-    logger.info("检查现有嵌入...")
+    logger.info("Checking for existing embeddings...")
     existing = load_existing_embeddings(embed_dim)
 
     if existing is not None:
         existing_pids_set = set(existing["pids"])
-        logger.info(f"找到 {len(existing_pids_set)} 个现有嵌入")
+        logger.info(f"Found {len(existing_pids_set)} existing embeddings")
 
         # 找出需要新生成的论文ID
         new_pids = []
@@ -255,10 +257,10 @@ def generate_embeddings_incremental(
                 new_pids.append(pid)
                 new_indices.append(i)
 
-        logger.info(f"需要生成 {len(new_pids)} 个新嵌入")
+        logger.info(f"Need to generate {len(new_pids)} new embeddings")
 
         if len(new_pids) == 0:
-            logger.info("所有论文已有嵌入，直接返回现有嵌入")
+            logger.info("All papers already have embeddings, returning existing embeddings")
             # 重新排序以匹配当前 pids 顺序
             ordered_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
             pid_to_idx = {pid: i for i, pid in enumerate(existing["pids"])}
@@ -273,7 +275,7 @@ def generate_embeddings_incremental(
             return ordered_embeddings
 
         # 只为需要更新的论文准备语料
-        logger.info(f"为 {len(new_pids)} 个新论文准备嵌入语料...")
+        logger.info(f"Preparing embedding corpus for {len(new_pids)} new papers...")
         new_texts = []
         for pid in tqdm(new_pids, desc="准备新论文嵌入语料"):
             d = pdb[pid]
@@ -282,13 +284,13 @@ def generate_embeddings_incremental(
             text += f"Abstract: {d['summary']}"
             new_texts.append(text)
     else:
-        logger.info("未找到现有嵌入，将生成全部嵌入")
+        logger.info("No existing embeddings found, will generate all embeddings")
         existing_pids_set = set()
         new_pids = all_pids
         new_indices = list(range(len(all_pids)))
 
         # 为所有论文准备语料
-        logger.info(f"为所有 {len(all_pids)} 个论文准备嵌入语料...")
+        logger.info(f"Preparing embedding corpus for all {len(all_pids)} papers...")
         new_texts = []
         for pid in tqdm(all_pids, desc="准备嵌入语料"):
             d = pdb[pid]
@@ -300,11 +302,11 @@ def generate_embeddings_incremental(
     # 生成新嵌入
     new_embeddings = None
     if len(new_texts) > 0:
-        logger.info(f"初始化嵌入 API 客户端: {api_base}")
+        logger.info(f"Initializing embedding API client: {api_base}")
         model = Qwen3EmbeddingVllm(model_name_or_path=model_path, api_base=api_base)
 
         if not model.initialize():
-            logger.error("API 客户端初始化失败，使用随机嵌入")
+            logger.error("API client initialization failed, using random embeddings")
             new_embeddings = np.random.randn(len(new_texts), embed_dim).astype(np.float32)
         else:
             # 批量生成新嵌入
@@ -319,10 +321,10 @@ def generate_embeddings_incremental(
                     if batch_output is not None:
                         new_embeddings_list.append(batch_output.cpu().numpy())
                     else:
-                        logger.warning(f"批次 {i//batch_size + 1} 编码返回 None，使用随机嵌入")
+                        logger.warning(f"Batch {i//batch_size + 1} encoding returned None, using random embeddings")
                         new_embeddings_list.append(np.random.randn(len(batch_texts), embed_dim).astype(np.float32))
                 except Exception as e:
-                    logger.error(f"批次 {i//batch_size + 1} 生成嵌入失败: {e}")
+                    logger.error(f"Batch {i//batch_size + 1} failed to generate embeddings: {e}")
                     new_embeddings_list.append(np.random.randn(len(batch_texts), embed_dim).astype(np.float32))
 
             # 清理模型
@@ -330,7 +332,7 @@ def generate_embeddings_incremental(
 
             # 合并新嵌入
             new_embeddings = np.vstack(new_embeddings_list).astype(np.float32)
-            logger.info(f"生成新嵌入完成: {new_embeddings.shape}")
+            logger.info(f"New embeddings generated: {new_embeddings.shape}")
 
     # 组装最终的嵌入矩阵
     final_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
@@ -349,7 +351,7 @@ def generate_embeddings_incremental(
             final_embeddings[i] = new_embeddings[new_embed_idx]
             new_embed_idx += 1
 
-    logger.info(f"增量嵌入生成完成: 总计 {final_embeddings.shape}")
+    logger.info(f"Incremental embedding generation complete: total {final_embeddings.shape}")
     return final_embeddings
 
 
@@ -447,7 +449,7 @@ if __name__ == "__main__":
 
     # 决定最终使用的特征
     if args.use_embeddings:
-        logger.info("生成嵌入向量特征...")
+        logger.info("Generating embedding features...")
 
         # 增量生成嵌入向量（语料准备在函数内部完成）
         embeddings = generate_embeddings_incremental(
@@ -461,7 +463,7 @@ if __name__ == "__main__":
 
         if embeddings is not None:
             # 执行稀疏-稠密拼接
-            logger.info("执行稀疏-稠密矩阵拼接...")
+            logger.info("Performing sparse-dense matrix concatenation...")
             x_final = sparse_dense_concatenation(x, embeddings)
 
             # 保存特征
@@ -493,7 +495,7 @@ if __name__ == "__main__":
                 },
             }
         else:
-            logger.warning("嵌入生成失败，回退到仅使用TF-IDF特征")
+            logger.warning("Embedding generation failed, falling back to TF-IDF features only")
             x_final = x
             features = {
                 "pids": pids,
@@ -511,7 +513,7 @@ if __name__ == "__main__":
             }
     else:
         # 仅使用TF-IDF特征
-        logger.info("仅使用TF-IDF特征（未启用嵌入）")
+        logger.info("Using only TF-IDF features (embeddings not enabled)")
         x_final = x
         features = {
             "pids": pids,
@@ -528,19 +530,19 @@ if __name__ == "__main__":
             },
         }
 
-    logger.info("保存特征到磁盘...")
+    logger.info("Saving features to disk...")
     save_features(features)
 
-    logger.info("复制到生产文件...")
+    logger.info("Copying to production file...")
     shutil.copyfile(FEATURES_FILE_NEW, FEATURES_FILE)
 
     total_time = time.time() - start_time
-    logger.info(f"特征提取完成，总耗时: {total_time:.1f}s")
-    logger.info(f"最终特征形状: {x_final.shape}")
-    logger.info(f"最终特征类型: {features.get('feature_type', 'unknown')}")
+    logger.info(f"Feature extraction complete, total time: {total_time:.1f}s")
+    logger.info(f"Final feature shape: {x_final.shape}")
+    logger.info(f"Final feature type: {features.get('feature_type', 'unknown')}")
 
     if "feature_config" in features:
-        logger.info("特征配置详情:")
+        logger.info("Feature configuration details:")
         for key, value in features["feature_config"].items():
             logger.info(f"  {key}: {value}")
 
@@ -550,6 +552,6 @@ if __name__ == "__main__":
 
         if dist.is_initialized():
             dist.destroy_process_group()
-            logger.info("程序结束前清理分布式资源完成")
+            logger.info("Distributed resources cleaned up before program exit")
     except Exception as e:
-        logger.warning(f"程序结束前清理分布式资源失败: {e}")
+        logger.warning(f"Failed to clean up distributed resources before program exit: {e}")

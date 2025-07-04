@@ -89,7 +89,7 @@ if os.path.isfile("secret_key.txt"):
     # import secrets; secrets.token_urlsafe(16)
     sk = open("secret_key.txt").read().strip()
 else:
-    logger.warning("no secret key found, using default `devkey`")
+    logger.warning("No secret key found, using default `devkey`")
     sk = "devkey"
 app.secret_key = sk
 
@@ -449,7 +449,9 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
         if not pids:
             return [], [], []
         x = x[time_valid_indices]
-        logger.trace(f"智能时间过滤后保留 {len(pids)} 篇论文 (包含标记论文和{time_filter}天内论文)")
+        logger.trace(
+            f"After intelligent time filtering, kept {len(pids)} papers (including tagged papers and those within {time_filter} days)"
+        )
 
     n, d = x.shape
     ptoi, itop = {}, {}
@@ -1138,44 +1140,44 @@ def generate_paper_summary(pid: str) -> str:
 
         # Check if cached summary exists
         if cache_file.exists():
-            logger.info(f"使用緩存的論文總結: {pid}")
+            logger.info(f"Using cached paper summary: {pid}")
             try:
                 with open(cache_file, encoding="utf-8") as f:
                     cached_summary = f.read()
                 if cached_summary.strip():
                     return cached_summary
                 else:
-                    logger.warning(f"緩存文件為空，重新生成總結: {pid}")
+                    logger.warning(f"Cache file is empty, regenerating summary: {pid}")
             except Exception as e:
-                logger.error(f"讀取緩存總結失敗: {e}")
+                logger.error(f"Failed to read cached summary: {e}")
 
         # Generate new summary using paper_summarizer module
-        logger.info(f"生成新的論文總結: {pid}")
+        logger.info(f"Generating new paper summary: {pid}")
         summary_content = generate_paper_summary_from_module(pid)
 
         # Only cache successful summaries (not error messages)
         if not summary_content.startswith("# 錯誤") and not summary_content.startswith("# 错误"):
             # Check Chinese ratio before caching
             chinese_ratio = calculate_chinese_ratio(summary_content)
-            logger.trace(f"论文 {pid} 总结中文占比: {chinese_ratio:.2%}")
+            logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
 
             if chinese_ratio >= 0.25:
                 try:
                     with open(cache_file, "w", encoding="utf-8") as f:
                         f.write(summary_content)
-                    logger.info(f"論文總結已緩存到: {cache_file} (中文占比: {chinese_ratio:.2%})")
+                    logger.info(f"Paper summary cached to: {cache_file} (Chinese ratio: {chinese_ratio:.2%})")
                 except Exception as e:
-                    logger.error(f"緩存論文總結失敗: {e}")
+                    logger.error(f"Failed to cache paper summary: {e}")
             else:
-                logger.warning(f"總結中文占比過低 ({chinese_ratio:.2%} < 50%)，不進行緩存: {pid}")
+                logger.warning(f"Summary Chinese ratio too low ({chinese_ratio:.2%} < 50%), not caching: {pid}")
         else:
-            logger.warning(f"總結生成失敗，不進行緩存: {pid}")
+            logger.warning(f"Summary generation failed, not caching: {pid}")
 
         return summary_content
 
     except Exception as e:
-        logger.error(f"生成論文總結時發生錯誤: {e}")
-        return f"# 錯誤\n\n生成總結失敗: {str(e)}"
+        logger.error(f"Error occurred while generating paper summary: {e}")
+        return f"# Error\n\nFailed to generate summary: {str(e)}"
 
 
 @app.route("/profile")
