@@ -19,6 +19,17 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 
 ## 📈 Changelog
 
+### v2.4 - Multi-threading & Service Enhancement
+- ⚡ **Concurrency Optimization**: True multi-threaded concurrent paper summarization processing
+- 🔒 **Thread Safety**: File-level locking mechanism to avoid minerU parsing conflicts
+- 📊 **Enhanced Statistics**: Detailed processing statistics and failure reason analysis
+- 🔄 **Retry Mechanism**: Smart retry for failed paper processing tasks
+- 📈 **Progress Tracking**: Real-time progress bars and processing status display
+- 🔧 **Configuration Optimization**: Support for multiple LLM providers (OpenRouter, ZhipuAI, etc.)
+- 📊 **Service Integration**: Complete vLLM and minerU service integration
+- 🎨 **Interface Enhancement**: Better responsive design and MathJax mathematical formula support
+- 🛠️ **Error Handling**: Enhanced exception handling and retry mechanisms
+
 ### v2.3 - AI Paper Summarization
 - ✨ **New**: Complete AI-powered paper summarization system with [`paper_summarizer.py`](paper_summarizer.py)
 - 🧠 **MinerU Integration**: Advanced PDF parsing with minerU for better text extraction and structure recognition
@@ -26,7 +37,7 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 - 🔧 **Batch Processing**: [`batch_paper_summarizer.py`](batch_paper_summarizer.py) for parallel summary generation with thread safety
 - ⚡ **Smart Caching**: Intelligent summary caching with Chinese text ratio validation and quality control
 - 🎨 **Enhanced UI**: New summary page design with MathJax support for mathematical formulas
-- 📊 **Configuration**: Added LLM API configuration in [`vars_template.py`](vars_template.py)
+- 📊 **Configuration**: Added LLM API configuration in [`vars.py`](vars.py)
 - 🔄 **Auto Generation**: [`generate_latest_summaries.py`](generate_latest_summaries.py) for automated batch processing
 
 ### v2.2 - Performance & Stability Improvements
@@ -68,6 +79,7 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 5. [AI Paper Summarization](#ai-paper-summarization)
 6. [Advanced Features](#advanced-features)
 7. [API Reference](#api-reference)
+8. [Deployment Guide](#deployment-guide)
 
 ## 🛠 Installation & Setup
 
@@ -122,22 +134,15 @@ gunicorn -w 4 -b 0.0.0.0:5000 serve:app
 ## ⚙️ Configuration
 
 ### Primary Configuration (vars.py)
-```python
-# Database Configuration
-DATA_DIR = "data"  # Use SSD path for optimal performance
-HOST = "http://localhost:5000"  # Web service URL
 
-# Email Service Configuration
-from_email = "your_email@example.com"
-smtp_server = "smtp.example.com"
-smtp_port = 465  # SSL port (465) or TLS port (587)
-email_username = "your_username"
-email_passwd = "your_app_password"
+Configure the following settings in `vars.py`:
 
-# LLM API Configuration (for AI summarization)
-LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # e.g., ZhipuAI API
-LLM_API_KEY = "your_llm_api_key"  # Your LLM API key
-```
+- **Database Configuration**: Data storage paths and web service URL
+- **Email Service Configuration**: SMTP server settings for paper recommendation emails
+- **LLM API Configuration**: Support for multiple LLM providers (OpenAI-compatible API)
+- **vLLM Service Ports**: Port configuration for embedding models and minerU services
+
+The project supports multiple LLM providers, including OpenRouter (recommended free models), ZhipuAI (free Flash series models), and others.
 
 ### Advanced Parameters
 
@@ -148,10 +153,19 @@ python compute.py \
   --min_df 20 \              # Minimum document frequency
   --max_df 0.10 \            # Maximum document frequency
   --ngram_max 1 \            # Maximum n-gram size
-  --use_embeddings \         # Disable embedding vectors
+  --use_embeddings \         # Enable embedding vectors
   --embed_model ./qwen3-embed-0.6B \  # Embedding model path
   --embed_dim 512 \          # Embedding dimensions
   --embed_batch_size 2048    # Batch size for embedding generation
+```
+
+#### Batch Paper Summarization (batch_paper_summarizer.py)
+```bash
+python batch_paper_summarizer.py \
+  -n 200 \                   # Number of papers to process
+  -w 4 \                     # Number of worker threads
+  --max-retries 3 \          # Maximum retry attempts
+  --no-skip-cached           # Reprocess cached papers
 ```
 
 #### Email Recommendations (send_emails.py)
@@ -176,17 +190,19 @@ arxiv-sanity-X/
 ├── paper_summarizer.py         # AI paper summarization module
 ├── batch_paper_summarizer.py   # Batch processing for paper summaries
 ├── generate_latest_summaries.py # Auto-generate summaries for latest papers
-├── thumb_daemon.py             # Paper thumbnail generation
-├── vllm_serve.sh               # vLLM model server startup script
+├── mineru_serve.sh             # minerU VLM server startup script
+├── embedding_serve.sh          # vLLM embedding server startup script
 ├── aslite/                     # Core library
 │   ├── db.py                  # Database operations (SQLite + compression)
 │   └── arxiv.py               # arXiv API interface
 ├── templates/                  # HTML templates
-│   ├── main.html              # Main interface template
+│   ├── base.html              # Base template
+│   ├── index.html             # Main interface template
 │   └── summary.html           # Paper summary page template
 ├── static/                     # Static web assets
 │   ├── paper_list.js          # Main interface JavaScript
-│   └── paper_summary.js       # Summary page JavaScript
+│   ├── paper_summary.js       # Summary page JavaScript
+│   └── style.css              # Stylesheet
 └── data/                       # Data storage
     ├── papers.db              # Paper database (SQLite)
     ├── features.p             # Feature cache (pickle)
@@ -204,26 +220,19 @@ arxiv-sanity-X/
 5. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations with holiday-aware scheduling
 6. **Automation**: [`daemon.py`](daemon.py) orchestrates the entire pipeline with intelligent resource management
 
-### Automated Scheduling
-
-**Built-in Scheduler:**
-```bash
-python daemon.py
+### Service Dependencies
 ```
-
-**Manual Cron Setup:**
-```cron
-# Fetch and compute features (weekdays 4x daily)
-0 6,11,16,21 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 5000 && python compute.py
-
-# Send email recommendations (weekdays 6 PM)
-0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python send_emails.py -t 1.5
-
-# Generate paper summaries (daily 7 PM)
-0 19 * * * cd /path/to/arxiv-sanity-x && python generate_latest_summaries.py --num_papers 100
-
-# Backup user data (daily 10 PM)
-0 22 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Flask Web     │    │  vLLM Embedding  │    │  minerU VLM     │
+│   (port 5000)   │<-->│   (port 51000)   │    │  (port 52000)   │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+         v                       v                       v
+┌─────────────────────────────────────────────────────────────────┐
+│                     SQLite Database Storage                     │
+│  papers.db | features.p | dict.db | summary/ | mineru/          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## 📖 Usage Guide
@@ -231,17 +240,17 @@ python daemon.py
 ### User Interface Features
 
 - **Account System**: User authentication with profile management and email configuration
-- **Advanced Search**: 
+- **Advanced Search**:
   - **Keyword Search**: Traditional text-based search with TF-IDF scoring
-  - **Semantic Search**: AI-powered similarity search using embedding vectors  
+  - **Semantic Search**: AI-powered similarity search using embedding vectors
   - **Hybrid Search**: Combines keyword + semantic with adjustable weights (0.0-1.0)
   - **Tag-based**: SVM recommendations trained on your personal tags
   - **Time Filtering**: Smart filtering that preserves tagged papers even outside time window
-- **Organization Tools**: 
+- **Organization Tools**:
   - **Personal Tags**: Individual paper tagging with AND/OR logic
   - **Combined Tags**: Multi-tag categories (e.g., "RL,NLP") for complex topics
   - **Keywords**: Track specific terms across all papers
-- **AI Paper Summaries**: 
+- **AI Paper Summaries**:
   - Click "Summary" for LLM-generated summaries
   - MathJax rendering for LaTeX formulas
   - Async loading with progress indicators
@@ -258,9 +267,21 @@ python daemon.py
 ### Complete AI Pipeline
 1. **PDF Download**: Automatic arXiv paper fetching with error handling
 2. **minerU Parsing**: Advanced PDF text extraction with structure recognition and image handling
-3. **LLM Processing**: Generate comprehensive summaries using GLM-4-Flash or compatible models
+3. **LLM Processing**: Generate comprehensive summaries using multiple OpenAI-compatible LLM providers
 4. **Quality Control**: Chinese text ratio validation and content filtering
 5. **Smart Caching**: Intelligent caching with automatic quality checks and storage optimization
+
+### Start Services
+```bash
+# Start minerU VLM service
+bash mineru_serve.sh
+
+# Start embedding model service
+bash embedding_serve.sh
+
+# Start main web service
+python serve.py
+```
 
 ### Usage Commands
 ```bash
@@ -271,17 +292,27 @@ python daemon.py
 python generate_latest_summaries.py --num_papers 100
 
 # Advanced batch processing with custom workers
-python batch_paper_summarizer.py --num_papers 200 --max_workers 4 --skip_cached
+python batch_paper_summarizer.py -n 200 -w 4 --max-retries 3
 
 # Check processing status
-python batch_paper_summarizer.py --dry_run  # Preview mode
+python batch_paper_summarizer.py --dry-run  # Preview mode
 ```
 
-### Configuration
+### LLM Provider Support
+The project supports multiple LLM providers:
+
+#### OpenRouter
 ```python
-# In vars.py - LLM API setup
-LLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"  # ZhipuAI or OpenAI-compatible
-LLM_API_KEY = "your_api_key_here"
+LLM_BASE_URL = "https://openrouter.ai/api/v1"
+LLM_API_KEY = "sk-or-v1-..."
+LLM_NAME = "deepseek/deepseek-chat-v3.1:free"  # Free model
+```
+
+#### OpenAI
+```python
+LLM_BASE_URL = "https://api.openai.com/v1"
+LLM_API_KEY = "sk-..."
+LLM_NAME = "gpt-4o-mini"
 ```
 
 ### Features
@@ -298,13 +329,13 @@ LLM_API_KEY = "your_api_key_here"
 ```bash
 # Download and start embedding model
 huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
-bash vllm_serve.sh
+bash embedding_serve.sh
 
 # Enable embedding computation with API client
 python compute.py --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
 ```
 
-Features: 
+Features:
 - Multi-core processing optimization
 - Intel scikit-learn extensions for performance
 - Intelligent feature caching with automatic reload
@@ -316,6 +347,28 @@ Features:
 - **Features**: Hybrid sparse TF-IDF + dense embeddings with L2 normalization
 - **Memory**: Optimized for large datasets (400k+ papers) with streaming processing
 - **Compute**: Multi-threading with configurable worker pools and batch processing
+
+### Automated Scheduling
+
+**Built-in Scheduler:**
+```bash
+python daemon.py
+```
+
+**Manual Cron Setup:**
+```cron
+# Fetch and compute features (weekdays 4x daily)
+0 9,13,17,21 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 1000 && python compute.py
+
+# Send email recommendations (weekdays 6 PM)
+0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python send_emails.py -t 2
+
+# Generate paper summaries (daily 7 PM)
+0 19 * * * cd /path/to/arxiv-sanity-x && python batch_paper_summarizer.py -n 200 -w 2
+
+# Backup user data (daily 8 PM)
+0 20 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
+```
 
 ## 📚 API Reference
 
@@ -331,7 +384,7 @@ Features:
 
 #### API Endpoints
 - `POST /api/keyword_search` - Keyword-based search via API
-- `POST /api/tag_search` - Single tag recommendations  
+- `POST /api/tag_search` - Single tag recommendations
 - `POST /api/tags_search` - Multi-tag recommendations with logic operations
 - `POST /api/get_paper_summary` - Get AI-generated paper summary (JSON: `{"pid": "paper_id"}`)
 

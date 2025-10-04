@@ -27,7 +27,7 @@ from aslite.db import (
     get_papers_db,
     get_tags_db,
 )
-from vars import HOST
+from vars import HOST, SERVE_PORT
 
 # Set multi-threading environment variables
 num_threads = min(cpu_count(), 192)  # Reasonable thread limit
@@ -47,9 +47,9 @@ except ImportError:
     logger.info(f"Using standard sklearn with {num_threads} threads")
     USE_INTEL_EXT = False
 
-# API调用配置
-API_BASE_URL = "http://localhost:55555"  # serve.py默认端口
-API_TIMEOUT = 120  # API请求超时时间（秒）
+# API call configuration
+API_BASE_URL = f"http://localhost:{SERVE_PORT}"  # serve.py default port
+API_TIMEOUT = 120  # API request timeout (seconds)
 
 # -----------------------------------------------------------------------------
 # the html template for the email
@@ -357,27 +357,27 @@ template = """
 def calculate_ctag_recommendation(
     ctags: List[str],
     tags: dict,
-    user: str,  # 添加user参数
+    user: str,  # Add user parameter
     time_delta: int = 3,
 ):
-    """使用API调用联合tag推荐"""
+    """Use API to call joint tag recommendations"""
     all_pids, all_scores = {}, {}
 
     for ctag in ctags:
         _tags = list(map(str.strip, ctag.split(",")))
-        # 过滤出有效的tags（有论文的）
+        # Filter out valid tags (with papers)
         valid_tags = [tag for tag in _tags if tag in tags and len(tags[tag]) > 0]
 
         if not valid_tags:
             continue
 
         try:
-            # 调用API，传递tag名称列表和用户信息
+            # Call API, pass tag name list and user information
             response = requests.post(
                 f"{API_BASE_URL}/api/tags_search",
                 json={
-                    "tags": valid_tags,  # tag名称列表
-                    "user": user,  # 用户名
+                    "tags": valid_tags,  # tag name list
+                    "user": user,  # username
                     "logic": "and",
                     "time_delta": time_delta,
                     "limit": 1000,
@@ -404,10 +404,10 @@ def calculate_ctag_recommendation(
 
 def calculate_recommendation(
     tags: dict,
-    user: str,  # 添加user参数
+    user: str,  # Add user parameter
     time_delta: int = 3,  # how recent papers are we recommending? in days
 ):
-    """使用API调用单个tag推荐"""
+    """Use API to call single tag recommendations"""
     all_pids, all_scores = {}, {}
 
     for tag, tpids in tags.items():
@@ -415,12 +415,12 @@ def calculate_recommendation(
             continue
 
         try:
-            # 调用API，传递tag名称和用户信息
+            # Call API, pass tag name and user information
             response = requests.post(
                 f"{API_BASE_URL}/api/tag_search",
                 json={
-                    "tag_name": tag,  # tag名称
-                    "user": user,  # 用户名
+                    "tag_name": tag,  # tag name
+                    "user": user,  # username
                     "time_delta": time_delta,
                     "limit": 1000,
                     "C": 0.1,
@@ -448,12 +448,12 @@ def calculate_recommendation(
 # Keywords recommendation
 # -----------------------------------------------------------------------------
 def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], time_delta: int = 3):
-    """使用API调用关键词搜索"""
+    """Use API to call keyword search"""
     all_pids, all_scores = {}, {}
 
     for keyword, pids in keywords.items():
         try:
-            # 调用API
+            # Call API
             response = requests.post(
                 f"{API_BASE_URL}/api/keyword_search",
                 json={"keyword": keyword, "time_delta": time_delta, "limit": 1000},
@@ -463,7 +463,7 @@ def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], ti
             if response.status_code == 200:
                 result = response.json()
                 if result.get("success"):
-                    # 排除已有的论文
+                    # Exclude existing papers
                     rec_pids = result["pids"]
                     rec_scores = result["scores"]
                     keep = [i for i, pid in enumerate(rec_pids) if pid not in pids]
@@ -486,7 +486,7 @@ def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], ti
 # -----------------------------------------------------------------------------
 
 
-# TODO: 链接跳转到 summary 界面
+# TODO: Link to summary interface
 def render_recommendations(
     user,
     tags,
@@ -504,64 +504,64 @@ def render_recommendations(
     out = out.replace("__HOST__", HOST)
     out = out.replace("__WEB__", WEB)
 
-    # 收集所有推荐的论文，按优先级去重: tag > ctag > keyword
-    tag_papers = set()  # tag推荐的论文
-    ctag_papers = set()  # ctag推荐的论文
-    keyword_papers = set()  # keyword推荐的论文
+    # Collect all recommended papers, deduplicate by priority: tag > ctag > keyword
+    tag_papers = set()  # Papers recommended by tag
+    ctag_papers = set()  # Papers recommended by ctag
+    keyword_papers = set()  # Papers recommended by keyword
 
-    # 先收集tag推荐的论文
+    # First collect tag recommended papers
     if sum(len(tag_pids[tag]) for tag in tag_pids) > 0:
         for tag in tag_pids:
             tag_papers.update(tag_pids[tag])
 
-    # 收集ctag推荐的论文，排除已在tag中的
+    # Collect ctag recommended papers, exclude those already in tag
     if sum(len(ctag_pids[ctag]) for ctag in ctag_pids) > 0:
         for ctag in ctag_pids:
             ctag_papers.update(ctag_pids[ctag])
-        ctag_papers -= tag_papers  # 去重：排除tag中已有的
+        ctag_papers -= tag_papers  # Deduplicate: exclude those already in tag
 
-    # 收集keyword推荐的论文，排除已在tag和ctag中的
+    # Collect keyword recommended papers, exclude those already in tag and ctag
     if sum(len(kpids[keyword]) for keyword in keywords) > 0:
         for keyword in kpids:
             keyword_papers.update(kpids[keyword])
-        keyword_papers -= tag_papers  # 去重：排除tag中已有的
-        keyword_papers -= ctag_papers  # 去重：排除ctag中已有的
+        keyword_papers -= tag_papers  # Deduplicate: exclude those already in tag
+        keyword_papers -= ctag_papers  # Deduplicate: exclude those already in ctag
 
-    # 应用去重后的结果，修改原有的推荐数据
-    # 处理tag推荐
+    # Apply deduplicated results, modify original recommendation data
+    # Process tag recommendations
     filtered_tag_pids = {}
     filtered_tag_scores = {}
     for tag in tag_pids:
         filtered_pids = []
         filtered_scores = []
         for pid, score in zip(tag_pids[tag], tag_scores[tag]):
-            if pid in tag_papers:  # 只保留在tag_papers中的论文
+            if pid in tag_papers:  # Only keep papers in tag_papers
                 filtered_pids.append(pid)
                 filtered_scores.append(score)
         filtered_tag_pids[tag] = filtered_pids
         filtered_tag_scores[tag] = filtered_scores
 
-    # 处理ctag推荐
+    # Process ctag recommendations
     filtered_ctag_pids = {}
     filtered_ctag_scores = {}
     for ctag in ctag_pids:
         filtered_pids = []
         filtered_scores = []
         for pid, score in zip(ctag_pids[ctag], ctag_scores[ctag]):
-            if pid in ctag_papers:  # 只保留在ctag_papers中的论文
+            if pid in ctag_papers:  # Only keep papers in ctag_papers
                 filtered_pids.append(pid)
                 filtered_scores.append(score)
         filtered_ctag_pids[ctag] = filtered_pids
         filtered_ctag_scores[ctag] = filtered_scores
 
-    # 处理keyword推荐
+    # Process keyword recommendations
     filtered_kpids = {}
     filtered_kscores = {}
     for keyword in kpids:
         filtered_pids = []
         filtered_scores = []
         for pid, score in zip(kpids[keyword], kscores[keyword]):
-            if pid in keyword_papers:  # 只保留在keyword_papers中的论文
+            if pid in keyword_papers:  # Only keep papers in keyword_papers
                 filtered_pids.append(pid)
                 filtered_scores.append(score)
         filtered_kpids[keyword] = filtered_pids
@@ -587,7 +587,7 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # 每个tag推荐类型各自最多推荐num_recommendations个论文
+        # Each tag recommendation type recommends at most num_recommendations papers
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -681,7 +681,7 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # 每个ctag推荐类型各自最多推荐num_recommendations个论文
+        # Each ctag recommendation type recommends at most num_recommendations papers
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -736,7 +736,7 @@ def render_recommendations(
         final = "".join(parts)
 
         # render the stats
-        # 计算联合tags涉及的所有论文数量
+        # Calculate total number of papers involved in joint tags
         ctag_papers = set()
         for ctag in ctags:
             _tags = list(map(str.strip, ctag.split(",")))
@@ -782,7 +782,7 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # 每个keyword推荐类型各自最多推荐num_recommendations个论文
+        # Each keyword recommendation type recommends at most num_recommendations papers
         n = min(len(scores), args.num_recommendations)
         for score, pid in zip(scores[:n], pids[:n]):
             p = pdb[pid]
@@ -1006,7 +1006,7 @@ if __name__ == "__main__":
             kpids_set = set().union(*kpids.values()) if kpids.values() else set()
             logger.debug(f"From keywords, found {len(kpids_set)} papers for {user} within {args.time_delta} days")
 
-            # 检查是否有任何推荐结果
+            # Check if there are any recommendation results
             has_tag_recs = any(len(lst) > 0 for tag, lst in pids.items())
             has_ctag_recs = any(len(lst) > 0 for ctag, lst in cpids.items())
             has_keyword_recs = any(len(lst) > 0 for key, lst in kpids.items())

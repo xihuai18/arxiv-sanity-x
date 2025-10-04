@@ -10,6 +10,7 @@ scikit-learn-intelex
 openai
 tiktoken
 vllm
+mineru[all]
 
 # 数据处理和存储
 feedparser

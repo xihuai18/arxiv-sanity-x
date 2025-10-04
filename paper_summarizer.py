@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-论文总结器模块
-功能：
-1. 下载 arxiv 论文到 pdfs 目录
-2. 使用 minerU 解析为 markdown
-3. 使用智谱 AI 的 glm-4-flash 模型总结论文
+Paper Summarizer Module
+Features:
+1. Download arxiv papers to pdfs directory
+2. Parse PDFs to markdown using minerU
+3. Summarize papers using LLM models
 """
 
 import re
@@ -19,11 +19,19 @@ import openai
 import requests
 from loguru import logger
 
-from vars import DATA_DIR, LLM_API_KEY, LLM_BASE_URL, LLM_SUMMARY_LANG
+from vars import (
+    DATA_DIR,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_NAME,
+    LLM_SUMMARY_LANG,
+    MAIN_CONTENT_MIN_RATIO,
+    VLLM_MINERU_PORT,
+)
 
 
 class PaperSummarizer:
-    # 類級別的鎖，確保只有一個 minerU 進程在運行
+    # Class-level lock to ensure only one minerU process is running
     _mineru_lock = threading.Lock()
 
     def __init__(self):
@@ -31,29 +39,29 @@ class PaperSummarizer:
         self.pdfs_dir = self.data_dir / "pdfs"
         self.mineru_dir = self.data_dir / "mineru"
 
-        # 确保目录存在
+        # Ensure directories exist
         self.pdfs_dir.mkdir(parents=True, exist_ok=True)
         self.mineru_dir.mkdir(parents=True, exist_ok=True)
 
-        # 初始化 OpenAI 客户端连接智谱 AI
+        # Initialize OpenAI client
         self.client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
     def download_arxiv_paper(self, pid: str) -> Optional[Path]:
         """
-        下载 arXiv 论文 PDF
+        Download arXiv paper PDF
 
         Args:
-            pid: 论文 ID，例如 "2301.00001"
+            pid: Paper ID, e.g. "2301.00001"
 
         Returns:
-            下载的 PDF 文件路径，失败返回 None
+            Downloaded PDF file path, None if failed
         """
         try:
-            # arXiv PDF URL 格式
+            # arXiv PDF URL format
             pdf_url = f"https://arxiv.org/pdf/{pid}"
             pdf_path = self.pdfs_dir / f"{pid}.pdf"
 
-            # 如果文件已存在，直接返回
+            # If file already exists, return directly
             if pdf_path.exists():
                 logger.trace(f"PDF file already exists: {pdf_path}")
                 return pdf_path
@@ -74,41 +82,66 @@ class PaperSummarizer:
 
     def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
         """
-        使用 minerU 解析 PDF 为 Markdown (带单例锁保护)
+        Parse PDF to Markdown using minerU (with singleton lock protection)
 
         Args:
-            pdf_path: PDF 文件路径
+            pdf_path: PDF file path
 
         Returns:
-            生成的 Markdown 文件路径，失败返回 None
+            Generated Markdown file path, None if failed
         """
         try:
             pdf_name = pdf_path.stem
             output_dir = self.mineru_dir
 
-            # 检查是否已经解析过
-            expected_md_path = output_dir / pdf_name / "auto" / f"{pdf_name}.md"
+            # Migration logic: if vlm directory exists, rename to auto
+            vlm_dir = output_dir / pdf_name / "vlm"
+            auto_dir = output_dir / pdf_name / "auto"
+            if vlm_dir.exists():
+                try:
+                    vlm_dir.rename(auto_dir)
+                    logger.trace(f"Migrated vlm directory to auto: {vlm_dir} -> {auto_dir}")
+                except Exception as e:
+                    logger.trace(f"Failed to migrate vlm to auto: {e}")
+
+            # Check if already parsed
+            expected_md_path = auto_dir / f"{pdf_name}.md"
             if expected_md_path.exists():
                 logger.trace(f"Markdown file already exists: {expected_md_path}")
                 return expected_md_path
+            else:
+                logger.trace(f"{expected_md_path} not found")
 
-            # 获取鎖，確保只有一個 minerU 進程在運行
+            # Acquire lock to ensure only one minerU process is running
             logger.trace(f"Waiting for minerU lock to parse PDF: {pdf_path}")
             with self._mineru_lock:
                 logger.trace(f"Acquired minerU lock, start parsing PDF: {pdf_path}")
 
-                # 再次检查是否已经解析过（避免等待锁期间其他进程已完成解析）
+                # Check again if already parsed (avoid duplicate work during lock wait)
                 if expected_md_path.exists():
                     logger.trace(f"File generated during lock wait: {expected_md_path}")
                     return expected_md_path
 
-                # 构建 minerU 命令
-                cmd = ["mineru", "-p", str(pdf_path), "-o", str(output_dir), "-l", "en", "-d", "cuda", "--vram", "2"]
+                # Build minerU command
+                # cmd = ["mineru", "-p", str(pdf_path), "-o", str(output_dir), "-l", "en", "-d", "cuda", "--vram", "2"]
+                cmd = [
+                    "mineru",
+                    "-p",
+                    str(pdf_path),
+                    "-o",
+                    str(output_dir),
+                    "-l",
+                    "en",
+                    "-b",
+                    "vlm-http-client",
+                    "-u",
+                    f"http://127.0.0.1:{VLLM_MINERU_PORT}",
+                ]
 
                 logger.trace(f"Executing command: {' '.join(cmd)}")
                 start_time = time.time()
 
-                # 执行命令
+                # Execute command
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
                 elapsed_time = time.time() - start_time
@@ -116,7 +149,7 @@ class PaperSummarizer:
 
                 if result.returncode != 0:
                     logger.trace(f"minerU execution failed: {result.stderr}")
-                    # minerU 解析失败时删除 PDF 文件
+                    # Delete PDF file when minerU parsing fails
                     try:
                         pdf_path.unlink()
                         logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
@@ -124,24 +157,34 @@ class PaperSummarizer:
                         logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
-                # 检查生成的 Markdown 文件
+                # Post-execution migration logic: check if new vlm directory was generated, rename to auto
+                vlm_dir_new = output_dir / pdf_name / "vlm"
+                auto_dir_new = output_dir / pdf_name / "auto"
+                if vlm_dir_new.exists() and not auto_dir_new.exists():
+                    try:
+                        vlm_dir_new.rename(auto_dir_new)
+                        logger.trace(f"Migrated newly generated vlm to auto: {vlm_dir_new} -> {auto_dir_new}")
+                    except Exception as e:
+                        logger.trace(f"Failed to migrate newly generated vlm to auto: {e}")
+
+                # Check generated Markdown file
                 if expected_md_path.exists():
                     logger.trace(f"PDF parse complete: {expected_md_path}")
 
-                    # 解析完成后删除 PDF 文件以节省空间
+                    # Delete PDF file after successful parsing to save space
                     try:
                         pdf_path.unlink()
                         logger.trace(f"Deleted PDF source file: {pdf_path}")
                     except Exception as e:
                         logger.trace(f"Failed to delete PDF file: {e}")
 
-                    # 清理除了 images 和 markdown 之外的其他文件
+                    # Clean up files other than images and markdown
                     self._cleanup_mineru_output(output_dir / pdf_name)
 
                     return expected_md_path
                 else:
                     logger.trace(f"Generated Markdown file not found: {expected_md_path}")
-                    # 解析失败时删除 PDF 文件
+                    # Delete PDF file when parsing fails
                     try:
                         pdf_path.unlink()
                         logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
@@ -151,7 +194,7 @@ class PaperSummarizer:
 
         except subprocess.TimeoutExpired:
             logger.trace("minerU execution timeout")
-            # 解析超时时删除 PDF 文件
+            # Delete PDF file when parsing times out
             try:
                 pdf_path.unlink()
                 logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
@@ -160,7 +203,7 @@ class PaperSummarizer:
             return None
         except Exception as e:
             logger.trace(f"PDF parse failed: {e}")
-            # 解析异常时删除 PDF 文件
+            # Delete PDF file when parsing exception occurs
             try:
                 pdf_path.unlink()
                 logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
@@ -170,34 +213,34 @@ class PaperSummarizer:
 
     def _cleanup_mineru_output(self, output_path: Path):
         """
-        清理 minerU 输出目录，只保留 images 和 markdown 文件
+        Clean up minerU output directory, keep only images and markdown files
 
         Args:
-            output_path: minerU 输出的论文目录路径 (如 data/mineru/2507.01679)
+            output_path: minerU output paper directory path (e.g. data/mineru/2507.01679)
         """
         try:
             auto_dir = output_path / "auto"
             if not auto_dir.exists():
                 return
 
-            # 需要保留的文件模式
+            # File patterns to keep
             paper_id = output_path.name
-            keep_files = {f"{paper_id}.md"}  # 保留 markdown 文件
-            keep_dirs = {"images"}  # 保留 images 目录
+            keep_files = {f"{paper_id}.md"}  # Keep markdown files
+            keep_dirs = {"images"}  # Keep images directory
 
             items_to_remove = []
 
             for item in auto_dir.iterdir():
                 if item.is_dir():
                     if item.name not in keep_dirs:
-                        # 标记删除不需要的目录
+                        # Mark unnecessary directories for deletion
                         items_to_remove.append(item)
                 elif item.is_file():
                     if item.name not in keep_files:
-                        # 标记删除不需要的文件（JSON、PDF等中间文件）
+                        # Mark unnecessary files for deletion (JSON, PDF and other intermediate files)
                         items_to_remove.append(item)
 
-            # 执行删除操作
+            # Execute deletion
             for item in items_to_remove:
                 try:
                     if item.is_dir():
@@ -214,27 +257,31 @@ class PaperSummarizer:
 
     def extract_main_content(self, markdown_content: str) -> str:
         """
-        截取论文正文，去掉 references、acknowledgements 等部分
+        Extract main paper content, remove references, acknowledgements etc.
 
         Args:
-            markdown_content: 完整的 Markdown 内容
+            markdown_content: Complete Markdown content
 
         Returns:
-            截取后的正文内容
+            Extracted main content
         """
         try:
-            # 常见的结束标识符（不区分大小写）
+            # Common ending markers (case insensitive)
             end_patterns = [
-                r"(?i)^#+\s*references?\s*$",
-                r"(?i)^#+\s*acknowledgements?\s*$",
-                r"(?i)^#+\s*appendix\s*$",
-                r"(?i)^#+\s*appendices\s*$",
+                r"(?i)#+\s*references?\s*",
+                r"(?i)#+\s*acknowledgements?\s*",
+                r"(?i)#+\s*appendix\s*",
+                r"(?i)#+\s*appendices\s*",
+                r"(?i)^\s*references?\s*",
+                r"(?i)^\s*acknowledgements?\s*",
+                r"(?i)^\s*appendix\s*",
+                r"(?i)^\s*appendices\s*",
             ]
 
             lines = markdown_content.split("\n")
             end_index = len(lines)
 
-            # 找到最早出现的结束标识符
+            # Find the earliest occurrence of ending markers
             for i, line in enumerate(lines):
                 line = line.strip()
                 for pattern in end_patterns:
@@ -242,11 +289,11 @@ class PaperSummarizer:
                         end_index = min(end_index, i)
                         break
 
-            # 截取正文部分
+            # Extract main content
             main_content = "\n".join(lines[:end_index])
 
-            # 如果截取后的内容太短，返回原内容
-            if len(main_content.strip()) < len(markdown_content.strip()) * 0.25:
+            # If extracted content is too short, return original content
+            if len(main_content.strip()) < len(markdown_content.strip()) * MAIN_CONTENT_MIN_RATIO:
                 logger.trace("Extracted main content too short, using original content")
                 return markdown_content
 
@@ -259,24 +306,24 @@ class PaperSummarizer:
 
     def summarize_with_llm(self, markdown_content: str) -> str:
         """
-        使用智谱 AI 总结论文内容
+        Summarize paper content using LLM
 
         Args:
-            markdown_content: Markdown 格式的论文内容
+            markdown_content: Paper content in Markdown format
 
         Returns:
-            论文总结
+            Paper summary
         """
         try:
-            # 根据配置选择语言 prompt
+            # Choose language prompt based on configuration
             if LLM_SUMMARY_LANG == "en":
-                # 英文 prompt
+                # English prompt
                 prompt = f"""
 You are a senior researcher in deep learning and computer science, skilled at analyzing and summarizing academic papers. Please carefully read the following paper content and provide a professional, accurate, and structured **English** summary.
 
 <Summary Requirements>
 1. Use academic and rigorous language, formulas are allowed
-2. Use `$…$` (inline) or `$$…$$` (block) for all formulas
+2. Use `$…$` (inline) or `$$…$$` (block) for all formulas. Use basic Latex formulas, if possible.
 3. Each section should have specific content, avoid vague descriptions
 4. Use appropriate subheadings, lists, and emphasis to organize content
 </Summary Requirements>
@@ -301,16 +348,17 @@ Your brief summary of this paper
 </Notes>
 """
             else:
-                # 中文 prompt (默认)
+                # Chinese prompt (default)
                 prompt = f"""
 你是一位深度学习和计算机科学领域的资深研究员，擅长分析和总结学术论文。请仔细阅读以下论文内容，并提供一个专业、准确、结构化的**中文**总结。
 
 <总结要求>
-1. 要是用学术且严谨的语言，可以适当使用公式，
-2. 所有公式用 `$…$`（行内）或 `$$…$$`（独立）
+1. 要是用学术且严谨的语言，可以适当使用公式
+2. 所有公式用 `$…$`（行内）或 `$$…$$`（独立），要尽量使用最基本的 LaTex 公式
 3. 每个部分都要有具体内容，避免空泛的描述
 4. 适当使用子标题、列表和重点标记来组织内容
-<总结要求>
+5. 注意所使用的 Latex 和 Markdown 语法兼容性和正确性
+</总结要求>
 
 <论文内容>
 {markdown_content}
@@ -332,75 +380,84 @@ Your brief summary of this paper
 </注意事项>
 """
 
-            modelid = "glm-z1-flash"
+            modelid = LLM_NAME
             logger.trace(f"Calling {modelid} to generate paper summary...")
 
             response = self.client.chat.completions.create(
                 model=modelid,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-                top_p=0.95,
-                max_tokens=8192,
+                max_tokens=32768,
+                extra_body={"reasoning": {"effort": "low"}},  # Use low reasoning effort
             )
 
             summary = response.choices[0].message.content
 
-            # 提取 </think> 之后的内容
-            # logger.trace(f"原始总结内容:\n{summary}")
+            # Extract content after </think>
+            if hasattr(response.choices[0].message, "reasoning"):
+                logger.trace(f"Original summary Thinking:\n{response.choices[0].message.reasoning}")
+            elif hasattr(response.choices[0].message, "reasoning_content"):
+                logger.trace(f"Original summary Thinking:\n{response.choices[0].message.reasoning_content}")
+            else:
+                logger.trace(f"Original summary content:\n{summary}")
+
             if "</think>" in summary:
                 summary = summary.split("</think>", 1)[1].strip()
             else:
                 summary = summary.strip()
 
-            # 解析详细总结和TL;DR部分
+            # Parse detailed summary and TL;DR sections
             parsed_summary = self._parse_summary_sections(summary)
             logger.trace("Paper summary generation complete")
             return parsed_summary
 
         except Exception as e:
             logger.trace(f"LLM summary failed: {e}")
-            return f"# 错误\n\n总结生成失败: {str(e)}"
+            return f"# Error\n\nSummary generation failed: {str(e)}"
 
     def _parse_summary_sections(self, summary: str) -> str:
         """
-        解析总结内容，提取详细总结和TL;DR部分，并重新组织格式（TL;DR在前）
+        Parse summary content, extract detailed summary and TL;DR sections, reorganize format (TL;DR first)
 
         Args:
-            summary: 原始总结内容
+            summary: Original summary content
 
         Returns:
-            重新组织后的总结内容
+            Reorganized summary content
         """
         try:
             import re
 
-            # 新的解析逻辑：基于Markdown标题格式
-            # 提取详细总结部分 (## 论文详细总结 之后的内容)
+            # New parsing logic: based on Markdown heading format
+            # Extract detailed summary section (support both Chinese and English)
+            # Try Chinese format first
             detailed_match = re.search(r"##\s*论文详细总结\s*\n(.*?)(?=##\s*TL;DR|$)", summary, re.DOTALL)
+            if not detailed_match:
+                # Try English format
+                detailed_match = re.search(r"##\s*Detailed Paper Summary\s*\n(.*?)(?=##\s*TL;DR|$)", summary, re.DOTALL)
             detailed_summary = detailed_match.group(1).strip() if detailed_match else ""
 
-            # 提取TL;DR部分 (## TL;DR 之后的内容)
+            # Extract TL;DR section (content after ## TL;DR)
             tldr_match = re.search(r"##\s*TL;DR\s*\n(.*?)(?=##|$)", summary, re.DOTALL)
             tldr_summary = tldr_match.group(1).strip() if tldr_match else ""
 
-            # 重新组织格式：TL;DR在前，详细总结在后
+            # Reorganize format: TL;DR first, detailed summary second
             if tldr_summary and detailed_summary:
                 formatted_summary = f"""## TL;DR
 
 {tldr_summary}
 
-## 详细总结
+## Detailed Summary
 
 {detailed_summary}"""
                 return formatted_summary
             elif detailed_summary:
-                # 如果只有详细总结，添加标题后返回
-                return f"## 详细总结\n\n{detailed_summary}"
+                # If only detailed summary exists, add title and return
+                return f"## Detailed Summary\n\n{detailed_summary}"
             elif tldr_summary:
-                # 如果只有TL;DR，也返回
+                # If only TL;DR exists, return it
                 return f"## TL;DR\n\n{tldr_summary}"
             else:
-                # 如果都没有提取到，返回原始内容
+                # If neither extracted, return original content
                 logger.trace("Failed to parse detailed summary and TL;DR, returning original content")
                 return summary
 
@@ -410,56 +467,66 @@ Your brief summary of this paper
 
     def generate_summary(self, pid: str) -> str:
         """
-        生成论文总结的主要入口函数
+        Main entry function for generating paper summary
 
         Args:
-            pid: 论文 ID
+            pid: Paper ID
 
         Returns:
-            论文总结的 Markdown 内容
+            Paper summary in Markdown format
         """
         try:
-            # Step 0: 预先检查是否已有解析结果
+            # Step 0: Pre-check and migrate vlm directory (if exists)
+            vlm_dir = self.mineru_dir / pid / "vlm"
+            auto_dir = self.mineru_dir / pid / "auto"
+            if vlm_dir.exists() and not auto_dir.exists():
+                try:
+                    vlm_dir.rename(auto_dir)
+                    logger.trace(f"Migrated vlm directory to auto: {vlm_dir} -> {auto_dir}")
+                except Exception as e:
+                    logger.trace(f"Failed to migrate vlm to auto: {e}")
+
+            # Pre-check if parsing result already exists
             expected_md_path = self.mineru_dir / pid / "auto" / f"{pid}.md"
             if expected_md_path.exists():
                 logger.trace(f"Found existing parse result: {expected_md_path}")
-                # 直接读取 Markdown 内容
+                # Read Markdown content directly
                 with open(expected_md_path, encoding="utf-8") as f:
                     markdown_content = f.read()
 
                 if markdown_content.strip():
-                    # Step 3: 截取论文正文
+                    # Step 3: Extract main paper content
                     main_content = self.extract_main_content(markdown_content)
-                    # Step 4: 使用 LLM 生成总结
+                    # Step 4: Generate summary using LLM
                     logger.info(f"Summarizing {pid}.pdf ...")
                     summary = self.summarize_with_llm(main_content)
                     return summary
                 else:
                     logger.trace("Existing Markdown file content is empty, re-parsing")
 
-            # Step 1: 下载论文 PDF
+            # Step 1: Download paper PDF
             logger.info(f"Downloading {pid}.pdf ...")
             pdf_path = self.download_arxiv_paper(pid)
             if not pdf_path:
-                return "# 错误\n\n无法下载论文 PDF"
+                return "# Error\n\nUnable to download paper PDF"
 
-            # Step 2: 使用 minerU 解析为 Markdown
+            # Step 2: Parse PDF to Markdown using minerU
             logger.info(f"Parsing {pid}.pdf ...")
             md_path = self.parse_pdf_with_mineru(pdf_path)
             if not md_path:
-                return "# 错误\n\n无法解析 PDF 为 Markdown"
+                return "# Error\n\nUnable to parse PDF to Markdown"
 
-            # Step 3: 读取 Markdown 内容
+            # Step 3: Read Markdown content
             with open(md_path, encoding="utf-8") as f:
                 markdown_content = f.read()
 
             if not markdown_content.strip():
-                return "# 错误\n\n解析的 Markdown 内容为空"
+                return "# Error\n\nParsed Markdown content is empty"
 
-            # Step 4: 截取论文正文
+            # Step 4: Extract main paper content
             main_content = self.extract_main_content(markdown_content)
 
-            # Step 5: 使用 LLM 生成总结
+            # Step 5: Generate summary using LLM
             logger.info(f"Summarizing {pid}.pdf ...")
             summary = self.summarize_with_llm(main_content)
 
@@ -470,12 +537,12 @@ Your brief summary of this paper
             return f"# Error\n\nFailed to generate summary: {str(e)}"
 
 
-# 全局实例
+# Global instance
 _summarizer = None
 
 
 def get_summarizer() -> PaperSummarizer:
-    """获取全局 PaperSummarizer 实例"""
+    """Get global PaperSummarizer instance"""
     global _summarizer
     if _summarizer is None:
         _summarizer = PaperSummarizer()
@@ -484,20 +551,20 @@ def get_summarizer() -> PaperSummarizer:
 
 def generate_paper_summary(pid: str) -> str:
     """
-    生成论文总结的外部接口函数
+    External interface function for generating paper summary
 
     Args:
-        pid: 论文 ID
+        pid: Paper ID
 
     Returns:
-        论文总结的 Markdown 内容
+        Paper summary in Markdown format
     """
     summarizer = get_summarizer()
     return summarizer.generate_summary(pid)
 
 
 if __name__ == "__main__":
-    # 测试代码
+    # Test code
     import sys
 
     logger.remove()

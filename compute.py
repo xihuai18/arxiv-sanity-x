@@ -9,6 +9,8 @@ from multiprocessing import cpu_count
 
 from loguru import logger
 
+from vars import VLLM_EMBED_PORT
+
 # Set multi-threading environment variables
 num_threads = min(cpu_count(), 192)  # Reasonable thread limit
 os.environ["OMP_NUM_THREADS"] = str(num_threads)
@@ -45,24 +47,24 @@ from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, get_papers_db, save_feat
 
 def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
     """
-    保持TF-IDF稀疏性的拼接方案
+    Concatenation scheme that preserves TF-IDF sparsity
 
     Args:
-        tfidf_sparse: 稀疏TF-IDF矩阵 (n_samples, n_tfidf_features) - 已经L2归一化
-        embedding_dense: 稠密嵌入矩阵 (n_samples, n_embedding_features)
+        tfidf_sparse: Sparse TF-IDF matrix (n_samples, n_tfidf_features) - already L2 normalized
+        embedding_dense: Dense embedding matrix (n_samples, n_embedding_features)
 
     Returns:
-        concatenated_sparse: 拼接后的稀疏矩阵 (n_samples, n_tfidf_features + n_embedding_features)
+        concatenated_sparse: Concatenated sparse matrix (n_samples, n_tfidf_features + n_embedding_features)
     """
-    # 1. 对稠密嵌入进行归一化（与TF-IDF保持相同尺度）
+    # 1. Normalize dense embeddings (to maintain same scale as TF-IDF)
     embedding_norm = normalize(embedding_dense, norm="l2", axis=1)
 
-    # 2. TF-IDF已经在TfidfVectorizer中归一化，直接使用
+    # 2. TF-IDF is already normalized in TfidfVectorizer, use directly
 
-    # 3. 将稠密矩阵转换为稀疏格式
+    # 3. Convert dense matrix to sparse format
     embedding_sparse = sp.csr_matrix(embedding_norm)
 
-    # 4. 使用scipy的稀疏矩阵拼接
+    # 4. Use scipy sparse matrix concatenation
     concatenated_sparse = sp.hstack([tfidf_sparse, embedding_sparse], format="csr")
 
     logger.info(
@@ -76,9 +78,11 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 
 
 class Qwen3EmbeddingVllm:
-    """Qwen3 嵌入模型的 API 客户端实现"""
+    """Qwen3 embedding model API client implementation"""
 
-    def __init__(self, model_name_or_path, instruction=None, api_base="http://localhost:51000/v1"):
+    def __init__(self, model_name_or_path, instruction=None, api_base=None):
+        if api_base is None:
+            api_base = f"http://localhost:{VLLM_EMBED_PORT}/v1"
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
@@ -88,14 +92,14 @@ class Qwen3EmbeddingVllm:
         self.model_name = None
 
     def initialize(self):
-        """初始化 API 客户端"""
+        """Initialize API client"""
         try:
             from openai import OpenAI
 
             logger.info(f"Connecting to vLLM API server: {self.api_base}")
-            self.client = OpenAI(api_key="EMPTY", base_url=self.api_base)  # vLLM 不需要真实的 API key
+            self.client = OpenAI(api_key="EMPTY", base_url=self.api_base)  # vLLM doesn't need real API key
 
-            # 获取可用模型列表
+            # Get available model list
             try:
                 models = self.client.models.list()
                 if models.data:
@@ -120,11 +124,11 @@ class Qwen3EmbeddingVllm:
             return False
 
     def get_detailed_instruct(self, query: str) -> str:
-        """为文档添加指令前缀"""
+        """Add instruction prefix to document"""
         return f"Instruct: {self.instruction}\nQuery: {query}"
 
     def encode(self, sentences, dim=1024):
-        """通过 API 编码文本为嵌入向量"""
+        """Encode text to embedding vectors via API"""
         try:
             if self.client is None:
                 logger.error("API client not initialized, cannot encode")
@@ -138,23 +142,23 @@ class Qwen3EmbeddingVllm:
                 logger.error("Model name not set")
                 return None
 
-            # 添加指令前缀
+            # Add instruction prefix
             try:
                 instructed_sentences = [self.get_detailed_instruct(sent) for sent in sentences]
             except Exception as e:
                 logger.error(f"Error adding instruction prefix: {e}")
                 return None
 
-            # 调用 API 生成嵌入
+            # Call API to generate embeddings
             try:
                 response = self.client.embeddings.create(
                     input=instructed_sentences, model=self.model_name, dimensions=dim
                 )
 
-                # 提取嵌入向量
+                # Extract embedding vectors
                 embeddings = np.array([data.embedding for data in response.data], dtype=np.float32)
 
-                # 转换为 torch tensor 以保持与原有接口兼容
+                # Convert to torch tensor to maintain compatibility with original interface
                 import torch
 
                 return torch.from_numpy(embeddings)
@@ -173,9 +177,9 @@ class Qwen3EmbeddingVllm:
             return None
 
     def stop(self):
-        """清理客户端资源"""
+        """Clean up client resources"""
         try:
-            # API 客户端不需要特殊清理
+            # API client doesn't need special cleanup
             self.client = None
             logger.debug("API client resources cleaned up")
         except Exception as e:
@@ -184,20 +188,20 @@ class Qwen3EmbeddingVllm:
 
 def load_existing_embeddings(embed_dim=512):
     """
-    加载现有的嵌入特征
+    Load existing embedding features
 
     Returns:
         existing_embeddings: dict with 'pids', 'embeddings', 'params'
     """
     try:
-        # 尝试加载现有特征文件
+        # Try to load existing feature file
         with open(FEATURES_FILE, "rb") as f:
             import pickle
 
             features = pickle.load(f)
 
         if features.get("feature_type") == "hybrid_sparse_dense":
-            # 检查嵌入参数是否匹配
+            # Check if embedding parameters match
             embed_params = features.get("embedding_params", {})
             if embed_params.get("embed_dim") == embed_dim:
                 logger.info(f"Loaded existing embedding features: {features['x_embeddings'].shape}")
@@ -226,21 +230,23 @@ def generate_embeddings_incremental(
     model_path="./qwen3-embed-0.6B",
     embed_dim=512,
     batch_size=512,
-    api_base="http://localhost:51000/v1",
+    api_base=None,
 ):
+    if api_base is None:
+        api_base = f"http://localhost:{VLLM_EMBED_PORT}/v1"
     """
-    增量生成嵌入向量，优化语料准备顺序
+    Generate embedding vectors incrementally, optimize corpus preparation order
 
     Args:
-        all_pids: 所有论文ID列表
-        pdb: 论文数据库对象
-        model_path: 嵌入模型路径
-        embed_dim: 嵌入维度
-        batch_size: 批处理大小
-        api_base: vLLM 服务器 API 地址
+        all_pids: List of all paper IDs
+        pdb: Paper database object
+        model_path: Embedding model path
+        embed_dim: Embedding dimension
+        batch_size: Batch size
+        api_base: vLLM server API address
 
     Returns:
-        embeddings: numpy数组 (n_samples, embed_dim)
+        embeddings: numpy array (n_samples, embed_dim)
     """
     logger.info("Checking for existing embeddings...")
     existing = load_existing_embeddings(embed_dim)
@@ -249,7 +255,7 @@ def generate_embeddings_incremental(
         existing_pids_set = set(existing["pids"])
         logger.info(f"Found {len(existing_pids_set)} existing embeddings")
 
-        # 找出需要新生成的论文ID
+        # Find paper IDs that need new generation
         new_pids = []
         new_indices = []
         for i, pid in enumerate(all_pids):
@@ -261,7 +267,7 @@ def generate_embeddings_incremental(
 
         if len(new_pids) == 0:
             logger.info("All papers already have embeddings, returning existing embeddings")
-            # 重新排序以匹配当前 pids 顺序
+            # Reorder to match current pids order
             ordered_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
             pid_to_idx = {pid: i for i, pid in enumerate(existing["pids"])}
 
@@ -269,17 +275,17 @@ def generate_embeddings_incremental(
                 if pid in pid_to_idx:
                     ordered_embeddings[i] = existing["embeddings"][pid_to_idx[pid]]
                 else:
-                    # 这种情况理论上不应该发生，用随机向量填充
+                    # This should not happen in theory, fill with random vectors
                     ordered_embeddings[i] = np.random.randn(embed_dim).astype(np.float32)
 
             return ordered_embeddings
 
-        # 只为需要更新的论文准备语料
+        # Prepare corpus only for papers that need updates
         logger.info(f"Preparing embedding corpus for {len(new_pids)} new papers...")
         new_texts = []
-        for pid in tqdm(new_pids, desc="准备新论文嵌入语料"):
+        for pid in tqdm(new_pids, desc="Preparing new paper embedding corpus"):
             d = pdb[pid]
-            # 构建用于嵌入的文本
+            # Build text for embedding
             text = f"Title: {d['title']}\n"
             text += f"Abstract: {d['summary']}"
             new_texts.append(text)
@@ -289,17 +295,17 @@ def generate_embeddings_incremental(
         new_pids = all_pids
         new_indices = list(range(len(all_pids)))
 
-        # 为所有论文准备语料
+        # Prepare corpus for all papers
         logger.info(f"Preparing embedding corpus for all {len(all_pids)} papers...")
         new_texts = []
-        for pid in tqdm(all_pids, desc="准备嵌入语料"):
+        for pid in tqdm(all_pids, desc="Preparing embedding corpus"):
             d = pdb[pid]
-            # 构建用于嵌入的文本
+            # Build text for embedding
             text = f"Title: {d['title']}\n"
             text += f"Abstract: {d['summary']}"
             new_texts.append(text)
 
-    # 生成新嵌入
+    # Generate new embeddings
     new_embeddings = None
     if len(new_texts) > 0:
         logger.info(f"Initializing embedding API client: {api_base}")
@@ -309,10 +315,10 @@ def generate_embeddings_incremental(
             logger.error("API client initialization failed, using random embeddings")
             new_embeddings = np.random.randn(len(new_texts), embed_dim).astype(np.float32)
         else:
-            # 批量生成新嵌入
+            # Batch generate new embeddings
             new_embeddings_list = []
 
-            for i in tqdm(range(0, len(new_texts), batch_size), desc="生成新嵌入向量"):
+            for i in tqdm(range(0, len(new_texts), batch_size), desc="Generating new embedding vectors"):
                 batch_texts = new_texts[i : i + batch_size]
 
                 try:
@@ -327,24 +333,24 @@ def generate_embeddings_incremental(
                     logger.error(f"Batch {i//batch_size + 1} failed to generate embeddings: {e}")
                     new_embeddings_list.append(np.random.randn(len(batch_texts), embed_dim).astype(np.float32))
 
-            # 清理模型
+            # Clean up model
             model.stop()
 
-            # 合并新嵌入
+            # Merge new embeddings
             new_embeddings = np.vstack(new_embeddings_list).astype(np.float32)
             logger.info(f"New embeddings generated: {new_embeddings.shape}")
 
-    # 组装最终的嵌入矩阵
+    # Assemble final embedding matrix
     final_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
 
     if existing is not None:
-        # 先填充现有嵌入
+        # Fill existing embeddings first
         pid_to_idx = {pid: i for i, pid in enumerate(existing["pids"])}
         for i, pid in enumerate(all_pids):
             if pid in pid_to_idx:
                 final_embeddings[i] = existing["embeddings"][pid_to_idx[pid]]
 
-    # 填充新生成的嵌入
+    # Fill newly generated embeddings
     if new_embeddings is not None:
         new_embed_idx = 0
         for i in new_indices:
@@ -375,13 +381,16 @@ if __name__ == "__main__":
         help="maximum number of documents to use when training tfidf, or -1 to disable",
     )
 
-    # 新增嵌入相关参数
-    parser.add_argument("--use_embeddings", action="store_false", help="是否生成和使用嵌入向量")
-    parser.add_argument("--embed_model", type=str, default="./qwen3-embed-0.6B", help="嵌入模型路径")
-    parser.add_argument("--embed_dim", type=int, default=512, help="嵌入向量维度")
-    parser.add_argument("--embed_batch_size", type=int, default=2048, help="嵌入生成批大小")
+    # New embedding related parameters
+    parser.add_argument("--use_embeddings", action="store_false", help="Whether to generate and use embedding vectors")
+    parser.add_argument("--embed_model", type=str, default="./qwen3-embed-0.6B", help="Embedding model path")
+    parser.add_argument("--embed_dim", type=int, default=512, help="Embedding vector dimension")
+    parser.add_argument("--embed_batch_size", type=int, default=2048, help="Embedding generation batch size")
     parser.add_argument(
-        "--embed_api_base", type=str, default="http://localhost:51000/v1", help="vLLM 嵌入服务器 API 地址"
+        "--embed_api_base",
+        type=str,
+        default=f"http://localhost:{VLLM_EMBED_PORT}/v1",
+        help="vLLM embedding server API address",
     )
 
     args = parser.parse_args()
@@ -389,7 +398,7 @@ if __name__ == "__main__":
 
     start_time = time.time()
 
-    # 优化的 TF-IDF 参数，针对学术论文特点
+    # Optimized TF-IDF parameters for academic papers
     v = TfidfVectorizer(
         input="content",
         encoding="utf-8",
@@ -398,17 +407,17 @@ if __name__ == "__main__":
         lowercase=True,
         analyzer="word",
         stop_words="english",
-        # 改进的 token pattern：捕获更多学术词汇（如 COVID-19, state-of-the-art）
+        # Improved token pattern: capture more academic vocabulary (e.g. COVID-19, state-of-the-art)
         token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b",
         ngram_range=(1, args.ngram_max),
         max_features=args.num,
-        norm="l2",  # L2 归一化，对相似度计算很重要
+        norm="l2",  # L2 normalization, important for similarity calculation
         use_idf=True,
         smooth_idf=True,
-        sublinear_tf=True,  # 使用对数尺度的词频
+        sublinear_tf=True,  # Use logarithmic scale term frequency
         max_df=args.max_df,
         min_df=args.min_df,
-        dtype=np.float32,  # 使用 float32 节省空间
+        dtype=np.float32,  # Use float32 to save space
     )
 
     pdb = get_papers_db(flag="r")
@@ -444,14 +453,14 @@ if __name__ == "__main__":
     logger.info(f"Original TF-IDF feature matrix shape: {x.shape}")
     logger.info(f"TF-IDF sparsity: {1 - x.nnz / (x.shape[0] * x.shape[1]):.4f}")
 
-    # 获取所有论文ID
+    # Get all paper IDs
     pids = list(pdb.keys())
 
-    # 决定最终使用的特征
+    # Decide final features to use
     if args.use_embeddings:
         logger.info("Generating embedding features...")
 
-        # 增量生成嵌入向量（语料准备在函数内部完成）
+        # Generate embedding vectors incrementally (corpus preparation done inside function)
         embeddings = generate_embeddings_incremental(
             pids,
             pdb,
@@ -462,16 +471,16 @@ if __name__ == "__main__":
         )
 
         if embeddings is not None:
-            # 执行稀疏-稠密拼接
+            # Perform sparse-dense concatenation
             logger.info("Performing sparse-dense matrix concatenation...")
             x_final = sparse_dense_concatenation(x, embeddings)
 
-            # 保存特征
+            # Save features
             features = {
                 "pids": pids,
-                "x": x_final,  # 拼接后的混合特征
-                "x_tfidf": x,  # 原始TF-IDF特征
-                "x_embeddings": embeddings,  # 原始嵌入特征
+                "x": x_final,  # Concatenated hybrid features
+                "x_tfidf": x,  # Original TF-IDF features
+                "x_embeddings": embeddings,  # Original embedding features
                 "vocab": v.vocabulary_,
                 "idf": v._tfidf.idf_,
                 "feature_type": "hybrid_sparse_dense",
@@ -512,7 +521,7 @@ if __name__ == "__main__":
                 },
             }
     else:
-        # 仅使用TF-IDF特征
+        # Use only TF-IDF features
         logger.info("Using only TF-IDF features (embeddings not enabled)")
         x_final = x
         features = {
@@ -546,7 +555,7 @@ if __name__ == "__main__":
         for key, value in features["feature_config"].items():
             logger.info(f"  {key}: {value}")
 
-    # 确保分布式资源被清理
+    # Ensure distributed resources are cleaned up
     try:
         import torch.distributed as dist
 

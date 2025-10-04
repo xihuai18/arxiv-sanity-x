@@ -36,56 +36,264 @@ function parseMarkdownWithMath(text) {
     }
 }
 
-// 先 MathJax 後 Marked 的渲染函數（簡化版）
+// 先 Marked 後 MathJax 的渲染函數（完全重寫版）
 function renderMarkdownWithMath(text, container) {
     if (!text || !container) return Promise.resolve();
 
     return new Promise((resolve) => {
-        // 創建臨時元素用於渲染
-        const tempDiv = document.createElement('div');
-        tempDiv.style.display = 'none';
-        tempDiv.innerHTML = text;
-        document.body.appendChild(tempDiv);
+        try {
+            console.log('Starting markdown rendering, text length:', text.length);
 
-        // 等待 MathJax 完全加載
-        if (typeof MathJax !== 'undefined' && MathJax.startup && MathJax.startup.document) {
-            // 第一步：MathJax 渲染數學公式
-            MathJax.startup.promise.then(() => {
-                return MathJax.typesetPromise([tempDiv]);
-            }).then(() => {
-                // 第二步：使用 Marked 處理 Markdown
-                let htmlContent;
-                if (typeof marked !== 'undefined') {
-                    htmlContent = marked.parse(tempDiv.innerHTML);
-                } else {
-                    // 後備方案
-                    htmlContent = tempDiv.innerHTML
-                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                        .replace(/`(.*?)`/g, '<code>$1</code>')
-                        .replace(/\n/g, '<br>');
+            let htmlContent = '';
+
+            // 檢查 marked 是否可用
+            if (typeof marked !== 'undefined') {
+                // 配置 marked 選項
+                if (marked.setOptions) {
+                    marked.setOptions({
+                        breaks: true,
+                        gfm: true,
+                        headerIds: false,
+                        mangle: false,
+                        sanitize: false,
+                        pedantic: false,
+                        smartLists: true,
+                        smartypants: false,
+                        xhtml: false
+                    });
                 }
 
-                container.innerHTML = htmlContent;
+                // 保存所有需要保護的內容
+                const protectedContent = {
+                    mathBlocks: [],
+                    mathInlines: [],
+                    codeBlocks: []
+                };
 
-                // 第三步：重新渲染 MathJax
-                return MathJax.typesetPromise([container]);
-            }).then(() => {
-                document.body.removeChild(tempDiv);
-                resolve();
-            }).catch((err) => {
-                console.warn('MathJax rendering error:', err);
-                // 發生錯誤時使用簡單渲染
-                container.innerHTML = parseMarkdownWithMath(text);
-                if (tempDiv.parentNode) {
-                    document.body.removeChild(tempDiv);
+                // 第一步：保護所有特殊內容
+                let processedText = text;
+
+                // 1. 保護代碼塊
+                processedText = processedText.replace(/```[\s\S]*?```/g, (match) => {
+                    const index = protectedContent.codeBlocks.length;
+                    protectedContent.codeBlocks.push(match);
+                    return `\n\nCODEBLOCK${index}CODEBLOCK\n\n`;
+                });
+
+                // 2. 保護塊級數學公式
+                processedText = processedText.replace(/\$\$([\s\S]*?)\$\$/g, (match) => {
+                    const index = protectedContent.mathBlocks.length;
+                    protectedContent.mathBlocks.push(match);
+                    return `MATHBLOCK${index}MATHBLOCK`;
+                });
+
+                // 3. 保護行內數學公式（兼容性更好的版本）
+                // 避免使用 lookbehind，因為某些瀏覽器不支持
+                processedText = processedText.replace(/\$([^\$\n]+?)\$/g, (match, formula, offset, string) => {
+                    // 檢查前後是否是 $（避免匹配 $$）
+                    const prevChar = offset > 0 ? string[offset - 1] : '';
+                    const nextChar = offset + match.length < string.length ? string[offset + match.length] : '';
+
+                    if (prevChar === '$' || nextChar === '$') {
+                        return match; // 這是 $$ 的一部分，不處理
+                    }
+
+                    // 檢查是否包含數學符號特徵
+                    if (formula.match(/[a-zA-Z_\\{}\^\(\)\[\]]/)) {
+                        const index = protectedContent.mathInlines.length;
+                        protectedContent.mathInlines.push(match);
+                        return `MATHINLINE${index}MATHINLINE`;
+                    }
+                    return match;
+                });
+
+                console.log('Protected content counts:', {
+                    codeBlocks: protectedContent.codeBlocks.length,
+                    mathBlocks: protectedContent.mathBlocks.length,
+                    mathInlines: protectedContent.mathInlines.length
+                });
+
+                // 第二步：處理 Markdown
+                try {
+                    // 嘗試直接解析
+                    htmlContent = marked.parse(processedText);
+                    console.log('Marked parsing successful, output length:', htmlContent.length);
+                } catch (parseError) {
+                    console.error('Marked parsing failed:', parseError);
+                    // 如果失敗，嘗試分段處理
+                    const segments = processedText.split(/\n\n+/);
+                    const processedSegments = [];
+
+                    for (let segment of segments) {
+                        try {
+                            processedSegments.push(marked.parse(segment));
+                        } catch (segmentError) {
+                            console.warn('Segment parsing failed, using fallback:', segmentError);
+                            // 對失敗的段落使用簡單處理
+                            processedSegments.push(
+                                segment
+                                    .replace(/&/g, '&amp;')
+                                    .replace(/</g, '&lt;')
+                                    .replace(/>/g, '&gt;')
+                                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                                    .replace(/`(.*?)`/g, '<code>$1</code>')
+                            );
+                        }
+                    }
+
+                    htmlContent = processedSegments.join('</p><p>');
+                    // 確保段落標籤正確
+                    if (!htmlContent.startsWith('<p>')) {
+                        htmlContent = '<p>' + htmlContent;
+                    }
+                    if (!htmlContent.endsWith('</p>')) {
+                        htmlContent = htmlContent + '</p>';
+                    }
                 }
+
+                // 第三步：恢復保護的內容
+                // 注意：不要全局替換HTML實體，只在占位符周圍處理
+
+                // 恢復代碼塊
+                htmlContent = htmlContent.replace(/CODEBLOCK(\d+)CODEBLOCK/g, (match, index) => {
+                    const code = protectedContent.codeBlocks[parseInt(index)];
+                    if (code) {
+                        // 更靈活的代碼塊匹配
+                        const codeMatch = code.match(/^```([^\n]*)\n?([\s\S]*?)\n?```$/);
+                        if (codeMatch) {
+                            const lang = (codeMatch[1] || '').trim();
+                            const content = codeMatch[2] || '';
+                            const escapedContent = content
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;');
+                            return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escapedContent}</code></pre>`;
+                        } else {
+                            // 如果正則匹配失敗，直接返回原始代碼塊（去掉```）
+                            const simpleContent = code.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '');
+                            const escapedContent = simpleContent
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;');
+                            return `<pre><code>${escapedContent}</code></pre>`;
+                        }
+                    }
+                    return match;
+                });
+
+                // 恢復數學公式 - 處理可能被包裹在標籤中或被HTML編碼的情況
+                // 先處理被<p>標籤包裹的塊級數學公式
+                htmlContent = htmlContent.replace(/<p>MATHBLOCK(\d+)MATHBLOCK<\/p>/g, (match, index) => {
+                    const math = protectedContent.mathBlocks[parseInt(index)];
+                    return math ? `<p>${math}</p>` : match;
+                });
+
+                // 處理普通的塊級數學公式
+                htmlContent = htmlContent.replace(/MATHBLOCK(\d+)MATHBLOCK/g, (match, index) => {
+                    return protectedContent.mathBlocks[parseInt(index)] || match;
+                });
+
+                // 處理行內數學公式
+                htmlContent = htmlContent.replace(/MATHINLINE(\d+)MATHINLINE/g, (match, index) => {
+                    return protectedContent.mathInlines[parseInt(index)] || match;
+                });
+
+                // 如果還有被HTML編碼的占位符，嘗試恢復
+                if (htmlContent.includes('&lt;') || htmlContent.includes('&gt;') || htmlContent.includes('&amp;')) {
+                    // 只在占位符區域進行HTML解碼
+                    htmlContent = htmlContent.replace(/(&lt;|&gt;|&amp;)?(CODEBLOCK|MATHBLOCK|MATHINLINE)(\d+)\2(&lt;|&gt;|&amp;)?/g,
+                        (match, pre, type, index, post) => {
+                            const realType = type;
+                            const realIndex = parseInt(index);
+
+                            if (realType === 'CODEBLOCK' && protectedContent.codeBlocks[realIndex]) {
+                                const code = protectedContent.codeBlocks[realIndex];
+                                const codeMatch = code.match(/^```([^\n]*)\n?([\s\S]*?)\n?```$/);
+                                if (codeMatch) {
+                                    const lang = (codeMatch[1] || '').trim();
+                                    const content = codeMatch[2] || '';
+                                    const escapedContent = content
+                                        .replace(/&/g, '&amp;')
+                                        .replace(/</g, '&lt;')
+                                        .replace(/>/g, '&gt;');
+                                    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escapedContent}</code></pre>`;
+                                }
+                            } else if (realType === 'MATHBLOCK' && protectedContent.mathBlocks[realIndex]) {
+                                return protectedContent.mathBlocks[realIndex];
+                            } else if (realType === 'MATHINLINE' && protectedContent.mathInlines[realIndex]) {
+                                return protectedContent.mathInlines[realIndex];
+                            }
+
+                            return match;
+                        }
+                    );
+                }
+
+                // 檢查恢復情況 - 更準確的檢查
+                const codeBlocksRemaining = (htmlContent.match(/CODEBLOCK\d+CODEBLOCK/g) || []).length;
+                const mathBlocksRemaining = (htmlContent.match(/MATHBLOCK\d+MATHBLOCK/g) || []).length;
+                const mathInlinesRemaining = (htmlContent.match(/MATHINLINE\d+MATHINLINE/g) || []).length;
+                const totalRemaining = codeBlocksRemaining + mathBlocksRemaining + mathInlinesRemaining;
+
+                if (totalRemaining > 0) {
+                    console.warn(`Warning: ${totalRemaining} placeholders were not restored:`, {
+                        codeBlocks: codeBlocksRemaining,
+                        mathBlocks: mathBlocksRemaining,
+                        mathInlines: mathInlinesRemaining
+                    });
+                }
+
+            } else {
+                // marked 不可用時的後備方案
+                console.log('Marked not available, using fallback');
+                htmlContent = text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/`(.*?)`/g, '<code>$1</code>')
+                    .replace(/\n\n+/g, '</p><p>')
+                    .replace(/\n/g, '<br>');
+                htmlContent = '<p>' + htmlContent + '</p>';
+            }
+
+            console.log('Final HTML length:', htmlContent.length);
+
+            // 設置 HTML 內容
+            container.innerHTML = htmlContent;
+
+            // 第四步：渲染數學公式
+            if (typeof MathJax !== 'undefined' && MathJax.startup) {
+                MathJax.startup.promise.then(() => {
+                    console.log('Starting MathJax rendering');
+                    return MathJax.typesetPromise([container]);
+                }).then(() => {
+                    console.log('MathJax rendering completed');
+                    resolve();
+                }).catch((err) => {
+                    console.warn('MathJax rendering error:', err);
+                    resolve();
+                });
+            } else {
+                console.log('MathJax not available');
                 resolve();
+            }
+
+        } catch (err) {
+            console.error('Critical rendering error:', err);
+            console.error('Error stack:', err.stack);
+
+            // 最後的後備方案：顯示原始文本
+            const lines = text.split('\n');
+            const escapedLines = lines.map(line => {
+                return line
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
             });
-        } else {
-            // MathJax 未加載時直接使用 Markdown 解析
-            container.innerHTML = parseMarkdownWithMath(text);
-            document.body.removeChild(tempDiv);
+            container.innerHTML = '<pre>' + escapedLines.join('\n') + '</pre>';
             resolve();
         }
     });
