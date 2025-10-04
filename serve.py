@@ -59,6 +59,15 @@ from compute import Qwen3EmbeddingVllm
 from paper_summarizer import (
     generate_paper_summary as generate_paper_summary_from_module,
 )
+from vars import (
+    SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
+    SUMMARY_MIN_CHINESE_RATIO,
+    SVM_C,
+    SVM_MAX_ITER,
+    SVM_TOL,
+    VLLM_EMBED_PORT,
+    VLLM_MINERU_PORT,
+)
 
 # -----------------------------------------------------------------------------
 # inits and globals
@@ -71,12 +80,12 @@ FEATURES_CACHE = None
 FEATURES_FILE_MTIME = 0  # Feature file modification time
 FEATURES_CACHE_TIME = 0  # Cache creation time
 
-# Papers and metas cache related global variables (存储在同一个数据库文件中)
+# Papers and metas cache related global variables (stored in the same database file)
 PAPERS_CACHE = None
 METAS_CACHE = None
 PIDS_CACHE = None
-PAPERS_DB_FILE_MTIME = 0  # Papers数据库文件修改时间
-PAPERS_DB_CACHE_TIME = 0  # 数据库缓存创建时间
+PAPERS_DB_FILE_MTIME = 0  # Papers database file modification time
+PAPERS_DB_CACHE_TIME = 0  # Database cache creation time
 
 # Database file path
 from aslite.db import PAPERS_DB_FILE as PAPERS_DB_PATH
@@ -98,27 +107,27 @@ app.secret_key = sk
 # Helper function for Chinese text detection
 def calculate_chinese_ratio(text: str) -> float:
     """
-    计算文本中中文字符的占比
+    Calculate the ratio of Chinese characters in text
 
     Args:
-        text: 输入文本
+        text: Input text
 
     Returns:
-        float: 中文字符占比 (0.0 到 1.0)
+        float: Chinese character ratio (0.0 to 1.0)
     """
     if not text or not text.strip():
         return 0.0
 
-    # 移除空白字符后的文本
+    # Text after removing whitespace characters
     clean_text = re.sub(r"\s+", "", text)
     if not clean_text:
         return 0.0
 
-    # 统计中文字符数量 (包括中文标点符号)
+    # Count Chinese characters (including Chinese punctuation)
     chinese_chars = re.findall(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", clean_text)
     chinese_count = len(chinese_chars)
 
-    # 计算占比
+    # Calculate ratio
     total_chars = len(clean_text)
     ratio = chinese_count / total_chars if total_chars > 0 else 0.0
 
@@ -157,29 +166,29 @@ def get_keys():
 
 def get_data_cached():
     """
-    智能统一数据缓存加载函数
-    - 统一管理papers和metas数据的加载
-    - 检测数据库文件更新并自动重新加载
-    - 记录详细的缓存状态日志
+    Intelligent unified data cache loading function
+    - Unified management of papers and metas data loading
+    - Detect database file updates and automatically reload
+    - Record detailed cache status logs
     """
     global PAPERS_CACHE, METAS_CACHE, PIDS_CACHE
     global PAPERS_DB_FILE_MTIME, PAPERS_DB_CACHE_TIME
 
     current_time = time.time()
 
-    # 检查数据库文件是否存在
+    # Check if database file exists
     if not os.path.exists(PAPERS_DB_PATH):
         logger.error(f"Papers database file not found: {PAPERS_DB_PATH}")
         raise FileNotFoundError(f"Papers database file not found: {PAPERS_DB_PATH}")
 
-    # 获取当前数据库文件修改时间
+    # Get current database file modification time
     current_file_mtime = os.path.getmtime(PAPERS_DB_PATH)
 
-    # 检查是否需要重新加载（首次加载或文件更新）
+    # Check if reload is needed (first load or file update)
     need_reload = (
-        PAPERS_CACHE is None  # 首次加载
-        or METAS_CACHE is None  # 首次加载
-        or current_file_mtime > PAPERS_DB_FILE_MTIME  # 文件更新
+        PAPERS_CACHE is None  # First load
+        or METAS_CACHE is None  # First load
+        or current_file_mtime > PAPERS_DB_FILE_MTIME  # File update
     )
 
     if need_reload:
@@ -190,7 +199,7 @@ def get_data_cached():
         start_time = time.time()
 
         try:
-            # 同时加载papers和metas数据
+            # Load papers and metas data simultaneously
             with get_papers_db() as papers_db:
                 PAPERS_CACHE = {k: v for k, v in tqdm(papers_db.items(), desc="loading papers db")}
 
@@ -198,7 +207,7 @@ def get_data_cached():
                 METAS_CACHE = {k: v for k, v in tqdm(metas_db.items(), desc="loading metas db")}
                 PIDS_CACHE = list(METAS_CACHE.keys())
 
-            # 更新缓存时间戳
+            # Update cache timestamps
             PAPERS_DB_FILE_MTIME = current_file_mtime
             PAPERS_DB_CACHE_TIME = current_time
 
@@ -212,7 +221,7 @@ def get_data_cached():
             logger.error(f"Failed to load papers and metas: {e}")
             raise
     else:
-        # 使用缓存
+        # Use cache
         pass
 
     return PAPERS_CACHE, METAS_CACHE, PIDS_CACHE
@@ -223,28 +232,28 @@ def get_data_cached():
 
 
 def get_pids():
-    """获取所有论文ID列表"""
-    get_data_cached()  # 确保缓存已加载
+    """Get all paper ID list"""
+    get_data_cached()  # Ensure cache is loaded
     return PIDS_CACHE
 
 
 def get_papers():
-    """获取论文数据库"""
-    get_data_cached()  # 确保缓存已加载
+    """Get papers database"""
+    get_data_cached()  # Ensure cache is loaded
     return PAPERS_CACHE
 
 
 def get_metas():
-    """获取元数据数据库"""
-    get_data_cached()  # 确保缓存已加载
+    """Get metadata database"""
+    get_data_cached()  # Ensure cache is loaded
     return METAS_CACHE
 
 
-# 初始化缓存（在应用启动时预加载）
+# Initialize cache (preload on application startup)
 logger.info("Initializing unified data caches on startup...")
 get_data_cached()
 
-# 设置定时刷新缓存的调度器
+# Set up scheduler for periodic cache refresh
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 scheduler.add_job(get_data_cached, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
 scheduler.start()
@@ -263,8 +272,8 @@ def before_request():
 
 @app.teardown_request
 def close_connection(error=None):
-    # papers和metas现在使用全局缓存，无需清理
-    # 所有数据访问都直接使用全局变量
+    # papers and metas now use global cache, no cleanup needed
+    # All data access uses global variables directly
     pass
 
 
@@ -379,7 +388,7 @@ def time_rank(limit=None):
 
 def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
     """
-    智能时间过滤：保留有标签的论文（即使超出时间窗口）和时间窗口内的论文
+    Smart time filtering: keep tagged papers (even if outside time window) and papers within time window
     Filter papers by time but keep tagged papers even if outside time window
     """
     if not time_filter:
@@ -390,24 +399,24 @@ def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
     tnow = time.time()
     deltat = float(time_filter) * 60 * 60 * 24
 
-    # 获取用户标记的所有论文ID集合
+    # Get set of all user-tagged paper IDs
     tagged_set = set()
     if user_tagged_pids:
         tagged_set = user_tagged_pids
 
     # Find indices of papers that meet criteria:
-    # 1. 在时间窗口内的论文，或
-    # 2. 用户已标记的论文（即使超出时间窗口）
+    # 1. Papers within time window, or
+    # 2. User-tagged papers (even if outside time window)
     valid_indices = []
     valid_pids = []
     for i, pid in enumerate(pids):
         if pid in kv:
-            # 检查是否在时间窗口内
+            # Check if within time window
             in_time_window = (tnow - kv[pid]["_time"]) < deltat
-            # 检查是否被用户标记
+            # Check if tagged by user
             is_tagged = pid in tagged_set
 
-            # 满足任一条件即保留
+            # Keep if either condition is met
             if in_time_window or is_tagged:
                 valid_indices.append(i)
                 valid_pids.append(pid)
@@ -416,11 +425,14 @@ def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
 
 
 def _filter_by_time(pids, time_filter):
-    """原始时间过滤函数，保持向后兼容"""
+    """Original time filtering function, maintain backward compatibility"""
     return _filter_by_time_with_tags(pids, time_filter, None)
 
 
-def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "and", time_filter: str = ""):
+def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "and", time_filter: str = ""):
+    # Use default value
+    if C is None:
+        C = SVM_C
     # tag can be one tag or a few comma-separated tags or 'all' for all tags we have in db
     # pid can be a specific paper id to set as positive for a kind of nearest neighbor search
     if not (tags or s_pids):
@@ -431,7 +443,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
     features = get_features_cached()  # Replace: features = load_features()
     x, pids = features["x"], features["pids"]
 
-    # 收集用户标记的所有论文ID，用于智能时间过滤
+    # Collect all user-tagged paper IDs for smart time filtering
     user_tagged_pids = set()
     if tags:
         tags_db = get_tags()
@@ -443,7 +455,7 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
     if s_pids:
         user_tagged_pids.update(map(str.strip, s_pids.split(",")))
 
-    # 应用智能时间过滤：保留有标签的论文和时间窗口内的论文
+    # Apply smart time filtering: keep tagged papers and papers within time window
     if time_filter:
         pids, time_valid_indices = _filter_by_time_with_tags(pids, time_filter, user_tagged_pids)
         if not pids:
@@ -504,17 +516,17 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = 0.02, logic: str = "an
 
     s_time = time.time()
 
-    # classify - 优化参数加速训练，保持准确率
+    # classify - optimize parameters to accelerate training while maintaining accuracy
     clf = svm.LinearSVC(
         class_weight="balanced",
         verbose=0,
-        max_iter=5000,  # 适当减少迭代次数
-        tol=1e-3,
+        max_iter=SVM_MAX_ITER,
+        tol=SVM_TOL,
         C=C,
-        dual=False,  # 对高维特征更快
-        random_state=42,  # 确保结果可重现
-        fit_intercept=True,  # 通常提高准确率
-        multi_class="ovr",  # 一对其余，对二分类更快
+        dual=False,  # Faster for high-dimensional features
+        random_state=42,  # Ensure reproducible results
+        fit_intercept=True,  # Usually improves accuracy
+        multi_class="ovr",  # One-vs-rest, faster for binary classification
     )
     # feature_map_nystroem = Nystroem(
     #     random_state=0, n_components=100, n_jobs=-1
@@ -606,13 +618,13 @@ def search_rank(q: str = "", limit=None):
     return _apply_limit(pids, scores, limit)
 
 
-# 全局语义搜索相关变量
+# Global semantic search related variables
 _semantic_model = None
 _cached_embeddings = None
 
 
 def get_semantic_model():
-    """获取语义模型实例（通过 API 调用）"""
+    """Get semantic model instance (via API call)"""
     global _semantic_model
     if _semantic_model is None:
         try:
@@ -620,7 +632,7 @@ def get_semantic_model():
             _semantic_model = Qwen3EmbeddingVllm(
                 model_name_or_path="./qwen3-embed-0.6B",
                 instruction="Extract key concepts from this query to search computer science and AI paper",
-                api_base="http://localhost:51000/v1",
+                api_base=f"http://localhost:{VLLM_EMBED_PORT}/v1",
             )
             if not _semantic_model.initialize():
                 logger.error("Failed to initialize semantic model API client")
@@ -632,7 +644,7 @@ def get_semantic_model():
 
 
 def get_paper_embeddings():
-    """获取论文嵌入向量（从特征文件加载）"""
+    """Get paper embedding vectors (loaded from features file)"""
     global _cached_embeddings
     if _cached_embeddings is not None:
         return _cached_embeddings
@@ -656,24 +668,24 @@ get_paper_embeddings()
 
 
 def semantic_search_rank(q: str = "", limit=None):
-    """执行纯语义搜索"""
+    """Execute pure semantic search"""
     if not q:
         return [], []
 
-    # 获取论文嵌入
+    # Get paper embeddings
     paper_data = get_paper_embeddings()
     if paper_data is None:
         logger.error("No paper embeddings available")
         return [], []
 
-    # 获取模型
+    # Get model
     model = get_semantic_model()
     if model is None:
         logger.error("Semantic model not available")
         return [], []
 
     try:
-        # 编码查询
+        # Encode query
         # logger.trace(f"Encoding query: {q}")
         query_embedding = model.encode(
             [model.get_detailed_instruct(q)],
@@ -684,12 +696,12 @@ def semantic_search_rank(q: str = "", limit=None):
             return [], []
         query_embedding = query_embedding.cpu().numpy()
 
-        # 计算相似度
+        # Calculate similarity
         from sklearn.metrics.pairwise import cosine_similarity
 
         similarities = cosine_similarity(query_embedding, paper_data["embeddings"])[0]
 
-        # 获取top-k结果
+        # Get top-k results
         if limit:
             top_indices = np.argpartition(-similarities, min(limit, len(similarities) - 1))[:limit]
             top_indices = top_indices[np.argsort(-similarities[top_indices])]
@@ -706,92 +718,94 @@ def semantic_search_rank(q: str = "", limit=None):
         return [], []
 
 
-def hybrid_search_rank(q: str = "", limit=None, semantic_weight=0.5):
-    """混合搜索：融合关键词和语义搜索结果"""
+def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT):
+    """Hybrid search: fuse keyword and semantic search results"""
     if not q:
         return [], [], {}
 
-    # 并行执行两种搜索
+    # Execute both searches in parallel
     keyword_pids, keyword_scores = search_rank(q, limit=limit * 2 if limit else None)
     semantic_pids, semantic_scores = semantic_search_rank(q, limit=limit * 2 if limit else None)
 
-    # 创建分数映射
+    # Create score mapping
     keyword_score_map = {pid: score for pid, score in zip(keyword_pids, keyword_scores)} if keyword_pids else {}
     semantic_score_map = {pid: score for pid, score in zip(semantic_pids, semantic_scores)} if semantic_pids else {}
 
-    # 融合结果
+    # Fuse results
     combined_scores = {}
-    score_details = {}  # 保存每个paper的详细分数信息
+    score_details = {}  # Save detailed score information for each paper
 
-    # 归一化参数
+    # Normalization parameters
     max_keyword = max(keyword_scores) if keyword_scores else 1.0
     max_semantic = max(semantic_scores) if semantic_scores else 1.0
 
-    # 获取所有涉及的PIDs
+    # Get all involved PIDs
     all_pids = set(keyword_pids + semantic_pids)
 
     for pid in all_pids:
         keyword_score = keyword_score_map.get(pid, 0.0)
         semantic_score = semantic_score_map.get(pid, 0.0)
 
-        # 归一化分数
+        # Normalize scores
         normalized_keyword = keyword_score / max_keyword if max_keyword > 0 else 0.0
         normalized_semantic = semantic_score / max_semantic if max_semantic > 0 else 0.0
 
-        # 计算加权分数
+        # Calculate weighted scores
         weighted_keyword = (1 - semantic_weight) * normalized_keyword
         weighted_semantic = semantic_weight * normalized_semantic
         final_score = weighted_keyword + weighted_semantic
 
         combined_scores[pid] = final_score
 
-        # 保存详细信息，用于显示
+        # Save detailed information for display
         score_details[pid] = {
             "keyword_score": keyword_score,
             "semantic_score": semantic_score,
-            "keyword_weight": 1 - semantic_weight,  # 转换为百分制
-            "semantic_weight": semantic_weight,  # 转换为百分制
+            "keyword_weight": 1 - semantic_weight,  # Convert to percentage
+            "semantic_weight": semantic_weight,  # Convert to percentage
             "final_score": final_score * 100,
         }
 
-    # 排序并限制结果数量
+    # Sort and limit result count
     sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
     if limit:
         sorted_results = sorted_results[:limit]
 
-    # 分离PIDs和分数
+    # Separate PIDs and scores
     pids = [pid for pid, _ in sorted_results]
     scores = [score * 100 for _, score in sorted_results]
 
     return pids, scores, score_details
 
 
-def enhanced_search_rank(q: str = "", limit=None, search_mode="keyword", semantic_weight=0.5):
+def enhanced_search_rank(
+    q: str = "", limit=None, search_mode="keyword", semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+):
     """
-    增强的搜索函数，支持多种搜索模式
+    Enhanced search function supporting multiple search modes
 
     Args:
-        q: 搜索查询
-        limit: 结果数量限制
-        search_mode: 搜索模式 ('keyword', 'semantic', 'hybrid')
-        semantic_weight: 语义搜索权重 (0-1)，仅在 hybrid 模式下使用
+        q: Search query
+        limit: Result count limit
+        search_mode: Search mode ('keyword', 'semantic', 'hybrid')
+        semantic_weight: Semantic search weight (0-1), only used in hybrid mode
 
     Returns:
-        (paper_ids, scores) 元组
+        (paper_ids, scores) tuple
     """
     if not q:
         return [], []
 
     if search_mode == "keyword":
-        # 使用现有的关键词搜索
+        # Use existing keyword search
         return search_rank(q, limit)
 
     elif search_mode == "semantic":
-        # 纯语义搜索
+        # Pure semantic search
         return semantic_search_rank(q, limit)
 
     elif search_mode == "hybrid":
-        # 混合搜索
+        # Hybrid search
         return hybrid_search_rank(q, limit, semantic_weight)
 
     else:
@@ -831,7 +845,9 @@ def main():
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
     opt_search_mode = request.args.get("search_mode", "hybrid")  # search mode: keyword|semantic|hybrid
-    opt_semantic_weight = request.args.get("semantic_weight", "0.5")  # semantic weight for hybrid search
+    opt_semantic_weight = request.args.get(
+        "semantic_weight", str(SUMMARY_DEFAULT_SEMANTIC_WEIGHT)
+    )  # semantic weight for hybrid search
 
     # if a query is given, override rank to be of type "search"
     # this allows the user to simply hit ENTER in the search field and have the correct thing happen
@@ -875,15 +891,15 @@ def main():
 
     # rank papers: by tags, by time, by random
     words = []  # only populated in the case of svm rank
-    score_details = {}  # 保存详细分数信息，仅在 hybrid 模式下使用
+    score_details = {}  # Save detailed score information, only used in hybrid mode
 
     if opt_rank == "search":
         t_s = time.time()
-        # 使用增强的搜索函数
+        # Use enhanced search function
         try:
             semantic_weight = float(opt_semantic_weight)
         except ValueError:
-            semantic_weight = 0.5
+            semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
         if opt_search_mode == "hybrid":
             pids, scores, score_details = enhanced_search_rank(
@@ -929,13 +945,13 @@ def main():
 
     # filter by time (now handled within svm_rank for SVM-based rankings)
     if opt_time_filter and opt_rank not in ["tags", "pid"]:
-        # 收集用户标记的论文，用于智能时间过滤
+        # Collect user tagged papers for intelligent time filtering
         user_tagged_pids = set()
         tags = get_tags()
         for tag_pids in tags.values():
             user_tagged_pids.update(tag_pids)
 
-        # 使用智能时间过滤
+        # Use intelligent time filtering
         pids, time_valid_indices = _filter_by_time_with_tags(pids, opt_time_filter, user_tagged_pids)
         scores = [scores[i] for i in time_valid_indices]
 
@@ -959,16 +975,16 @@ def main():
     for i, p in enumerate(papers):
         p["weight"] = float(scores[i])
 
-        # 如果是 hybrid 搜索模式，添加详细分数信息
+        # If hybrid search mode, add detailed score information
         if opt_rank == "search" and opt_search_mode == "hybrid" and score_details:
             pid = p["id"]
             if pid in score_details:
                 details = score_details[pid]
-                # 格式化显示：A: {(1 - semantic_weight)} Keyword {Score} + {semantic_weight} Semantic {Score}
+                # Format display: A: {(1 - semantic_weight)} Keyword {Score} + {semantic_weight} Semantic {Score}
                 try:
                     semantic_weight = float(opt_semantic_weight)
                 except ValueError:
-                    semantic_weight = 0.5
+                    semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
                 keyword_weight = 1 - semantic_weight
                 p["score_breakdown"] = (
@@ -1037,7 +1053,7 @@ def inspect():
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
 
-    # 使用原始 TF-IDF 矩阵进行 inspect（如果存在）
+    # Use original TF-IDF matrix for inspect (if exists)
     x = features.get("x_tfidf", features["x"])
     idf = features["idf"]
     ivocab = {v: k for k, v in features["vocab"].items()}
@@ -1062,29 +1078,32 @@ def inspect():
     context["words_desc"] = (
         "The following are the tokens and their (tfidf) weight in the paper vector. This is the actual summary that feeds into the SVM to power recommendations, so hopefully it is good and representative!"
     )
+    # Add paper name to page title
+    context["title"] = f"Paper Inspect - {paper['title']}"
     return render_template("inspect.html", **context)
 
 
 @app.route("/summary", methods=["GET"])
 def summary():
     """
-    显示论文的 AI 生成的 markdown 格式总结
+    Display AI-generated markdown format summary of the paper
     """
-    # 获取论文 ID
+    # Get paper ID
     pid = request.args.get("pid", "")
     logger.info(f"show paper summary page for paper {pid}")
     pdb = get_papers()
     if pid not in pdb:
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
-    # 获取论文基本信息
+    # Get basic paper information
     paper = render_pid(pid)
 
-    # 构建页面上下文，不在这里调用 get_paper_summary
+    # Build page context, don't call get_paper_summary here
     context = default_context()
     context["paper"] = paper
-    context["pid"] = pid  # 传递 pid 给前端，用于异步获取 summary
-
+    context["pid"] = pid  # Pass pid to frontend for async summary retrieval
+    # Add paper name to page title
+    context["title"] = f"Paper Summary - {paper['title']}"
     return render_template("summary.html", **context)
 
 
@@ -1129,7 +1148,7 @@ def generate_paper_summary(pid: str) -> str:
     try:
         pdb = get_papers()
         if pid not in pdb:
-            return "# 錯誤\n\n論文未找到。"
+            return "# Error\n\nPaper not found."
 
         # Define cache file path
         cache_dir = Path("data/summary")
@@ -1156,12 +1175,12 @@ def generate_paper_summary(pid: str) -> str:
         summary_content = generate_paper_summary_from_module(pid)
 
         # Only cache successful summaries (not error messages)
-        if not summary_content.startswith("# 錯誤") and not summary_content.startswith("# 错误"):
+        if not summary_content.startswith("# Error"):
             # Check Chinese ratio before caching
             chinese_ratio = calculate_chinese_ratio(summary_content)
             logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
 
-            if chinese_ratio >= 0.25:
+            if chinese_ratio >= SUMMARY_MIN_CHINESE_RATIO:
                 try:
                     with open(cache_file, "w", encoding="utf-8") as f:
                         f.write(summary_content)
@@ -1270,7 +1289,7 @@ def _temporary_user_context(user):
 
 @app.route("/api/keyword_search", methods=["POST"])
 def api_keyword_search():
-    """API接口：单个关键词搜索"""
+    """API interface: single keyword search"""
     try:
         data = request.get_json()
         # logger.info(f"API keyword search data: {data}")
@@ -1278,18 +1297,18 @@ def api_keyword_search():
             return jsonify({"error": "No JSON data provided"}), 400
 
         keyword = data.get("keyword", "")
-        time_delta = data.get("time_delta", 3)  # 天数
+        time_delta = data.get("time_delta", 3)  # days
         limit = data.get("limit", 50)
 
         if not keyword:
             return jsonify({"error": "Keyword is required"}), 400
 
-        # 使用增强搜索
+        # Use enhanced search
         pids, scores = enhanced_search_rank(
-            q=keyword, limit=limit * 5, search_mode="keyword"  # 多取一些，因为需要时间过滤
+            q=keyword, limit=limit * 5, search_mode="keyword"  # Get more because time filtering is needed
         )
 
-        # 应用时间过滤
+        # Apply time filtering
         if time_delta:
             mdb = get_metas()
             kv = {k: v for k, v in mdb.items()}
@@ -1299,7 +1318,7 @@ def api_keyword_search():
             pids = [pids[i] for i in keep]
             scores = [scores[i] for i in keep]
 
-        # 限制最终结果数量
+        # Limit final result count
         if len(pids) > limit:
             pids = pids[:limit]
             scores = scores[:limit]
@@ -1313,16 +1332,16 @@ def api_keyword_search():
 
 @app.route("/api/tag_search", methods=["POST"])
 def api_tag_search():
-    """API接口：单个tag推荐"""
+    """API interface: single tag recommendation"""
     try:
         data = request.get_json()
         logger.trace(f"API tag search data: {data}")
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
-        tag_name = data.get("tag_name", "")  # tag名称
-        user = data.get("user", "")  # 用户名
-        time_delta = data.get("time_delta", 3)  # 天数
+        tag_name = data.get("tag_name", "")  # tag name
+        user = data.get("user", "")  # username
+        time_delta = data.get("time_delta", 3)  # days
         limit = data.get("limit", 50)
         C = data.get("C", 0.1)
 
@@ -1331,18 +1350,18 @@ def api_tag_search():
         if not user:
             return jsonify({"error": "user is required"}), 400
 
-        # 获取该用户的标签数据
+        # Get user's tag data
         with get_tags_db() as tags_db:
             user_tags = tags_db.get(user, {})
 
-        # 检查用户是否有该标签
+        # Check if user has this tag
         if tag_name not in user_tags or len(user_tags[tag_name]) == 0:
             logger.warning(f"User {user} has no papers tagged with '{tag_name}'")
             return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
 
         logger.trace(f"User {user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
 
-        # 临时设置g.user和g._tags，让svm_rank能正确工作
+        # Temporarily set g.user and g._tags to make svm_rank work correctly
         original_user = getattr(g, "user", None)
         original_tags = getattr(g, "_tags", None)
 
@@ -1350,20 +1369,20 @@ def api_tag_search():
         g._tags = user_tags
 
         try:
-            # 使用tag名称进行推荐
+            # Use tag name for recommendation
             rec_pids, rec_scores, words = svm_rank(
                 tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta)
             )
 
             logger.trace(f"svm_rank returned {len(rec_pids)} results before filtering")
 
-            # 获取该用户该tag已标记的论文，用于排除
+            # Get papers already tagged by this user for this tag, for exclusion
             if tag_name in user_tags:
                 tagged_pids = user_tags[tag_name]
                 tagged_set = set(tagged_pids)
                 logger.trace(f"User has {len(tagged_set)} papers tagged with '{tag_name}'")
 
-                # 计算推荐结果和已标记论文的交集
+                # Calculate intersection of recommendation results and already tagged papers
                 intersection = [pid for pid in rec_pids if pid in tagged_set]
                 logger.trace(f"Found {len(intersection)} recommended papers that are already tagged")
 
@@ -1373,7 +1392,7 @@ def api_tag_search():
 
                 logger.trace(f"After filtering out tagged papers: {len(rec_pids)} papers remain")
         finally:
-            # 恢复原始的g.user和g._tags
+            # Restore original g.user and g._tags
             if original_user is not None:
                 g.user = original_user
             else:
@@ -1385,7 +1404,7 @@ def api_tag_search():
                 if hasattr(g, "_tags"):
                     delattr(g, "_tags")
 
-        # 限制结果数量
+        # Limit result count
         if len(rec_pids) > limit:
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
@@ -1399,7 +1418,7 @@ def api_tag_search():
 
 @app.route("/api/tags_search", methods=["POST"])
 def api_tags_search():
-    """API接口：联合tag推荐"""
+    """API interface: joint tag recommendation"""
     try:
         data = request.get_json()
         logger.trace(f"API combined tags search data: {data}")
@@ -1407,9 +1426,9 @@ def api_tags_search():
             return jsonify({"error": "No JSON data provided"}), 400
 
         tags_list = data.get("tags", [])  # List[tag_name]
-        user = data.get("user", "")  # 用户名
+        user = data.get("user", "")  # username
         logic = data.get("logic", "and")  # and|or
-        time_delta = data.get("time_delta", 3)  # 天数
+        time_delta = data.get("time_delta", 3)  # days
         limit = data.get("limit", 50)
         C = data.get("C", 0.1)
 
@@ -1418,20 +1437,20 @@ def api_tags_search():
         if not user:
             return jsonify({"error": "user is required"}), 400
 
-        # 获取该用户的标签数据
+        # Get user's tag data
         with get_tags_db() as tags_db:
             user_tags = tags_db.get(user, {})
 
-        # 检查用户是否有任一标签
+        # Check if user has any of the tags
         valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
         if not valid_tags:
             logger.warning(f"User {user} has no papers tagged with any of {tags_list}")
             return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
 
-        # 将tag列表转换为逗号分隔的字符串
+        # Convert tag list to comma-separated string
         tags_str = ",".join(valid_tags)
 
-        # 临时设置g.user和g._tags，让svm_rank能正确工作
+        # Temporarily set g.user and g._tags to make svm_rank work correctly
         original_user = getattr(g, "user", None)
         original_tags = getattr(g, "_tags", None)
 
@@ -1439,12 +1458,12 @@ def api_tags_search():
         g._tags = user_tags
 
         try:
-            # 使用SVM推荐
+            # Use SVM recommendation
             rec_pids, rec_scores, words = svm_rank(
                 tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta)
             )
 
-            # 获取该用户所有相关tags的已标记论文，用于排除
+            # Get all tagged papers for all related tags of this user, for exclusion
             all_tagged = set()
             for tag in valid_tags:
                 if tag in user_tags:
@@ -1454,7 +1473,7 @@ def api_tags_search():
             rec_pids = [rec_pids[i] for i in keep]
             rec_scores = [rec_scores[i] for i in keep]
         finally:
-            # 恢复原始的g.user和g._tags
+            # Restore original g.user and g._tags
             if original_user is not None:
                 g.user = original_user
             else:
@@ -1466,7 +1485,7 @@ def api_tags_search():
                 if hasattr(g, "_tags"):
                     delattr(g, "_tags")
 
-        # 限制结果数量
+        # Limit result count
         if len(rec_pids) > limit:
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
@@ -1489,6 +1508,32 @@ def cache_status():
     global FEATURES_CACHE, FEATURES_FILE_MTIME, FEATURES_CACHE_TIME
     global PAPERS_CACHE, METAS_CACHE, PIDS_CACHE, PAPERS_DB_FILE_MTIME, PAPERS_DB_CACHE_TIME
 
+    # Check vLLM service status
+    def check_vllm_service(port, service_name):
+        """Check if vLLM service is available"""
+        try:
+            import requests
+
+            logger.trace(f"Checking {service_name} at port {port}...")
+            response = requests.get(f"http://localhost:{port}/health", timeout=2)
+            is_available = response.status_code == 200
+            if is_available:
+                logger.trace(f"{service_name} is available (status: {response.status_code})")
+            else:
+                logger.warning(f"{service_name} returned non-200 status: {response.status_code}")
+            return {
+                "available": is_available,
+                "status_code": response.status_code,
+                "service_name": service_name,
+            }
+        except Exception as e:
+            logger.warning(f"{service_name} is not available: {str(e)}")
+            return {
+                "available": False,
+                "error": str(e),
+                "service_name": service_name,
+            }
+
     status = {
         "current_time": time.time(),
         "features": {
@@ -1501,6 +1546,12 @@ def cache_status():
             "metas_cached": METAS_CACHE is not None,
             "cache_time": PAPERS_DB_CACHE_TIME,
             "db_file_mtime": PAPERS_DB_FILE_MTIME,
+        },
+        "vllm_services": {
+            "embedding_service": check_vllm_service(
+                VLLM_EMBED_PORT, f"Qwen3 Embedding Service (port {VLLM_EMBED_PORT})"
+            ),
+            "mineru_service": check_vllm_service(VLLM_MINERU_PORT, f"MinerU VLM Service (port {VLLM_MINERU_PORT})"),
         },
     }
 
