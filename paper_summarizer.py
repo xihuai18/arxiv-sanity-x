@@ -7,9 +7,11 @@ Features:
 3. Summarize papers using LLM models
 """
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -32,6 +34,8 @@ from vars import (
 
 class PaperSummarizer:
     # Class-level lock to ensure only one minerU process is running
+    # Note: This only works within a single process. For multi-process safety,
+    # consider using file-based locks or distributed locks
     _mineru_lock = threading.Lock()
 
     def __init__(self):
@@ -66,12 +70,32 @@ class PaperSummarizer:
                 logger.trace(f"PDF file already exists: {pdf_path}")
                 return pdf_path
 
+            # Use atomic file write with temporary file
             logger.trace(f"Downloading paper {pid} ...")
             response = requests.get(pdf_url, stream=True, timeout=30)
             response.raise_for_status()
 
-            with open(pdf_path, "wb") as f:
-                shutil.copyfileobj(response.raw, f)
+            # Write to temporary file first, then atomic rename
+            temp_fd, temp_path = tempfile.mkstemp(dir=self.pdfs_dir, prefix=f"{pid}_", suffix=".pdf.tmp")
+            try:
+                with os.fdopen(temp_fd, "wb") as f:
+                    shutil.copyfileobj(response.raw, f)
+
+                # Atomic rename (on POSIX systems)
+                temp_file = Path(temp_path)
+                try:
+                    temp_file.rename(pdf_path)
+                except FileExistsError:
+                    # Another process already downloaded the file
+                    temp_file.unlink()
+                    logger.trace(f"PDF file was downloaded by another process: {pdf_path}")
+                    return pdf_path if pdf_path.exists() else None
+
+            except Exception:
+                # Clean up temporary file on error
+                if Path(temp_path).exists():
+                    Path(temp_path).unlink()
+                raise
 
             logger.trace(f"Paper download complete: {pdf_path}")
             return pdf_path
@@ -80,9 +104,42 @@ class PaperSummarizer:
             logger.trace(f"Failed to download paper {pid}: {e}")
             return None
 
+    def _acquire_file_lock(self, lock_path: Path, timeout: int = 60) -> Optional[int]:
+        """
+        Acquire a file-based lock for multi-process synchronization
+
+        Args:
+            lock_path: Path to the lock file
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            File descriptor if lock acquired, None if timeout
+        """
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+                return fd
+            except FileExistsError:
+                # Lock file exists, wait and retry
+                time.sleep(0.5)
+
+        logger.trace(f"Failed to acquire lock after {timeout} seconds: {lock_path}")
+        return None
+
+    def _release_file_lock(self, fd: int, lock_path: Path):
+        """Release a file-based lock"""
+        try:
+            os.close(fd)
+            lock_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.trace(f"Error releasing lock: {e}")
+
     def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
         """
-        Parse PDF to Markdown using minerU (with singleton lock protection)
+        Parse PDF to Markdown using minerU (with multi-process lock protection)
 
         Args:
             pdf_path: PDF file path
@@ -97,12 +154,13 @@ class PaperSummarizer:
             # Migration logic: if vlm directory exists, rename to auto
             vlm_dir = output_dir / pdf_name / "vlm"
             auto_dir = output_dir / pdf_name / "auto"
-            if vlm_dir.exists():
+            if vlm_dir.exists() and not auto_dir.exists():
                 try:
                     vlm_dir.rename(auto_dir)
                     logger.trace(f"Migrated vlm directory to auto: {vlm_dir} -> {auto_dir}")
-                except Exception as e:
-                    logger.trace(f"Failed to migrate vlm to auto: {e}")
+                except (FileExistsError, OSError) as e:
+                    # Another process may have already renamed it
+                    logger.trace(f"Failed to migrate vlm to auto (may already exist): {e}")
 
             # Check if already parsed
             expected_md_path = auto_dir / f"{pdf_name}.md"
@@ -112,10 +170,20 @@ class PaperSummarizer:
             else:
                 logger.trace(f"{expected_md_path} not found")
 
-            # Acquire lock to ensure only one minerU process is running
-            logger.trace(f"Waiting for minerU lock to parse PDF: {pdf_path}")
-            with self._mineru_lock:
-                logger.trace(f"Acquired minerU lock, start parsing PDF: {pdf_path}")
+            # Use file-based lock for multi-process synchronization
+            lock_path = self.mineru_dir / f".{pdf_name}.lock"
+            lock_fd = None
+
+            try:
+                # Acquire file lock (works across processes)
+                logger.trace(f"Waiting for file lock to parse PDF: {pdf_path}")
+                lock_fd = self._acquire_file_lock(lock_path, timeout=300)
+
+                if lock_fd is None:
+                    logger.trace(f"Failed to acquire lock for {pdf_name}, skipping")
+                    return None
+
+                logger.trace(f"Acquired file lock, start parsing PDF: {pdf_path}")
 
                 # Check again if already parsed (avoid duplicate work during lock wait)
                 if expected_md_path.exists():
@@ -151,7 +219,7 @@ class PaperSummarizer:
                     logger.trace(f"minerU execution failed: {result.stderr}")
                     # Delete PDF file when minerU parsing fails
                     try:
-                        pdf_path.unlink()
+                        pdf_path.unlink(missing_ok=True)
                         logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
                         logger.trace(f"Failed to delete PDF file: {e}")
@@ -164,8 +232,9 @@ class PaperSummarizer:
                     try:
                         vlm_dir_new.rename(auto_dir_new)
                         logger.trace(f"Migrated newly generated vlm to auto: {vlm_dir_new} -> {auto_dir_new}")
-                    except Exception as e:
-                        logger.trace(f"Failed to migrate newly generated vlm to auto: {e}")
+                    except (FileExistsError, OSError) as e:
+                        # Another process may have already renamed it
+                        logger.trace(f"Failed to migrate newly generated vlm to auto (may already exist): {e}")
 
                 # Check generated Markdown file
                 if expected_md_path.exists():
@@ -173,7 +242,7 @@ class PaperSummarizer:
 
                     # Delete PDF file after successful parsing to save space
                     try:
-                        pdf_path.unlink()
+                        pdf_path.unlink(missing_ok=True)
                         logger.trace(f"Deleted PDF source file: {pdf_path}")
                     except Exception as e:
                         logger.trace(f"Failed to delete PDF file: {e}")
@@ -186,17 +255,23 @@ class PaperSummarizer:
                     logger.trace(f"Generated Markdown file not found: {expected_md_path}")
                     # Delete PDF file when parsing fails
                     try:
-                        pdf_path.unlink()
+                        pdf_path.unlink(missing_ok=True)
                         logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
                     except Exception as e:
                         logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
+            finally:
+                # Always release the file lock
+                if lock_fd is not None:
+                    self._release_file_lock(lock_fd, lock_path)
+                    logger.trace(f"Released file lock for {pdf_name}")
+
         except subprocess.TimeoutExpired:
             logger.trace("minerU execution timeout")
             # Delete PDF file when parsing times out
             try:
-                pdf_path.unlink()
+                pdf_path.unlink(missing_ok=True)
                 logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
             except Exception as e:
                 logger.trace(f"Failed to delete PDF file: {e}")
@@ -205,7 +280,7 @@ class PaperSummarizer:
             logger.trace(f"PDF parse failed: {e}")
             # Delete PDF file when parsing exception occurs
             try:
-                pdf_path.unlink()
+                pdf_path.unlink(missing_ok=True)
                 logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
             except Exception as e:
                 logger.trace(f"Failed to delete PDF file: {e}")
@@ -483,8 +558,9 @@ Your brief summary of this paper
                 try:
                     vlm_dir.rename(auto_dir)
                     logger.trace(f"Migrated vlm directory to auto: {vlm_dir} -> {auto_dir}")
-                except Exception as e:
-                    logger.trace(f"Failed to migrate vlm to auto: {e}")
+                except (FileExistsError, OSError) as e:
+                    # Another process may have already renamed it
+                    logger.trace(f"Failed to migrate vlm to auto (may already exist): {e}")
 
             # Pre-check if parsing result already exists
             expected_md_path = self.mineru_dir / pid / "auto" / f"{pid}.md"
@@ -537,15 +613,19 @@ Your brief summary of this paper
             return f"# Error\n\nFailed to generate summary: {str(e)}"
 
 
-# Global instance
+# Global instance with thread-safe initialization
 _summarizer = None
+_summarizer_lock = threading.Lock()
 
 
 def get_summarizer() -> PaperSummarizer:
-    """Get global PaperSummarizer instance"""
+    """Get global PaperSummarizer instance (thread-safe singleton)"""
     global _summarizer
     if _summarizer is None:
-        _summarizer = PaperSummarizer()
+        with _summarizer_lock:
+            # Double-check locking pattern
+            if _summarizer is None:
+                _summarizer = PaperSummarizer()
     return _summarizer
 
 

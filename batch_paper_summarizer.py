@@ -101,8 +101,8 @@ class BatchPaperSummarizer(PaperSummarizer):
 
     def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
         """
-        Parse PDF to Markdown using minerU, reuse parent class method and add file-level lock
-        Added file-level lock to avoid concurrent parsing conflicts for the same paper
+        Parse PDF to Markdown using minerU
+        Now completely relies on parent class implementation which already has proper file locking
 
         Args:
             pdf_path: PDF file path
@@ -111,57 +111,17 @@ class BatchPaperSummarizer(PaperSummarizer):
             Generated Markdown file path, None if failed
         """
         try:
-            pdf_name = pdf_path.stem
-            output_dir = self.mineru_dir
-
-            # Use file-level lock to avoid concurrent parsing of the same paper
-            lock_file = output_dir / f"{pdf_name}.lock"
-
-            # Try to create lock file
-            try:
-                lock_file.touch(exist_ok=False)
-                logger.trace(f"Acquired parse lock: {pdf_name}")
-            except FileExistsError:
-                # Lock file already exists, wait for other process to complete
-                logger.trace(f"Waiting for other process to parse {pdf_name}...")
-                max_wait = 600  # Wait at most 10 minutes
-                wait_time = 0
-                expected_md_path = output_dir / pdf_name / "auto" / f"{pdf_name}.md"
-                while lock_file.exists() and wait_time < max_wait:
-                    time.sleep(5)
-                    wait_time += 5
-                    if expected_md_path.exists():
-                        logger.trace(f"Other process finished parsing: {expected_md_path}")
-                        return expected_md_path
-
-                if wait_time >= max_wait:
-                    logger.warning(f"Timeout waiting for parse lock: {pdf_name}")
-                    # Clean up possible deadlock
-                    try:
-                        lock_file.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-
-            try:
-                # Call parent class parsing method
-                result = super().parse_pdf_with_mineru(pdf_path)
-                if result is None:
-                    # Record failure details
-                    self._record_failure_detail(
-                        pdf_path.stem,
-                        "parse_failed",
-                        "Parent class parse_pdf_with_mineru returned None",
-                        Exception("minerU parsing failed"),
-                    )
-                return result
-
-            finally:
-                # Clean up lock file
-                try:
-                    lock_file.unlink(missing_ok=True)
-                    logger.trace(f"Released parse lock: {pdf_name}")
-                except Exception:
-                    pass
+            # Directly use parent class method - it already has file-based locking
+            result = super().parse_pdf_with_mineru(pdf_path)
+            if result is None:
+                # Record failure details
+                self._record_failure_detail(
+                    pdf_path.stem,
+                    "parse_failed",
+                    "Parent class parse_pdf_with_mineru returned None",
+                    Exception("minerU parsing failed"),
+                )
+            return result
 
         except Exception as e:
             error_msg = f"PDF parse failed: {e}"
