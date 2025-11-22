@@ -1,5 +1,7 @@
 # arxiv-sanity-X
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/xihuai18/arxiv-sanity-x)
+
 [中文](README_CN.md) | [English](README.md)
 
 A comprehensive arXiv paper browsing and recommendation system featuring AI-powered summarization, hybrid search capabilities, and personalized recommendations. Built with modern ML techniques including TF-IDF, semantic embeddings, and LLM integration.
