@@ -5,12 +5,12 @@ gunicorn
 
 # 机器学习和AI
 numpy
-scikit-learn==1.6.1
+scikit-learn
 scikit-learn-intelex
 openai
-tiktoken
-vllm
 mineru[all]
+mineru_vl_utils
+vllm==0.11.0
 
 # 数据处理和存储
 feedparser
@@ -26,6 +26,9 @@ holidays
 tqdm
 backoff
 loguru
+requests
+beautifulsoup4
+markdownify
 
 # 开发工具
 pre-commit

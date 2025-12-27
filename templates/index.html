@@ -9,14 +9,20 @@ var words_desc = {{ words_desc | tojson }};
 var gvars = {{ gvars | tojson }};
 var papers = {{ papers | tojson }};
 var combined_tags = {{ combined_tags | tojson }};
+var max_pages = {{ max_pages | tojson }};
 
 /*
 JS code here handles pagination. I really don't super love this approach,
 if anyone can think of a cleaner / shorter way please let me know.
 */
 var move_page = function(int_offset) {
+    var current = parseInt(gvars.page_number, 10) || 1;
+    var nextPage = Math.max(1, current + int_offset);
+    if (max_pages && nextPage > max_pages) {
+        return;
+    }
     var queryParams = new URLSearchParams(window.location.search);
-    queryParams.set("page_number", Math.max(1, parseInt(gvars.page_number) + int_offset));
+    queryParams.set("page_number", nextPage);
     window.location.href = '/?' + queryParams.toString();
 }
 
@@ -24,16 +30,85 @@ var move_page = function(int_offset) {
 var SearchBoxController = {
     // Initialize search box features
     init: function() {
+        this.restorePreferences();
         this.setupSearchBox();
         this.setupFilters();
+        this.setupAdvancedFilters();
+        this.updateEmptyState();
+        this.setupModalFocus();
         this.setupShortcuts();
         this.setupFormValidation();
+    },
+
+    // Restore last used preferences (only when URL doesn't specify them)
+    restorePreferences: function() {
+        try {
+            var params = new URLSearchParams(window.location.search);
+            var setIfMissing = function(paramName, elementId, storageKey, validator) {
+                if (params.has(paramName)) return;
+                var el = document.getElementById(elementId);
+                if (!el) return;
+                var v = localStorage.getItem(storageKey);
+                if (v === null || v === undefined || v === '') return;
+                if (validator && !validator(v)) {
+                    try { localStorage.removeItem(storageKey); } catch (e) {}
+                    return;
+                }
+                el.value = v;
+            };
+
+            var isAllowed = function(value, allowed) {
+                return allowed.indexOf(value) !== -1;
+            };
+            var isPositiveNumber = function(value) {
+                var num = Number(value);
+                return Number.isFinite(num) && num > 0;
+            };
+
+            if (!params.has('rank') && !params.has('q')) {
+                setIfMissing('rank', 'rank_select', 'arxiv_sanity_pref.rank', function(v) {
+                    return isAllowed(v, ['search', 'tags', 'pid', 'time', 'random']);
+                });
+            }
+            setIfMissing('search_mode', 'search_mode_select', 'arxiv_sanity_pref.search_mode', function(v) {
+                return isAllowed(v, ['keyword', 'semantic', 'hybrid']);
+            });
+            setIfMissing('semantic_weight', 'semantic_weight_slider', 'arxiv_sanity_pref.semantic_weight', function(v) {
+                var num = Number(v);
+                return Number.isFinite(num) && num >= 0 && num <= 1;
+            });
+            setIfMissing('time_filter', 'time_filter_field', 'arxiv_sanity_pref.time_filter', isPositiveNumber);
+            setIfMissing('skip_have', 'skip_have_select', 'arxiv_sanity_pref.skip_have', function(v) {
+                return isAllowed(v, ['yes', 'no']);
+            });
+
+            var semanticWeightValue = document.getElementById('semantic_weight_value');
+            var semanticWeightSlider = document.getElementById('semantic_weight_slider');
+            if (semanticWeightValue && semanticWeightSlider) {
+                semanticWeightValue.textContent = semanticWeightSlider.value;
+            }
+
+            // Reflect restored search mode in the UI (weight slider visibility)
+            var searchModeSelect = document.getElementById('search_mode_select');
+            var semanticWeightContainer = document.getElementById('semantic_weight_container');
+            if (searchModeSelect && semanticWeightContainer) {
+                semanticWeightContainer.style.display = (searchModeSelect.value === 'hybrid') ? '' : 'none';
+            }
+        } catch (e) {
+            // ignore storage errors (private mode, etc.)
+        }
     },
 
     // Setup search box functionality
     setupSearchBox: function() {
         var searchInput = document.getElementById('qfield');
+        if (!searchInput) return;
         var searchForm = searchInput.closest('form');
+        if (searchForm) {
+            searchForm.addEventListener('submit', function() {
+                document.body.classList.add('search-loading');
+            });
+        }
 
         // Auto focus search box (if no query)
         if (searchInput && !searchInput.value.trim()) {
@@ -58,22 +133,39 @@ var SearchBoxController = {
 
     // Add clear button
     addClearButton: function(searchInput) {
-        if (searchInput.value.trim()) {
-            var clearBtn = document.createElement('button');
+        if (!searchInput || !searchInput.parentNode) return;
+        var parent = searchInput.parentNode;
+        parent.style.position = 'relative';
+
+        var clearBtn = parent.querySelector('.search-clear-btn');
+        if (!clearBtn) {
+            clearBtn = document.createElement('button');
             clearBtn.type = 'button';
             clearBtn.className = 'search-clear-btn';
             clearBtn.innerHTML = '×';
             clearBtn.title = 'Clear search';
+            clearBtn.setAttribute('aria-label', 'Clear search');
 
             clearBtn.addEventListener('click', function() {
                 searchInput.value = '';
                 searchInput.focus();
-                clearBtn.remove();
+                SearchBoxController.hideSuggestions();
+                SearchBoxController.hideTagSuggestions();
+                SearchBoxController.addClearButton(searchInput);
             });
 
-            searchInput.parentNode.style.position = 'relative';
-            searchInput.parentNode.appendChild(clearBtn);
+            parent.appendChild(clearBtn);
         }
+
+        var toggleClear = function() {
+            clearBtn.style.display = searchInput.value.trim() ? 'block' : 'none';
+        };
+
+        if (!searchInput.dataset.clearBound) {
+            searchInput.addEventListener('input', toggleClear);
+            searchInput.dataset.clearBound = '1';
+        }
+        toggleClear();
     },
 
     // Search suggestions functionality removed
@@ -92,14 +184,17 @@ var SearchBoxController = {
         var pidField = document.getElementById('pid_field');
         var searchModeSelect = document.getElementById('search_mode_select');
         var semanticWeightContainer = document.getElementById('semantic_weight_container');
+        var semanticWeightSlider = document.getElementById('semantic_weight_slider');
 
-        // Auto expand advanced filters when rank is tags
-        rankSelect.addEventListener('change', function() {
-            var advancedFilters = document.querySelector('.advanced-filters');
-            if (this.value === 'tags' || this.value === 'pid') {
-                advancedFilters.open = true;
-            }
-        });
+        // Auto open advanced filter panel when rank is tags/pid
+        if (rankSelect) {
+            rankSelect.addEventListener('change', function() {
+                if (this.value === 'tags' || this.value === 'pid') {
+                    SearchBoxController.setAdvancedFiltersOpen(true, true);
+                }
+                try { localStorage.setItem('arxiv_sanity_pref.rank', this.value); } catch (e) {}
+            });
+        }
 
         // Show/hide semantic weight slider based on search mode
         if (searchModeSelect) {
@@ -109,12 +204,135 @@ var SearchBoxController = {
                 } else {
                     semanticWeightContainer.style.display = 'none';
                 }
+                try { localStorage.setItem('arxiv_sanity_pref.search_mode', this.value); } catch (e) {}
+            });
+        }
+
+        // Persist semantic weight
+        if (semanticWeightSlider) {
+            semanticWeightSlider.addEventListener('input', function() {
+                try { localStorage.setItem('arxiv_sanity_pref.semantic_weight', this.value); } catch (e) {}
+            });
+        }
+
+        // Persist other simple filters
+        var timeFilterField = document.getElementById('time_filter_field');
+        if (timeFilterField) {
+            timeFilterField.addEventListener('input', function() {
+                var value = this.value.trim();
+                if (!value) {
+                    try { localStorage.removeItem('arxiv_sanity_pref.time_filter'); } catch (e) {}
+                    return;
+                }
+                var num = Number(value);
+                if (!Number.isFinite(num) || num <= 0) {
+                    try { localStorage.removeItem('arxiv_sanity_pref.time_filter'); } catch (e) {}
+                    return;
+                }
+                try { localStorage.setItem('arxiv_sanity_pref.time_filter', value); } catch (e) {}
+            });
+        }
+        var skipHaveSelect = document.getElementById('skip_have_select');
+        if (skipHaveSelect) {
+            skipHaveSelect.addEventListener('change', function() {
+                try { localStorage.setItem('arxiv_sanity_pref.skip_have', this.value); } catch (e) {}
             });
         }
 
         // Tag field smart suggestions
-        if (typeof tags !== 'undefined' && tags.length > 0) {
+        if (tagsField && typeof tags !== 'undefined' && tags.length > 0) {
             this.setupTagSuggestions(tagsField);
+        }
+    },
+
+    updateEmptyState: function() {
+        var emptyState = document.getElementById('empty-state');
+        if (!emptyState) return;
+        var isEmpty = Array.isArray(papers) && papers.length === 0;
+        emptyState.style.display = isEmpty ? 'block' : 'none';
+
+        var pagination = document.getElementById('pagination');
+        if (pagination) {
+            pagination.style.display = isEmpty ? 'none' : '';
+        }
+        var paginationNote = document.querySelector('.pagination-note');
+        if (paginationNote) {
+            paginationNote.style.display = isEmpty ? 'none' : '';
+        }
+    },
+
+    clearPreferences: function() {
+        try {
+            localStorage.removeItem('arxiv_sanity_pref.rank');
+            localStorage.removeItem('arxiv_sanity_pref.search_mode');
+            localStorage.removeItem('arxiv_sanity_pref.semantic_weight');
+            localStorage.removeItem('arxiv_sanity_pref.time_filter');
+            localStorage.removeItem('arxiv_sanity_pref.skip_have');
+            localStorage.removeItem('arxiv_sanity_pref.adv_open');
+        } catch (e) {}
+    },
+
+    setupModalFocus: function() {
+        if (this._modalObserver) return;
+        var observer = new MutationObserver(function() {
+            var overlays = document.querySelectorAll('.modal-overlay');
+            overlays.forEach(function(overlay) {
+                if (overlay.dataset.focused) return;
+                var field = overlay.querySelector('input, select, textarea, button');
+                if (field) {
+                    field.focus();
+                }
+                overlay.dataset.focused = '1';
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        this._modalObserver = observer;
+    },
+
+    // Advanced filter panel behavior
+    setupAdvancedFilters: function() {
+        var advBtn = document.getElementById('adv-filter-toggle');
+        var advPanel = document.getElementById('adv-filter-panel');
+        if (!advBtn || !advPanel) return;
+
+        var rankSelect = document.getElementById('rank_select');
+        var tagsField = document.getElementById('tags_field');
+        var pidField = document.getElementById('pid_field');
+
+        var hasAdvancedValues = false;
+        [tagsField, pidField].forEach(function(field) {
+            if (field && field.value.trim()) {
+                hasAdvancedValues = true;
+            }
+        });
+        if (rankSelect && (rankSelect.value === 'tags' || rankSelect.value === 'pid')) {
+            hasAdvancedValues = true;
+        }
+
+        var persistedOpen = false;
+        try {
+            persistedOpen = localStorage.getItem('arxiv_sanity_pref.adv_open') === '1';
+        } catch (e) {}
+
+        this.setAdvancedFiltersOpen(hasAdvancedValues || persistedOpen, false);
+
+        var self = this;
+        advBtn.addEventListener('click', function() {
+            var expanded = advBtn.getAttribute('aria-expanded') === 'true';
+            self.setAdvancedFiltersOpen(!expanded, true);
+        });
+    },
+
+    setAdvancedFiltersOpen: function(isOpen, persist) {
+        var advBtn = document.getElementById('adv-filter-toggle');
+        var advPanel = document.getElementById('adv-filter-panel');
+        if (!advBtn || !advPanel) return;
+        advBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        advPanel.style.display = isOpen ? 'flex' : 'none';
+        if (persist) {
+            try {
+                localStorage.setItem('arxiv_sanity_pref.adv_open', isOpen ? '1' : '0');
+            } catch (e) {}
         }
     },
 
@@ -137,6 +355,15 @@ var SearchBoxController = {
                 SearchBoxController.hideTagSuggestions();
             }
         });
+
+        if (!tagsField.dataset.suggestionBound) {
+            document.addEventListener('click', function(e) {
+                if (!tagsField.parentNode || !tagsField.parentNode.contains(e.target)) {
+                    SearchBoxController.hideTagSuggestions();
+                }
+            });
+            tagsField.dataset.suggestionBound = '1';
+        }
     },
 
     // Show tag suggestions
@@ -217,28 +444,103 @@ var SearchBoxController = {
         var form = document.querySelector('#cbox form');
         var timeFilterField = document.getElementById('time_filter_field');
         var svmCField = document.getElementById('svm_c_field');
+        var errorBox = document.getElementById('filter-client-errors');
 
-        // Number field validation
-        timeFilterField.addEventListener('input', function() {
-            var value = this.value.trim();
-            if (value && !/^\d+(\.\d+)?$/.test(value)) {
-                this.style.borderColor = '#f55';
-                this.title = 'Please enter a valid number';
+        if (!form || !timeFilterField || !svmCField) return;
+
+        var setFieldError = function(field, message) {
+            if (!field) return;
+            if (message) {
+                field.classList.add('error');
+                field.setAttribute('aria-invalid', 'true');
+                field.title = message;
             } else {
-                this.style.borderColor = '';
-                this.title = '';
+                field.classList.remove('error');
+                field.removeAttribute('aria-invalid');
+                field.title = '';
             }
+        };
+
+        var validatePositiveNumber = function(field, label) {
+            var value = field.value.trim();
+            if (!value) return null;
+            var num = Number(value);
+            if (!Number.isFinite(num) || num <= 0) {
+                return label + ' must be a positive number.';
+            }
+            return null;
+        };
+
+        var updateFieldState = function(field, label) {
+            var error = validatePositiveNumber(field, label);
+            setFieldError(field, error);
+        };
+
+        var maybeClearErrors = function() {
+            var timeError = validatePositiveNumber(timeFilterField, 'Time filter');
+            var svmError = validatePositiveNumber(svmCField, 'SVM C');
+            if (!timeError && !svmError && errorBox) {
+                errorBox.style.display = 'none';
+                errorBox.innerHTML = '';
+            }
+        };
+
+        timeFilterField.addEventListener('input', function() {
+            updateFieldState(timeFilterField, 'Time filter');
+            maybeClearErrors();
         });
 
         svmCField.addEventListener('input', function() {
-            var value = this.value.trim();
-            if (value && !/^\d*\.?\d+$/.test(value)) {
-                this.style.borderColor = '#f55';
-                this.title = 'Please enter a valid number';
-            } else {
-                this.style.borderColor = '';
-                this.title = '';
+            updateFieldState(svmCField, 'SVM C');
+            maybeClearErrors();
+        });
+
+        var showErrors = function(errors) {
+            if (!errorBox) return;
+            if (!errors.length) {
+                errorBox.style.display = 'none';
+                errorBox.innerHTML = '';
+                return;
             }
+
+            var list = document.createElement('ul');
+            errors.forEach(function(msg) {
+                var item = document.createElement('li');
+                item.textContent = msg;
+                list.appendChild(item);
+            });
+            errorBox.innerHTML = '';
+            errorBox.appendChild(list);
+            errorBox.style.display = 'block';
+        };
+
+        form.addEventListener('submit', function(e) {
+            var errors = [];
+            var timeError = validatePositiveNumber(timeFilterField, 'Time filter');
+            var svmError = validatePositiveNumber(svmCField, 'SVM C');
+
+            setFieldError(timeFilterField, timeError);
+            setFieldError(svmCField, svmError);
+
+            if (timeError) errors.push(timeError);
+            if (svmError) errors.push(svmError);
+
+            if (errors.length) {
+                e.preventDefault();
+                showErrors(errors);
+                if (svmError) {
+                    SearchBoxController.setAdvancedFiltersOpen(true, true);
+                }
+                if (timeError) {
+                    timeFilterField.focus();
+                } else if (svmError) {
+                    svmCField.focus();
+                }
+                return;
+            }
+
+            showErrors([]);
+            document.body.classList.add('search-loading');
         });
     },
 
@@ -252,13 +554,26 @@ var SearchBoxController = {
         }
 
         // Submit form
-        document.querySelector('#cbox form').submit();
+        var form = document.querySelector('#cbox form');
+        if (!form) return;
+        if (form.requestSubmit) {
+            form.requestSubmit();
+        } else {
+            document.body.classList.add('search-loading');
+            form.submit();
+        }
     }
 };
 
 // Initialize after DOM loaded
 document.addEventListener('DOMContentLoaded', function() {
     SearchBoxController.init();
+
+    // Add loading overlay for better UX
+    var loadingOverlay = document.createElement('div');
+    loadingOverlay.id = 'search-loading-overlay';
+    loadingOverlay.innerHTML = '<div class="loading-spinner"></div><span>Searching...</span>';
+    document.body.appendChild(loadingOverlay);
 });
 </script>
 {% endblock %}
@@ -266,7 +581,10 @@ document.addEventListener('DOMContentLoaded', function() {
 {% block content %}
 
 {% if not user %}
-<div id="log-fun-warn">(hi! just btw you have to be logged in to be able to add/delete/curate tags for papers and get recommendations)</div>
+<div id="log-fun-warn">
+    <span class="warn-icon">💡</span>
+    <span>Please <a href="/profile">log in</a> to add/delete/curate tags and get personalized recommendations.</span>
+</div>
 {% endif %}
 
 <div id="controls">
@@ -276,9 +594,25 @@ document.addEventListener('DOMContentLoaded', function() {
         <div id="cbox">
             <form action="/" method="get">
                 <div class="search-row">
-                    <input name="q" type="text" id="qfield" class="search-input" placeholder="Search arXiv papers… (Ctrl+K)" value="{{ gvars.search_query }}">
-                    <button type="submit" class="primary-btn">Search</button>
+                    <div class="search-input-wrapper">
+                        <input name="q" type="text" id="qfield" class="search-input" aria-label="Search arXiv papers" placeholder="Search arXiv papers… (⌘K)" value="{{ gvars.search_query }}" autocomplete="off" spellcheck="false" inputmode="search">
+                        <span class="search-shortcut-hint">⌘K</span>
+                    </div>
+                    <button type="submit" class="primary-btn">
+                        <span class="btn-icon">🔍</span>
+                        <span class="btn-text">Search</span>
+                    </button>
                 </div>
+                {% if form_errors %}
+                <div id="filter-server-errors" class="form-errors" role="status" aria-live="polite">
+                    <ul>
+                    {% for msg in form_errors %}
+                        <li>{{ msg }}</li>
+                    {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                <div id="filter-client-errors" class="form-errors" role="status" aria-live="polite" style="display:none;"></div>
                 <div class="filter-row">
                     <div class="filter-group primary-filters">
                         <div class="filter-item">
@@ -290,12 +624,13 @@ document.addEventListener('DOMContentLoaded', function() {
                             </select>
                         </div>
                         <div class="filter-item" id="semantic_weight_container" style="{{ gvars.search_mode != 'hybrid' and 'display:none;' }} margin-left: 20px;">
-                            <label for="semantic_weight_slider">Semantic Weight:</label>
+                            <label for="semantic_weight_slider" title="0 = keyword-only, 1 = semantic-only">Semantic Weight:</label>
                             <input type="range" name="semantic_weight" id="semantic_weight_slider"
                                    min="0" max="1" step="0.1" value="{{ gvars.semantic_weight }}"
                                    style="width: 80px; margin: 0 5px;"
                                    oninput="document.getElementById('semantic_weight_value').textContent = this.value">
-                            <span id="semantic_weight_value" style="background: #f0f0f0; padding: 2px 6px; border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); font-weight: bold; min-width: 20px; display: inline-block; text-align: center;">{{ gvars.semantic_weight }}</span>
+                            <span id="semantic_weight_value" class="weight-value-badge">{{ gvars.semantic_weight }}</span>
+                            <small class="filter-hint">0 = keyword, 1 = semantic</small>
                         </div>
                         <div class="filter-item">
                             <label for="rank_select">Rank by:</label>
@@ -309,7 +644,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         </div>
                         <div class="filter-item">
                             <label for="time_filter_field">Time filter (days):</label>
-                            <input name="time_filter" type="text" id="time_filter_field" value="{{ gvars.time_filter }}">
+                            <input name="time_filter" type="text" id="time_filter_field" value="{{ gvars.time_filter }}" inputmode="decimal" autocomplete="off" placeholder="e.g. 7">
                         </div>
                         <div class="filter-item">
                             <label for="skip_have_select">Skip seen:</label>
@@ -330,25 +665,25 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div id="adv-filter-panel" class="adv-filter-panel" style="display:none;">
                         <div class="filter-item">
                             <label for="tags_field">Tags:</label>
-                            <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}" placeholder="Comma separated tags">
+                            <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}" placeholder="Comma separated tags" autocomplete="off" spellcheck="false">
                         </div>
                         <div class="filter-item">
                             <label for="pid_field">PIDs:</label>
-                            <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}" placeholder="Comma separated author IDs">
+                            <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}" placeholder="Comma separated paper IDs" autocomplete="off" spellcheck="false">
                         </div>
                         <div class="filter-item">
-                            <label for="logic">Logic Inside Tags and PIDs:</label>
-                            <select name="logic" id="logic" title="Logical relation inside Tags and PIDs; OR if both filled">
+                            <label for="logic">Match logic within Tags/PIDs:</label>
+                            <select name="logic" id="logic" title="Logical relation inside Tags and PIDs; results are combined when both lists are filled">
                                 <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
                                 <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
                             </select>
                         </div>
                         <div class="filter-item">
                             <label for="svm_c_field">SVM C:</label>
-                            <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}" placeholder="0.005">
+                            <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}" placeholder="0.005" inputmode="decimal" autocomplete="off">
                         </div>
                         <div class="filter-note">
-                            <small>💡 When both Tags and PIDs are filled, either matches will be present.</small>
+                            <small>When both Tags and PIDs are filled, papers matching either list are included.</small>
                         </div>
                     </div>
                 </div>
@@ -356,10 +691,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 <div id="cbox_fast">
                     <span class="shortcut-label">Shortcuts:</span>
                     <div class="shortcut-buttons">
-                        <button class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=7&skip_have=yes'">Recommend last week</button>
-                        <button class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=3&skip_have=yes'">Recommend last 3 days</button>
-                        <button class="shortcut-btn" onclick="window.location.href='/?rank=time'">Recent</button>
-                        <button class="shortcut-btn" onclick="window.location.href='/?rank=random&time_filter=7'">Random last week</button>
+                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=7&skip_have=yes'">Recommend last week</button>
+                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=3&skip_have=yes'">Recommend last 3 days</button>
+                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=time'">Recent</button>
+                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=random&time_filter=7'">Random last week</button>
+                        <button type="button" class="shortcut-btn shortcut-btn-secondary" onclick="SearchBoxController.clearPreferences(); window.location.href='/'">Clear filters</button>
                     </div>
                 </div>
             </form>
@@ -370,7 +706,7 @@ document.addEventListener('DOMContentLoaded', function() {
     </div>
 </div>
 
-{% if user and tags %}
+{% if user %}
 <div id="tagwrap">
 </div>
 {% endif %}
@@ -392,6 +728,11 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 {% endif %}
 
+<div id="empty-state" class="empty-state" style="display:none;">
+    <h3>No results found</h3>
+    <p>Try adjusting the query, time filter, or tag/pid filters.</p>
+</div>
+
 
 
 <!-- main content showing all the papers as a list -->
@@ -399,14 +740,22 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 
 <!-- links to previous and next pages -->
+{% set is_first_page = gvars.page_number|int <= 1 %}
+{% set is_last_page = gvars.page_number|int >= max_pages %}
 <div id="pagination">
-    <span id="link-prev-page" onclick='move_page(-1);'>prev</span>
-    <span>current page: {{ gvars.page_number }} </span>
-    <span id="link-next-page" onclick='move_page(1);'>next</span>
+    <button type="button" id="link-prev-page" class="{{ 'disabled' if is_first_page }}" {% if is_first_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} onclick="move_page(-1);">prev</button>
+    <span class="pagination-status">Page {{ gvars.page_number }} of {{ max_pages }}</span>
+    <button type="button" id="link-next-page" class="{{ 'disabled' if is_last_page }}" {% if is_last_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} onclick="move_page(1);">next</button>
 </div>
+{% if page_adjusted %}
+<div class="pagination-note">Reached the last available page ({{ gvars.page_number }} of {{ max_pages }}).</div>
+{% endif %}
 {% endblock %}
 
 {% block elements %}
-<script src="{{ url_for('static', filename='paper_list.js') }}" type="text/babel"></script>
-<script src="{{ url_for('static', filename='word_list.js') }}" type="text/babel"></script>
+<!-- React (only needed on pages with JSX/React components) -->
+<script defer src="https://unpkg.com/react@16/umd/react.production.min.js" crossorigin></script>
+<script defer src="https://unpkg.com/react-dom@16/umd/react-dom.production.min.js" crossorigin></script>
+<script defer src="{{ url_for('static', filename='dist/paper_list.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/word_list.js') }}"></script>
 {% endblock %}

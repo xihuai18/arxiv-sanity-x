@@ -1,8 +1,104 @@
 'use strict';
 
+function getCsrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? (meta.getAttribute('content') || '') : '';
+}
+
+function csrfFetch(url, options) {
+    const opts = options || {};
+    const method = (opts.method || 'POST').toUpperCase();
+    const headers = new Headers(opts.headers || {});
+    const tok = getCsrfToken();
+    if (tok) headers.set('X-CSRF-Token', tok);
+    return fetch(url, { ...opts, method, headers, credentials: 'same-origin' });
+}
+
+function appendParam(params, key, value) {
+    if (value === undefined || value === null) return;
+    const str = String(value).trim();
+    if (!str) return;
+    params.set(key, str);
+}
+
+function appendCommonFilters(params, options = {}) {
+    if (typeof gvars === 'undefined' || !gvars) return;
+    appendParam(params, 'time_filter', gvars.time_filter);
+    if (gvars.skip_have) {
+        params.set('skip_have', gvars.skip_have);
+    }
+    if (options.includeLogic && gvars.logic) {
+        params.set('logic', gvars.logic);
+    }
+    if (options.includeSvmC) {
+        appendParam(params, 'svm_c', gvars.svm_c);
+    }
+    if (options.includeSearchMode && gvars.search_mode) {
+        params.set('search_mode', gvars.search_mode);
+    }
+    if (options.includeSemanticWeight) {
+        appendParam(params, 'semantic_weight', gvars.semantic_weight);
+    }
+}
+
+function buildTagUrl(tagName, options = {}) {
+    const params = new URLSearchParams();
+    params.set('rank', 'tags');
+    appendParam(params, 'tags', tagName);
+    appendCommonFilters(params, { includeLogic: true, includeSvmC: true });
+    if (options.logic) {
+        params.set('logic', options.logic);
+    }
+    return '/?' + params.toString();
+}
+
+function buildKeywordUrl(keyword) {
+    const params = new URLSearchParams();
+    params.set('rank', 'search');
+    appendParam(params, 'q', keyword);
+    appendCommonFilters(params, { includeSearchMode: true, includeSemanticWeight: true });
+    return '/?' + params.toString();
+}
+
+const dropdownRegistry = new Map();
+let dropdownListenersBound = false;
+
+function bindDropdownListeners() {
+    if (dropdownListenersBound) return;
+    dropdownListenersBound = true;
+
+    document.addEventListener('mousedown', (event) => {
+        dropdownRegistry.forEach((api, id) => {
+            if (!api.isOpen()) return;
+            const dropdown = document.getElementById(id);
+            if (dropdown && !dropdown.contains(event.target)) {
+                api.close();
+            }
+        });
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        dropdownRegistry.forEach((api) => {
+            if (api.isOpen()) {
+                api.close();
+            }
+        });
+    });
+}
+
+function registerDropdown(id, api) {
+    dropdownRegistry.set(id, api);
+    bindDropdownListeners();
+}
+
+function unregisterDropdown(id) {
+    dropdownRegistry.delete(id);
+}
+
 const UTag = props => {
     const tag_name = props.tag;
-    const turl = "/?rank=tags&tags=" + encodeURIComponent(tag_name);
+    const turl = buildTagUrl(tag_name);
     return (
         <div class='rel_utag'>
             <a href={turl}>
@@ -66,8 +162,8 @@ const MultiSelectDropdown = props => {
     });
 
     return (
-        <div class="multi-select-dropdown" id={dropdownId}>
-            <div class="multi-select-trigger" onClick={onToggle}>
+        <div class={`multi-select-dropdown ${isOpen ? 'open' : ''}`} id={dropdownId}>
+            <div class={`multi-select-trigger ${isOpen ? 'active' : ''}`} onClick={onToggle}>
                 <div class="multi-select-content">
                     {triggerContent}
                 </div>
@@ -148,7 +244,7 @@ const Paper = props => {
             <div class="rel_score">
                 {p.weight.toFixed(2)}
                 {p.score_breakdown && (
-                    <div class="score_breakdown" style={{fontSize: '0.8em', color: '#666', marginTop: '2px'}}>
+                    <div class="score_breakdown">
                         {p.score_breakdown}
                     </div>
                 )}
@@ -188,7 +284,6 @@ class PaperComponent extends React.Component {
     constructor(props) {
         super(props);
         this.state = {
-            key: props.key,
             paper: props.paper,
             tags: props.tags,
             dropdownOpen: false,
@@ -202,38 +297,49 @@ class PaperComponent extends React.Component {
         this.handleNewTagChange = this.handleNewTagChange.bind(this);
         this.handleAddNewTag = this.handleAddNewTag.bind(this);
         this.handleSearchChange = this.handleSearchChange.bind(this);
-        this.handleClickOutside = this.handleClickOutside.bind(this);
     }
 
     componentDidMount() {
-        document.addEventListener('mousedown', this.handleClickOutside);
-        this.handleKeyDown = this.handleKeyDown.bind(this);
-        document.addEventListener('keydown', this.handleKeyDown);
+        registerDropdown(this.dropdownId, {
+            isOpen: () => this.state.dropdownOpen,
+            close: () => {
+                // Remove dropdown-open class when closing
+                const dropdown = document.getElementById(this.dropdownId);
+                if (dropdown) {
+                    const paperCard = dropdown.closest('.rel_paper');
+                    if (paperCard) {
+                        paperCard.classList.remove('dropdown-open');
+                    }
+                }
+                this.setState({ dropdownOpen: false });
+            }
+        });
     }
 
     componentWillUnmount() {
-        document.removeEventListener('mousedown', this.handleClickOutside);
-        document.removeEventListener('keydown', this.handleKeyDown);
-    }
-
-    handleKeyDown(event) {
-        if (event.key === 'Escape' && this.state.dropdownOpen) {
-            this.setState({ dropdownOpen: false });
-        }
-    }
-
-    handleClickOutside(event) {
-        const dropdown = document.getElementById(this.dropdownId);
-        if (dropdown && !dropdown.contains(event.target)) {
-            this.setState({ dropdownOpen: false });
-        }
+        unregisterDropdown(this.dropdownId);
     }
 
     handleToggleDropdown() {
-        this.setState(prevState => ({
-            dropdownOpen: !prevState.dropdownOpen,
-            searchValue: !prevState.dropdownOpen ? '' : prevState.searchValue // Reset search when opened
-        }));
+        this.setState(prevState => {
+            const newOpen = !prevState.dropdownOpen;
+            // Toggle class on parent .rel_paper for z-index (fallback for :has())
+            const dropdown = document.getElementById(this.dropdownId);
+            if (dropdown) {
+                const paperCard = dropdown.closest('.rel_paper');
+                if (paperCard) {
+                    if (newOpen) {
+                        paperCard.classList.add('dropdown-open');
+                    } else {
+                        paperCard.classList.remove('dropdown-open');
+                    }
+                }
+            }
+            return {
+                dropdownOpen: newOpen,
+                searchValue: newOpen ? '' : prevState.searchValue // Reset search when opened
+            };
+        });
     }
 
     handleSearchChange(event) {
@@ -248,7 +354,7 @@ class PaperComponent extends React.Component {
 
         if (isSelected) {
             // Remove tag
-            fetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
+            csrfFetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
                 .then(response => response.text())
                 .then(text => {
                     if (text.startsWith('ok')) {
@@ -256,6 +362,7 @@ class PaperComponent extends React.Component {
                         this.setState({
                             paper: paper
                         });
+                        adjustTagCount(tagName, -1);
                         console.log(`Removed tag: ${tagName}`);
                     } else {
                         console.error('Server error removing tag:', text);
@@ -268,7 +375,7 @@ class PaperComponent extends React.Component {
                 });
         } else {
             // Add tag
-            fetch("/add/" + paper.id + "/" + encodeURIComponent(tagName))
+            csrfFetch("/add/" + paper.id + "/" + encodeURIComponent(tagName))
                 .then(response => response.text())
                 .then(text => {
                     if (text.startsWith('ok')) {
@@ -278,6 +385,7 @@ class PaperComponent extends React.Component {
                         this.setState({
                             paper: paper
                         });
+                        adjustTagCount(tagName, 1);
                         console.log(`Added tag: ${tagName}`);
                     } else {
                         console.error('Server error adding tag:', text);
@@ -293,7 +401,7 @@ class PaperComponent extends React.Component {
 
     handleRemoveTag(tagName) {
         const { paper } = this.state;
-        fetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
+        csrfFetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
@@ -301,6 +409,7 @@ class PaperComponent extends React.Component {
                     this.setState({
                         paper: paper
                     });
+                    adjustTagCount(tagName, -1);
                     console.log(`Removed tag: ${tagName}`);
                 } else {
                     console.error('Server error removing tag:', text);
@@ -331,7 +440,7 @@ class PaperComponent extends React.Component {
             return;
         }
 
-        fetch("/add/" + paper.id + "/" + encodeURIComponent(trimmedTag))
+        csrfFetch("/add/" + paper.id + "/" + encodeURIComponent(trimmedTag))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
@@ -340,6 +449,7 @@ class PaperComponent extends React.Component {
                         paper: paper,
                         newTagValue: ''
                     });
+                    adjustTagCount(trimmedTag, 1);
                     console.log(`Added new tag: ${trimmedTag}`);
                 } else {
                     console.error('Server error adding new tag:', text);
@@ -355,7 +465,6 @@ class PaperComponent extends React.Component {
     render() {
         return (
             <Paper
-                key={this.state.key}
                 paper={this.state.paper}
                 tags={this.state.tags}
                 dropdownOpen={this.state.dropdownOpen}
@@ -375,7 +484,7 @@ class PaperComponent extends React.Component {
 
 const Tag = props => {
     const t = props.tag;
-    const turl = "/?rank=tags&tags=" + encodeURIComponent(t.name);
+    const turl = buildTagUrl(t.name);
     const tag_class = 'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '');
     const isEditable = t.name !== 'all';
 
@@ -418,8 +527,12 @@ const TagList = props => {
 
     return (
         <div class="enhanced-tag-list">
-            <span class="tag-stats-inline">({lst.length} tags)</span>
-            <br />
+            <div class="tag-list-actions">
+                <span class="tag-stats-inline">({lst.length} tags)</span>
+                <button class="tag-action-btn add-btn" onClick={props.onAddTag} title="Add new tag">
+                    + Add
+                </button>
+            </div>
             <div id="tagList" class="rel_utags enhanced-tags">
                 {tlst}
             </div>
@@ -589,19 +702,48 @@ class TagListComponent extends React.Component {
 
     handleSaveNewTag() {
         const { newTagName } = this.state;
-        if (!newTagName.trim()) {
+        const trimmedTag = newTagName.trim();
+        if (!trimmedTag) {
             alert('Tag name cannot be empty');
             return;
         }
 
-        // Should call Add tag API here
-        console.log('Adding new tag:', newTagName.trim());
-        // TODO: Implement Add tag logic
+        if (trimmedTag === 'all' || trimmedTag === 'null') {
+            alert('Tag name is reserved');
+            return;
+        }
 
-        this.setState({
-            showAddModal: false,
-            newTagName: ''
-        });
+        if (this.state.tags.some(tag => tag.name === trimmedTag)) {
+            alert('Tag already exists');
+            return;
+        }
+
+        csrfFetch("/add_tag/" + encodeURIComponent(trimmedTag))
+            .then(response => response.text())
+            .then(text => {
+                if (text.startsWith('ok')) {
+                    this.setState((prevState) => {
+                        const nextTags = normalizeTags(
+                            prevState.tags
+                                .filter(tag => tag.name !== 'all')
+                                .concat([{ name: trimmedTag, n: 0 }])
+                        );
+                        setGlobalTags(nextTags, { renderTags: false });
+                        return {
+                            tags: nextTags,
+                            showAddModal: false,
+                            newTagName: ''
+                        };
+                    });
+                    console.log('Tag added successfully');
+                } else {
+                    alert('Add failed: ' + text);
+                }
+            })
+            .catch(error => {
+                console.error('Error adding tag:', error);
+                alert('Network error, add failed');
+            });
     }
 
 
@@ -631,20 +773,34 @@ class TagListComponent extends React.Component {
             return;
         }
 
-        fetch("/rename/" + encodeURIComponent(editingTag.name) + "/" + encodeURIComponent(editingTagName.trim()))
+        const trimmedName = editingTagName.trim();
+        if (this.state.tags.some(tag => tag.name === trimmedName && tag.name !== editingTag.name)) {
+            alert('Tag already exists');
+            return;
+        }
+
+        csrfFetch("/rename/" + encodeURIComponent(editingTag.name) + "/" + encodeURIComponent(trimmedName))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => ({
-                        tags: prevState.tags.map(tag =>
-                            tag.name === editingTag.name
-                                ? { ...tag, name: editingTagName.trim() }
-                                : tag
-                        ),
-                        showEditModal: false,
-                        editingTag: null,
-                        editingTagName: ''
-                    }));
+                    this.setState((prevState) => {
+                        const nextTags = normalizeTags(
+                            prevState.tags.map(tag =>
+                                tag.name === editingTag.name
+                                    ? { ...tag, name: trimmedName }
+                                    : tag
+                            )
+                        );
+                        const nextCombinedTags = renameCombinedTagsForTag(combined_tags, editingTag.name, trimmedName);
+                        setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
+                        setGlobalTags(nextTags, { renderTags: false });
+                        return {
+                            tags: nextTags,
+                            showEditModal: false,
+                            editingTag: null,
+                            editingTagName: ''
+                        };
+                    });
                     console.log('Tag renamed successfully');
                 } else {
                     alert('Rename failed: ' + text);
@@ -659,15 +815,23 @@ class TagListComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingTag } = this.state;
 
-        fetch("/del/" + encodeURIComponent(deletingTag.name))
+        csrfFetch("/del/" + encodeURIComponent(deletingTag.name))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => ({
-                        tags: prevState.tags.filter(tag => tag.name !== deletingTag.name),
-                        showDeleteModal: false,
-                        deletingTag: null
-                    }));
+                    this.setState((prevState) => {
+                        const nextTags = normalizeTags(
+                            prevState.tags.filter(tag => tag.name !== deletingTag.name)
+                        );
+                        const nextCombinedTags = removeCombinedTagsWithTag(combined_tags, deletingTag.name);
+                        setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
+                        setGlobalTags(nextTags, { renderTags: false });
+                        return {
+                            tags: nextTags,
+                            showDeleteModal: false,
+                            deletingTag: null
+                        };
+                    });
                     console.log('Tag deleted successfully');
                 } else {
                     alert('Delete failed: ' + text);
@@ -707,7 +871,7 @@ class TagListComponent extends React.Component {
 
 const CombinedTag = props => {
     const t = props.comtag;
-    const turl = "/?rank=tags&logic=and&tags=" + encodeURIComponent(t.name);
+    const turl = buildTagUrl(t.name, { logic: 'and' });
     const tag_class = 'rel_utag rel_utag_all enhanced-combined-tag';
 
     return (
@@ -943,34 +1107,40 @@ class CombinedTagListComponent extends React.Component {
         const combinationName = selectedTagsForCombination.join(', ');
 
         if (editingCombinedTag) {
-            // Edit existing combined tag: delete old one first, then add new one
-            fetch("/del_ctag/" + encodeURIComponent(editingCombinedTag.name))
+            if (editingCombinedTag.name === combinationName) {
+                this.handleCloseAddEditModal();
+                return;
+            }
+
+            // Edit existing combined tag atomically
+            csrfFetch(
+                "/rename_ctag/" +
+                encodeURIComponent(editingCombinedTag.name) +
+                "/" +
+                encodeURIComponent(combinationName)
+            )
                 .then(response => response.text())
                 .then(text => {
                     if (text.includes('ok')) {
-                        return fetch("/add_ctag/" + encodeURIComponent(combinationName));
-                    } else {
-                        throw new Error('Delete failed: ' + text);
-                    }
-                })
-                .then(response => response.text())
-                .then(text => {
-                    if (text.includes('ok')) {
-                        this.setState((prevState) => ({
-                            combined_tags: prevState.combined_tags.map(tag =>
-                                tag.name === editingCombinedTag.name
-                                    ? { ...tag, name: combinationName }
-                                    : tag
-                            ),
-                            showAddEditModal: false,
-                            editingCombinedTag: null,
-                            selectedTagsForCombination: [],
-                            combinationDropdownOpen: false,
-                            combinationSearchValue: ''
-                        }));
+                        this.setState((prevState) => {
+                            const nextCombinedTags = renameCombinedTagInList(
+                                prevState.combined_tags,
+                                editingCombinedTag.name,
+                                combinationName
+                            );
+                            setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
+                            return {
+                                combined_tags: nextCombinedTags,
+                                showAddEditModal: false,
+                                editingCombinedTag: null,
+                                selectedTagsForCombination: [],
+                                combinationDropdownOpen: false,
+                                combinationSearchValue: ''
+                            };
+                        });
                         console.log('Combined tag edited successfully');
                     } else {
-                        throw new Error('Add failed: ' + text);
+                        throw new Error('Rename failed: ' + text);
                     }
                 })
                 .catch(error => {
@@ -979,17 +1149,21 @@ class CombinedTagListComponent extends React.Component {
                 });
         } else {
             // Add new combined tag
-            fetch("/add_ctag/" + encodeURIComponent(combinationName))
+            csrfFetch("/add_ctag/" + encodeURIComponent(combinationName))
                 .then(response => response.text())
                 .then(text => {
                     if (text.includes('ok')) {
-                        this.setState((prevState) => ({
-                            combined_tags: [...prevState.combined_tags, { name: combinationName }],
-                            showAddEditModal: false,
-                            selectedTagsForCombination: [],
-                            combinationDropdownOpen: false,
-                            combinationSearchValue: ''
-                        }));
+                        this.setState((prevState) => {
+                            const nextCombinedTags = prevState.combined_tags.concat([{ name: combinationName }]);
+                            setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
+                            return {
+                                combined_tags: nextCombinedTags,
+                                showAddEditModal: false,
+                                selectedTagsForCombination: [],
+                                combinationDropdownOpen: false,
+                                combinationSearchValue: ''
+                            };
+                        });
                         console.log('Combined tag added successfully');
                     } else {
                         alert('Add failed: ' + text);
@@ -1005,15 +1179,21 @@ class CombinedTagListComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingCombinedTag } = this.state;
 
-        fetch("/del_ctag/" + encodeURIComponent(deletingCombinedTag.name))
+        csrfFetch("/del_ctag/" + encodeURIComponent(deletingCombinedTag.name))
             .then(response => response.text())
             .then(text => {
                 if (text.includes('ok')) {
-                    this.setState((prevState) => ({
-                        combined_tags: prevState.combined_tags.filter(tag => tag.name !== deletingCombinedTag.name),
-                        showDeleteModal: false,
-                        deletingCombinedTag: null
-                    }));
+                    this.setState((prevState) => {
+                        const nextCombinedTags = prevState.combined_tags.filter(
+                            tag => tag.name !== deletingCombinedTag.name
+                        );
+                        setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
+                        return {
+                            combined_tags: nextCombinedTags,
+                            showDeleteModal: false,
+                            deletingCombinedTag: null
+                        };
+                    });
                     console.log('Combined tag deleted successfully');
                 } else {
                     alert('Delete failed: ' + text);
@@ -1063,8 +1243,6 @@ class CombinedTagListComponent extends React.Component {
         return (
             <CombinedTagList
                 combined_tags={this.state.combined_tags}
-                searchValue={this.state.searchValue}
-                onSearchChange={this.handleSearchChange}
                 onAddCombinedTag={this.handleAddCombinedTag}
                 onEditCombinedTag={this.handleEditCombinedTag}
                 onDeleteCombinedTag={this.handleDeleteCombinedTag}
@@ -1092,7 +1270,7 @@ class CombinedTagListComponent extends React.Component {
 
 const Key = props => {
     const k = props.jkey;
-    const kurl = `/?q=${encodeURIComponent(k.name)}&rank=search`;
+    const kurl = buildKeywordUrl(k.name);
     const key_class = 'rel_ukey' + (k.name === 'Artificial general intelligence' ? ' rel_ukey_all' : '');
     const isEditable = k.name !== 'Artificial general intelligence';
 
@@ -1310,15 +1488,19 @@ class KeyComponent extends React.Component {
             return;
         }
 
-        fetch("/add_key/" + encodeURIComponent(trimmedKey))
+        csrfFetch("/add_key/" + encodeURIComponent(trimmedKey))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => ({
-                        keys: [...prevState.keys, { name: trimmedKey, pids: [] }],
-                        showAddModal: false,
-                        newKeyName: ''
-                    }));
+                    this.setState((prevState) => {
+                        const nextKeys = [...prevState.keys, { name: trimmedKey, pids: [] }];
+                        setGlobalKeys(nextKeys, { renderKeys: false });
+                        return {
+                            keys: nextKeys,
+                            showAddModal: false,
+                            newKeyName: ''
+                        };
+                    });
                     console.log('Keyword added successfully');
                 } else {
                     alert('Failed to add keyword: ' + text);
@@ -1365,33 +1547,32 @@ class KeyComponent extends React.Component {
             return;
         }
 
-        // Should call keyword rename API here, but backend doesn't seem to have this interface
-        // We delete the old one first, then add the new one
-        fetch("/del_key/" + encodeURIComponent(editingKey.name))
+        csrfFetch(
+            "/rename_key/" +
+            encodeURIComponent(editingKey.name) +
+            "/" +
+            encodeURIComponent(trimmedKeyName)
+        )
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    return fetch("/add_key/" + encodeURIComponent(trimmedKeyName));
-                } else {
-                    throw new Error('Delete failed: ' + text);
-                }
-            })
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
-                    this.setState((prevState) => ({
-                        keys: prevState.keys.map(key =>
+                    this.setState((prevState) => {
+                        const nextKeys = prevState.keys.map(key =>
                             key.name === editingKey.name
                                 ? { ...key, name: trimmedKeyName }
                                 : key
-                        ),
-                        showEditModal: false,
-                        editingKey: null,
-                        editingKeyName: ''
-                    }));
+                        );
+                        setGlobalKeys(nextKeys, { renderKeys: false });
+                        return {
+                            keys: nextKeys,
+                            showEditModal: false,
+                            editingKey: null,
+                            editingKeyName: ''
+                        };
+                    });
                     console.log('Keyword renamed successfully');
                 } else {
-                    throw new Error('Add failed: ' + text);
+                    alert('Rename failed: ' + text);
                 }
             })
             .catch(error => {
@@ -1403,15 +1584,19 @@ class KeyComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingKey } = this.state;
 
-        fetch("/del_key/" + encodeURIComponent(deletingKey.name))
+        csrfFetch("/del_key/" + encodeURIComponent(deletingKey.name))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => ({
-                        keys: prevState.keys.filter(key => key.name !== deletingKey.name),
-                        showDeleteModal: false,
-                        deletingKey: null
-                    }));
+                    this.setState((prevState) => {
+                        const nextKeys = prevState.keys.filter(key => key.name !== deletingKey.name);
+                        setGlobalKeys(nextKeys, { renderKeys: false });
+                        return {
+                            keys: nextKeys,
+                            showDeleteModal: false,
+                            deletingKey: null
+                        };
+                    });
                     console.log('Keyword deleted successfully');
                 } else {
                     alert('Delete failed: ' + text);
@@ -1452,23 +1637,163 @@ class KeyComponent extends React.Component {
 
 
 
+function normalizeTags(list) {
+    const base = (list || []).filter(tag => tag && tag.name && tag.name !== 'all');
+    const normalized = base.map(tag => ({ name: tag.name, n: tag.n }));
+    if (normalized.length > 0) {
+        normalized.push({ name: 'all' });
+    }
+    normalized.sort((a, b) => a.name.localeCompare(b.name));
+    return normalized;
+}
+
+function normalizeCombinedTags(list) {
+    const seen = new Set();
+    const normalized = [];
+    (list || []).forEach((tag) => {
+        const name = (tag && tag.name) ? tag.name : '';
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        normalized.push({ name });
+    });
+    normalized.sort((a, b) => a.name.localeCompare(b.name));
+    return normalized;
+}
+
+function renameCombinedTagsForTag(list, oldTag, newTag) {
+    if (!oldTag || !newTag) return normalizeCombinedTags(list);
+    const seen = new Set();
+    const updated = [];
+    (list || []).forEach((tag) => {
+        const name = tag && tag.name ? tag.name : '';
+        if (!name) return;
+        const parts = name.split(',').map(t => t.trim()).filter(Boolean);
+        if (parts.length === 0) return;
+        const nextParts = parts.includes(oldTag)
+            ? parts.map(t => (t === oldTag ? newTag : t))
+            : parts;
+        const nextName = nextParts.join(', ');
+        if (seen.has(nextName)) return;
+        seen.add(nextName);
+        updated.push({ name: nextName });
+    });
+    return updated;
+}
+
+function removeCombinedTagsWithTag(list, tagName) {
+    if (!tagName) return normalizeCombinedTags(list);
+    const filtered = (list || []).filter((tag) => {
+        const name = tag && tag.name ? tag.name : '';
+        const parts = name.split(',').map(t => t.trim()).filter(Boolean);
+        return !parts.includes(tagName);
+    });
+    return normalizeCombinedTags(filtered);
+}
+
+function renameCombinedTagInList(list, oldName, newName) {
+    if (!oldName || !newName) return normalizeCombinedTags(list);
+    const mapped = (list || []).map((tag) => {
+        if (tag && tag.name === oldName) {
+            return { name: newName };
+        }
+        return tag;
+    });
+    return normalizeCombinedTags(mapped);
+}
+
+function setGlobalTags(nextTags, options) {
+    const opts = options || {};
+    tags = normalizeTags(nextTags);
+    if (opts.renderTags !== false) {
+        renderTagList();
+    }
+    if (opts.renderPaper !== false) {
+        renderPaperList();
+    }
+    if (opts.renderCombined !== false) {
+        renderCombinedTagList();
+    }
+}
+
+function setGlobalCombinedTags(nextCombinedTags, options) {
+    const opts = options || {};
+    combined_tags = normalizeCombinedTags(nextCombinedTags);
+    if (opts.renderCombined !== false) {
+        renderCombinedTagList();
+    }
+}
+
+function setGlobalKeys(nextKeys, options) {
+    const opts = options || {};
+    keys = Array.isArray(nextKeys) ? nextKeys.slice() : [];
+    keys.sort((a, b) => a.name.localeCompare(b.name));
+    if (opts.renderKeys !== false) {
+        renderKeyList();
+    }
+}
+
+function adjustTagCount(tagName, delta) {
+    if (!tagName || tagName === 'all' || !delta) return;
+    const baseTags = (tags || []).filter(tag => tag && tag.name && tag.name !== 'all');
+    let found = false;
+    let tagAdded = false;
+    let tagRemoved = false;
+    const updated = baseTags
+        .map((tag) => {
+            if (tag.name !== tagName) return tag;
+            found = true;
+            const prevCount = tag.n || 0;
+            const nextCount = Math.max(0, prevCount + delta);
+            if (prevCount > 0 && nextCount === 0) {
+                tagRemoved = true;
+            }
+            return { ...tag, n: nextCount };
+        });
+    if (!found && delta > 0) {
+        updated.push({ name: tagName, n: delta });
+        tagAdded = true;
+    }
+    setGlobalTags(updated, { renderPaper: tagAdded || tagRemoved });
+}
+
+
 // render papers into #wrap
 // ReactDOM.render(<PaperList papers={papers} tags={tags} />, document.getElementById('wrap'));
-ReactDOM.render(<PaperList papers={papers} tags={tags} />, document.getElementById('wrap'));
+const paperListRoot = document.getElementById('wrap');
+const tagwrap_elt = document.getElementById('tagwrap');
+const keywrap_elt = document.getElementById('keywrap');
+const tagcombwrap_elt = document.getElementById('tagcombwrap');
+
+function renderPaperList() {
+    if (paperListRoot) {
+        ReactDOM.render(<PaperList papers={papers} tags={tags} />, paperListRoot);
+    }
+}
+
+function renderTagList() {
+    if (tagwrap_elt) {
+        ReactDOM.render(<TagListComponent tags={tags} />, tagwrap_elt);
+    }
+}
+
+function renderKeyList() {
+    if (keywrap_elt) {
+        ReactDOM.render(<KeyComponent keys={keys} />, keywrap_elt);
+    }
+}
+
+function renderCombinedTagList() {
+    if (tagcombwrap_elt) {
+        ReactDOM.render(<CombinedTagListComponent combined_tags={combined_tags} tags={tags} />, tagcombwrap_elt);
+    }
+}
+
+renderPaperList();
 
 // render tags into #tagwrap, if it exists
-let tagwrap_elt = document.getElementById('tagwrap');
-if (tagwrap_elt) {
-    ReactDOM.render(<TagListComponent tags={tags} />, tagwrap_elt);
-}
+renderTagList();
 
 // render keys into #keywrap, if it exists
-let keywrap_elt = document.getElementById('keywrap');
-if (keywrap_elt) {
-    ReactDOM.render(<KeyComponent keys={keys} />, keywrap_elt);
-}
+renderKeyList();
 
-let tagcombwrap_elt = document.getElementById('tagcombwrap');
-if (tagcombwrap_elt) {
-    ReactDOM.render(<CombinedTagListComponent combined_tags={combined_tags} tags={tags} />, tagcombwrap_elt);
-}
+renderCombinedTagList();

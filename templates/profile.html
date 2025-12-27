@@ -7,56 +7,83 @@
 <div id="profilewrap">
 
     {% if user %}
-    <div>
-        <div>
-            <div><b>Current session</b></div>
-            <div>Logged in user: {{ user }}</div>
-        </div>
-        <br>
-        <div>
-            <div><b>Email recommendations</b></div>
-            <div>
-                Users can receive regular new paper recommendations via email based on their tags.
-                (This is still being developed, may not be running or may be unreliable.)
-                Register your email address below to receive these recommendations.
-                To stop the recommendations simply delete your email address.
-            </div>
-            <div>
-                <form id="email-form" action="{{ url_for('register_email') }}" method="post">
-                    <div class="form-group">
-                        <input type="text" class="form-control" name="email" placeholder="Email address" value="{{ email }}">
-                    </div>
-                    <input type="submit" class="btn" value="Set">
-                </form>
+    <div class="profile-section">
+        <div class="profile-card">
+            <div class="profile-card-header">
+                <span class="profile-avatar">👤</span>
+                <div class="profile-user-info">
+                    <h2>{{ user }}</h2>
+                    <span class="profile-badge">Active Session</span>
+                </div>
             </div>
         </div>
-        <br>
-        <div>
-            <a href="{{ url_for('logout') }}">Log out</a>
+
+        <div class="profile-card">
+            <div class="profile-card-title">
+                <span class="profile-icon">📧</span>
+                <h3>Email Recommendations</h3>
+            </div>
+            <p class="profile-description">
+                Get personalized paper recommendations delivered to your inbox based on your tags and interests.
+            </p>
+            <div class="profile-note">
+                <span class="note-icon">ℹ️</span>
+                <span>This feature is in beta. Remove your email to unsubscribe.</span>
+            </div>
+            <form id="email-form" action="{{ url_for('register_email') }}" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-group">
+                    <label for="email-input">Email Address</label>
+                    <input type="email" id="email-input" class="form-control" name="email" placeholder="your@email.com" value="{{ email }}" autocomplete="email" inputmode="email" spellcheck="false">
+                </div>
+                <button type="submit" class="btn btn-primary">Update Email</button>
+            </form>
+        </div>
+
+        <div class="profile-card profile-card-danger">
+            <div class="profile-card-title">
+                <span class="profile-icon">🚪</span>
+                <h3>Session</h3>
+            </div>
+            <p class="profile-description">End your current session and return to the login page.</p>
+            <form action="{{ url_for('logout') }}" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-outline-danger">Log Out</button>
+            </form>
         </div>
     </div>
-    {% else %}
-    <div>
 
-        <div id="profile-warning">
-            <p>
-            Okay, arxiv-sanity-lite uses a super lite version of
-            "user accounts" where there are no passwords. Basically, you can "log in"
-            with any arbitrary username. If you want to share your library with a
-            friend, you can just tell them the username. And if you'd like to keep your
-            account private, just make your username be something unique
-            and write it down somewhere safe.
-            </p>
-            <b>TLDR: there are no passwords!</b>
+    {% else %}
+    <div class="profile-section">
+        <div class="profile-card profile-card-welcome">
+            <div class="welcome-icon">🔐</div>
+            <h2>Welcome to arxiv-sanity-X</h2>
+            <p class="profile-description">Create or access your personal research library</p>
         </div>
 
-        <form id="profile-login-form" action="/login" method="POST">
-            <div class="form-group">
-              <label>Username:</label>
-              <input class="form-control" type="text" name="username">
+        <div class="profile-card">
+            <div class="profile-notice">
+                <div class="notice-header">
+                    <span class="notice-icon">💡</span>
+                    <strong>No Password Required</strong>
+                </div>
+                <ul class="notice-list">
+                    <li>Simply pick any username to get started</li>
+                    <li>Share your library by sharing your username</li>
+                    <li>For privacy, use a unique username only you know</li>
+                </ul>
             </div>
-            <button type="submit" class="btn">Log in</button>
-        </form>
+
+            <form id="profile-login-form" action="/login" method="POST">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div class="form-group">
+                    <label for="username-input">Username</label>
+                    <input id="username-input" class="form-control" type="text" name="username" placeholder="Enter a username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" autofocus>
+                    <span class="form-hint">Letters, numbers, and underscores allowed</span>
+                </div>
+                <button type="submit" class="btn btn-primary btn-full">Continue</button>
+            </form>
+        </div>
     </div>
     {% endif %}
 
@@ -64,4 +91,25 @@
 {% endblock %}
 
 {% block elements %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var usernameInput = document.getElementById('username-input');
+    if (usernameInput) {
+        usernameInput.addEventListener('input', function() {
+            var value = this.value.trim();
+            var hint = document.querySelector('.form-hint');
+            if (value.length > 0 && value.length < 3) {
+                hint.textContent = 'Username should be at least 3 characters';
+                hint.style.color = 'var(--warning-color)';
+            } else if (value.length >= 3) {
+                hint.textContent = '✓ Looks good!';
+                hint.style.color = 'var(--success-color)';
+            } else {
+                hint.textContent = 'Letters, numbers, and underscores allowed';
+                hint.style.color = 'var(--text-muted)';
+            }
+        });
+    }
+});
+</script>
 {% endblock %}

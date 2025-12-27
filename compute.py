@@ -40,7 +40,13 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
 
-from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, get_papers_db, save_features
+from aslite.db import (
+    FEATURES_FILE,
+    FEATURES_FILE_NEW,
+    get_papers_db,
+    load_features,
+    save_features,
+)
 
 # -----------------------------------------------------------------------------
 
@@ -194,11 +200,8 @@ def load_existing_embeddings(embed_dim=512):
         existing_embeddings: dict with 'pids', 'embeddings', 'params'
     """
     try:
-        # Try to load existing feature file
-        with open(FEATURES_FILE, "rb") as f:
-            import pickle
-
-            features = pickle.load(f)
+        # Try to load existing feature file (with numpy pickle compatibility)
+        features = load_features()
 
         if features.get("feature_type") == "hybrid_sparse_dense":
             # Check if embedding parameters match
@@ -382,7 +385,18 @@ if __name__ == "__main__":
     )
 
     # New embedding related parameters
-    parser.add_argument("--use_embeddings", action="store_false", help="Whether to generate and use embedding vectors")
+    parser.add_argument(
+        "--use_embeddings",
+        action="store_true",
+        default=True,
+        help="Enable embedding vectors (default: on; use --no-embeddings to disable)",
+    )
+    parser.add_argument(
+        "--no-embeddings",
+        action="store_false",
+        dest="use_embeddings",
+        help="Disable embedding vectors",
+    )
     parser.add_argument("--embed_model", type=str, default="./qwen3-embed-0.6B", help="Embedding model path")
     parser.add_argument("--embed_dim", type=int, default=512, help="Embedding vector dimension")
     parser.add_argument("--embed_batch_size", type=int, default=2048, help="Embedding generation batch size")

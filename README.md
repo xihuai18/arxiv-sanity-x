@@ -6,9 +6,29 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 
 ![Screenshot](arxiv-sanity-x.png)
 
+## ⚡ Quick Start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/xihuai18/arxiv-sanity-x && cd arxiv-sanity-x
+pip install -r requirements.txt
+
+# 2. Configure
+cp vars_template.py vars.py  # Edit vars.py with your settings
+
+# 3. Fetch papers and compute features
+python3 arxiv_daemon.py -n 10000 -m 500
+python3 compute.py --num 20000
+
+# 4. Start all services (one command)
+python3 run_services.py
+
+# Visit http://localhost:55555
+```
+
 ## 🚀 Core Features
 
-- **🤖 AI Paper Summarization**: Complete processing pipeline with `minerU` PDF parsing, LLM summarization, and intelligent caching system
+- **🤖 AI Paper Summarization**: Complete processing pipeline with HTML (arXiv/ar5iv) parsing or `minerU` PDF parsing, LLM summarization, and intelligent caching system
 - **🔍 Advanced Search Engine**: Keyword, semantic, and hybrid search modes with configurable weights and intelligent time filtering
 - **🎯 Smart Recommendations**: Hybrid TF-IDF + embedding features with dynamic SVM classifiers trained on user preferences
 - **🏷️ Flexible Organization**: Personal tags, combined tags, keyword tracking with AND/OR logic operations
@@ -19,13 +39,21 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 
 ## 📈 Changelog
 
+### v3.0 - UI Redesign & HTML Summarization
+- 🎨 **UI Overhaul**: Redesigned About, Profile, Stats pages with modern layout and feature grids
+- 📄 **HTML Summarization**: ar5iv/arxiv HTML parsing (faster than PDF, better structure)
+- 🤖 **Model Selection**: Multiple LLM models with auto-retry in summary page
+- 🔍 **Enhanced Search**: Keyboard shortcuts (Ctrl+K), advanced filters, accessibility improvements
+- 📊 **Stats Chart**: Daily paper count visualization with bar chart
+- 📦 **LiteLLM Template**: `llm_template.yml` with OpenRouter free model configs
+
 ### v2.4 - Multi-threading & Service Enhancement
 - ⚡ **Concurrency Optimization**: True multi-threaded concurrent paper summarization processing
 - 🔒 **Thread Safety**: File-level locking mechanism to avoid minerU parsing conflicts
 - 📊 **Enhanced Statistics**: Detailed processing statistics and failure reason analysis
 - 🔄 **Retry Mechanism**: Smart retry for failed paper processing tasks
 - 📈 **Progress Tracking**: Real-time progress bars and processing status display
-- 🔧 **Configuration Optimization**: Support for multiple LLM providers (OpenRouter, ZhipuAI, etc.)
+- 🔧 **Configuration Optimization**: Support for multiple LLM providers (OpenRouter free models, OpenAI-compatible APIs)
 - 📊 **Service Integration**: Complete vLLM and minerU service integration
 - 🎨 **Interface Enhancement**: Better responsive design and MathJax mathematical formula support
 - 🛠️ **Error Handling**: Enhanced exception handling and retry mechanisms
@@ -38,7 +66,6 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 - ⚡ **Smart Caching**: Intelligent summary caching with Chinese text ratio validation and quality control
 - 🎨 **Enhanced UI**: New summary page design with MathJax support for mathematical formulas
 - 📊 **Configuration**: Added LLM API configuration in [`vars.py`](vars.py)
-- 🔄 **Auto Generation**: [`generate_latest_summaries.py`](generate_latest_summaries.py) for automated batch processing
 
 ### v2.2 - Performance & Stability Improvements
 - ⚡ **Performance**: Enhanced unified data caching system with intelligent auto-reload and file change detection
@@ -109,7 +136,8 @@ pip install scikit-learn-intelex
 1. **Create Configuration**
 ```bash
 cp vars_template.py vars.py
-# Edit vars.py with your settings
+cp llm_template.yml llm.yml
+# Edit vars.py and llm.yml with your settings
 ```
 
 2. **Generate Security Key**
@@ -122,13 +150,14 @@ print(secrets.token_urlsafe(16))
 3. **Initialize Database**
 ```bash
 # Fetch initial paper data (CS categories: AI, ML, CL, etc.)
-python arxiv_daemon.py -n 50000 -m 1000
+python3 arxiv_daemon.py -n 50000 -m 1000
 
 # Compute hybrid feature vectors (TF-IDF + embeddings)
-python compute.py --num 50000 --embed_dim 512
+python3 compute.py --num 50000 --embed_dim 512 --use_embeddings
 
 # Start web service
-gunicorn -w 4 -b 0.0.0.0:5000 serve:app
+# (recommended) Uses `SERVE_PORT` from vars.py and supports preload/tuning env vars
+bash up.sh
 ```
 
 ## ⚙️ Configuration
@@ -141,19 +170,51 @@ Configure the following settings in `vars.py`:
 - **Email Service Configuration**: SMTP server settings for paper recommendation emails
 - **LLM API Configuration**: Support for multiple LLM providers (OpenAI-compatible API)
 - **vLLM Service Ports**: Port configuration for embedding models and minerU services
+- **Summary Markdown Source**: Choose `html` (default) or `mineru`, and set HTML source order
 
-The project supports multiple LLM providers, including OpenRouter (recommended free models), ZhipuAI (free Flash series models), and others.
+The project supports multiple LLM providers, including OpenRouter (recommended with many free models) and other OpenAI-compatible APIs.
+
+Summary source selection (takes effect at web startup):
+```bash
+# Default: HTML -> Markdown (ar5iv then arxiv)
+export ARXIV_SANITY_SUMMARY_SOURCE=html
+export ARXIV_SANITY_HTML_SOURCES=ar5iv,arxiv
+
+# Use minerU (PDF) instead
+export ARXIV_SANITY_SUMMARY_SOURCE=mineru
+
+# MinerU backend (default: pipeline)
+export ARXIV_SANITY_MINERU_BACKEND=pipeline
+# Or use VLM http-client backend (requires minerU OpenAI-compatible server)
+export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
+```
+Note: HTML mode does not require minerU. If you use `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`, start a minerU OpenAI-compatible server on `VLLM_MINERU_PORT`.
+Note: Summary and HTML caches are version-aware (pidvN), so new arXiv versions regenerate automatically.
+
+### Daemon Environment Variables
+
+The scheduler daemon (`daemon.py`) supports the following environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ARXIV_SANITY_FETCH_NUM` | 1000 | Number of papers to fetch per category |
+| `ARXIV_SANITY_FETCH_MAX` | 200 | Max results per API request |
+| `ARXIV_SANITY_SUMMARY_NUM` | 100 | Number of papers to summarize per run |
+| `ARXIV_SANITY_SUMMARY_WORKERS` | 2 | Number of parallel summary workers |
+| `ARXIV_SANITY_DAEMON_SUMMARY` | 1 | Enable/disable summary generation (0/1) |
+| `ARXIV_SANITY_DAEMON_EMBEDDINGS` | 1 | Enable/disable embedding computation (0/1) |
+| `ARXIV_SANITY_ENABLE_GIT_BACKUP` | 0 | Enable git backup of user data (0/1) |
 
 ### Advanced Parameters
 
 #### Feature Computation (compute.py)
 ```bash
-python compute.py \
+python3 compute.py \
   --num 50000 \              # Number of TF-IDF features
   --min_df 20 \              # Minimum document frequency
   --max_df 0.10 \            # Maximum document frequency
   --ngram_max 1 \            # Maximum n-gram size
-  --use_embeddings \         # Enable embedding vectors
+  --use_embeddings \         # Enable embedding vectors (optional)
   --embed_model ./qwen3-embed-0.6B \  # Embedding model path
   --embed_dim 512 \          # Embedding dimensions
   --embed_batch_size 2048    # Batch size for embedding generation
@@ -161,7 +222,7 @@ python compute.py \
 
 #### Batch Paper Summarization (batch_paper_summarizer.py)
 ```bash
-python batch_paper_summarizer.py \
+python3 batch_paper_summarizer.py \
   -n 200 \                   # Number of papers to process
   -w 4 \                     # Number of worker threads
   --max-retries 3 \          # Maximum retry attempts
@@ -170,7 +231,7 @@ python batch_paper_summarizer.py \
 
 #### Email Recommendations (send_emails.py)
 ```bash
-python send_emails.py \
+python3 send_emails.py \
   -n 20 \                    # Papers per recommendation
   -t 2.0 \                   # Time window (days)
   -m 5 \                     # Minimum tagged papers per user
@@ -189,7 +250,9 @@ arxiv-sanity-X/
 ├── daemon.py                   # Scheduler for automated tasks
 ├── paper_summarizer.py         # AI paper summarization module
 ├── batch_paper_summarizer.py   # Batch processing for paper summaries
-├── generate_latest_summaries.py # Auto-generate summaries for latest papers
+├── up.sh                       # Gunicorn startup script
+├── litellm.sh                  # LiteLLM gateway startup script
+├── llm.yml                     # LiteLLM configuration file
 ├── mineru_serve.sh             # minerU VLM server startup script
 ├── embedding_serve.sh          # vLLM embedding server startup script
 ├── aslite/                     # Core library
@@ -209,13 +272,14 @@ arxiv-sanity-X/
     ├── dict.db                # User data (SQLite)
     ├── pdfs/                  # Downloaded PDF files
     ├── mineru/                # MinerU parsed content
+    ├── html_md/               # Cached HTML->Markdown content
     └── summary/               # Cached paper summaries
 ```
 
 ### Data Flow Pipeline
 1. **Data Ingestion**: [`arxiv_daemon.py`](arxiv_daemon.py) fetches papers from arXiv API (4x daily: 6AM, 11AM, 4PM, 9PM)
 2. **Feature Processing**: [`compute.py`](compute.py) generates hybrid TF-IDF + embedding features with incremental updates
-3. **AI Summarization**: [`paper_summarizer.py`](paper_summarizer.py) downloads PDFs → minerU parsing → LLM summarization
+3. **AI Summarization**: [`paper_summarizer.py`](paper_summarizer.py) fetches arXiv/ar5iv HTML (default) or PDFs → Markdown parsing → LLM summarization
 4. **Web Service**: [`serve.py`](serve.py) provides responsive UI, hybrid search, recommendations, and async summary loading
 5. **Email Service**: [`send_emails.py`](send_emails.py) delivers personalized recommendations with holiday-aware scheduling
 6. **Automation**: [`daemon.py`](daemon.py) orchestrates the entire pipeline with intelligent resource management
@@ -224,14 +288,14 @@ arxiv-sanity-X/
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Flask Web     │    │  vLLM Embedding  │    │  minerU VLM     │
-│   (port 5000)   │<-->│   (port 51000)   │    │  (port 52000)   │
+│  (port 55555)  │<-->│   (port 51000)   │    │  (port 52000)   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
          │                       │                       │
          v                       v                       v
 ┌─────────────────────────────────────────────────────────────────┐
 │                     SQLite Database Storage                     │
-│  papers.db | features.p | dict.db | summary/ | mineru/          │
+│  papers.db | features.p | dict.db | summary/ | mineru/ | html_md/│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -265,23 +329,51 @@ arxiv-sanity-X/
 ## 🤖 AI Paper Summarization
 
 ### Complete AI Pipeline
-1. **PDF Download**: Automatic arXiv paper fetching with error handling
-2. **minerU Parsing**: Advanced PDF text extraction with structure recognition and image handling
+1. **HTML/PDF Fetch**: Pull arXiv/ar5iv HTML (default) or PDFs with error handling
+2. **Markdown Parsing**: HTML→Markdown (default) or minerU PDF parsing with structure recognition
 3. **LLM Processing**: Generate comprehensive summaries using multiple OpenAI-compatible LLM providers
 4. **Quality Control**: Chinese text ratio validation and content filtering
 5. **Smart Caching**: Intelligent caching with automatic quality checks and storage optimization
 
 ### Start Services
 ```bash
-# Start minerU VLM service
-bash mineru_serve.sh
+# One-command start (recommended, single terminal)
+python3 run_services.py
 
-# Start embedding model service
-bash embedding_serve.sh
+# Optional: run web with gunicorn
+python3 run_services.py --web gunicorn
 
-# Start main web service
-python serve.py
+# Optional: skip heavy services (web only)
+python3 run_services.py --no-embed --no-mineru --no-litellm
+
+# Optional: choose summary markdown source at startup (default: html)
+python3 run_services.py --summary-source html
+python3 run_services.py --summary-source mineru
+
+# Optional: also start scheduler daemon (fetch/compute/summary/email)
+python3 run_services.py --with-daemon
+
+# One-shot: fetch latest N papers across all categories, then compute features
+python3 run_services.py --fetch-compute        # default 10000
+python3 run_services.py --fetch-compute 1000   # custom N
 ```
+
+### Runtime & Performance Knobs (New)
+
+- `ARXIV_SANITY_CACHE_PAPERS=1`: Cache the full `papers` table in RAM (higher memory, faster rendering). Default `0` caches only `metas/pids` and reads papers on demand.
+- `ARXIV_SANITY_WARMUP_DATA=0|1`, `ARXIV_SANITY_WARMUP_ML=0|1`: Enable/disable background warmups (started lazily per worker; safe with gunicorn `--preload`).
+- `ARXIV_SANITY_ENABLE_SCHEDULER=0|1`: Enable/disable APScheduler cache refresh inside the web process.
+- `ARXIV_SANITY_LOG_LEVEL=INFO|DEBUG|...`: Loguru log level for the web process.
+- `up.sh` (gunicorn): `GUNICORN_WORKERS`, `GUNICORN_THREADS`, `GUNICORN_EXTRA_ARGS`, `ARXIV_SANITY_GUNICORN_PRELOAD=0|1`.
+
+Frontend is prebuilt (no browser-side Babel). If you change `static/paper_list.js` etc:
+```bash
+npm install
+npm run build:static
+```
+
+Troubleshooting:
+- If you see `No module named 'numpy._core'` / `features.p` load failure: your feature file was generated under a different major NumPy version. Upgrade to NumPy 2.x or regenerate features with `python3 compute.py` in the current environment.
 
 ### Usage Commands
 ```bash
@@ -289,13 +381,13 @@ python serve.py
 # Click "Summary" link or visit: /summary?pid=<paper_id>
 
 # Batch processing (latest papers)
-python generate_latest_summaries.py --num_papers 100
+python3 batch_paper_summarizer.py -n 100 -w 2
 
 # Advanced batch processing with custom workers
-python batch_paper_summarizer.py -n 200 -w 4 --max-retries 3
+python3 batch_paper_summarizer.py -n 200 -w 4 --max-retries 3
 
 # Check processing status
-python batch_paper_summarizer.py --dry-run  # Preview mode
+python3 batch_paper_summarizer.py --dry-run  # Preview mode
 ```
 
 ### LLM Provider Support
@@ -332,7 +424,7 @@ huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6
 bash embedding_serve.sh
 
 # Enable embedding computation with API client
-python compute.py --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
+python3 compute.py --use_embeddings --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
 ```
 
 Features:
@@ -352,22 +444,22 @@ Features:
 
 **Built-in Scheduler:**
 ```bash
-python daemon.py
+python3 daemon.py
 ```
 
 **Manual Cron Setup:**
 ```cron
 # Fetch and compute features (weekdays 4x daily)
-0 9,13,17,21 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 1000 && python compute.py
+0 9,13,17,21 * * 1-5 cd /path/to/arxiv-sanity-x && python3 arxiv_daemon.py -n 1000 && python3 compute.py --use_embeddings
 
 # Send email recommendations (weekdays 6 PM)
-0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python send_emails.py -t 2
+0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python3 send_emails.py -t 2
 
 # Generate paper summaries (daily 7 PM)
-0 19 * * * cd /path/to/arxiv-sanity-x && python batch_paper_summarizer.py -n 200 -w 2
+0 19 * * * cd /path/to/arxiv-sanity-x && python3 batch_paper_summarizer.py -n 200 -w 2
 
 # Backup user data (daily 8 PM)
-0 20 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
+0 20 * * * cd /path/to/arxiv-sanity-x && ARXIV_SANITY_ENABLE_GIT_BACKUP=1 python3 -c "from daemon import backup_user_data; backup_user_data()"
 ```
 
 ## 📚 API Reference

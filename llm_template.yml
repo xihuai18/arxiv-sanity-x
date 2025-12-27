@@ -1,0 +1,55 @@
+# LiteLLM Configuration Template
+# Copy this file to llm.yml and fill in your API keys
+# Usage: cp llm_template.yml llm.yml
+#
+# LiteLLM acts as a unified gateway for multiple LLM providers.
+# Start with: litellm -c llm.yml --port 53000
+# Or use: python3 run_services.py (auto-starts LiteLLM)
+
+model_list:
+  # OpenRouter - Recommended for free models
+  # Get your API key at: https://openrouter.ai/keys
+  - model_name: or-deepseek-r1t2
+    litellm_params:
+      model: openrouter/tngtech/deepseek-r1t2-chimera:free
+      api_base: https://openrouter.ai/api/v1
+      api_key: YOUR_OPENROUTER_API_KEY  # Replace with your key
+      max_tokens: 32768
+      extra_body:
+        reasoning:
+          effort: "medium"
+    model_info:
+      supports_reasoning: True
+
+  - model_name: or-mimo
+    litellm_params:
+      model: openrouter/xiaomi/mimo-v2-flash:free
+      api_base: https://openrouter.ai/api/v1
+      api_key: YOUR_OPENROUTER_API_KEY  # Replace with your key
+      max_tokens: 32768
+      extra_body:
+        reasoning:
+          effort: "medium"
+    model_info:
+      supports_reasoning: True
+
+  - model_name: or-glm
+    litellm_params:
+      model: openai/z-ai/glm-4.5-air:free
+      api_base: https://openrouter.ai/api/v1
+      api_key: YOUR_OPENROUTER_API_KEY  # Replace with your key
+      max_tokens: 32768
+    model_info:
+      supports_reasoning: True
+
+  - model_name: or-gpt-oss-120b
+    litellm_params:
+      model: openrouter/openai/gpt-oss-120b:free
+      api_base: https://openrouter.ai/api/v1
+      api_key: YOUR_OPENROUTER_API_KEY  # Replace with your key
+      max_tokens: 32768
+    model_info:
+      supports_reasoning: True
+
+litellm_settings:
+  drop_params: true

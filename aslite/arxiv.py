@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def get_response(search_query, start_index=0, max_r=100):
     """pings arxiv.org API to fetch a batch of 100 papers"""
     # fetch raw response
-    base_url = "http://export.arxiv.org/api/query?"
+    base_url = "https://export.arxiv.org/api/query?"
     add_url = "search_query=%s&sortBy=lastUpdatedDate&start=%d&max_results=%d" % (
         search_query,
         start_index,
@@ -25,11 +25,16 @@ def get_response(search_query, start_index=0, max_r=100):
     search_query = base_url + add_url
     logger.info(f"arxiv url {search_query}")
     logger.debug(f"Searching arxiv for {search_query}")
-    with urllib.request.urlopen(search_query) as url:
+    req = urllib.request.Request(
+        search_query,
+        headers={
+            "User-Agent": "arxiv-sanity-x (+https://github.com/karpathy/arxiv-sanity-lite)",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=20) as url:
         response = url.read()
-
-    if url.status != 200:
-        logger.error(f"arxiv did not return status 200 response")
+        if getattr(url, "status", 200) != 200:
+            logger.error("arxiv did not return status 200 response")
 
     return response
 

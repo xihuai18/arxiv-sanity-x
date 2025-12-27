@@ -8,9 +8,18 @@ ideas:
 """
 
 # Multi-core optimization configuration - Ubuntu system
+import json
 import os
+import secrets
+import shutil
+import tempfile
+import threading
+from collections import OrderedDict
 from multiprocessing import Pool, cpu_count
+from typing import Optional
+from urllib.parse import urlparse
 
+import requests
 from loguru import logger
 
 # Set multi-threading environment variables
@@ -39,12 +48,22 @@ from random import shuffle
 
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import g  # global session-level object
-from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from flask import (  # global session-level object
+    Flask,
+    abort,
+    g,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 from sklearn import svm
 from tqdm import tqdm
 
 from aslite.db import (
+    DICT_DB_FILE,
     FEATURES_FILE,
     get_combined_tags_db,
     get_email_db,
@@ -60,7 +79,14 @@ from paper_summarizer import (
     generate_paper_summary as generate_paper_summary_from_module,
 )
 from vars import (
+    DATA_DIR,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_NAME,
+    LLM_SUMMARY_LANG,
     SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
+    SUMMARY_DIR,
+    SUMMARY_MARKDOWN_SOURCE,
     SUMMARY_MIN_CHINESE_RATIO,
     SVM_C,
     SVM_MAX_ITER,
@@ -79,6 +105,7 @@ MAX_RESULTS = RET_NUM * 10  # Process at most 10 pages of results, avoid process
 FEATURES_CACHE = None
 FEATURES_FILE_MTIME = 0  # Feature file modification time
 FEATURES_CACHE_TIME = 0  # Cache creation time
+FEATURES_CACHE_LOCK = threading.Lock()
 
 # Papers and metas cache related global variables (stored in the same database file)
 PAPERS_CACHE = None
@@ -86,21 +113,200 @@ METAS_CACHE = None
 PIDS_CACHE = None
 PAPERS_DB_FILE_MTIME = 0  # Papers database file modification time
 PAPERS_DB_CACHE_TIME = 0  # Database cache creation time
+PAPERS_DB_CACHE_LOCK = threading.Lock()
 
 # Database file path
 from aslite.db import PAPERS_DB_FILE as PAPERS_DB_PATH
 
 app = Flask(__name__)
 
+# Whether to cache the entire (large) papers table in RAM.
+# Default on when memory is sufficient; metas/pids remain cached.
+CACHE_PAPERS_IN_MEMORY = os.environ.get("ARXIV_SANITY_CACHE_PAPERS", "1").lower() in ("1", "true", "yes")
+
+
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).lower() in ("1", "true", "yes", "y", "on")
+
+
+def _load_secret_key() -> str:
+    """
+    Prefer env var, then secret_key.txt. If neither exists, generate a random key.
+
+    This avoids shipping an insecure default and reduces accidental session forgery.
+    """
+    sk = (os.environ.get("ARXIV_SANITY_SECRET_KEY") or "").strip()
+    if sk:
+        return sk
+
+    if os.path.isfile("secret_key.txt"):
+        try:
+            with open("secret_key.txt", encoding="utf-8") as f:
+                sk = f.read().strip()
+            if sk:
+                return sk
+        except Exception as e:
+            logger.warning(f"Failed to read secret_key.txt: {e}")
+
+    logger.warning(
+        "No secret key found (ARXIV_SANITY_SECRET_KEY/secret_key.txt); generating a random key (sessions reset on restart)"
+    )
+    return secrets.token_urlsafe(32)
+
+
 # set the secret key so we can cryptographically sign cookies and maintain sessions
-if os.path.isfile("secret_key.txt"):
-    # example of generating a good key on your system is:
-    # import secrets; secrets.token_urlsafe(16)
-    sk = open("secret_key.txt").read().strip()
-else:
-    logger.warning("No secret key found, using default `devkey`")
-    sk = "devkey"
-app.secret_key = sk
+app.secret_key = _load_secret_key()
+
+# Cookie & request hardening (can be overridden via env vars)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE=os.environ.get("ARXIV_SANITY_COOKIE_SAMESITE", "Lax"),
+    SESSION_COOKIE_SECURE=_truthy_env("ARXIV_SANITY_COOKIE_SECURE", "0"),
+    MAX_CONTENT_LENGTH=int(os.environ.get("ARXIV_SANITY_MAX_CONTENT_LENGTH", str(1 * 1024 * 1024))),  # 1 MiB
+)
+
+
+@app.after_request
+def add_security_headers(resp):
+    # Basic hardening headers (CSP intentionally not set due to inline scripts/CDNs)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+    resp.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), interest-cohort=()",
+    )
+    return resp
+
+
+def _get_or_set_csrf_token() -> str:
+    tok = session.get("_csrf_token")
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        session["_csrf_token"] = tok
+    return tok
+
+
+def _is_same_origin_request() -> bool:
+    """
+    Best-effort same-origin check for legacy GET mutation endpoints.
+
+    - For modern browsers, `Sec-Fetch-Site: cross-site` is a reliable CSRF signal.
+    - Otherwise fall back to Origin/Referer checks.
+    """
+    sfs = (request.headers.get("Sec-Fetch-Site") or "").lower().strip()
+    if sfs:
+        return sfs in ("same-origin", "same-site", "none")
+
+    origin = (request.headers.get("Origin") or "").strip()
+    if origin:
+        return origin.rstrip("/") == request.host_url.rstrip("/")
+
+    referer = (request.headers.get("Referer") or "").strip()
+    if referer:
+        try:
+            return urlparse(referer).netloc == request.host
+        except Exception:
+            return False
+
+    return False
+
+
+def _csrf_protect():
+    """
+    CSRF protection for state-changing endpoints.
+
+    - POST: require session token via header/form/json
+    - GET (legacy): require same-origin *or* explicit query token
+    """
+    tok = _get_or_set_csrf_token()
+
+    if request.method == "GET":
+        if request.args.get("csrf_token") == tok:
+            return
+        if _is_same_origin_request():
+            return
+        abort(403, description="CSRF blocked (cross-site GET)")
+
+    # Unsafe methods: token required
+    token = (request.headers.get("X-CSRF-Token") or "").strip()
+    if not token:
+        token = (request.form.get("csrf_token") or "").strip()
+    if not token and request.is_json:
+        data = request.get_json(silent=True) or {}
+        token = (data.get("csrf_token") or "").strip()
+
+    if not token or token != tok:
+        abort(403, description="CSRF token missing/invalid")
+
+
+# -----------------------------------------------------------------------------
+# Input normalization helpers
+
+
+def _normalize_name(value: Optional[str]) -> str:
+    return (value or "").strip()
+
+
+def _validate_tag_name(tag: str) -> Optional[str]:
+    if not tag:
+        return "error, tag is required"
+    if tag in ("all", "null"):
+        return f"error, cannot use the protected tag '{tag}'"
+    return None
+
+
+def _validate_keyword_name(keyword: str) -> Optional[str]:
+    if not keyword:
+        return "error, keyword is required"
+    if keyword == "null":
+        return "error, cannot use the protected keyword 'null'"
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Small in-memory caches (thread-safe, per-process)
+
+
+class _LRUCacheTTL:
+    def __init__(self, maxsize: int = 256, ttl_s: float = 120.0):
+        self._maxsize = maxsize
+        self._ttl_s = ttl_s
+        self._data = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        now = time.time()
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                return None
+            ts, value = item
+            if now - ts > self._ttl_s:
+                try:
+                    del self._data[key]
+                except KeyError:
+                    pass
+                return None
+            self._data.move_to_end(key)
+            return value
+
+    def set(self, key, value):
+        now = time.time()
+        with self._lock:
+            self._data[key] = (now, value)
+            self._data.move_to_end(key)
+            while len(self._data) > self._maxsize:
+                self._data.popitem(last=False)
+
+
+SVM_RANK_CACHE = _LRUCacheTTL(maxsize=128, ttl_s=180.0)
+SEARCH_RANK_CACHE = _LRUCacheTTL(maxsize=256, ttl_s=120.0)
+PAPER_CACHE = _LRUCacheTTL(maxsize=2048, ttl_s=300.0)
+THUMB_CACHE = _LRUCacheTTL(maxsize=4096, ttl_s=600.0)
+QUERY_EMBED_CACHE = _LRUCacheTTL(maxsize=256, ttl_s=600.0)
 
 
 # -----------------------------------------------------------------------------
@@ -184,42 +390,57 @@ def get_data_cached():
     # Get current database file modification time
     current_file_mtime = os.path.getmtime(PAPERS_DB_PATH)
 
-    # Check if reload is needed (first load or file update)
-    need_reload = (
-        PAPERS_CACHE is None  # First load
-        or METAS_CACHE is None  # First load
-        or current_file_mtime > PAPERS_DB_FILE_MTIME  # File update
-    )
+    # We always cache metas/pids (they are small enough and heavily used for ranking/time filtering).
+    # Papers cache is optional because the decoded objects can be very large.
+    need_reload_metas = METAS_CACHE is None or PIDS_CACHE is None or current_file_mtime > PAPERS_DB_FILE_MTIME
+    need_reload_papers = CACHE_PAPERS_IN_MEMORY and (PAPERS_CACHE is None or current_file_mtime > PAPERS_DB_FILE_MTIME)
+    need_reload = need_reload_metas or need_reload_papers
 
     if need_reload:
-        logger.info("Loading papers and metas from database...")
-        if PAPERS_CACHE is not None:
-            logger.trace(f"Database file updated (old mtime: {PAPERS_DB_FILE_MTIME}, new mtime: {current_file_mtime})")
+        with PAPERS_DB_CACHE_LOCK:
+            # Re-check inside lock to avoid duplicate reloads in multi-thread servers
+            try:
+                current_file_mtime = os.path.getmtime(PAPERS_DB_PATH)
+            except Exception:
+                current_file_mtime = 0.0
+            need_reload_metas = METAS_CACHE is None or PIDS_CACHE is None or current_file_mtime > PAPERS_DB_FILE_MTIME
+            need_reload_papers = CACHE_PAPERS_IN_MEMORY and (
+                PAPERS_CACHE is None or current_file_mtime > PAPERS_DB_FILE_MTIME
+            )
+            need_reload = need_reload_metas or need_reload_papers
+            if need_reload:
+                logger.info("Loading metas%s from database..." % (" and papers" if CACHE_PAPERS_IN_MEMORY else ""))
+                if PAPERS_CACHE is not None:
+                    logger.trace(
+                        f"Database file updated (old mtime: {PAPERS_DB_FILE_MTIME}, new mtime: {current_file_mtime})"
+                    )
 
-        start_time = time.time()
+                start_time = time.time()
 
-        try:
-            # Load papers and metas data simultaneously
-            with get_papers_db() as papers_db:
-                PAPERS_CACHE = {k: v for k, v in tqdm(papers_db.items(), desc="loading papers db")}
+                try:
+                    if CACHE_PAPERS_IN_MEMORY:
+                        with get_papers_db() as papers_db:
+                            PAPERS_CACHE = {k: v for k, v in tqdm(papers_db.items(), desc="loading papers db")}
+                    else:
+                        PAPERS_CACHE = None
 
-            with get_metas_db() as metas_db:
-                METAS_CACHE = {k: v for k, v in tqdm(metas_db.items(), desc="loading metas db")}
-                PIDS_CACHE = list(METAS_CACHE.keys())
+                    with get_metas_db() as metas_db:
+                        METAS_CACHE = {k: v for k, v in tqdm(metas_db.items(), desc="loading metas db")}
+                        PIDS_CACHE = list(METAS_CACHE.keys())
 
-            # Update cache timestamps
-            PAPERS_DB_FILE_MTIME = current_file_mtime
-            PAPERS_DB_CACHE_TIME = current_time
+                    PAPERS_DB_FILE_MTIME = current_file_mtime
+                    PAPERS_DB_CACHE_TIME = current_time
 
-            load_time = time.time() - start_time
-            logger.info(f"Data loaded successfully in {load_time:.3f}s")
-            logger.trace(f"Number of papers: {len(PAPERS_CACHE)}")
-            logger.trace(f"Number of metas: {len(METAS_CACHE)}")
-            logger.trace(f"Number of pids: {len(PIDS_CACHE)}")
+                    load_time = time.time() - start_time
+                    logger.info(f"Data loaded successfully in {load_time:.3f}s")
+                    if PAPERS_CACHE is not None:
+                        logger.trace(f"Number of papers: {len(PAPERS_CACHE)}")
+                    logger.trace(f"Number of metas: {len(METAS_CACHE)}")
+                    logger.trace(f"Number of pids: {len(PIDS_CACHE)}")
 
-        except Exception as e:
-            logger.error(f"Failed to load papers and metas: {e}")
-            raise
+                except Exception as e:
+                    logger.error(f"Failed to load papers and metas: {e}")
+                    raise
     else:
         # Use cache
         pass
@@ -243,24 +464,135 @@ def get_papers():
     return PAPERS_CACHE
 
 
+def paper_exists(pid: str) -> bool:
+    """Fast existence check using metas (always cached)."""
+    if not pid:
+        return False
+    mdb = get_metas()
+    return pid in mdb
+
+
+def get_paper(pid: str):
+    """
+    Get one paper record by pid.
+
+    - If full papers cache is enabled, read from in-memory dict.
+    - Otherwise, read through SqliteDict and cache a small working set in RAM.
+    """
+    if not pid:
+        return None
+
+    if CACHE_PAPERS_IN_MEMORY:
+        pdb = get_papers()
+        if pdb is None:
+            return None
+        return pdb.get(pid)
+
+    cached = PAPER_CACHE.get(pid)
+    if cached is not None:
+        return cached
+
+    try:
+        with get_papers_db() as pdb:
+            paper = pdb.get(pid)
+            if paper is None:
+                return None
+        PAPER_CACHE.set(pid, paper)
+        return paper
+    except Exception as e:
+        logger.warning(f"Failed to read paper {pid} from db: {e}")
+        return None
+
+
+def get_papers_bulk(pids):
+    """
+    Fetch a batch of papers efficiently.
+
+    When `ARXIV_SANITY_CACHE_PAPERS=0`, this avoids opening the SqliteDict once per paper.
+    """
+    out = {}
+    if not pids:
+        return out
+
+    if CACHE_PAPERS_IN_MEMORY:
+        pdb = get_papers()
+        if pdb is None:
+            return out
+        for pid in pids:
+            paper = pdb.get(pid)
+            if paper is not None:
+                out[pid] = paper
+        return out
+
+    try:
+        with get_papers_db() as pdb:
+            for pid in pids:
+                paper = pdb.get(pid)
+                if paper is None:
+                    continue
+                out[pid] = paper
+                try:
+                    PAPER_CACHE.set(pid, paper)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning(f"Failed to bulk-read papers from db: {e}")
+    return out
+
+
 def get_metas():
     """Get metadata database"""
     get_data_cached()  # Ensure cache is loaded
     return METAS_CACHE
 
 
-# Initialize cache (preload on application startup)
-logger.info("Initializing unified data caches on startup...")
-get_data_cached()
+_BACKGROUND_LOCK = threading.Lock()
+_BACKGROUND_STARTED = False
+_SCHEDULER = None
 
-# Set up scheduler for periodic cache refresh
-scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-scheduler.add_job(get_data_cached, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
-scheduler.start()
+
+def _warmup_data_cache():
+    try:
+        logger.info("Warming metas/pids cache in background...")
+        get_data_cached()
+    except Exception as e:
+        logger.warning(f"Data cache warmup failed: {e}")
+
+
+def _ensure_background_services_started():
+    """
+    Start background threads/schedulers lazily (per worker process).
+
+    This avoids starting threads at import-time, which is important when running
+    under gunicorn with `--preload` (forking after threads start is unsafe).
+    """
+    global _BACKGROUND_STARTED, _SCHEDULER
+    if _BACKGROUND_STARTED:
+        return
+    with _BACKGROUND_LOCK:
+        if _BACKGROUND_STARTED:
+            return
+
+        if os.environ.get("ARXIV_SANITY_WARMUP_DATA", "1").lower() in ("1", "true", "yes"):
+            threading.Thread(target=_warmup_data_cache, daemon=True).start()
+
+        if os.environ.get("ARXIV_SANITY_WARMUP_ML", "1").lower() in ("1", "true", "yes"):
+            threading.Thread(target=_warmup_ml_cache, daemon=True).start()
+
+        if os.environ.get("ARXIV_SANITY_ENABLE_SCHEDULER", "1").lower() in ("1", "true", "yes"):
+            try:
+                _SCHEDULER = BackgroundScheduler(timezone="Asia/Shanghai")
+                _SCHEDULER.add_job(get_data_cached, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
+                _SCHEDULER.start()
+            except Exception as e:
+                logger.warning(f"Failed to start scheduler: {e}")
+
+        _BACKGROUND_STARTED = True
 
 
 @app.before_request
 def before_request():
+    _ensure_background_services_started()
     g.user = session.get("user", None)
 
     # record activity on this user so we can reserve periodic
@@ -304,27 +636,48 @@ def get_features_cached():
     need_reload = FEATURES_CACHE is None or current_file_mtime > FEATURES_FILE_MTIME  # First load  # File updated
 
     if need_reload:
-        logger.info(f"Loading features from disk...")
-        if FEATURES_CACHE is not None:
-            logger.trace(f"Features file updated (old mtime: {FEATURES_FILE_MTIME}, new mtime: {current_file_mtime})")
+        with FEATURES_CACHE_LOCK:
+            # Re-check inside lock to avoid duplicate reloads in multi-thread servers
+            try:
+                current_file_mtime = os.path.getmtime(FEATURES_FILE)
+            except Exception:
+                current_file_mtime = 0.0
+            need_reload = FEATURES_CACHE is None or current_file_mtime > FEATURES_FILE_MTIME
 
-        start_time = time.time()
+            if need_reload:
+                logger.info("Loading features from disk...")
+                if FEATURES_CACHE is not None:
+                    logger.trace(
+                        f"Features file updated (old mtime: {FEATURES_FILE_MTIME}, new mtime: {current_file_mtime})"
+                    )
 
-        try:
-            # Load features
-            FEATURES_CACHE = load_features()
-            FEATURES_FILE_MTIME = current_file_mtime
-            FEATURES_CACHE_TIME = current_time
+                start_time = time.time()
 
-            load_time = time.time() - start_time
-            logger.info(f"Features loaded successfully in {load_time:.3f}s")
-            logger.trace(f"Feature matrix shape: {FEATURES_CACHE['x'].shape}")
-            logger.trace(f"Number of papers: {len(FEATURES_CACHE['pids'])}")
-            logger.trace(f"Vocabulary size: {len(FEATURES_CACHE['vocab'])}")
+                try:
+                    FEATURES_CACHE = load_features()
+                    FEATURES_FILE_MTIME = current_file_mtime
+                    FEATURES_CACHE_TIME = current_time
 
-        except Exception as e:
-            logger.error(f"Failed to load features: {e}")
-            raise
+                    # Build pid -> index map for fast lookups (inspect, etc.)
+                    try:
+                        if (
+                            isinstance(FEATURES_CACHE, dict)
+                            and "pids" in FEATURES_CACHE
+                            and "pid_to_index" not in FEATURES_CACHE
+                        ):
+                            FEATURES_CACHE["pid_to_index"] = {pid: i for i, pid in enumerate(FEATURES_CACHE["pids"])}
+                    except Exception as e:
+                        logger.warning(f"Failed to build pid_to_index map: {e}")
+
+                    load_time = time.time() - start_time
+                    logger.info(f"Features loaded successfully in {load_time:.3f}s")
+                    logger.trace(f"Feature matrix shape: {FEATURES_CACHE['x'].shape}")
+                    logger.trace(f"Number of papers: {len(FEATURES_CACHE['pids'])}")
+                    logger.trace(f"Vocabulary size: {len(FEATURES_CACHE['vocab'])}")
+
+                except Exception as e:
+                    logger.error(f"Failed to load features: {e}")
+                    raise
     else:
         # Use cache
         pass
@@ -338,13 +691,38 @@ def get_features_cached():
 # ranking utilities for completing the search/rank/filter requests
 
 
-def render_pid(pid):
+def _get_thumb_url(pid: str) -> str:
+    cached = THUMB_CACHE.get(pid)
+    if cached is not None:
+        return cached
+    thumb_path = Path("static/thumb") / f"{pid}.jpg"
+    thumb_url = f"static/thumb/{pid}.jpg" if thumb_path.is_file() else ""
+    THUMB_CACHE.set(pid, thumb_url)
+    return thumb_url
+
+
+def render_pid(pid, pid_to_utags=None, paper=None):
     # render a single paper with just the information we need for the UI
-    pdb = get_papers()
-    tags = get_tags()
-    thumb_path = "static/thumb/" + pid + ".jpg"
-    thumb_url = thumb_path if os.path.isfile(thumb_path) else ""
-    d = pdb[pid]
+    thumb_url = _get_thumb_url(pid)
+    d = paper if paper is not None else get_paper(pid)
+    if d is None:
+        # Extremely defensive: return a minimal stub instead of crashing the request.
+        return dict(
+            weight=0.0,
+            id=pid,
+            title="(missing paper)",
+            time="",
+            authors="",
+            tags="",
+            utags=pid_to_utags.get(pid, []) if pid_to_utags else [],
+            summary="",
+            thumb_url=thumb_url,
+        )
+    if pid_to_utags is not None:
+        utags = pid_to_utags.get(pid, [])
+    else:
+        tags = get_tags()
+        utags = [t for t, tpids in tags.items() if pid in tpids]
     return dict(
         weight=0.0,
         id=d["_id"],
@@ -352,7 +730,7 @@ def render_pid(pid):
         time=d["_time_str"],
         authors=", ".join(a["name"] for a in d["authors"]),
         tags=", ".join(t["term"] for t in d["tags"]),
-        utags=[t for t, pids in tags.items() if pid in pids],
+        utags=utags,
         summary=d["summary"],
         thumb_url=thumb_url,
     )
@@ -366,19 +744,41 @@ def _apply_limit(pids, scores, limit):
 
 
 def random_rank(limit=None):
-    mdb = get_metas()
-    pids = list(mdb.keys())
+    pids_all = get_pids()
+    if limit is not None:
+        try:
+            k = min(int(limit), len(pids_all))
+        except Exception:
+            k = len(pids_all)
+        if k <= 0:
+            return [], []
+        # sample without shuffling the full list (much faster on large corpora)
+        import random
+
+        pids = random.sample(pids_all, k)
+        scores = [0.0 for _ in pids]
+        return pids, scores
+
+    pids = list(pids_all)
     shuffle(pids)
-    scores = [0 for _ in pids]
-    return _apply_limit(pids, scores, limit)
+    scores = [0.0 for _ in pids]
+    return pids, scores
 
 
 def time_rank(limit=None):
     mdb = get_metas()
-    ms = sorted(mdb.items(), key=lambda kv: kv[1]["_time"], reverse=True)
-
     if limit is not None:
-        ms = ms[:limit]
+        import heapq
+
+        try:
+            k = min(int(limit), len(mdb))
+        except Exception:
+            k = len(mdb)
+        if k <= 0:
+            return [], []
+        ms = heapq.nlargest(k, mdb.items(), key=lambda kv: kv[1]["_time"])
+    else:
+        ms = sorted(mdb.items(), key=lambda kv: kv[1]["_time"], reverse=True)
 
     tnow = time.time()
     pids = [k for k, v in ms]
@@ -395,9 +795,12 @@ def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
         return pids, list(range(len(pids)))
 
     mdb = get_metas()
-    kv = {k: v for k, v in mdb.items()}
     tnow = time.time()
-    deltat = float(time_filter) * 60 * 60 * 24
+    try:
+        deltat = float(time_filter) * 60 * 60 * 24
+    except Exception:
+        logger.warning(f"Invalid time_filter '{time_filter}', skipping time filtering")
+        return pids, list(range(len(pids)))
 
     # Get set of all user-tagged paper IDs
     tagged_set = set()
@@ -410,16 +813,18 @@ def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
     valid_indices = []
     valid_pids = []
     for i, pid in enumerate(pids):
-        if pid in kv:
-            # Check if within time window
-            in_time_window = (tnow - kv[pid]["_time"]) < deltat
-            # Check if tagged by user
-            is_tagged = pid in tagged_set
+        meta = mdb.get(pid)
+        if not meta:
+            continue
+        # Check if within time window
+        in_time_window = (tnow - meta["_time"]) < deltat
+        # Check if tagged by user
+        is_tagged = pid in tagged_set
 
-            # Keep if either condition is met
-            if in_time_window or is_tagged:
-                valid_indices.append(i)
-                valid_pids.append(pid)
+        # Keep if either condition is met
+        if in_time_window or is_tagged:
+            valid_indices.append(i)
+            valid_pids.append(pid)
 
     return valid_pids, valid_indices
 
@@ -429,7 +834,14 @@ def _filter_by_time(pids, time_filter):
     return _filter_by_time_with_tags(pids, time_filter, None)
 
 
-def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "and", time_filter: str = ""):
+def svm_rank(
+    tags: str = "",
+    s_pids: str = "",
+    C: float = None,
+    logic: str = "and",
+    time_filter: str = "",
+    limit=None,
+):
     # Use default value
     if C is None:
         C = SVM_C
@@ -437,6 +849,28 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "an
     # pid can be a specific paper id to set as positive for a kind of nearest neighbor search
     if not (tags or s_pids):
         return [], [], []
+
+    # Fast path: cache (safe because we key by dict.db/features.p mtime)
+    try:
+        dict_mtime = os.path.getmtime(DICT_DB_FILE) if os.path.exists(DICT_DB_FILE) else 0.0
+        feat_mtime = os.path.getmtime(FEATURES_FILE) if os.path.exists(FEATURES_FILE) else 0.0
+        cache_key = (
+            "svm",
+            getattr(g, "user", None),
+            tags,
+            s_pids,
+            float(C),
+            logic,
+            time_filter,
+            int(limit) if limit is not None else None,
+            dict_mtime,
+            feat_mtime,
+        )
+        cached = SVM_RANK_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        cache_key = None
 
     # Use intelligent cache to load features
     s_time = time.time()
@@ -465,54 +899,70 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "an
             f"After intelligent time filtering, kept {len(pids)} papers (including tagged papers and those within {time_filter} days)"
         )
 
-    n, d = x.shape
-    ptoi, itop = {}, {}
-    for i, p in enumerate(pids):
-        ptoi[p] = i
-        itop[i] = p
+    n, _d = x.shape
 
-    # construct the positive set
-    y = np.zeros(n, dtype=np.float32)
-    weight_offset = 0.0
+    # Construct the positive set (avoid building pid->idx for all papers)
+    pos_weights = {}
+    tags_filter_to = []
 
-    # Process PIDs
-    if s_pids:
-        s_pids = set(map(str.strip, s_pids.split(",")))
-        for p_i, pid in enumerate(s_pids):
-            if pid in ptoi:  # Ensure PID exists
-                if logic == "and":
-                    y[ptoi[pid]] = 1.0 + p_i + weight_offset
-                else:
-                    y[ptoi[pid]] = max(y[ptoi[pid]], 1.0)
-        weight_offset += len(s_pids)  # Reserve space for tags weight
-
-    # Process Tags (can coexist with PIDs)
     if tags:
         tags_db = get_tags()
-        logger.trace(f"Available tags in tags_db: {list(tags_db.keys())}")
-        tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
-        logger.trace(f"Tags to filter: {tags_filter_to}")
-        for t_i, tag in enumerate(tags_filter_to):
-            if tag in tags_db:  # Ensure tag exists
-                t_pids = tags_db[tag]
-                logger.trace(f"Tag '{tag}' has {len(t_pids)} papers")
-                found_count = 0
-                for p_i, pid in enumerate(t_pids):
-                    if pid in ptoi:  # Ensure PID exists
-                        found_count += 1
-                        if logic == "and":
-                            y[ptoi[pid]] = max(y[ptoi[pid]], 1.0 + t_i + weight_offset)
-                        else:
-                            y[ptoi[pid]] = max(y[ptoi[pid]], 1.0)
-                logger.trace(f"Found {found_count} papers from tag '{tag}' in current features")
-            else:
-                logger.trace(f"Tag '{tag}' not found in tags_db")
+        tags_filter_to = list(tags_db.keys()) if tags == "all" else [t.strip() for t in tags.split(",") if t.strip()]
+        if logic == "and":
+            tag_counts = {}
+            for tag in tags_filter_to:
+                if tag not in tags_db:
+                    continue
+                for pid in tags_db[tag]:
+                    tag_counts[pid] = tag_counts.get(pid, 0) + 1
+            for pid, count in tag_counts.items():
+                pos_weights[pid] = max(pos_weights.get(pid, 0.0), float(count))
+        else:
+            for tag in tags_filter_to:
+                if tag not in tags_db:
+                    continue
+                for pid in tags_db[tag]:
+                    pos_weights[pid] = max(pos_weights.get(pid, 0.0), 1.0)
+
+    if s_pids:
+        pid_list = [p.strip() for p in s_pids.split(",") if p.strip()]
+        seed_weight = 1.0
+        if logic == "and" and tags_filter_to:
+            seed_weight = float(len(tags_filter_to))
+        for pid in pid_list:
+            pos_weights[pid] = max(pos_weights.get(pid, 0.0), seed_weight)
+
+    y = np.zeros(n, dtype=np.int8)
+    sample_weight = np.ones(n, dtype=np.float32)
+    found = 0
+    if pos_weights:
+        for i, pid in enumerate(pids):
+            w = pos_weights.get(pid)
+            if w:
+                y[i] = 1
+                sample_weight[i] = float(w)
+                found += 1
+        logger.trace(f"Found {found} positive papers in current feature slice")
     e_time = time.time()
 
     logger.trace(f"feature loading/caching for {e_time - s_time:.5f}s")
 
-    if y.sum() == 0:
+    if found == 0:
         return [], [], []  # there are no positives?
+
+    if found == n:
+        scores = sample_weight
+        if limit is not None:
+            k = min(int(limit), len(scores))
+            if k <= 0:
+                return [], [], []
+            top_ix = np.argpartition(-scores, k - 1)[:k]
+            top_ix = top_ix[np.argsort(-scores[top_ix])]
+        else:
+            top_ix = np.argsort(-scores)
+        pids_out = [pids[int(ix)] for ix in top_ix]
+        scores_out = [100 * float(scores[int(ix)]) for ix in top_ix]
+        return pids_out, scores_out, []
 
     s_time = time.time()
 
@@ -537,26 +987,32 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "an
     # e_time = time.time()
     # logger.trace(f"Dimension reduction for {e_time - s_time:.5f}s")
 
-    clf.fit(x, y)
+    clf.fit(x, y, sample_weight=sample_weight)
     e_time = time.time()
     logger.trace(f"SVM fitting data for {e_time - s_time:.5f}s")
 
-    if logic == "and":
-        s = clf.decision_function(x)
-        # logger.trace(f"svm_rank: {s.shape}")
-        if len(s.shape) > 1:
-            s = s[:, 1:].mean(axis=-1)
-    else:
-        s = clf.decision_function(x)
+    s = clf.decision_function(x)
+    if getattr(s, "ndim", 1) > 1:
+        s = s.reshape(-1)
     e_time = time.time()
     logger.trace(f"SVM decsion function for {e_time - s_time:.5f}s")
-    sortix = np.argsort(-s)
-    pids = [itop[ix] for ix in sortix]
-    scores = [100 * float(s[ix]) for ix in sortix]
+
+    # Top-k selection without full sort (limit is already bounded by MAX_RESULTS in callers)
+    if limit is not None:
+        k = min(int(limit), len(s))
+        if k <= 0:
+            return [], [], []
+        top_ix = np.argpartition(-s, k - 1)[:k]
+        top_ix = top_ix[np.argsort(-s[top_ix])]
+    else:
+        top_ix = np.argsort(-s)
+
+    pids_out = [pids[int(ix)] for ix in top_ix]
+    scores_out = [100 * float(s[int(ix)]) for ix in top_ix]
 
     # get the words that score most positively and most negatively for the svm
     ivocab = {v: k for k, v in features["vocab"].items()}  # index to word mapping
-    weights = clf.coef_[0]  # (n_features,) weights of the trained svm
+    weights = clf.coef_[0] if getattr(clf.coef_, "ndim", 1) > 1 else clf.coef_
 
     # Only analyze TF-IDF part weights (vocab size), ignore embedding dimensions
     vocab_size = len(ivocab)
@@ -576,7 +1032,13 @@ def svm_rank(tags: str = "", s_pids: str = "", C: float = None, logic: str = "an
             }
         )
 
-    return pids, scores, words
+    result = (pids_out, scores_out, words)
+    if cache_key is not None:
+        try:
+            SVM_RANK_CACHE.set(cache_key, result)
+        except Exception:
+            pass
+    return result
 
 
 def count_match(q, pid_start, n_pids):
@@ -586,25 +1048,28 @@ def count_match(q, pid_start, n_pids):
     match = lambda s: sum(min(3, s.lower().count(qp)) for qp in qs) / len(qs)
     # matchu = lambda s: sum(int(s.lower().count(qp) > 0) for qp in qs) / len(qs)
     match_t = lambda s: int(q in s.lower())
-    pdb = get_papers()
-    for pid in get_pids()[pid_start : pid_start + n_pids]:
-        p = pdb[pid]
-        score = 0.0
-        score += 20.0 * match_t(" ".join([a["name"] for a in p["authors"]]))
-        score += 20.0 * match(p["title"])
-        score += 10.0 * match_t(p["title"])
-        score += 5.0 * match(p["summary"])
-        if score > 0:
-            sub_pairs.append((score, pid))
+    with get_papers_db() as pdb:
+        for pid in get_pids()[pid_start : pid_start + n_pids]:
+            p = pdb.get(pid)
+            if p is None:
+                continue
+            score = 0.0
+            score += 20.0 * match_t(" ".join([a["name"] for a in p["authors"]]))
+            score += 20.0 * match(p["title"])
+            score += 10.0 * match_t(p["title"])
+            score += 5.0 * match(p["summary"])
+            if score > 0:
+                sub_pairs.append((score, pid))
     return sub_pairs
 
 
-def search_rank(q: str = "", limit=None):
+def legacy_search_rank(q: str = "", limit=None):
     if not q:
         return [], []  # no query? no results
     n_pids = len(get_pids())
     chunk_size = 20000
-    n_process = min(cpu_count() // 2, n_pids // chunk_size)
+    n_process = min(cpu_count() // 2, max(1, n_pids // chunk_size))
+    n_process = max(1, n_process)
     with Pool(n_process) as pool:
         sub_pairs_list = pool.starmap(
             count_match,
@@ -618,9 +1083,143 @@ def search_rank(q: str = "", limit=None):
     return _apply_limit(pids, scores, limit)
 
 
+def _get_query_vectorizer(features):
+    """Reconstruct a query-side TF-IDF encoder from cached features."""
+    global _tfidf_query_vectorizer, _tfidf_query_vectorizer_mtime
+
+    try:
+        current_mtime = os.path.getmtime(FEATURES_FILE)
+    except Exception:
+        current_mtime = 0.0
+
+    if _tfidf_query_vectorizer is not None and _tfidf_query_vectorizer_mtime == current_mtime:
+        return _tfidf_query_vectorizer
+
+    from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+
+    tfidf_params = features.get("tfidf_params", {})
+    ngram_max = int(tfidf_params.get("ngram_max", 1))
+    vocab = features.get("vocab")
+    idf = features.get("idf")
+
+    if vocab is None or idf is None:
+        return None
+
+    try:
+        import scipy.sparse as sp
+    except Exception as e:
+        logger.warning(f"scipy is required for TF-IDF keyword search, fallback to legacy: {e}")
+        return None
+
+    class _QueryTfidf:
+        def __init__(self, vocabulary, idf_values, ngram_max_val):
+            self._cv = CountVectorizer(
+                vocabulary=vocabulary,
+                ngram_range=(1, ngram_max_val),
+                dtype=np.int32,
+            )
+            self._tfidf = TfidfTransformer(
+                norm="l2",
+                use_idf=True,
+                smooth_idf=True,
+                sublinear_tf=True,
+            )
+            idf_arr = np.asarray(idf_values, dtype=np.float32)
+            self._tfidf.idf_ = idf_arr
+            self._tfidf._idf_diag = sp.diags(
+                idf_arr,
+                offsets=0,
+                shape=(idf_arr.shape[0], idf_arr.shape[0]),
+                format="csr",
+            )
+
+        def transform(self, texts):
+            counts = self._cv.transform(texts)
+            return self._tfidf.transform(counts).astype(np.float32, copy=False)
+
+    _tfidf_query_vectorizer = _QueryTfidf(vocab, idf, ngram_max)
+    _tfidf_query_vectorizer_mtime = current_mtime
+    return _tfidf_query_vectorizer
+
+
+def search_rank(q: str = "", limit=None):
+    """
+    Fast keyword search using TF-IDF dot-product against the precomputed matrix.
+    Falls back to legacy substring matching if TF-IDF is unavailable or query OOV.
+    """
+    q = (q or "").strip()
+    if not q:
+        return [], []
+
+    features = None
+    try:
+        features = get_features_cached()
+    except Exception:
+        features = None
+
+    cache_key = None
+    try:
+        cache_key = ("kw", q.lower(), int(limit) if limit is not None else None, FEATURES_FILE_MTIME)
+        cached = SEARCH_RANK_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        cache_key = None
+
+    if not features:
+        return legacy_search_rank(q, limit)
+
+    x_tfidf = features.get("x_tfidf")
+    if x_tfidf is None:
+        return legacy_search_rank(q, limit)
+
+    v = _get_query_vectorizer(features)
+    if v is None:
+        return legacy_search_rank(q, limit)
+
+    try:
+        q_vec = v.transform([q])
+        if q_vec.nnz == 0:
+            return legacy_search_rank(q, limit)
+
+        # Sparse dot-product: only docs with matching terms become non-zero.
+        scores_sparse = (x_tfidf @ q_vec.T).tocoo()
+        if scores_sparse.nnz == 0:
+            return [], []
+
+        rows = scores_sparse.row
+        vals = scores_sparse.data
+
+        if limit is not None:
+            k = min(int(limit), len(vals))
+            if k <= 0:
+                return [], []
+            top = np.argpartition(-vals, k - 1)[:k]
+            top = top[np.argsort(-vals[top])]
+        else:
+            top = np.argsort(-vals)
+
+        pids = [features["pids"][int(rows[i])] for i in top]
+        scores = [float(vals[i]) * 100.0 for i in top]
+
+        if cache_key is not None:
+            SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
+
+        return pids, scores
+
+    except Exception as e:
+        logger.warning(f"TF-IDF keyword search failed, fallback to legacy: {e}")
+        return legacy_search_rank(q, limit)
+
+
 # Global semantic search related variables
 _semantic_model = None
 _cached_embeddings = None
+_cached_embeddings_mtime = 0.0
+
+# Query-side TF-IDF vectorizer cache (reconstructed from features.p)
+_tfidf_query_vectorizer = None
+_tfidf_query_vectorizer_mtime = 0.0
 
 
 def get_semantic_model():
@@ -645,15 +1244,31 @@ def get_semantic_model():
 
 def get_paper_embeddings():
     """Get paper embedding vectors (loaded from features file)"""
-    global _cached_embeddings
-    if _cached_embeddings is not None:
+    global _cached_embeddings, _cached_embeddings_mtime
+    # Refresh if features file changed
+    try:
+        current_mtime = os.path.getmtime(FEATURES_FILE)
+    except Exception:
+        current_mtime = 0.0
+    if _cached_embeddings is not None and _cached_embeddings_mtime == current_mtime:
         return _cached_embeddings
 
     try:
         features = get_features_cached()
         if features.get("feature_type") == "hybrid_sparse_dense" and "x_embeddings" in features:
             logger.trace("Using pre-computed embeddings from features file")
-            _cached_embeddings = {"embeddings": features["x_embeddings"], "pids": features["pids"]}
+            embeddings = features["x_embeddings"]
+            # Normalize once for fast cosine similarity via dot product
+            try:
+                if embeddings.dtype != np.float32:
+                    embeddings = embeddings.astype(np.float32, copy=False)
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True).astype(np.float32, copy=False)
+                norms[norms == 0] = 1.0
+                embeddings /= norms
+            except Exception as e:
+                logger.warning(f"Failed to normalize embeddings, fallback to raw vectors: {e}")
+            _cached_embeddings = {"embeddings": embeddings, "pids": features["pids"]}
+            _cached_embeddings_mtime = current_mtime
             return _cached_embeddings
         else:
             logger.warning("No embeddings found in features file")
@@ -663,8 +1278,48 @@ def get_paper_embeddings():
         return None
 
 
-get_semantic_model()
-get_paper_embeddings()
+def _get_query_embedding(q: str, embed_dim: int):
+    """Get cached query embedding to avoid repeated API calls."""
+    key = (q.lower(), int(embed_dim), _cached_embeddings_mtime)
+    cached = QUERY_EMBED_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    model = get_semantic_model()
+    if model is None:
+        return None
+
+    query_embedding = model.encode([q], dim=embed_dim)
+    if query_embedding is None:
+        logger.error("Failed to encode query")
+        return None
+
+    try:
+        if hasattr(query_embedding, "cpu"):
+            query_embedding = query_embedding.cpu().numpy()
+        else:
+            query_embedding = np.asarray(query_embedding)
+    except Exception as e:
+        logger.error(f"Failed to convert query embedding: {e}")
+        return None
+
+    query_vec = query_embedding.reshape(-1).astype(np.float32, copy=False)
+    qn = float(np.linalg.norm(query_vec))
+    if qn > 0:
+        query_vec /= qn
+
+    QUERY_EMBED_CACHE.set(key, query_vec)
+    return query_vec
+
+
+def _warmup_ml_cache():
+    try:
+        logger.info("Warming features/embeddings/model in background...")
+        get_features_cached()
+        get_paper_embeddings()
+        get_semantic_model()
+    except Exception as e:
+        logger.warning(f"ML cache warmup failed: {e}")
 
 
 def semantic_search_rank(q: str = "", limit=None):
@@ -672,44 +1327,50 @@ def semantic_search_rank(q: str = "", limit=None):
     if not q:
         return [], []
 
+    q = q.strip()
+
     # Get paper embeddings
     paper_data = get_paper_embeddings()
     if paper_data is None:
         logger.error("No paper embeddings available")
         return [], []
 
-    # Get model
-    model = get_semantic_model()
-    if model is None:
-        logger.error("Semantic model not available")
-        return [], []
+    try:
+        cache_key = ("sem", q.lower(), int(limit) if limit is not None else None, _cached_embeddings_mtime)
+        cached = SEARCH_RANK_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        cache_key = None
 
     try:
-        # Encode query
-        # logger.trace(f"Encoding query: {q}")
-        query_embedding = model.encode(
-            [model.get_detailed_instruct(q)],
-            dim=512,
-        )
-        if query_embedding is None:
-            logger.error("Failed to encode query")
+        embed_dim = 512
+        try:
+            embeddings = paper_data.get("embeddings")
+            if hasattr(embeddings, "shape") and len(embeddings.shape) >= 2:
+                embed_dim = int(embeddings.shape[1])
+        except Exception:
+            embed_dim = 512
+        query_vec = _get_query_embedding(q, embed_dim)
+        if query_vec is None:
+            logger.error("Semantic query embedding unavailable")
             return [], []
-        query_embedding = query_embedding.cpu().numpy()
 
-        # Calculate similarity
-        from sklearn.metrics.pairwise import cosine_similarity
-
-        similarities = cosine_similarity(query_embedding, paper_data["embeddings"])[0]
+        similarities = paper_data["embeddings"] @ query_vec  # (n_papers,)
 
         # Get top-k results
         if limit:
-            top_indices = np.argpartition(-similarities, min(limit, len(similarities) - 1))[:limit]
+            k = min(int(limit), len(similarities))
+            top_indices = np.argpartition(-similarities, min(k, len(similarities) - 1))[:k]
             top_indices = top_indices[np.argsort(-similarities[top_indices])]
         else:
             top_indices = np.argsort(-similarities)
 
         pids = [paper_data["pids"][i] for i in top_indices]
         scores = [float(similarities[i]) * 100 for i in top_indices]
+
+        if cache_key is not None:
+            SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
 
         return pids, scores
 
@@ -719,63 +1380,100 @@ def semantic_search_rank(q: str = "", limit=None):
 
 
 def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT):
-    """Hybrid search: fuse keyword and semantic search results"""
+    """
+    Hybrid search: weighted Reciprocal Rank Fusion (RRF) of keyword + semantic rankings.
+
+    - More robust than raw score normalization across heterogeneous scoring functions.
+    - semantic_weight (0..1) controls the relative contribution of semantic vs keyword ranks.
+    """
+    q = (q or "").strip()
     if not q:
         return [], [], {}
 
-    # Execute both searches in parallel
-    keyword_pids, keyword_scores = search_rank(q, limit=limit * 2 if limit else None)
-    semantic_pids, semantic_scores = semantic_search_rank(q, limit=limit * 2 if limit else None)
+    try:
+        cache_key = (
+            "hyb",
+            q.lower(),
+            int(limit) if limit is not None else None,
+            float(semantic_weight),
+            FEATURES_FILE_MTIME,
+            _cached_embeddings_mtime,
+        )
+        cached = SEARCH_RANK_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+    except Exception:
+        cache_key = None
 
-    # Create score mapping
-    keyword_score_map = {pid: score for pid, score in zip(keyword_pids, keyword_scores)} if keyword_pids else {}
-    semantic_score_map = {pid: score for pid, score in zip(semantic_pids, semantic_scores)} if semantic_pids else {}
+    candidate_k = None
+    if limit is not None:
+        candidate_k = min(int(limit) * 2, MAX_RESULTS)
 
-    # Fuse results
+    keyword_pids, keyword_scores = search_rank(q, limit=candidate_k)
+    semantic_pids, semantic_scores = semantic_search_rank(q, limit=candidate_k)
+
+    if not keyword_pids and not semantic_pids:
+        return [], [], {}
+    if not semantic_pids:
+        return keyword_pids[:limit] if limit else keyword_pids, keyword_scores[:limit] if limit else keyword_scores, {}
+    if not keyword_pids:
+        return (
+            semantic_pids[:limit] if limit else semantic_pids,
+            semantic_scores[:limit] if limit else semantic_scores,
+            {},
+        )
+
+    keyword_rank = {pid: i + 1 for i, pid in enumerate(keyword_pids)}
+    semantic_rank = {pid: i + 1 for i, pid in enumerate(semantic_pids)}
+
+    keyword_score_map = {pid: score for pid, score in zip(keyword_pids, keyword_scores)}
+    semantic_score_map = {pid: score for pid, score in zip(semantic_pids, semantic_scores)}
+
+    rrf_k = 60  # standard RRF constant
+    w_sem = float(np.clip(semantic_weight, 0.0, 1.0))
+    w_kw = 1.0 - w_sem
+
     combined_scores = {}
-    score_details = {}  # Save detailed score information for each paper
-
-    # Normalization parameters
-    max_keyword = max(keyword_scores) if keyword_scores else 1.0
-    max_semantic = max(semantic_scores) if semantic_scores else 1.0
-
-    # Get all involved PIDs
-    all_pids = set(keyword_pids + semantic_pids)
+    all_pids = set(keyword_rank.keys()) | set(semantic_rank.keys())
 
     for pid in all_pids:
-        keyword_score = keyword_score_map.get(pid, 0.0)
-        semantic_score = semantic_score_map.get(pid, 0.0)
+        kr = keyword_rank.get(pid)
+        sr = semantic_rank.get(pid)
+        kw_rrf = (w_kw / (rrf_k + kr)) if kr is not None else 0.0
+        sem_rrf = (w_sem / (rrf_k + sr)) if sr is not None else 0.0
+        final = kw_rrf + sem_rrf
+        combined_scores[pid] = final
 
-        # Normalize scores
-        normalized_keyword = keyword_score / max_keyword if max_keyword > 0 else 0.0
-        normalized_semantic = semantic_score / max_semantic if max_semantic > 0 else 0.0
-
-        # Calculate weighted scores
-        weighted_keyword = (1 - semantic_weight) * normalized_keyword
-        weighted_semantic = semantic_weight * normalized_semantic
-        final_score = weighted_keyword + weighted_semantic
-
-        combined_scores[pid] = final_score
-
-        # Save detailed information for display
-        score_details[pid] = {
-            "keyword_score": keyword_score,
-            "semantic_score": semantic_score,
-            "keyword_weight": 1 - semantic_weight,  # Convert to percentage
-            "semantic_weight": semantic_weight,  # Convert to percentage
-            "final_score": final_score * 100,
-        }
-
-    # Sort and limit result count
     sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
     if limit:
-        sorted_results = sorted_results[:limit]
+        sorted_results = sorted_results[: int(limit)]
 
-    # Separate PIDs and scores
     pids = [pid for pid, _ in sorted_results]
-    scores = [score * 100 for _, score in sorted_results]
+    scores = [combined_scores[pid] * 100.0 for pid in pids]
 
-    return pids, scores, score_details
+    score_details = {}
+    for pid in pids:
+        kr = keyword_rank.get(pid)
+        sr = semantic_rank.get(pid)
+        kw_rrf = (w_kw / (rrf_k + kr)) if kr is not None else 0.0
+        sem_rrf = (w_sem / (rrf_k + sr)) if sr is not None else 0.0
+        final = kw_rrf + sem_rrf
+        score_details[pid] = {
+            "keyword_score": float(keyword_score_map.get(pid, 0.0)),
+            "semantic_score": float(semantic_score_map.get(pid, 0.0)),
+            "keyword_rank": int(kr) if kr is not None else None,
+            "semantic_rank": int(sr) if sr is not None else None,
+            "keyword_rrf": float(kw_rrf),
+            "semantic_rrf": float(sem_rrf),
+            "keyword_weight": w_kw,
+            "semantic_weight": w_sem,
+            "final_score": float(final * 100.0),
+        }
+
+    result = (pids, scores, score_details)
+    if cache_key is not None:
+        SEARCH_RANK_CACHE.set(cache_key, result)
+    return result
 
 
 def enhanced_search_rank(
@@ -820,6 +1518,7 @@ def default_context():
     # any global context across all pages, e.g. related to the current user
     context = {}
     context["user"] = g.user if g.user is not None else ""
+    context["csrf_token"] = _get_or_set_csrf_token()
     return context
 
 
@@ -831,39 +1530,104 @@ def main():
     default_time_filter = ""
     default_skip_have = "no"
     default_logic = "and"
-    logger.remove()
-    logger.add(sys.stdout, level="INFO")
+    if not getattr(app, "_logger_configured", False):
+        try:
+            level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "INFO").upper()
+        except Exception:
+            level = "INFO"
+        logger.remove()
+        logger.add(sys.stdout, level=level)
+        setattr(app, "_logger_configured", True)
 
     # override variables with any provided options via the interface
-    opt_rank = request.args.get("rank", default_rank)  # rank type. search|tags|pid|time|random
-    opt_q = request.args.get("q", "")  # search request in the text box
-    opt_tags = request.args.get("tags", default_tags)  # tags to rank by if opt_rank == 'tag'
-    opt_pid = request.args.get("pid", "")  # pid to find nearest neighbors to
+    form_errors = []
+    allowed_ranks = {"search", "tags", "pid", "time", "random"}
+    allowed_logic = {"and", "or"}
+    allowed_search_modes = {"keyword", "semantic", "hybrid"}
+    allowed_skip_have = {"yes", "no"}
+
+    opt_rank = _normalize_name(request.args.get("rank", default_rank)).lower()
+    opt_q = _normalize_name(request.args.get("q", ""))
+    opt_tags = _normalize_name(request.args.get("tags", default_tags))
+    opt_pid = _normalize_name(request.args.get("pid", ""))
     opt_time_filter = request.args.get("time_filter", default_time_filter)  # number of days to filter by
-    opt_skip_have = request.args.get("skip_have", default_skip_have)  # hide papers we already have?
-    opt_logic = request.args.get("logic", default_logic)  # tags logic?
+    opt_skip_have = _normalize_name(request.args.get("skip_have", default_skip_have)).lower()
+    opt_logic = _normalize_name(request.args.get("logic", default_logic)).lower()
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
-    opt_search_mode = request.args.get("search_mode", "hybrid")  # search mode: keyword|semantic|hybrid
-    opt_semantic_weight = request.args.get(
-        "semantic_weight", str(SUMMARY_DEFAULT_SEMANTIC_WEIGHT)
-    )  # semantic weight for hybrid search
+    opt_search_mode = _normalize_name(request.args.get("search_mode", "hybrid")).lower()
+    opt_semantic_weight = request.args.get("semantic_weight", str(SUMMARY_DEFAULT_SEMANTIC_WEIGHT))
+
+    if opt_rank not in allowed_ranks:
+        form_errors.append(f"Unknown rank '{opt_rank}', using '{default_rank}'.")
+        opt_rank = default_rank
+    if opt_logic not in allowed_logic:
+        form_errors.append("Logic must be 'and' or 'or'; using default.")
+        opt_logic = default_logic
+    if opt_skip_have not in allowed_skip_have:
+        form_errors.append("Skip seen must be 'yes' or 'no'; using default.")
+        opt_skip_have = default_skip_have
+    if opt_search_mode not in allowed_search_modes:
+        form_errors.append("Search mode must be keyword, semantic, or hybrid; using hybrid.")
+        opt_search_mode = "hybrid"
 
     # if a query is given, override rank to be of type "search"
     # this allows the user to simply hit ENTER in the search field and have the correct thing happen
     if opt_q:
         opt_rank = "search"
 
+    # Parse time filter (days)
+    opt_time_filter = (opt_time_filter or "").strip()
+    time_filter_provided = bool(opt_time_filter)
+    time_filter_invalid = False
+    if opt_time_filter:
+        try:
+            parsed_time_filter = float(opt_time_filter)
+        except Exception:
+            time_filter_invalid = True
+            opt_time_filter = ""
+        else:
+            if parsed_time_filter <= 0:
+                time_filter_invalid = True
+                opt_time_filter = ""
+
     # if using svm_rank (tags or pid) and no time filter is specified, default to 365 days
     if opt_rank in ["tags", "pid"] and not opt_time_filter:
+        if time_filter_provided:
+            form_errors.append("Invalid time filter; using default 365 days for tag/pid ranking.")
         opt_time_filter = "365"
-        # logger.trace(f"Applied default 365-day time filter for SVM ranking ({opt_rank})")
+    elif time_filter_invalid:
+        form_errors.append("Time filter must be a positive number; ignoring it.")
 
     # try to parse opt_svm_c into something sensible (a float)
-    try:
-        C = float(opt_svm_c)
-    except ValueError:
-        C = 0.02  # sensible default, i think
+    opt_svm_c = (opt_svm_c or "").strip()
+    if opt_svm_c:
+        try:
+            C = float(opt_svm_c)
+        except Exception:
+            C = SVM_C
+            form_errors.append(f"SVM C must be a positive number; using default {C}.")
+        else:
+            if C <= 0:
+                C = SVM_C
+                form_errors.append(f"SVM C must be a positive number; using default {C}.")
+    else:
+        C = SVM_C
+
+    # parse semantic weight (0..1)
+    semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+    opt_semantic_weight = (opt_semantic_weight or "").strip()
+    if opt_semantic_weight:
+        try:
+            semantic_weight = float(opt_semantic_weight)
+        except Exception:
+            form_errors.append("Semantic weight must be between 0 and 1; using default.")
+            semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+        else:
+            if semantic_weight < 0 or semantic_weight > 1:
+                form_errors.append("Semantic weight must be between 0 and 1; using default.")
+                semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+    opt_semantic_weight = str(semantic_weight)
 
     # Calculate required number of results (considering pagination and possible need for more results after filtering)
     try:
@@ -896,11 +1660,6 @@ def main():
     if opt_rank == "search":
         t_s = time.time()
         # Use enhanced search function
-        try:
-            semantic_weight = float(opt_semantic_weight)
-        except ValueError:
-            semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
-
         if opt_search_mode == "hybrid":
             pids, scores, score_details = enhanced_search_rank(
                 q=opt_q, limit=dynamic_limit, search_mode=opt_search_mode, semantic_weight=semantic_weight
@@ -914,24 +1673,20 @@ def main():
         )
     elif opt_rank == "tags":
         t_s = time.time()
-        pids, scores, words = svm_rank(tags=opt_tags, C=C, logic=opt_logic, time_filter=opt_time_filter)
+        pids, scores, words = svm_rank(
+            tags=opt_tags, C=C, logic=opt_logic, time_filter=opt_time_filter, limit=dynamic_limit
+        )
         logger.info(
             f"User {g.user} tags {opt_tags} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
         )
-        # SVM results are usually already sorted, trim early
-        if len(pids) > dynamic_limit:
-            pids = pids[:dynamic_limit]
-            scores = scores[:dynamic_limit]
     elif opt_rank == "pid":
         t_s = time.time()
-        pids, scores, words = svm_rank(s_pids=opt_pid, C=C, logic=opt_logic, time_filter=opt_time_filter)
+        pids, scores, words = svm_rank(
+            s_pids=opt_pid, C=C, logic=opt_logic, time_filter=opt_time_filter, limit=dynamic_limit
+        )
         logger.info(
             f"User {g.user} pid {opt_pid} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
         )
-        # SVM results are usually already sorted, trim early
-        if len(pids) > dynamic_limit:
-            pids = pids[:dynamic_limit]
-            scores = scores[:dynamic_limit]
     elif opt_rank == "time":
         t_s = time.time()
         pids, scores = time_rank(limit=dynamic_limit)
@@ -962,6 +1717,13 @@ def main():
         keep = [i for i, pid in enumerate(pids) if pid not in have]
         pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
 
+    total_count = len(pids)
+    max_pages = max(1, (total_count + RET_NUM - 1) // RET_NUM) if total_count else 1
+    page_adjusted = False
+    if page_number > max_pages:
+        page_number = max_pages
+        page_adjusted = True
+
     # Pagination processing (page_number already calculated above)
     start_index = (page_number - 1) * RET_NUM  # desired starting index
     end_index = min(start_index + RET_NUM, len(pids))  # desired ending index
@@ -971,7 +1733,20 @@ def main():
     # logger.trace(f"Final pagination: start={start_index}, end={end_index}, got {len(pids)} papers")
 
     # render all papers to just the information we need for the UI
-    papers = [render_pid(pid) for pid in pids]
+    pid_to_utags = None
+    if g.user:
+        try:
+            user_tags = get_tags()
+            pid_set = set(pids)
+            pid_to_utags = {pid: [] for pid in pid_set}
+            for tag, tag_pids in user_tags.items():
+                for pid in pid_set.intersection(tag_pids):
+                    pid_to_utags[pid].append(tag)
+        except Exception:
+            pid_to_utags = None
+
+    pid_to_paper = get_papers_bulk(pids)
+    papers = [render_pid(pid, pid_to_utags=pid_to_utags, paper=pid_to_paper.get(pid)) for pid in pids]
     for i, p in enumerate(papers):
         p["weight"] = float(scores[i])
 
@@ -980,16 +1755,12 @@ def main():
             pid = p["id"]
             if pid in score_details:
                 details = score_details[pid]
-                # Format display: A: {(1 - semantic_weight)} Keyword {Score} + {semantic_weight} Semantic {Score}
-                try:
-                    semantic_weight = float(opt_semantic_weight)
-                except ValueError:
-                    semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
-
                 keyword_weight = 1 - semantic_weight
+                kw_rank = details.get("keyword_rank")
+                sem_rank = details.get("semantic_rank")
                 p["score_breakdown"] = (
-                    f"{keyword_weight:.1f} Keyword {details['keyword_score']:.2f} + "
-                    f"{semantic_weight:.1f} Semantic {details['semantic_score']:.2f}"
+                    f"{keyword_weight:.1f} kw#{kw_rank if kw_rank is not None else '-'} {details['keyword_score']:.1f} + "
+                    f"{semantic_weight:.1f} sem#{sem_rank if sem_rank is not None else '-'} {details['semantic_score']:.1f}"
                 )
 
     # build the current tags for the user, and append the special 'all' tag
@@ -1007,6 +1778,7 @@ def main():
 
     # build the page context information and render
     context = default_context()
+    context["form_errors"] = form_errors
     context["papers"] = papers
     context["words"] = words
 
@@ -1033,6 +1805,8 @@ def main():
     context["gvars"]["search_query"] = opt_q
     context["gvars"]["svm_c"] = str(C)
     context["gvars"]["page_number"] = str(page_number)
+    context["page_adjusted"] = page_adjusted
+    context["max_pages"] = max_pages
     context["gvars"]["search_mode"] = opt_search_mode
     context["gvars"]["semantic_weight"] = opt_semantic_weight
     context["show_score_breakdown"] = opt_rank == "search" and opt_search_mode == "hybrid"
@@ -1046,9 +1820,8 @@ def main():
 def inspect():
     # fetch the paper of interest based on the pid
     pid = request.args.get("pid", "")
-    pdb = get_papers()
-    if pid not in pdb:
-        return "error, malformed pid"  # todo: better error handling
+    if not paper_exists(pid):
+        return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
@@ -1057,7 +1830,11 @@ def inspect():
     x = features.get("x_tfidf", features["x"])
     idf = features["idf"]
     ivocab = {v: k for k, v in features["vocab"].items()}
-    pix = features["pids"].index(pid)
+    pid_to_index = features.get("pid_to_index")
+    if isinstance(pid_to_index, dict) and pid in pid_to_index:
+        pix = pid_to_index[pid]
+    else:
+        pix = features["pids"].index(pid)
     wixs = np.flatnonzero(np.asarray(x[pix].todense()))
     words = []
     for ix in wixs:
@@ -1091,17 +1868,18 @@ def summary():
     # Get paper ID
     pid = request.args.get("pid", "")
     logger.info(f"show paper summary page for paper {pid}")
-    pdb = get_papers()
-    if pid not in pdb:
+    raw_pid, _ = _split_pid_version(pid)
+    if not paper_exists(raw_pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
     # Get basic paper information
-    paper = render_pid(pid)
+    paper = render_pid(raw_pid)
 
     # Build page context, don't call get_paper_summary here
     context = default_context()
     context["paper"] = paper
-    context["pid"] = pid  # Pass pid to frontend for async summary retrieval
+    context["pid"] = pid  # Preserve versioned pid if provided
+    context["default_summary_model"] = LLM_NAME or ""
     # Add paper name to page title
     context["title"] = f"Paper Summary - {paper['title']}"
     return render_template("summary.html", **context)
@@ -1113,6 +1891,54 @@ def api_get_paper_summary():
     API endpoint: Get paper summary asynchronously
     """
     try:
+        _csrf_protect()
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+
+        pid = data.get("pid", "").strip()
+        model = (data.get("model") or "").strip()
+        if not model:
+            model = (LLM_NAME or "").strip()
+        if not model:
+            return jsonify({"success": False, "error": "Model is required"}), 400
+        force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
+        cache_only = bool(data.get("cache_only", False))
+        if not pid:
+            return jsonify({"success": False, "error": "Paper ID is required"}), 400
+
+        logger.info(f"Getting paper summary for: {pid}")
+
+        # Check if paper exists
+        raw_pid, _ = _split_pid_version(pid)
+        if not paper_exists(raw_pid):
+            return jsonify({"success": False, "error": "Paper not found"}), 404
+
+        # Generate paper summary and meta
+        summary_content, summary_meta = generate_paper_summary(
+            pid, model=model, force_refresh=force_regen, cache_only=cache_only
+        )
+
+        return jsonify(
+            {
+                "success": True,
+                "pid": pid,
+                "summary_content": summary_content,
+                "summary_meta": _public_summary_meta(summary_meta),
+            }
+        )
+
+    except SummaryCacheMiss as e:
+        return jsonify({"success": False, "error": str(e), "code": "summary_cache_miss"}), 404
+    except Exception as e:
+        logger.error(f"Paper summary API error: {e}")
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+
+
+@app.route("/api/clear_paper_cache", methods=["POST"])
+def api_clear_paper_cache():
+    try:
+        _csrf_protect()
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "No JSON data provided"}), 400
@@ -1121,82 +1947,482 @@ def api_get_paper_summary():
         if not pid:
             return jsonify({"success": False, "error": "Paper ID is required"}), 400
 
-        logger.info(f"Getting paper summary for: {pid}")
-
-        # Check if paper exists
-        pdb = get_papers()
-        if pid not in pdb:
+        raw_pid, _ = _split_pid_version(pid)
+        if not paper_exists(raw_pid):
             return jsonify({"success": False, "error": "Paper not found"}), 404
 
-        # Generate paper summary - currently returns placeholder
-        summary_content = generate_paper_summary(pid)
-
-        return jsonify({"success": True, "pid": pid, "summary_content": summary_content})
+        _clear_paper_cache(pid)
+        return jsonify({"success": True, "pid": pid})
 
     except Exception as e:
-        logger.error(f"Paper summary API error: {e}")
+        logger.error(f"Failed to clear paper cache: {e}")
         return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
 
 
-def generate_paper_summary(pid: str) -> str:
+@app.route("/api/llm_models", methods=["GET"])
+def api_llm_models():
+    try:
+        base_url = (LLM_BASE_URL or "").rstrip("/")
+        if not base_url:
+            models = [{"id": LLM_NAME}] if LLM_NAME else []
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "LLM base URL is not configured",
+                    "models": models,
+                }
+            )
+
+        headers = {}
+        if LLM_API_KEY:
+            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        models = []
+        for item in payload.get("data", []):
+            mid = item.get("id")
+            if mid:
+                models.append(item)
+        if not models and LLM_NAME:
+            models = [{"id": LLM_NAME}]
+        return jsonify({"success": True, "models": models})
+    except Exception as e:
+        logger.error(f"Failed to fetch LLM models: {e}")
+        models = [{"id": LLM_NAME}] if LLM_NAME else []
+        return jsonify({"success": False, "error": "Failed to load model list", "models": models})
+
+
+def _summary_retry_seconds() -> float:
+    try:
+        hours = float(os.environ.get("ARXIV_SANITY_SUMMARY_RETRY_HOURS", "24"))
+    except Exception:
+        hours = 24.0
+    return max(0.0, hours) * 3600.0
+
+
+def _summary_lock_stale_seconds() -> float:
+    try:
+        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "3600"))
+    except Exception:
+        seconds = 3600.0
+    return max(0.0, seconds)
+
+
+def _is_lock_stale(lock_path: Path, stale_s: float) -> bool:
+    if stale_s <= 0:
+        return False
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return age > stale_s
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    _atomic_write_text(path, json.dumps(data))
+
+
+def _summary_quality(summary_content: str):
+    lang = (LLM_SUMMARY_LANG or "").strip().lower()
+    if lang.startswith("zh"):
+        ratio = calculate_chinese_ratio(summary_content)
+        quality = "ok" if ratio >= SUMMARY_MIN_CHINESE_RATIO else "low_chinese"
+        return quality, ratio
+    return "ok", None
+
+
+_PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
+
+
+def _split_pid_version(pid: str):
+    pid = (pid or "").strip()
+    match = _PID_VERSION_RE.match(pid)
+    if not match:
+        return pid, None
+    raw_pid = match.group("raw")
+    try:
+        version = int(match.group("ver"))
+    except Exception:
+        return raw_pid, None
+    return raw_pid, version
+
+
+def _resolve_cache_pid(pid: str):
+    raw_pid, explicit_version = _split_pid_version(pid)
+    if explicit_version:
+        return pid, raw_pid, True
+
+    meta = get_metas().get(raw_pid) if raw_pid else None
+    if isinstance(meta, dict):
+        version = meta.get("_version")
+        if version is not None:
+            try:
+                return f"{raw_pid}v{int(version)}", raw_pid, False
+            except Exception:
+                pass
+    return raw_pid, raw_pid, False
+
+
+def _model_cache_key(model: Optional[str]) -> str:
+    model = (model or "").strip()
+    if not model:
+        raise ValueError("Model name is required for summary caching")
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", model)
+    if not cleaned:
+        raise ValueError("Model name is invalid for summary caching")
+    return cleaned
+
+
+def _summary_cache_paths(cache_pid: str, model: Optional[str]):
+    base_dir = Path(SUMMARY_DIR) / cache_pid
+    model_key = _model_cache_key(model)
+    cache_file = base_dir / f"{model_key}.md"
+    meta_file = base_dir / f"{model_key}.meta.json"
+    lock_file = base_dir / f".{model_key}.lock"
+
+    legacy_cache = Path(SUMMARY_DIR) / f"{cache_pid}.md"
+    legacy_meta = Path(SUMMARY_DIR) / f"{cache_pid}.meta.json"
+    legacy_lock = Path(SUMMARY_DIR) / f".{cache_pid}.lock"
+    return cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock
+
+
+def _normalize_summary_source(source: str) -> str:
+    src = (source or "").strip().lower()
+    if src not in {"html", "mineru"}:
+        return "html"
+    return src
+
+
+def _summary_source_matches(meta: dict, summary_source: str) -> bool:
+    cached_source = (meta.get("source") or "mineru").strip().lower()
+    if cached_source not in {"html", "mineru"}:
+        cached_source = "mineru"
+    return cached_source == summary_source
+
+
+def _read_summary_meta(meta_path: Path) -> dict:
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_summary_meta(meta_path: Path, data: dict) -> None:
+    try:
+        _atomic_write_json(meta_path, data)
+    except Exception as e:
+        logger.warning(f"Failed to write summary meta: {e}")
+
+
+def _public_summary_meta(meta: dict) -> dict:
+    """Filter summary metadata for client responses."""
+    if not isinstance(meta, dict):
+        return {}
+    allowed = ("updated_at", "generated_at", "quality", "source", "chinese_ratio", "model")
+    return {key: meta.get(key) for key in allowed if meta.get(key) is not None}
+
+
+def _normalize_summary_result(result):
+    if isinstance(result, dict):
+        content = result.get("content") or ""
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    else:
+        content = result if isinstance(result, str) else str(result or "")
+        meta = {}
+    return content, meta
+
+
+def _sanitize_summary_meta(meta: dict) -> dict:
+    if not isinstance(meta, dict):
+        return {}
+    clean = dict(meta)
+    clean.pop("prompt", None)
+    return clean
+
+
+class SummaryCacheMiss(Exception):
+    pass
+
+
+def _acquire_summary_lock(lock_path: Path, timeout_s: int = 300):
+    start_time = time.time()
+    stale_s = _summary_lock_stale_seconds()
+    while time.time() - start_time < timeout_s:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+            return fd
+        except FileExistsError:
+            if _is_lock_stale(lock_path, stale_s):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    logger.warning(f"Removed stale summary lock: {lock_path}")
+                    continue
+                except Exception:
+                    pass
+            time.sleep(0.2)
+    return None
+
+
+def _release_summary_lock(fd, lock_path: Path):
+    try:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to release summary lock: {e}")
+
+
+def generate_paper_summary(
+    pid: str, model: Optional[str] = None, force_refresh: bool = False, cache_only: bool = False
+):
     """
     Generate paper summary with intelligent caching mechanism
-    1. Check if data/summary/{pid}.md exists
-    2. If exists, return cached summary
+    1. Check if SUMMARY_DIR/{pid}.md exists
+    2. If exists, return cached summary (unless force_refresh=True)
     3. If not exists, call paper_summarizer to generate and cache the summary
     """
     try:
-        pdb = get_papers()
-        if pid not in pdb:
-            return "# Error\n\nPaper not found."
+        cache_pid, raw_pid, has_explicit_version = _resolve_cache_pid(pid)
+        if not paper_exists(raw_pid):
+            return "# Error\n\nPaper not found.", {}
+
+        summary_source = _normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
 
         # Define cache file path
-        cache_dir = Path("data/summary")
-        cache_file = cache_dir / f"{pid}.md"
+        cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = _summary_cache_paths(
+            cache_pid, model
+        )
+        if legacy_cache.exists() and not cache_file.exists():
+            lock_file = legacy_lock
+        retry_seconds = _summary_retry_seconds()
 
         # Ensure cache directory exists
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Check if cached summary exists
-        if cache_file.exists():
-            logger.info(f"Using cached paper summary: {pid}")
+        def _read_from_paths(body_path: Path, meta_path: Path, inject_model: bool = True):
+            if not body_path.exists():
+                return None, {}
             try:
-                with open(cache_file, encoding="utf-8") as f:
-                    cached_summary = f.read()
-                if cached_summary.strip():
-                    return cached_summary
-                else:
-                    logger.warning(f"Cache file is empty, regenerating summary: {pid}")
+                with open(body_path, encoding="utf-8") as f:
+                    cached = f.read()
+                cached = cached if cached.strip() else None
+                meta = _read_summary_meta(meta_path)
+                if "generated_at" not in meta and "updated_at" in meta:
+                    meta["generated_at"] = meta.get("updated_at")
+                if meta and "source" not in meta:
+                    meta["source"] = summary_source
+                if meta and "model" not in meta and model and inject_model:
+                    meta["model"] = model
+                if not cached:
+                    return None, {}
+                return cached, meta
             except Exception as e:
                 logger.error(f"Failed to read cached summary: {e}")
+                return None, {}
 
-        # Generate new summary using paper_summarizer module
-        logger.info(f"Generating new paper summary: {pid}")
-        summary_content = generate_paper_summary_from_module(pid)
+        def _read_cached_summary():
+            cached, meta = _read_from_paths(cache_file, meta_file)
+            if cached:
+                return cached, meta
 
-        # Only cache successful summaries (not error messages)
-        if not summary_content.startswith("# Error"):
-            # Check Chinese ratio before caching
-            chinese_ratio = calculate_chinese_ratio(summary_content)
-            logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
+            legacy_cached, legacy_meta_data = _read_from_paths(legacy_cache, legacy_meta, inject_model=False)
+            if not legacy_cached:
+                return None, {}
 
-            if chinese_ratio >= SUMMARY_MIN_CHINESE_RATIO:
+            legacy_model = (legacy_meta_data.get("model") or "").strip()
+            if model and (not legacy_model or legacy_model != model):
+                return None, {}
+            return legacy_cached, legacy_meta_data
+
+        def _should_retry_low_quality(meta: dict) -> bool:
+            if retry_seconds <= 0:
+                return False
+            try:
+                updated_at = float(meta.get("updated_at", 0.0))
+            except Exception:
+                updated_at = 0.0
+            return (time.time() - updated_at) >= retry_seconds
+
+        def _matches_requested_model(meta: dict) -> bool:
+            if not model:
+                return False
+            cached_model = (meta.get("model") or "").strip()
+            return cached_model == model
+
+        # Check if cached summary exists (must match current markdown source)
+        cached_summary, cached_meta = _read_cached_summary()
+        if cached_summary and not force_refresh:
+            if not _summary_source_matches(cached_meta, summary_source):
+                cached_summary = None
+            elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
+                logger.info(f"Using cached paper summary: {pid}")
+                if model:
+                    cached_meta.setdefault("model", model)
+                return cached_summary, _sanitize_summary_meta(cached_meta)
+        elif cached_summary and force_refresh and _summary_source_matches(cached_meta, summary_source):
+            if _matches_requested_model(cached_meta):
+                logger.info(f"Using cached paper summary (model match): {pid}")
+                cached_meta.setdefault("model", model)
+                return cached_summary, _sanitize_summary_meta(cached_meta)
+
+        if cache_only:
+            raise SummaryCacheMiss("Summary cache not found")
+
+        lock_fd = _acquire_summary_lock(lock_file, timeout_s=300)
+        if lock_fd is None:
+            if cached_summary and not force_refresh:
+                if model:
+                    cached_meta.setdefault("model", model)
+                return cached_summary, _sanitize_summary_meta(cached_meta)
+            return "# Error\n\nSummary is being generated, please retry shortly.", {}
+
+        try:
+            cached_summary, cached_meta = _read_cached_summary()
+            if cached_summary and not force_refresh:
+                if not _summary_source_matches(cached_meta, summary_source):
+                    cached_summary = None
+                elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
+                    logger.info(f"Using cached paper summary after lock: {pid}")
+                    if model:
+                        cached_meta.setdefault("model", model)
+                    return cached_summary, _sanitize_summary_meta(cached_meta)
+            elif cached_summary and force_refresh and _summary_source_matches(cached_meta, summary_source):
+                if _matches_requested_model(cached_meta):
+                    logger.info(f"Using cached paper summary after lock (model match): {pid}")
+                    if model:
+                        cached_meta.setdefault("model", model)
+                    return cached_summary, _sanitize_summary_meta(cached_meta)
+
+            if cache_only:
+                raise SummaryCacheMiss("Summary cache not found")
+
+            # Generate new summary using paper_summarizer module
+            logger.info(f"Generating new paper summary: {pid}")
+            if summary_source == "html":
+                pid_for_summary = pid if has_explicit_version else cache_pid
+            else:
+                pid_for_summary = pid if has_explicit_version else raw_pid
+
+            summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
+            summary_content, summary_meta = _normalize_summary_result(summary_result)
+            summary_meta = summary_meta if isinstance(summary_meta, dict) else {}
+            if model and "model" not in summary_meta:
+                summary_meta["model"] = model
+            response_meta = _sanitize_summary_meta(summary_meta)
+
+            # Only cache successful summaries (not error messages)
+            if not summary_content.startswith("# Error"):
+                quality, chinese_ratio = _summary_quality(summary_content)
+                if chinese_ratio is not None:
+                    logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
+
                 try:
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        f.write(summary_content)
-                    logger.info(f"Paper summary cached to: {cache_file} (Chinese ratio: {chinese_ratio:.2%})")
+                    _atomic_write_text(cache_file, summary_content)
+                    meta = {
+                        "updated_at": time.time(),
+                        "quality": quality,
+                        "source": summary_source,
+                    }
+                    meta.update(summary_meta)
+                    if model:
+                        meta.setdefault("model", model)
+                    if chinese_ratio is not None:
+                        meta["chinese_ratio"] = chinese_ratio
+                    if "generated_at" not in meta:
+                        meta["generated_at"] = meta.get("updated_at")
+                    _write_summary_meta(meta_file, meta)
+                    if quality == "ok":
+                        logger.info(f"Paper summary cached to: {cache_file}")
+                    else:
+                        logger.warning(
+                            f"Summary Chinese ratio too low ({chinese_ratio:.2%} < {SUMMARY_MIN_CHINESE_RATIO:.0%}); cached with retry"
+                        )
+                    response_meta = _sanitize_summary_meta(meta)
                 except Exception as e:
                     logger.error(f"Failed to cache paper summary: {e}")
             else:
-                logger.warning(f"Summary Chinese ratio too low ({chinese_ratio:.2%} < 50%), not caching: {pid}")
-        else:
-            logger.warning(f"Summary generation failed, not caching: {pid}")
+                logger.warning(f"Summary generation failed, not caching: {pid}")
 
-        return summary_content
+            return summary_content, response_meta
+        finally:
+            _release_summary_lock(lock_fd, lock_file)
 
+    except SummaryCacheMiss:
+        raise
     except Exception as e:
         logger.error(f"Error occurred while generating paper summary: {e}")
-        return f"# Error\n\nFailed to generate summary: {str(e)}"
+        return f"# Error\n\nFailed to generate summary: {str(e)}", {}
+
+
+def _clear_paper_cache(pid: str):
+    cache_pid, raw_pid, _ = _resolve_cache_pid(pid)
+    ids_to_clear = {cache_pid, raw_pid}
+
+    # Clear summary caches (all models) including legacy flat files
+    for paper_id in ids_to_clear:
+        summary_dir = Path(SUMMARY_DIR) / paper_id
+        if summary_dir.exists():
+            try:
+                shutil.rmtree(summary_dir)
+            except Exception as e:
+                logger.warning(f"Failed to remove summary cache dir {summary_dir}: {e}")
+
+        legacy_md = Path(SUMMARY_DIR) / f"{paper_id}.md"
+        legacy_meta = Path(SUMMARY_DIR) / f"{paper_id}.meta.json"
+        legacy_lock = Path(SUMMARY_DIR) / f".{paper_id}.lock"
+        for path in (legacy_md, legacy_meta, legacy_lock):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Failed to remove legacy summary cache {path}: {e}")
+
+    # Clear parsed HTML/markdown caches
+    html_dir = Path(DATA_DIR) / "html_md"
+    for paper_id in ids_to_clear:
+        for suffix in (".md", ".meta.json"):
+            try:
+                (html_dir / f"{paper_id}{suffix}").unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Failed to remove html cache {paper_id}{suffix}: {e}")
+
+    # Clear minerU outputs
+    mineru_dir = Path(DATA_DIR) / "mineru"
+    for paper_id in ids_to_clear:
+        target_dir = mineru_dir / paper_id
+        if target_dir.exists():
+            try:
+                shutil.rmtree(target_dir)
+            except Exception as e:
+                logger.warning(f"Failed to remove minerU cache {target_dir}: {e}")
+
+    # Clear downloaded PDFs
+    pdf_dir = Path(DATA_DIR) / "pdfs"
+    for paper_id in ids_to_clear:
+        try:
+            (pdf_dir / f"{paper_id}.pdf").unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Failed to remove cached PDF for {paper_id}: {e}")
 
 
 @app.route("/profile")
@@ -1212,12 +2438,11 @@ def profile():
 def stats():
     context = default_context()
     mdb = get_metas()
-    kv = {k: v for k, v in mdb.items()}  # read all of metas to memory at once, for efficiency
-    times = [v["_time"] for v in kv.values()]
+    times = [v["_time"] for v in mdb.values()]
     tstr = lambda t: time.strftime("%b %d %Y", time.localtime(t))
 
-    context["num_papers"] = len(kv)
-    if len(kv) > 0:
+    context["num_papers"] = len(mdb)
+    if len(mdb) > 0:
         context["earliest_paper"] = tstr(min(times))
         context["latest_paper"] = tstr(max(times))
     else:
@@ -1303,18 +2528,31 @@ def api_keyword_search():
         if not keyword:
             return jsonify({"error": "Keyword is required"}), 400
 
+        try:
+            limit = min(int(limit), MAX_RESULTS)
+        except Exception:
+            limit = 50
+        if limit <= 0:
+            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+        try:
+            time_delta = float(time_delta)
+        except Exception:
+            return jsonify({"error": "time_delta must be a number"}), 400
+
         # Use enhanced search
-        pids, scores = enhanced_search_rank(
-            q=keyword, limit=limit * 5, search_mode="keyword"  # Get more because time filtering is needed
-        )
+        search_limit = min(limit * 5, MAX_RESULTS)  # Get more because time filtering is needed
+        pids, scores = enhanced_search_rank(q=keyword, limit=search_limit, search_mode="keyword")
 
         # Apply time filtering
         if time_delta:
             mdb = get_metas()
-            kv = {k: v for k, v in mdb.items()}
             tnow = time.time()
-            deltat = float(time_delta) * 60 * 60 * 24
-            keep = [i for i, pid in enumerate(pids) if pid in kv and (tnow - kv[pid]["_time"]) < deltat]
+            deltat = time_delta * 60 * 60 * 24
+            keep = [
+                i
+                for i, pid in enumerate(pids)
+                if (meta := mdb.get(pid)) is not None and (tnow - meta["_time"]) < deltat
+            ]
             pids = [pids[i] for i in keep]
             scores = [scores[i] for i in keep]
 
@@ -1349,60 +2587,42 @@ def api_tag_search():
             return jsonify({"error": "tag_name is required"}), 400
         if not user:
             return jsonify({"error": "user is required"}), 400
-
-        # Get user's tag data
-        with get_tags_db() as tags_db:
-            user_tags = tags_db.get(user, {})
-
-        # Check if user has this tag
-        if tag_name not in user_tags or len(user_tags[tag_name]) == 0:
-            logger.warning(f"User {user} has no papers tagged with '{tag_name}'")
-            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
-
-        logger.trace(f"User {user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
-
-        # Temporarily set g.user and g._tags to make svm_rank work correctly
-        original_user = getattr(g, "user", None)
-        original_tags = getattr(g, "_tags", None)
-
-        g.user = user
-        g._tags = user_tags
-
         try:
+            limit = min(int(limit), MAX_RESULTS)
+        except Exception:
+            return jsonify({"error": "limit must be an integer"}), 400
+        if limit <= 0:
+            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+        try:
+            time_delta = float(time_delta)
+        except Exception:
+            return jsonify({"error": "time_delta must be a number"}), 400
+
+        with _temporary_user_context(user) as user_tags:
+            # Check if user has this tag
+            if tag_name not in user_tags or len(user_tags[tag_name]) == 0:
+                logger.warning(f"User {user} has no papers tagged with '{tag_name}'")
+                return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+
+            logger.trace(f"User {user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
+
             # Use tag name for recommendation
+            try:
+                svm_limit = min(int(limit) * 5, MAX_RESULTS)
+            except Exception:
+                svm_limit = MAX_RESULTS
+
             rec_pids, rec_scores, words = svm_rank(
-                tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta)
+                tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta), limit=svm_limit
             )
 
             logger.trace(f"svm_rank returned {len(rec_pids)} results before filtering")
 
-            # Get papers already tagged by this user for this tag, for exclusion
-            if tag_name in user_tags:
-                tagged_pids = user_tags[tag_name]
-                tagged_set = set(tagged_pids)
-                logger.trace(f"User has {len(tagged_set)} papers tagged with '{tag_name}'")
-
-                # Calculate intersection of recommendation results and already tagged papers
-                intersection = [pid for pid in rec_pids if pid in tagged_set]
-                logger.trace(f"Found {len(intersection)} recommended papers that are already tagged")
-
+            tagged_set = set(user_tags.get(tag_name, set()))
+            if tagged_set:
                 keep = [i for i, pid in enumerate(rec_pids) if pid not in tagged_set]
                 rec_pids = [rec_pids[i] for i in keep]
                 rec_scores = [rec_scores[i] for i in keep]
-
-                logger.trace(f"After filtering out tagged papers: {len(rec_pids)} papers remain")
-        finally:
-            # Restore original g.user and g._tags
-            if original_user is not None:
-                g.user = original_user
-            else:
-                if hasattr(g, "user"):
-                    delattr(g, "user")
-            if original_tags is not None:
-                g._tags = original_tags
-            else:
-                if hasattr(g, "_tags"):
-                    delattr(g, "_tags")
 
         # Limit result count
         if len(rec_pids) > limit:
@@ -1436,54 +2656,44 @@ def api_tags_search():
             return jsonify({"error": "Tags list is required"}), 400
         if not user:
             return jsonify({"error": "user is required"}), 400
-
-        # Get user's tag data
-        with get_tags_db() as tags_db:
-            user_tags = tags_db.get(user, {})
-
-        # Check if user has any of the tags
-        valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
-        if not valid_tags:
-            logger.warning(f"User {user} has no papers tagged with any of {tags_list}")
-            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
-
-        # Convert tag list to comma-separated string
-        tags_str = ",".join(valid_tags)
-
-        # Temporarily set g.user and g._tags to make svm_rank work correctly
-        original_user = getattr(g, "user", None)
-        original_tags = getattr(g, "_tags", None)
-
-        g.user = user
-        g._tags = user_tags
-
         try:
-            # Use SVM recommendation
+            limit = min(int(limit), MAX_RESULTS)
+        except Exception:
+            return jsonify({"error": "limit must be an integer"}), 400
+        if limit <= 0:
+            return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+        try:
+            time_delta = float(time_delta)
+        except Exception:
+            return jsonify({"error": "time_delta must be a number"}), 400
+
+        with _temporary_user_context(user) as user_tags:
+            # Check if user has any of the tags
+            valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
+            if not valid_tags:
+                logger.warning(f"User {user} has no papers tagged with any of {tags_list}")
+                return jsonify({"success": True, "pids": [], "scores": [], "total_count": 0})
+
+            # Convert tag list to comma-separated string
+            tags_str = ",".join(valid_tags)
+
+            try:
+                svm_limit = min(int(limit) * 5, MAX_RESULTS)
+            except Exception:
+                svm_limit = MAX_RESULTS
+
             rec_pids, rec_scores, words = svm_rank(
-                tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta)
+                tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta), limit=svm_limit
             )
 
-            # Get all tagged papers for all related tags of this user, for exclusion
+            # Exclude papers already tagged by the user under any of the involved tags
             all_tagged = set()
             for tag in valid_tags:
-                if tag in user_tags:
-                    all_tagged.update(user_tags[tag])
+                all_tagged.update(user_tags.get(tag, set()))
 
             keep = [i for i, pid in enumerate(rec_pids) if pid not in all_tagged]
             rec_pids = [rec_pids[i] for i in keep]
             rec_scores = [rec_scores[i] for i in keep]
-        finally:
-            # Restore original g.user and g._tags
-            if original_user is not None:
-                g.user = original_user
-            else:
-                if hasattr(g, "user"):
-                    delattr(g, "user")
-            if original_tags is not None:
-                g._tags = original_tags
-            else:
-                if hasattr(g, "_tags"):
-                    delattr(g, "_tags")
 
         # Limit result count
         if len(rec_pids) > limit:
@@ -1502,6 +2712,8 @@ def api_tags_search():
 @app.route("/cache_status")
 def cache_status():
     """Debug endpoint to display cache status"""
+    if not _truthy_env("ARXIV_SANITY_ENABLE_CACHE_STATUS", "0"):
+        abort(404)
     if not g.user:
         return "Access denied"
 
@@ -1518,7 +2730,7 @@ def cache_status():
             response = requests.get(f"http://localhost:{port}/health", timeout=2)
             is_available = response.status_code == 200
             if is_available:
-                logger.trace(f"{service_name} is available (status: {response.status_code})")
+                logger.success(f"{service_name} is available (status: {response.status_code})")
             else:
                 logger.warning(f"{service_name} returned non-200 status: {response.status_code}")
             return {
@@ -1602,21 +2814,50 @@ def cache_status():
     else:
         status["papers_and_metas"]["db_file_exists"] = False
 
-    return status
+    return jsonify(status)
 
 
 # -----------------------------------------------------------------------------
 # tag related endpoints: add, delete tags for any paper
 
 
-@app.route("/add/<pid>/<tag>")
+@app.route("/add_tag/<tag>", methods=["POST"])
+def add_tag(tag=None):
+    if g.user is None:
+        return "error, not logged in"
+    _csrf_protect()
+    tag = _normalize_name(tag)
+    err = _validate_tag_name(tag)
+    if err:
+        return err
+
+    with get_tags_db(flag="c") as tags_db:
+        if g.user not in tags_db:
+            tags_db[g.user] = {}
+
+        d = tags_db[g.user]
+        if tag in d:
+            return "user has repeated tag"
+
+        d[tag] = set()
+        tags_db[g.user] = d
+
+    logger.info(f"added empty tag {tag} for user {g.user}")
+    return "ok"
+
+
+@app.route("/add/<pid>/<tag>", methods=["GET", "POST"])
 def add(pid=None, tag=None):
     if g.user is None:
         return "error, not logged in"
-    if tag == "all":
-        return "error, cannot add the protected tag 'all'"
-    elif tag == "null":
-        return "error, cannot add the protected tag 'null'"
+    _csrf_protect()
+    pid = _normalize_name(pid)
+    tag = _normalize_name(tag)
+    if not pid:
+        return "error, pid is required"
+    err = _validate_tag_name(tag)
+    if err:
+        return err
 
     with get_tags_db(flag="c") as tags_db:
         # create the user if we don't know about them yet with an empty library
@@ -1635,13 +2876,18 @@ def add(pid=None, tag=None):
         tags_db[g.user] = d
 
     logger.info(f"added paper {pid} to tag {tag} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/sub/<pid>/<tag>")
+@app.route("/sub/<pid>/<tag>", methods=["GET", "POST"])
 def sub(pid=None, tag=None):
     if g.user is None:
         return "error, not logged in"
+    _csrf_protect()
+    pid = _normalize_name(pid)
+    tag = _normalize_name(tag)
+    if not pid or not tag:
+        return "error, pid and tag are required"
 
     with get_tags_db(flag="c") as tags_db:
         # if the user doesn't have any tags, there is nothing to do
@@ -1670,10 +2916,14 @@ def sub(pid=None, tag=None):
                 return f"user doesn't have paper {pid} in tag {tag}"
 
 
-@app.route("/del/<tag>")
+@app.route("/del/<tag>", methods=["GET", "POST"])
 def delete_tag(tag=None):
     if g.user is None:
         return "error, not logged in"
+    _csrf_protect()
+    tag = _normalize_name(tag)
+    if not tag:
+        return "error, tag is required"
 
     with get_tags_db(flag="c") as tags_db:
         with get_combined_tags_db(flag="c") as ctags_db:
@@ -1691,20 +2941,29 @@ def delete_tag(tag=None):
             # write back to database
             tags_db[g.user] = d
             # remove ctag
-            d = ctags_db[g.user]
-            for ctag in d:
-                if tag in ctag.split(","):
-                    d.remove(ctag)
-            ctags_db[g.user] = d
+            if g.user in ctags_db:
+                ctags = ctags_db[g.user]
+                for ctag in list(ctags):
+                    if tag in ctag.split(","):
+                        ctags.remove(ctag)
+                ctags_db[g.user] = ctags
 
     logger.info(f"deleted tag {tag} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/rename/<otag>/<ntag>")
+@app.route("/rename/<otag>/<ntag>", methods=["GET", "POST"])
 def rename_tag(otag=None, ntag=None):
     if g.user is None:
         return "error, not logged in"
+    _csrf_protect()
+    otag = _normalize_name(otag)
+    ntag = _normalize_name(ntag)
+    if not otag or not ntag:
+        return "error, tag is required"
+    err = _validate_tag_name(ntag)
+    if err:
+        return err
 
     with get_tags_db(flag="c") as tags_db:
         with get_combined_tags_db(flag="c") as ctags_db:
@@ -1729,28 +2988,30 @@ def rename_tag(otag=None, ntag=None):
             tags_db[g.user] = d
 
             # rename ctag
-            d = ctags_db[g.user]
-            # logger.error(d)
-            for ctag in d:
-                # logger.error(f"{ctag}, {otag}, {ctag.split(',')}")
-                if otag in (ctag_split := ctag.split(",")):
-                    ctag_split = [ct_s if ct_s != otag else ntag for ct_s in ctag_split]
-                    n_ctag = ",".join(ctag_split)
-                    # logger.error(f"{ctag}, {n_ctag}")
-                    d.remove(ctag)
-                    d.add(n_ctag)
-            ctags_db[g.user] = d
+            if g.user in ctags_db:
+                ctags = ctags_db[g.user]
+                for ctag in list(ctags):
+                    if otag in (ctag_split := ctag.split(",")):
+                        ctag_split = [ct_s if ct_s != otag else ntag for ct_s in ctag_split]
+                        n_ctag = ",".join(ctag_split)
+                        ctags.remove(ctag)
+                        ctags.add(n_ctag)
+                ctags_db[g.user] = ctags
 
     logger.info(f"renamed tag {otag} to {ntag} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/add_ctag/<ctag>")
+@app.route("/add_ctag/<ctag>", methods=["GET", "POST"])
 def add_ctag(ctag=None):
     if g.user is None:
         return "error, not logged in"
-    elif ctag == "null":
+    ctag = _normalize_name(ctag)
+    if not ctag:
+        return "error, ctag is required"
+    if ctag == "null":
         return "error, cannot add the ctag 'null'"
+    _csrf_protect()
 
     tags = get_tags()
     for tag in map(str.strip, ctag.split(",")):
@@ -1779,13 +3040,17 @@ def add_ctag(ctag=None):
         ctags_db[g.user] = d
 
     logger.info(f"added ctag {ctag} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/del_ctag/<ctag>")
+@app.route("/del_ctag/<ctag>", methods=["GET", "POST"])
 def delete_ctag(ctag=None):
     if g.user is None:
         return "error, not logged in"
+    _csrf_protect()
+    ctag = _normalize_name(ctag)
+    if not ctag:
+        return "error, ctag is required"
 
     with get_combined_tags_db(flag="c") as ctags_db:
         if g.user not in ctags_db:
@@ -1803,15 +3068,56 @@ def delete_ctag(ctag=None):
         ctags_db[g.user] = d
 
     logger.info(f"deleted ctag {ctag} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/add_key/<keyword>")
+@app.route("/rename_ctag/<otag>/<ntag>", methods=["POST"])
+def rename_ctag(otag=None, ntag=None):
+    if g.user is None:
+        return "error, not logged in"
+    _csrf_protect()
+
+    otag = (otag or "").strip()
+    ntag = (ntag or "").strip()
+    if not otag or not ntag:
+        return "error, tag is required"
+    if ntag == "null":
+        return "error, cannot add the ctag 'null'"
+    if otag == ntag:
+        return "ok"
+
+    tags = get_tags()
+    for tag in map(str.strip, ntag.split(",")):
+        if tag not in tags:
+            return "invalid ctag"
+
+    with get_combined_tags_db(flag="c") as ctags_db:
+        if g.user not in ctags_db:
+            return "user does not have a library"
+
+        d = ctags_db[g.user]
+        if otag not in d:
+            return "user does not have this ctag"
+        if ntag in d:
+            return "user has repeated ctag"
+
+        d.remove(otag)
+        d.add(ntag)
+        ctags_db[g.user] = d
+
+    logger.info(f"renamed ctag {otag} to {ntag} for user {g.user}")
+    return "ok"
+
+
+@app.route("/add_key/<keyword>", methods=["GET", "POST"])
 def add_key(keyword=None):
     if g.user is None:
         return "error, not logged in"
-    elif keyword == "null":
-        return "error, cannot add the protected keyword 'null'"
+    keyword = _normalize_name(keyword)
+    err = _validate_keyword_name(keyword)
+    if err:
+        return err
+    _csrf_protect()
 
     with get_keywords_db(flag="c") as keys_db:
         # create the user if we don't know about them yet with an empty library
@@ -1831,13 +3137,17 @@ def add_key(keyword=None):
         keys_db[g.user] = d
 
     logger.info(f"added keyword {keyword} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
 
 
-@app.route("/del_key/<keyword>")
+@app.route("/del_key/<keyword>", methods=["GET", "POST"])
 def delete_key(keyword=None):
     if g.user is None:
         return "error, not logged in"
+    _csrf_protect()
+    keyword = _normalize_name(keyword)
+    if not keyword:
+        return "error, keyword is required"
 
     with get_keywords_db(flag="c") as keys_db:
         if g.user not in keys_db:
@@ -1855,7 +3165,41 @@ def delete_key(keyword=None):
         keys_db[g.user] = d
 
     logger.info(f"deleted keyword {keyword} for user {g.user}")
-    return "ok: " + str(d)  # return back the user library for debugging atm
+    return "ok"
+
+
+@app.route("/rename_key/<okey>/<nkey>", methods=["POST"])
+def rename_key(okey=None, nkey=None):
+    if g.user is None:
+        return "error, not logged in"
+    _csrf_protect()
+
+    okey = _normalize_name(okey)
+    nkey = _normalize_name(nkey)
+    if not okey or not nkey:
+        return "error, keyword is required"
+    if nkey == "null":
+        return "error, cannot add the protected keyword 'null'"
+    if okey == nkey:
+        return "ok"
+
+    with get_keywords_db(flag="c") as keys_db:
+        if g.user not in keys_db:
+            return "user does not have a library"
+
+        d = keys_db[g.user]
+        if okey not in d:
+            return "user does not have this keyword"
+
+        if nkey in d:
+            d[nkey] = d[nkey].union(d[okey])
+        else:
+            d[nkey] = d[okey]
+        del d[okey]
+        keys_db[g.user] = d
+
+    logger.info(f"renamed keyword {okey} to {nkey} for user {g.user}")
+    return "ok"
 
 
 # -----------------------------------------------------------------------------
@@ -1864,17 +3208,19 @@ def delete_key(keyword=None):
 
 @app.route("/login", methods=["POST"])
 def login():
+    _csrf_protect()
     # the user is logged out but wants to log in, ok
-    if g.user is None and request.form["username"]:
-        username = request.form["username"]
+    username = (request.form.get("username") or "").strip()
+    if g.user is None and username:
         if len(username) > 0:  # one more paranoid check
             session["user"] = username
 
     return redirect(url_for("profile"))
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["GET", "POST"])
 def logout():
+    _csrf_protect()
     session.pop("user", None)
     return redirect(url_for("profile"))
 
@@ -1885,7 +3231,8 @@ def logout():
 
 @app.route("/register_email", methods=["POST"])
 def register_email():
-    email = request.form["email"]
+    _csrf_protect()
+    email = (request.form.get("email") or "").strip()
 
     if g.user:
         # do some basic input validation
@@ -1896,3 +3243,11 @@ def register_email():
                 edb[g.user] = email
 
     return redirect(url_for("profile"))
+
+
+if __name__ == "__main__":
+    from vars import SERVE_PORT
+
+    logger.remove()
+    logger.add(sys.stdout, level="INFO")
+    app.run(host="0.0.0.0", port=int(SERVE_PORT), threaded=True)

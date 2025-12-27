@@ -7,9 +7,29 @@
 
 ![Screenshot](arxiv-sanity-x.png)
 
+## ⚡ 快速开始
+
+```bash
+# 1. 克隆并安装
+git clone https://github.com/xihuai18/arxiv-sanity-x && cd arxiv-sanity-x
+pip install -r requirements.txt
+
+# 2. 配置
+cp vars_template.py vars.py  # 编辑 vars.py 配置您的设置
+
+# 3. 获取论文并计算特征
+python3 arxiv_daemon.py -n 10000 -m 500
+python3 compute.py --num 20000
+
+# 4. 一键启动所有服务
+python3 run_services.py
+
+# 访问 http://localhost:55555
+```
+
 ## 🚀 核心功能
 
-- **🤖 AI 论文总结**：完整处理管道，包含 `minerU` PDF 解析、LLM 总结和智能缓存系统
+- **🤖 AI 论文总结**：完整处理管道，包含 HTML（arXiv/ar5iv）解析或 `minerU` PDF 解析、LLM 总结和智能缓存系统
 - **🔍 高级搜索引擎**：关键词、语义和混合搜索模式，支持可配置权重和智能时间过滤
 - **🎯 智能推荐系统**：混合 TF-IDF + 嵌入特征，基于用户偏好训练动态 SVM 分类器
 - **🏷️ 灵活组织管理**：个人标签、组合标签、关键词跟踪，支持 AND/OR 逻辑操作
@@ -20,13 +40,21 @@
 
 ## 📈 更新日志
 
+### v3.0 - UI 重设计与 HTML 总结
+- 🎨 **UI 改版**：关于、个人中心、统计页面现代化布局重设计
+- 📄 **HTML 总结**：ar5iv/arxiv HTML 解析（比 PDF 更快，结构更好）
+- 🤖 **模型选择**：总结页面支持多 LLM 模型切换和自动重试
+- 🔍 **增强搜索**：键盘快捷键（Ctrl+K）、高级过滤器、无障碍改进
+- 📊 **统计图表**：每日论文数量柱状图可视化
+- 📦 **LiteLLM 模板**：`llm_template.yml` 含 OpenRouter 免费模型配置
+
 ### v2.4 - 多线程批量处理与服务完善
 - ⚡ **并发优化**：真正的多线程并发论文总结处理
 - 🔒 **线程安全**：文件级锁机制避免 minerU 解析冲突
 - 📊 **统计增强**：详细的处理统计和失败原因分析
 - 🔄 **重试机制**：智能重试失败的论文处理任务
 - 📈 **进度跟踪**：实时进度条和处理状态显示
-- 🔧 **配置优化**：支持多种 LLM 服务商（OpenRouter、智谱AI等）
+- 🔧 **配置优化**：支持多种 LLM 服务商（OpenRouter 免费模型、OpenAI 兼容 API）
 - 📊 **服务集成**：完善的 vLLM 和 minerU 服务集成
 - 🎨 **界面增强**：更好的响应式设计和 MathJax 数学公式支持
 - 🛠️ **错误处理**：增强的异常处理和重试机制
@@ -39,7 +67,6 @@
 - ⚡ **智能缓存**：智能总结缓存，支持中文文本比例验证和质量控制
 - 🎨 **界面增强**：新的总结页面设计，支持 MathJax 数学公式渲染
 - 📊 **配置完善**：在 [`vars.py`](vars.py) 中添加 LLM API 配置
-- 🔄 **自动生成**：[`generate_latest_summaries.py`](generate_latest_summaries.py) 支持自动化批量处理
 
 ### v2.2 - 性能与稳定性改进
 - ⚡ **性能提升**：增强统一数据缓存系统，支持智能自动重载和文件变更检测
@@ -110,7 +137,8 @@ pip install scikit-learn-intelex
 1. **创建配置文件**
 ```bash
 cp vars_template.py vars.py
-# 编辑 vars.py 配置您的设置
+cp llm_template.yml llm.yml
+# 编辑 vars.py 和 llm.yml 配置您的设置
 ```
 
 2. **生成安全密钥**
@@ -123,13 +151,14 @@ print(secrets.token_urlsafe(16))
 3. **初始化数据库**
 ```bash
 # 获取初始论文数据（CS 类别：AI、ML、CL 等）
-python arxiv_daemon.py -n 50000 -m 1000
+python3 arxiv_daemon.py -n 50000 -m 1000
 
 # 计算混合特征向量（TF-IDF + 嵌入）
-python compute.py --num 50000 --embed_dim 512
+python3 compute.py --num 50000 --embed_dim 512 --use_embeddings
 
 # 启动网络服务
-gunicorn -w 4 -b 0.0.0.0:5000 serve:app
+#（推荐）读取 vars.py 里的 `SERVE_PORT`，并支持 preload/worker 等调参
+bash up.sh
 ```
 
 ## ⚙️ 配置
@@ -142,19 +171,51 @@ gunicorn -w 4 -b 0.0.0.0:5000 serve:app
 - **邮件服务配置**：SMTP服务器设置，用于论文推荐邮件
 - **LLM API 配置**：支持多种LLM服务商（OpenAI接口）
 - **vLLM 服务端口**：嵌入模型和minerU服务的端口配置
+- **总结 Markdown 来源**：选择 `html`（默认）或 `mineru`，并设置 HTML 来源顺序
 
-项目支持多种LLM服务商，包括OpenRouter（推荐免费模型）、智谱AI（免费 Flash 系列模型）等。
+项目支持多种LLM服务商，包括OpenRouter（推荐，提供大量免费模型）和其他OpenAI兼容API。
+
+总结来源选择（启动网页时生效）：
+```bash
+# 默认：HTML -> Markdown（优先 ar5iv，其次 arxiv）
+export ARXIV_SANITY_SUMMARY_SOURCE=html
+export ARXIV_SANITY_HTML_SOURCES=ar5iv,arxiv
+
+# 使用 minerU（PDF）解析
+export ARXIV_SANITY_SUMMARY_SOURCE=mineru
+
+# MinerU 后端（默认：pipeline）
+export ARXIV_SANITY_MINERU_BACKEND=pipeline
+# 或使用 VLM http-client 后端（需要启动 minerU OpenAI 兼容服务）
+export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
+```
+说明：HTML 模式不依赖 minerU；若 `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`，需在 `VLLM_MINERU_PORT` 启动 minerU 的 OpenAI 兼容服务。
+说明：摘要与 HTML 缓存按 arXiv 版本（pidvN）区分，新版本会自动重新生成。
+
+### 调度器环境变量
+
+调度器守护进程（`daemon.py`）支持以下环境变量：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ARXIV_SANITY_FETCH_NUM` | 1000 | 每个分类获取的论文数量 |
+| `ARXIV_SANITY_FETCH_MAX` | 200 | 每次 API 请求的最大结果数 |
+| `ARXIV_SANITY_SUMMARY_NUM` | 100 | 每次运行总结的论文数量 |
+| `ARXIV_SANITY_SUMMARY_WORKERS` | 2 | 并行总结工作线程数 |
+| `ARXIV_SANITY_DAEMON_SUMMARY` | 1 | 启用/禁用总结生成 (0/1) |
+| `ARXIV_SANITY_DAEMON_EMBEDDINGS` | 1 | 启用/禁用嵌入计算 (0/1) |
+| `ARXIV_SANITY_ENABLE_GIT_BACKUP` | 0 | 启用用户数据 git 备份 (0/1) |
 
 ### 高级参数
 
 #### 特征计算 (compute.py)
 ```bash
-python compute.py \
+python3 compute.py \
   --num 50000 \              # TF-IDF 特征数量
   --min_df 20 \              # 最小文档频率
   --max_df 0.10 \            # 最大文档频率
   --ngram_max 1 \            # 最大 n-gram 大小
-  --use_embeddings \         # 启用嵌入向量
+  --use_embeddings \         # 启用嵌入向量（可选）
   --embed_model ./qwen3-embed-0.6B \  # 嵌入模型路径
   --embed_dim 512 \          # 嵌入维度
   --embed_batch_size 2048    # 嵌入生成批次大小
@@ -162,7 +223,7 @@ python compute.py \
 
 #### 批量论文总结 (batch_paper_summarizer.py)
 ```bash
-python batch_paper_summarizer.py \
+python3 batch_paper_summarizer.py \
   -n 200 \                   # 处理论文数量
   -w 4 \                     # 工作线程数
   --max-retries 3 \          # 最大重试次数
@@ -171,7 +232,7 @@ python batch_paper_summarizer.py \
 
 #### 邮件推荐 (send_emails.py)
 ```bash
-python send_emails.py \
+python3 send_emails.py \
   -n 20 \                    # 每次推荐的论文数量
   -t 2.0 \                   # 时间窗口（天）
   -m 5 \                     # 每用户最少标记论文数
@@ -190,7 +251,9 @@ arxiv-sanity-X/
 ├── daemon.py                   # 自动化任务调度器
 ├── paper_summarizer.py         # AI 论文总结模块
 ├── batch_paper_summarizer.py   # 批量论文总结处理
-├── generate_latest_summaries.py # 自动生成最新论文总结
+├── up.sh                       # Gunicorn 启动脚本
+├── litellm.sh                  # LiteLLM 网关启动脚本
+├── llm.yml                     # LiteLLM 配置文件
 ├── mineru_serve.sh             # minerU VLM 服务器启动脚本
 ├── embedding_serve.sh          # vLLM 嵌入服务器启动脚本
 ├── aslite/                     # 核心库
@@ -210,13 +273,14 @@ arxiv-sanity-X/
     ├── dict.db                # 用户数据（SQLite）
     ├── pdfs/                  # 下载的 PDF 文件
     ├── mineru/                # MinerU 解析内容
+    ├── html_md/               # HTML->Markdown 缓存内容
     └── summary/               # 缓存的论文总结
 ```
 
 ### 数据流管道
 1. **数据摄取**：[`arxiv_daemon.py`](arxiv_daemon.py) 从 arXiv API 获取论文（每日4次：早6点、上午11点、下午4点、晚9点）
 2. **特征处理**：[`compute.py`](compute.py) 生成混合 TF-IDF + 嵌入特征，支持增量更新
-3. **AI 总结**：[`paper_summarizer.py`](paper_summarizer.py) 下载 PDF → minerU 解析 → LLM 总结
+3. **AI 总结**：[`paper_summarizer.py`](paper_summarizer.py) 获取 arXiv/ar5iv HTML（默认）或 PDF → Markdown 解析 → LLM 总结
 4. **网络服务**：[`serve.py`](serve.py) 提供响应式 UI、混合搜索、推荐功能和异步总结加载
 5. **邮件服务**：[`send_emails.py`](send_emails.py) 提供个性化推荐，支持假期感知调度
 6. **自动化管理**：[`daemon.py`](daemon.py) 协调整个流程，支持智能资源管理
@@ -225,14 +289,14 @@ arxiv-sanity-X/
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Flask Web     │    │  vLLM Embedding  │    │  minerU VLM     │
-│   (port 5000)   │<-->│   (port 51000)   │    │  (port 52000)   │
+│  (port 55555)  │<-->│   (port 51000)   │    │  (port 52000)   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
          │                       │                       │
          v                       v                       v
 ┌─────────────────────────────────────────────────────────────────┐
 │                     SQLite 数据库存储                             │
-│  papers.db | features.p | dict.db | summary/ | mineru/          │
+│  papers.db | features.p | dict.db | summary/ | mineru/ | html_md/│
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -266,23 +330,51 @@ arxiv-sanity-X/
 ## 🤖 AI 论文总结
 
 ### 完整 AI 处理管道
-1. **PDF 下载**：自动 arXiv 论文获取，支持错误处理
-2. **minerU 解析**：高级 PDF 文本提取，支持结构识别和图像处理
+1. **HTML/PDF 获取**：获取 arXiv/ar5iv HTML（默认）或 PDF，支持错误处理
+2. **Markdown 解析**：HTML→Markdown（默认）或 minerU PDF 解析，支持结构识别
 3. **LLM 处理**：使用多种兼容 OpenAI API 的模型生成全面总结
 4. **质量控制**：中文文本比例验证和内容过滤
 5. **智能缓存**：智能缓存机制，自动质量检查和存储优化
 
 ### 启动服务
 ```bash
-# 启动 minerU VLM 服务
-bash mineru_serve.sh
+# 一键启动（推荐，只需一个终端）
+python3 run_services.py
 
-# 启动嵌入模型服务
-bash embedding_serve.sh
+# 可选：用 gunicorn 启动 Web
+python3 run_services.py --web gunicorn
 
-# 启动主 Web 服务
-python serve.py
+# 可选：不启动某些重服务（例如只跑 Web）
+python3 run_services.py --no-embed --no-mineru --no-litellm
+
+# 可选：启动时指定总结 Markdown 来源（默认：html）
+python3 run_services.py --summary-source html
+python3 run_services.py --summary-source mineru
+
+# 可选：同时启动自动化调度器（fetch/compute/summary/email）
+python3 run_services.py --with-daemon
+
+# 一次性：跨所有分类抓取最新 N 篇，然后计算特征
+python3 run_services.py --fetch-compute        # 默认 10000
+python3 run_services.py --fetch-compute 1000   # 自定义 N
 ```
+
+### 运行与性能开关（新增）
+
+- `ARXIV_SANITY_CACHE_PAPERS=1`：把整张 `papers` 表常驻内存（更吃内存，但渲染更快）。默认 `0` 仅缓存 `metas/pids`，论文内容按需读取。
+- `ARXIV_SANITY_WARMUP_DATA=0|1`、`ARXIV_SANITY_WARMUP_ML=0|1`：是否开启后台预热（每个 worker 懒启动；可安全配合 gunicorn `--preload`）。
+- `ARXIV_SANITY_ENABLE_SCHEDULER=0|1`：是否在 Web 进程内启用 APScheduler 的缓存刷新任务。
+- `ARXIV_SANITY_LOG_LEVEL=INFO|DEBUG|...`：Web 进程的日志等级（Loguru）。
+- `up.sh`（gunicorn）：`GUNICORN_WORKERS`、`GUNICORN_THREADS`、`GUNICORN_EXTRA_ARGS`、`ARXIV_SANITY_GUNICORN_PRELOAD=0|1`。
+
+前端已预编译（不再依赖浏览器端 Babel）。如需修改 `static/paper_list.js` 等源码后重新构建：
+```bash
+npm install
+npm run build:static
+```
+
+常见问题：
+- 如果看到 `No module named 'numpy._core'` / `features.p` 加载失败：说明特征文件由不同 NumPy 大版本生成。请升级到 NumPy 2.x 或在当前环境下重新运行 `python3 compute.py` 生成特征。
 
 ### 使用命令
 ```bash
@@ -290,13 +382,13 @@ python serve.py
 # 点击"总结"链接或访问：/summary?pid=<paper_id>
 
 # 批量处理（最新论文）
-python generate_latest_summaries.py --num_papers 100
+python3 batch_paper_summarizer.py -n 100 -w 2
 
 # 高级批量处理，自定义工作线程
-python batch_paper_summarizer.py -n 200 -w 4 --max-retries 3
+python3 batch_paper_summarizer.py -n 200 -w 4 --max-retries 3
 
 # 检查处理状态
-python batch_paper_summarizer.py --dry-run  # 预览模式
+python3 batch_paper_summarizer.py --dry-run  # 预览模式
 ```
 
 ### LLM 服务商支持
@@ -333,7 +425,7 @@ huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6
 bash embedding_serve.sh
 
 # 使用 API 客户端启用嵌入计算
-python compute.py --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
+python3 compute.py --use_embeddings --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
 ```
 
 功能特性：
@@ -353,22 +445,22 @@ python compute.py --embed_model ./qwen3-embed-0.6B --embed_api_base http://local
 
 **内置调度器：**
 ```bash
-python daemon.py
+python3 daemon.py
 ```
 
 **手动 Cron 设置：**
 ```cron
 # 获取和计算特征（工作日每日4次）
-0 9,13,17,21 * * 1-5 cd /path/to/arxiv-sanity-x && python arxiv_daemon.py -n 1000 && python compute.py
+0 9,13,17,21 * * 1-5 cd /path/to/arxiv-sanity-x && python3 arxiv_daemon.py -n 1000 && python3 compute.py --use_embeddings
 
 # 发送邮件推荐（工作日下午 6 点）
-0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python send_emails.py -t 2
+0 18 * * 1-5 cd /path/to/arxiv-sanity-x && python3 send_emails.py -t 2
 
 # 生成论文总结（每日晚上 7 点）
-0 19 * * * cd /path/to/arxiv-sanity-x && python batch_paper_summarizer.py -n 200 -w 2
+0 19 * * * cd /path/to/arxiv-sanity-x && python3 batch_paper_summarizer.py -n 200 -w 2
 
 # 备份用户数据（每日晚上 8 点）
-0 20 * * * cd /path/to/arxiv-sanity-x && git add . && git commit -m "backup" && git push
+0 20 * * * cd /path/to/arxiv-sanity-x && ARXIV_SANITY_ENABLE_GIT_BACKUP=1 python3 -c "from daemon import backup_user_data; backup_user_data()"
 ```
 
 ## 📚 API 参考

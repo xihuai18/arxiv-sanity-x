@@ -10,9 +10,11 @@ to manually register with sendgrid yourself, get an API key and put it in the fi
 """
 
 import argparse
+import html
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import cpu_count
 from typing import Dict, List, Set
 
@@ -23,7 +25,6 @@ from aslite.db import (
     get_combined_tags_db,
     get_email_db,
     get_keywords_db,
-    get_metas_db,
     get_papers_db,
     get_tags_db,
 )
@@ -354,6 +355,86 @@ template = """
 """
 
 
+def _h(value) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _crop_summary(text: str, limit: int = 500) -> str:
+    if not text:
+        return ""
+    text = str(text)
+    if len(text) > limit:
+        return text[:limit] + "..."
+    return text
+
+
+def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "paper-source"):
+    title = _h(paper.get("title", ""))
+    authors = _h(", ".join(a.get("name", "") for a in paper.get("authors", [])))
+    summary = _h(_crop_summary(paper.get("summary", "")))
+    time_str = _h(paper.get("_time_str", ""))
+
+    url = _h(f"{HOST}/?rank=pid&pid={pid}")
+    summary_url = _h(f"{HOST}/summary?pid={pid}")
+    arxiv_url = _h(f"https://arxiv.org/abs/{pid}")
+    alphaxiv_url = _h(f"https://www.alphaxiv.org/overview/{pid}")
+    cool_url = _h(f"https://papers.cool/arxiv/{pid}")
+
+    return f"""
+    <div class="paper-item">
+        <div class="paper-header">
+            <div class="{source_class}">{_h(source_label)}</div>
+            <div class="score">{float(score):.2f}</div>
+        </div>
+        <div class="paper-title">{title}</div>
+        <div class="paper-links">
+            <a href="{url}">Sanity</a>
+            <a href="{summary_url}">📝 Sanity Summary</a>
+            <a href="{arxiv_url}" class="arxiv-link">Arxiv</a>
+            <div class="right-links">
+                <a href="{alphaxiv_url}" class="alphaxiv-link">alphaXiv</a>
+                <a href="{cool_url}" class="cool-link">Cool</a>
+            </div>
+        </div>
+        <div class="paper-authors">{authors}</div>
+        <div class="paper-date">📅 {time_str}</div>
+        <div class="paper-summary">{summary}</div>
+    </div>
+    """
+
+
+def _api_worker_count(n_tasks: int) -> int:
+    try:
+        max_workers = int(os.environ.get("ARXIV_SANITY_EMAIL_API_WORKERS", "8"))
+    except Exception:
+        max_workers = 8
+    return max(1, min(max_workers, n_tasks))
+
+
+def _post_recommendation(url: str, payload: dict, label: str, key: str):
+    try:
+        response = requests.post(url, json=payload, timeout=API_TIMEOUT)
+    except requests.RequestException as e:
+        logger.error(f"API request exception for {label} {key}: {e}")
+        return None
+
+    if response.status_code != 200:
+        logger.error(f"API request failed for {label} {key}: {response.status_code}")
+        return None
+
+    try:
+        result = response.json()
+    except Exception as e:
+        logger.error(f"API response parse failed for {label} {key}: {e}")
+        return None
+
+    if not result.get("success"):
+        logger.error(f"API error for {label} {key}: {result.get('error')}")
+        return None
+
+    return key, result.get("pids", []), result.get("scores", [])
+
+
 def calculate_ctag_recommendation(
     ctags: List[str],
     tags: dict,
@@ -363,41 +444,50 @@ def calculate_ctag_recommendation(
     """Use API to call joint tag recommendations"""
     all_pids, all_scores = {}, {}
 
+    tasks = []
     for ctag in ctags:
         _tags = list(map(str.strip, ctag.split(",")))
-        # Filter out valid tags (with papers)
         valid_tags = [tag for tag in _tags if tag in tags and len(tags[tag]) > 0]
-
         if not valid_tags:
             continue
+        payload = {
+            "tags": valid_tags,
+            "user": user,
+            "logic": "and",
+            "time_delta": time_delta,
+            "limit": 1000,
+            "C": 0.1,
+        }
+        tasks.append((ctag, payload))
 
-        try:
-            # Call API, pass tag name list and user information
-            response = requests.post(
-                f"{API_BASE_URL}/api/tags_search",
-                json={
-                    "tags": valid_tags,  # tag name list
-                    "user": user,  # username
-                    "logic": "and",
-                    "time_delta": time_delta,
-                    "limit": 1000,
-                    "C": 0.1,
-                },
-                timeout=API_TIMEOUT,
-            )
+    if not tasks:
+        return all_pids, all_scores
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("success"):
-                    all_pids[ctag] = result["pids"]
-                    all_scores[ctag] = result["scores"]
-                else:
-                    logger.error(f"API error for ctag {ctag}: {result.get('error')}")
-            else:
-                logger.error(f"API request failed for ctag {ctag}: {response.status_code}")
+    max_workers = _api_worker_count(len(tasks))
+    if max_workers <= 1:
+        for ctag, payload in tasks:
+            result = _post_recommendation(f"{API_BASE_URL}/api/tags_search", payload, "ctag", ctag)
+            if result:
+                key, pids, scores = result
+                all_pids[key] = pids
+                all_scores[key] = scores
+        return all_pids, all_scores
 
-        except requests.RequestException as e:
-            logger.error(f"API request exception for ctag {ctag}: {e}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_post_recommendation, f"{API_BASE_URL}/api/tags_search", payload, "ctag", ctag): ctag
+            for ctag, payload in tasks
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.error(f"API request exception for ctag {futures[future]}: {e}")
+                continue
+            if result:
+                key, pids, scores = result
+                all_pids[key] = pids
+                all_scores[key] = scores
 
     return all_pids, all_scores
 
@@ -410,36 +500,47 @@ def calculate_recommendation(
     """Use API to call single tag recommendations"""
     all_pids, all_scores = {}, {}
 
+    tasks = []
     for tag, tpids in tags.items():
         if len(tpids) == 0:
             continue
+        payload = {
+            "tag_name": tag,
+            "user": user,
+            "time_delta": time_delta,
+            "limit": 1000,
+            "C": 0.1,
+        }
+        tasks.append((tag, payload))
 
-        try:
-            # Call API, pass tag name and user information
-            response = requests.post(
-                f"{API_BASE_URL}/api/tag_search",
-                json={
-                    "tag_name": tag,  # tag name
-                    "user": user,  # username
-                    "time_delta": time_delta,
-                    "limit": 1000,
-                    "C": 0.1,
-                },
-                timeout=API_TIMEOUT,
-            )
+    if not tasks:
+        return all_pids, all_scores
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("success"):
-                    all_pids[tag] = result["pids"]
-                    all_scores[tag] = result["scores"]
-                else:
-                    logger.error(f"API error for tag {tag}: {result.get('error')}")
-            else:
-                logger.error(f"API request failed for tag {tag}: {response.status_code}")
+    max_workers = _api_worker_count(len(tasks))
+    if max_workers <= 1:
+        for tag, payload in tasks:
+            result = _post_recommendation(f"{API_BASE_URL}/api/tag_search", payload, "tag", tag)
+            if result:
+                key, pids, scores = result
+                all_pids[key] = pids
+                all_scores[key] = scores
+        return all_pids, all_scores
 
-        except requests.RequestException as e:
-            logger.error(f"API request exception for tag {tag}: {e}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_post_recommendation, f"{API_BASE_URL}/api/tag_search", payload, "tag", tag): tag
+            for tag, payload in tasks
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.error(f"API request exception for tag {futures[future]}: {e}")
+                continue
+            if result:
+                key, pids, scores = result
+                all_pids[key] = pids
+                all_scores[key] = scores
 
     return all_pids, all_scores
 
@@ -451,34 +552,49 @@ def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], ti
     """Use API to call keyword search"""
     all_pids, all_scores = {}, {}
 
+    tasks = []
     for keyword, pids in keywords.items():
-        try:
-            # Call API
-            response = requests.post(
-                f"{API_BASE_URL}/api/keyword_search",
-                json={"keyword": keyword, "time_delta": time_delta, "limit": 1000},
-                timeout=API_TIMEOUT,
-            )
+        payload = {"keyword": keyword, "time_delta": time_delta, "limit": 1000}
+        tasks.append((keyword, payload, pids))
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("success"):
-                    # Exclude existing papers
-                    rec_pids = result["pids"]
-                    rec_scores = result["scores"]
-                    keep = [i for i, pid in enumerate(rec_pids) if pid not in pids]
-                    rec_pids = [rec_pids[i] for i in keep]
-                    rec_scores = [rec_scores[i] for i in keep]
+    if not tasks:
+        return all_pids, all_scores
 
-                    all_pids[keyword] = rec_pids
-                    all_scores[keyword] = rec_scores
-                else:
-                    logger.error(f"API error for keyword {keyword}: {result.get('error')}")
-            else:
-                logger.error(f"API request failed for keyword {keyword}: {response.status_code}")
+    def _post_keyword(keyword, payload, existing_pids):
+        result = _post_recommendation(f"{API_BASE_URL}/api/keyword_search", payload, "keyword", keyword)
+        if not result:
+            return None
+        key, rec_pids, rec_scores = result
+        keep = [i for i, pid in enumerate(rec_pids) if pid not in existing_pids]
+        rec_pids = [rec_pids[i] for i in keep]
+        rec_scores = [rec_scores[i] for i in keep]
+        return key, rec_pids, rec_scores
 
-        except requests.RequestException as e:
-            logger.error(f"API request exception for keyword {keyword}: {e}")
+    max_workers = _api_worker_count(len(tasks))
+    if max_workers <= 1:
+        for keyword, payload, existing_pids in tasks:
+            result = _post_keyword(keyword, payload, existing_pids)
+            if result:
+                key, rec_pids, rec_scores = result
+                all_pids[key] = rec_pids
+                all_scores[key] = rec_scores
+        return all_pids, all_scores
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_post_keyword, keyword, payload, existing_pids): keyword
+            for keyword, payload, existing_pids in tasks
+        }
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.error(f"API request exception for keyword {futures[future]}: {e}")
+                continue
+            if result:
+                key, rec_pids, rec_scores = result
+                all_pids[key] = rec_pids
+                all_scores[key] = rec_scores
 
     return all_pids, all_scores
 
@@ -500,9 +616,12 @@ def render_recommendations(
     kscores,
 ):
     out = template
-    out = out.replace("__USER__", user)
-    out = out.replace("__HOST__", HOST)
-    out = out.replace("__WEB__", WEB)
+    safe_user = _h(user)
+    safe_host = _h(HOST)
+    safe_web = _h(WEB)
+    out = out.replace("__USER__", safe_user)
+    out = out.replace("__HOST__", safe_host)
+    out = out.replace("__WEB__", safe_web)
 
     # Collect all recommended papers, deduplicate by priority: tag > ctag > keyword
     tag_papers = set()  # Papers recommended by tag
@@ -521,7 +640,7 @@ def render_recommendations(
         ctag_papers -= tag_papers  # Deduplicate: exclude those already in tag
 
     # Collect keyword recommended papers, exclude those already in tag and ctag
-    if sum(len(kpids[keyword]) for keyword in keywords) > 0:
+    if sum(len(kpids[keyword]) for keyword in kpids) > 0:
         for keyword in kpids:
             keyword_papers.update(kpids[keyword])
         keyword_papers -= tag_papers  # Deduplicate: exclude those already in tag
@@ -587,64 +706,22 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # Each tag recommendation type recommends at most num_recommendations papers
-        n = min(len(scores), args.num_recommendations)
-        for score, pid in zip(scores[:n], pids[:n]):
-            p = pdb[pid]
-            authors = ", ".join(a["name"] for a in p["authors"])
-            # crop the abstract
-            summary = p["summary"]
-            summary = summary[: min(500, len(summary))]
-            if len(summary) == 500:
-                summary += "..."
-            # create the url that will feature this paper on top and also show the most similar papers
-            url = f"{HOST}/?rank=pid&pid=" + pid
-            arxiv_url = f"https://arxiv.org/abs/{pid}"
-
-            parts.append(
-                """
-    <div class="paper-item">
-        <div class="paper-header">
-            <div class="paper-source">%s</div>
-            <div class="score">%.2f</div>
-        </div>
-        <div class="paper-title">%s</div>
-        <div class="paper-links">
-            <a href="%s">Sanity</a>
-            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
-            <a href="%s" class="arxiv-link">Arxiv</a>
-            <div class="right-links">
-                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
-                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
-            </div>
-        </div>
-        <div class="paper-authors">%s</div>
-        <div class="paper-date">📅 %s</div>
-        <div class="paper-summary">%s</div>
-    </div>
-    """
-                % (
-                    max_source_tag[pid],
-                    score,
-                    p["title"],
-                    url,
-                    HOST,
-                    pid,
-                    arxiv_url,
-                    pid,
-                    pid,
-                    authors,
-                    p["_time_str"],
-                    summary,
-                )
-            )
+        for score, pid in zip(scores, pids):
+            if len(parts) >= args.num_recommendations:
+                break
+            p = pdb.get(pid)
+            if p is None:
+                logger.warning(f"Missing paper in db for tag recommendation: {pid}")
+                continue
+            parts.append(_render_paper_html(p, pid, score, max_source_tag.get(pid, "")))
 
         # render the recommendations
         final = "".join(parts)
 
         # render the stats
         num_papers_tagged = len(set().union(*tags.values()))
-        tags_str = ", ".join(['"%s" (%d)' % (t, len(tags[t])) for t in tags.keys()])
+        tags_str = ", ".join([f'"{_h(t)}" ({len(tags[t])})' for t in tags.keys()])
+        n = len(parts)
         stats = f"We took the {num_papers_tagged} papers across your {len(tags)} tags ({tags_str}) and \
                 ranked {len(pids)} papers that showed up on arxiv over the last \
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
@@ -681,56 +758,14 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # Each ctag recommendation type recommends at most num_recommendations papers
-        n = min(len(scores), args.num_recommendations)
-        for score, pid in zip(scores[:n], pids[:n]):
-            p = pdb[pid]
-            authors = ", ".join(a["name"] for a in p["authors"])
-            # crop the abstract
-            summary = p["summary"]
-            summary = summary[: min(500, len(summary))]
-            if len(summary) == 500:
-                summary += "..."
-            # create the url that will feature this paper on top and also show the most similar papers
-            url = f"{HOST}/?rank=pid&pid=" + pid
-            arxiv_url = f"https://arxiv.org/abs/{pid}"
-            parts.append(
-                """
-    <div class="paper-item">
-        <div class="paper-header">
-            <div class="paper-source">%s</div>
-            <div class="score">%.2f</div>
-        </div>
-        <div class="paper-title">%s</div>
-        <div class="paper-links">
-            <a href="%s">Sanity</a>
-            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
-            <a href="%s" class="arxiv-link">Arxiv</a>
-            <div class="right-links">
-                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
-                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
-            </div>
-        </div>
-        <div class="paper-authors">%s</div>
-        <div class="paper-date">📅 %s</div>
-        <div class="paper-summary">%s</div>
-    </div>
-    """
-                % (
-                    max_source_ctag[pid],
-                    score,
-                    p["title"],
-                    url,
-                    HOST,
-                    pid,
-                    arxiv_url,
-                    pid,
-                    pid,
-                    authors,
-                    p["_time_str"],
-                    summary,
-                )
-            )
+        for score, pid in zip(scores, pids):
+            if len(parts) >= args.num_recommendations:
+                break
+            p = pdb.get(pid)
+            if p is None:
+                logger.warning(f"Missing paper in db for ctag recommendation: {pid}")
+                continue
+            parts.append(_render_paper_html(p, pid, score, max_source_ctag.get(pid, "")))
 
         # render the recommendations
         final = "".join(parts)
@@ -745,7 +780,8 @@ def render_recommendations(
                     ctag_papers.update(tags[tag])
         num_papers_ctagged = len(ctag_papers)
 
-        ctags_str = ", ".join(['"%s"' % (t) for t in ctags])
+        ctags_str = ", ".join([f'"{_h(t)}"' for t in ctags])
+        n = len(parts)
         stats = f"We took the {num_papers_ctagged} papers across your {len(ctags)} registered combined tags ({ctags_str}) and \
                 ranked {len(pids)} papers that showed up on arxiv over the last \
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
@@ -782,54 +818,16 @@ def render_recommendations(
 
         # now render the html for each individual recommendation
         parts = []
-        # Each keyword recommendation type recommends at most num_recommendations papers
-        n = min(len(scores), args.num_recommendations)
-        for score, pid in zip(scores[:n], pids[:n]):
-            p = pdb[pid]
-            authors = ", ".join(a["name"] for a in p["authors"])
-            # crop the abstract
-            summary = p["summary"]
-            summary = summary[: min(500, len(summary))]
-            if len(summary) == 500:
-                summary += "..."
-            # create the url that will feature this paper on top and also show the most similar papers
-            url = f"{HOST}/?rank=pid&pid=" + pid
-            arxiv_url = f"https://arxiv.org/abs/{pid}"
+        for score, pid in zip(scores, pids):
+            if len(parts) >= args.num_recommendations:
+                break
+            p = pdb.get(pid)
+            if p is None:
+                logger.warning(f"Missing paper in db for keyword recommendation: {pid}")
+                continue
             parts.append(
-                """
-    <div class="paper-item">
-        <div class="paper-header">
-            <div class="paper-source keyword-source">%s</div>
-            <div class="score">%.2f</div>
-        </div>
-        <div class="paper-title">%s</div>
-        <div class="paper-links">
-            <a href="%s">Sanity</a>
-            <a href="%s/summary?pid=%s">📝 Sanity Summary</a>
-            <a href="%s" class="arxiv-link">Arxiv</a>
-            <div class="right-links">
-                <a href="https://www.alphaxiv.org/overview/%s" class="alphaxiv-link">alphaXiv</a>
-                <a href="https://papers.cool/arxiv/%s" class="cool-link">Cool</a>
-            </div>
-        </div>
-        <div class="paper-authors">%s</div>
-        <div class="paper-date">📅 %s</div>
-        <div class="paper-summary">%s</div>
-    </div>
-    """
-                % (
-                    max_source_keyword[pid],
-                    score,
-                    p["title"],
-                    url,
-                    HOST,
-                    pid,
-                    arxiv_url,
-                    pid,
-                    pid,
-                    authors,
-                    p["_time_str"],
-                    summary,
+                _render_paper_html(
+                    p, pid, score, max_source_keyword.get(pid, ""), source_class="paper-source keyword-source"
                 )
             )
 
@@ -837,7 +835,8 @@ def render_recommendations(
         final = "".join(parts)
 
         # render the stats
-        keywords_str = ", ".join(['"%s"' % k for k, pids in keywords.items()])
+        keywords_str = ", ".join([f'"{_h(k)}"' for k, pids in keywords.items()])
+        n = len(parts)
         stats = f"We search your {len(keywords)} keywords ({keywords_str}) and \
                 ranked {len(pids)} papers that showed up on arxiv over the last \
                 {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
@@ -856,7 +855,7 @@ def render_recommendations(
         out = out.replace("__SECTION_KEYWORD__", "")
 
     # render the account
-    out = out.replace("__ACCOUNT__", user)
+    out = out.replace("__ACCOUNT__", safe_user)
 
     return out
 
@@ -957,10 +956,6 @@ if __name__ == "__main__":
         keywords = {k: v for k, v in keywords_db.items()}
 
     # read entire db simply into RAM
-    with get_metas_db() as mdb:
-        metas = {k: v for k, v in mdb.items()}
-
-    # read entire db simply into RAM
     with get_email_db() as edb:
         emails = {k: v for k, v in edb.items()}
 
@@ -970,6 +965,9 @@ if __name__ == "__main__":
     # iterate all users, create recommendations, send emails
     num_sent = 0
     if args.user:
+        if args.user not in tags:
+            logger.error(f"user {args.user} not found in tags db")
+            sys.exit(1)
         tags = {args.user: tags[args.user]}
     for user, utags in tags.items():
         # verify that we have an email for this user
@@ -1018,17 +1016,19 @@ if __name__ == "__main__":
             logger.info(
                 "rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user)
             )
-            html = render_recommendations(user, utags, pids, scores, u_ctag, cpids, cscores, ukeywords, kpids, kscores)
+            email_html = render_recommendations(
+                user, utags, pids, scores, u_ctag, cpids, cscores, ukeywords, kpids, kscores
+            )
             # temporarily for debugging write recommendations to disk for manual inspection
             if os.path.isdir("recco"):
                 with open(f"recco/{user}.html", "w") as f:
-                    f.write(html)
+                    f.write(email_html)
             # actually send the email
             logger.info("sending email...")
             n_send_try = 0
             while n_send_try < 3:
                 try:
-                    send_email(email, html)
+                    send_email(email, email_html)
                     break
                 except Exception as e:
                     logger.warning(f"Failed to send email attempt {n_send_try + 1}: {e}")
