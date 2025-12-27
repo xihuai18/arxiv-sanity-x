@@ -48,7 +48,47 @@ from aslite.db import (
     save_features,
 )
 
+
+def log_csr_nnz_stats(name: str, mat):
+    """Log nnz statistics for a CSR sparse matrix efficiently."""
+    try:
+        if mat is None:
+            logger.warning(f"{name}: matrix is None")
+            return
+        if not sp.isspmatrix(mat):
+            logger.warning(f"{name}: not a scipy sparse matrix (type={type(mat)}), skip nnz stats")
+            return
+
+        mat_csr = mat.tocsr(copy=False)
+        rows, cols = mat_csr.shape
+        total = mat_csr.nnz
+
+        if rows == 0 or cols == 0:
+            logger.info(f"{name}: shape={mat_csr.shape}, nnz={total}")
+            return
+
+        row_nnz = np.diff(mat_csr.indptr)
+        mean_nnz = float(row_nnz.mean())
+        median_nnz = float(np.median(row_nnz))
+        p95_nnz = float(np.percentile(row_nnz, 95))
+        max_nnz = int(row_nnz.max())
+
+        denom = float(rows) * float(cols)
+        density = float(total) / denom if denom > 0 else 0.0
+        sparsity = 1.0 - density
+
+        logger.info(
+            f"{name}: shape={mat_csr.shape}, nnz={total}, density={density:.6g}, sparsity={sparsity:.6g}, "
+            f"row_nnz(mean/median/p95/max)={mean_nnz:.2f}/{median_nnz:.0f}/{p95_nnz:.0f}/{max_nnz}"
+        )
+    except Exception as e:
+        logger.warning(f"{name}: failed to compute nnz stats: {e}")
+
+
 # -----------------------------------------------------------------------------
+
+TFIDF_TOKEN_PATTERN = r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b"
+TFIDF_STOP_WORDS = "english"
 
 
 def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
@@ -369,13 +409,30 @@ def generate_embeddings_incremental(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arxiv Computor - Optimized for 400k papers with hybrid features")
     parser.add_argument(
-        "-n", "--num", type=int, default=50000, help="number of tfidf features (optimized for 400k papers)"
+        "-n",
+        "--num",
+        type=int,
+        default=100000,
+        help="number of tfidf features (recommended default for ~440k docs)",
     )
-    parser.add_argument("--min_df", type=int, default=20, help="min document frequency (for 400k papers)")
-    parser.add_argument("--max_df", type=float, default=0.10, help="max document frequency (for 400k papers)")
+    parser.add_argument(
+        "--min_df",
+        type=int,
+        default=10,
+        help="min document frequency (recommended default for ~440k docs)",
+    )
+    parser.add_argument(
+        "--max_df",
+        type=float,
+        default=0.50,
+        help="max document frequency as fraction (recommended default for ~440k docs)",
+    )
 
     parser.add_argument(
-        "--ngram_max", type=int, default=1, help="maximum n-gram size (unigram only for large datasets)"
+        "--ngram_max",
+        type=int,
+        default=2,
+        help="maximum n-gram size (2 captures key phrases; keep small for large datasets)",
     )
     parser.add_argument(
         "--max_docs",
@@ -420,9 +477,9 @@ if __name__ == "__main__":
         strip_accents="unicode",
         lowercase=True,
         analyzer="word",
-        stop_words="english",
+        stop_words=TFIDF_STOP_WORDS,
         # Improved token pattern: capture more academic vocabulary (e.g. COVID-19, state-of-the-art)
-        token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b",
+        token_pattern=TFIDF_TOKEN_PATTERN,
         ngram_range=(1, args.ngram_max),
         max_features=args.num,
         norm="l2",  # L2 normalization, important for similarity calculation
@@ -466,6 +523,7 @@ if __name__ == "__main__":
     logger.info(f"Transform completed in {time.time() - t0:.1f}s")
     logger.info(f"Original TF-IDF feature matrix shape: {x.shape}")
     logger.info(f"TF-IDF sparsity: {1 - x.nnz / (x.shape[0] * x.shape[1]):.4f}")
+    log_csr_nnz_stats("TF-IDF", x)
 
     # Get all paper IDs
     pids = list(pdb.keys())
@@ -488,6 +546,7 @@ if __name__ == "__main__":
             # Perform sparse-dense concatenation
             logger.info("Performing sparse-dense matrix concatenation...")
             x_final = sparse_dense_concatenation(x, embeddings)
+            log_csr_nnz_stats("Hybrid(TF-IDF+Emb)", x_final)
 
             # Save features
             features = {
@@ -511,6 +570,8 @@ if __name__ == "__main__":
                     "min_df": args.min_df,
                     "max_df": args.max_df,
                     "ngram_max": args.ngram_max,
+                    "token_pattern": TFIDF_TOKEN_PATTERN,
+                    "stop_words": TFIDF_STOP_WORDS,
                 },
                 "embedding_params": {
                     "model_path": args.embed_model,
@@ -532,12 +593,15 @@ if __name__ == "__main__":
                     "min_df": args.min_df,
                     "max_df": args.max_df,
                     "ngram_max": args.ngram_max,
+                    "token_pattern": TFIDF_TOKEN_PATTERN,
+                    "stop_words": TFIDF_STOP_WORDS,
                 },
             }
     else:
         # Use only TF-IDF features
         logger.info("Using only TF-IDF features (embeddings not enabled)")
         x_final = x
+        log_csr_nnz_stats("TF-IDF(final)", x_final)
         features = {
             "pids": pids,
             "x": x_final,
@@ -550,6 +614,8 @@ if __name__ == "__main__":
                 "min_df": args.min_df,
                 "max_df": args.max_df,
                 "ngram_max": args.ngram_max,
+                "token_pattern": TFIDF_TOKEN_PATTERN,
+                "stop_words": TFIDF_STOP_WORDS,
             },
         }
 

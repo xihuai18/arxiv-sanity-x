@@ -467,12 +467,24 @@ python3 daemon.py
 ### Core Endpoints
 
 #### Search & Recommendations
-- `GET /?rank=search&q=<query>` - Keyword search with TF-IDF scoring
+- `GET /?rank=search&q=<query>` - Keyword search (TF-IDF candidates + paper-oriented lexical reranking: title/authors/category boosted)
 - `GET /?rank=search&q=<query>&search_mode=semantic` - Semantic search using embeddings
 - `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=<weight>` - Hybrid search with configurable weights
 - `GET /?rank=tags&tags=<tag_list>&logic=<and|or>` - Tag-based SVM recommendations
 - `GET /?rank=time&time_filter=<days>` - Time-filtered papers with smart tag preservation
 - `GET /?rank=pid&pid=<paper_id>` - Similar papers using nearest neighbor search
+
+**Query syntax (same search box / query param, no UI changes):**
+- Field filters: `ti:`/`title:`, `au:`/`author:`, `abs:`/`abstract:`, `cat:`/`category:`, `id:`
+- Phrases: `"diffusion model"`
+- Negation: `-survey` or `!survey`
+- Multi-keyword: spaces/commas/semicolons/slashes are treated as separators; `AND`/`OR` are ignored
+- Technical terms: hyphens/slashes are normalized (e.g., `self-supervised`, `rnn/lstm`)
+
+Examples:
+- `ti:"graph neural network" cat:cs.LG`
+- `au:goodfellow -survey`
+- `id:2312.12345`
 
 #### API Endpoints
 - `POST /api/keyword_search` - Keyword-based search via API

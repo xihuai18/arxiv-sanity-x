@@ -124,48 +124,6 @@ var SearchBoxController = {
         });
 
         // Search suggestions and history functionality removed
-
-        // Clear search button
-        this.addClearButton(searchInput);
-    },
-
-    // Search suggestions functionality removed
-
-    // Add clear button
-    addClearButton: function(searchInput) {
-        if (!searchInput || !searchInput.parentNode) return;
-        var parent = searchInput.parentNode;
-        parent.style.position = 'relative';
-
-        var clearBtn = parent.querySelector('.search-clear-btn');
-        if (!clearBtn) {
-            clearBtn = document.createElement('button');
-            clearBtn.type = 'button';
-            clearBtn.className = 'search-clear-btn';
-            clearBtn.innerHTML = '×';
-            clearBtn.title = 'Clear search';
-            clearBtn.setAttribute('aria-label', 'Clear search');
-
-            clearBtn.addEventListener('click', function() {
-                searchInput.value = '';
-                searchInput.focus();
-                SearchBoxController.hideSuggestions();
-                SearchBoxController.hideTagSuggestions();
-                SearchBoxController.addClearButton(searchInput);
-            });
-
-            parent.appendChild(clearBtn);
-        }
-
-        var toggleClear = function() {
-            clearBtn.style.display = searchInput.value.trim() ? 'block' : 'none';
-        };
-
-        if (!searchInput.dataset.clearBound) {
-            searchInput.addEventListener('input', toggleClear);
-            searchInput.dataset.clearBound = '1';
-        }
-        toggleClear();
     },
 
     // Search suggestions functionality removed
@@ -595,8 +553,7 @@ document.addEventListener('DOMContentLoaded', function() {
             <form action="/" method="get">
                 <div class="search-row">
                     <div class="search-input-wrapper">
-                        <input name="q" type="text" id="qfield" class="search-input" aria-label="Search arXiv papers" placeholder="Search arXiv papers… (⌘K)" value="{{ gvars.search_query }}" autocomplete="off" spellcheck="false" inputmode="search">
-                        <span class="search-shortcut-hint">⌘K</span>
+                        <input name="q" type="text" id="qfield" class="search-input" aria-label="Search arXiv papers" placeholder="Search arXiv papers…" value="{{ gvars.search_query }}" autocomplete="off" spellcheck="false" inputmode="search">
                     </div>
                     <button type="submit" class="primary-btn">
                         <span class="btn-icon">🔍</span>
@@ -623,14 +580,14 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <option value="hybrid" {{ gvars.search_mode == 'hybrid' and 'selected' }}>Hybrid</option>
                             </select>
                         </div>
-                        <div class="filter-item" id="semantic_weight_container" style="{{ gvars.search_mode != 'hybrid' and 'display:none;' }} margin-left: 20px;">
+                        <div class="filter-item" id="semantic_weight_container" style="{{ gvars.search_mode != 'hybrid' and 'display:none;' or '' }}">
                             <label for="semantic_weight_slider" title="0 = keyword-only, 1 = semantic-only">Semantic Weight:</label>
                             <input type="range" name="semantic_weight" id="semantic_weight_slider"
                                    min="0" max="1" step="0.1" value="{{ gvars.semantic_weight }}"
-                                   style="width: 80px; margin: 0 5px;"
+                                   style="width: 80px;"
                                    oninput="document.getElementById('semantic_weight_value').textContent = this.value">
                             <span id="semantic_weight_value" class="weight-value-badge">{{ gvars.semantic_weight }}</span>
-                            <small class="filter-hint">0 = keyword, 1 = semantic</small>
+                            <small class="filter-hint">0=keyword, 1=semantic</small>
                         </div>
                         <div class="filter-item">
                             <label for="rank_select">Rank by:</label>

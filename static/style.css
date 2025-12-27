@@ -569,18 +569,20 @@ button.link-button:hover {
 
 .rel_score {
     display: inline-flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     margin-right: 14px;
-    font-weight: 700;
-    font-size: 13px;
-    background: linear-gradient(135deg, var(--primary-bg) 0%, #c02f2f 100%);
+    font-weight: 600;
+    font-size: 14px;
+    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
     color: white;
-    padding: 5px 12px;
-    border-radius: 20px;
+    padding: 6px 12px;
+    border-radius: 8px;
     min-width: 50px;
-    box-shadow: 0 2px 8px rgba(179, 27, 27, 0.25);
+    box-shadow: 0 2px 6px rgba(185, 28, 28, 0.2);
     letter-spacing: 0.02em;
+    gap: 1px;
 }
 
 .rel_authors {
@@ -1006,33 +1008,6 @@ button.link-button:hover {
     box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.2), var(--shadow-md);
 }
 
-/* Search box clear button */
-.search-clear-btn {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: none;
-    border: none;
-    font-size: 18px;
-    color: var(--text-color);
-    opacity: 0.6;
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 50%;
-    transition: opacity 0.15s ease, background-color 0.15s ease;
-    z-index: 2;
-}
-.search-clear-btn:hover {
-    opacity: 1;
-    background-color: rgba(0, 0, 0, 0.05);
-}
-[data-theme="dark"] .search-clear-btn:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-}
-
-/* Search suggestions functionality removed */
-
 /* Tag suggestions dropdown */
 .tag-suggestions {
     position: absolute;
@@ -1162,16 +1137,17 @@ button.link-button:hover {
 
 .filter-row {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
     margin-bottom: 8px;
+    gap: 8px;
 }
 
 /* Filter Groups Styling */
 .filter-group {
     display: flex;
     flex-wrap: wrap;
-    gap: 10px 16px;
+    gap: 6px 20px;
     align-items: center;
 }
 
@@ -1181,47 +1157,51 @@ button.link-button:hover {
 
 .filter-item {
     display: flex;
+    flex-direction: row;
     align-items: center;
-    gap: 8px;
-    flex: 0 1 auto;
+    gap: 6px;
+    flex: 0 0 auto;
+    white-space: nowrap;
 }
 
 .filter-item label {
     font-size: 13px;
     color: var(--text-muted);
-    font-weight: 600;
+    font-weight: 500;
     white-space: nowrap;
+    line-height: 1;
+    margin: 0;
+    padding: 0;
 }
 
 .filter-item input[type="text"],
 .filter-item select {
     box-sizing: border-box;
-    height: 40px;
-    font-size: 14px;
+    height: 32px;
+    font-size: 13px;
     font-weight: 500;
-    padding: 0 14px;
-    padding-right: 32px;
-    border: 2px solid var(--border-color);
-    border-radius: 12px;
+    padding: 6px 10px;
+    padding-right: 26px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
     background-color: var(--card-bg);
     color: var(--text-color);
     transition: all var(--transition-fast);
-    line-height: normal;
-    flex-grow: 1;
-    min-width: 60px;
+    line-height: 1.2;
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 12px center;
-    background-size: 12px;
+    background-position: right 8px center;
+    background-size: 10px;
+    vertical-align: middle;
 }
 
 .filter-item input[type="text"] {
     background-image: none;
-    padding-right: 14px;
+    padding-right: 10px;
     cursor: text;
 }
 
@@ -1243,25 +1223,30 @@ html[data-theme="dark"] .filter-item select {
 
 /* Give specific inputs more defined widths if they tend to be too wide or too narrow */
 .filter-item #rank_select,
-.filter-item #logic,
+.filter-item #logic {
+    width: 80px;
+}
+
 .filter-item #skip_have_select {
-    flex-grow: 0; /* Prevent select boxes from growing too much */
-    min-width: 100px; /* Ensure select boxes have enough width */
+    width: 55px;
+}
+
+.filter-item #search_mode_select {
+    width: 90px;
 }
 
 .filter-item #time_filter_field {
-    width: 60px;
-    min-width: 60px;
-    flex-grow: 0;
+    width: 65px;
+    text-align: center;
 }
+
 .filter-item #svm_c_field {
     width: 70px;
-    min-width: 70px;
-    flex-grow: 0;
+    text-align: center;
 }
+
 .filter-item #tags_field,
 .filter-item #pid_field {
-    min-width: 200px; /* Increase minimum width to show full placeholder */
     width: 200px;
 }
 
@@ -1457,13 +1442,15 @@ html[data-theme="dark"] .filter-item select {
 }
 
 .score_breakdown {
-    font-size: 12px;
-    color: #666;
-    margin-top: 3px;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.85);
+    margin-top: 2px;
     line-height: 1.2;
+    font-weight: 400;
+    letter-spacing: 0.02em;
 }
 [data-theme="dark"] .score_breakdown {
-    color: #a8a8a8;
+    color: rgba(255, 255, 255, 0.8);
 }
 
 /* Search box loading state */
@@ -1503,24 +1490,25 @@ html[data-theme="dark"] .filter-item select {
 }
 
 .filter-hint {
-    display: block;
-    margin-top: 4px;
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-muted);
+    opacity: 0.7;
+    white-space: nowrap;
+    line-height: 1;
 }
 
 /* Weight value badge */
 .weight-value-badge {
-    background-color: var(--card-bg);
-    color: var(--text-color);
-    padding: 4px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--border-color);
+    background-color: var(--link-color);
+    color: white;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: none;
     font-weight: 600;
-    font-size: 13px;
+    font-size: 12px;
     min-width: 28px;
-    display: inline-block;
     text-align: center;
+    line-height: 1;
 }
 
 [data-theme="dark"] .weight-value-badge {
@@ -1532,23 +1520,24 @@ html[data-theme="dark"] .filter-item select {
 input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
-    height: 6px;
+    height: 5px;
     background: var(--border-color);
     border-radius: 3px;
     outline: none;
     cursor: pointer;
+    vertical-align: middle;
 }
 
 input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     background: var(--link-color);
     border-radius: 50%;
     cursor: pointer;
     border: 2px solid var(--card-bg);
-    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
     transition: transform var(--transition-fast);
 }
 
@@ -1557,13 +1546,13 @@ input[type="range"]::-webkit-slider-thumb:hover {
 }
 
 input[type="range"]::-moz-range-thumb {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
     background: var(--link-color);
     border-radius: 50%;
     cursor: pointer;
     border: 2px solid var(--card-bg);
-    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
 }
 
 /* New advanced filter row styles */
@@ -3819,8 +3808,11 @@ body {
 
 /* 分数显示优化 */
 .rel_score {
-    font-size: 15px; /* 稍大的分数字号 */
+    font-size: 14px;
     margin-right: 10px;
+    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+    flex-direction: column;
+    gap: 1px;
 }
 
 /* ===== 方块紧凑化微调 ===== */
@@ -5426,28 +5418,6 @@ html {
 .search-input-wrapper .search-input,
 .search-input-wrapper #qfield {
     width: 100%;
-    padding-right: 70px;
-}
-
-.search-shortcut-hint {
-    position: absolute;
-    right: 50px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-muted);
-    background: var(--body-bg);
-    padding: 4px 8px;
-    border-radius: 6px;
-    border: 1px solid var(--border-color);
-    opacity: 0.6;
-    pointer-events: none;
-    transition: opacity var(--transition-fast);
-}
-
-.search-input-wrapper .search-input:focus + .search-shortcut-hint {
-    opacity: 0;
 }
 
 .primary-btn .btn-icon {
@@ -5463,9 +5433,6 @@ html {
         display: inline;
     }
     .primary-btn .btn-text {
-        display: none;
-    }
-    .search-shortcut-hint {
         display: none;
     }
 }
