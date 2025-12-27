@@ -468,12 +468,26 @@ python3 daemon.py
 ### 核心端点
 
 #### 搜索与推荐
-- `GET /?rank=search&q=<query>` - 关键词搜索，使用 TF-IDF 评分
+- `GET /?rank=search&q=<query>` - 关键词搜索（TF-IDF 候选 + 面向论文的字段加权重排：标题/作者/分类更重要）
 - `GET /?rank=search&q=<query>&search_mode=semantic` - 语义搜索，使用嵌入向量
 - `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=<weight>` - 混合搜索，可配置权重
 - `GET /?rank=tags&tags=<tag_list>&logic=<and|or>` - 基于标签的 SVM 推荐
 - `GET /?rank=time&time_filter=<days>` - 时间过滤论文，智能标签保留
 - `GET /?rank=pid&pid=<paper_id>` - 相似论文，使用最近邻搜索
+
+**搜索语法（在同一个搜索框输入即可，无需改 UI）：**
+- 字段过滤：`ti:`/`title:`（标题）、`au:`/`author:`（作者）、`abs:`/`abstract:`（摘要）、`cat:`/`category:`（分类）、`id:`（arXiv ID）
+- 短语：`"diffusion model"`
+- 排除词：`-survey` 或 `!survey`
+- 多关键词：空格/逗号/顿号/分号/斜杠分隔均可，`AND`/`OR` 作为连接词会被忽略
+- 技术名词：连字符/斜杠会被归一化（如 `self-supervised`、`rnn/lstm`）
+
+示例：
+- `ti:"graph neural network" cat:cs.LG`
+- `au:goodfellow -survey`
+- `id:2312.12345`
+
+提示：直接粘贴完整论文标题也会优先匹配标题并尽量置顶；如果标题里包含较多标点/版本号，使用引号或 `ti:` 会更稳定。
 
 #### API 端点
 - `POST /api/keyword_search` - 通过 API 进行关键词搜索

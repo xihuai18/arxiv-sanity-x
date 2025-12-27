@@ -250,6 +250,17 @@ def _normalize_name(value: Optional[str]) -> str:
     return (value or "").strip()
 
 
+# Keep tokenization consistent with compute.py for query-side TF-IDF.
+TFIDF_TOKEN_PATTERN = (
+    r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b"
+)
+TFIDF_STOP_WORDS = "english"
+
+# Treat common separators (incl. CJK punctuation) as spaces for multi-keyword queries.
+_QUERY_SEP_RE = re.compile(r"[,;\uFF0C\u3001\uFF1B\uFF1A:/\\|\(\)\[\]{}]+")
+_BOOLEAN_TOKENS = {"and", "or", "not"}
+
+
 def _validate_tag_name(tag: str) -> Optional[str]:
     if not tag:
         return "error, tag is required"
@@ -1041,25 +1052,718 @@ def svm_rank(
     return result
 
 
-def count_match(q, pid_start, n_pids):
-    q = q.lower().strip()
-    qs = q.split()  # split query by spaces and lowercase
-    sub_pairs = []
-    match = lambda s: sum(min(3, s.lower().count(qp)) for qp in qs) / len(qs)
-    # matchu = lambda s: sum(int(s.lower().count(qp) > 0) for qp in qs) / len(qs)
-    match_t = lambda s: int(q in s.lower())
-    with get_papers_db() as pdb:
-        for pid in get_pids()[pid_start : pid_start + n_pids]:
+def _normalize_text(text: str) -> str:
+    """Normalize text for matching: lowercase, handle hyphens, extra spaces."""
+    text = (text or "").lower().strip()
+    if not text:
+        return ""
+    # Treat hyphens as spaces for matching (self-attention ≈ self attention)
+    text = text.replace("-", " ")
+    # Split on common separators (commas, slashes, colons, brackets, etc.)
+    text = _QUERY_SEP_RE.sub(" ", text)
+    # Collapse multiple spaces
+    text = " ".join(text.split())
+    return text
+
+
+def _normalize_text_loose(text: str) -> str:
+    """Looser normalization for title-like matching.
+
+    - Lowercase
+    - Treat hyphens and common punctuation as spaces
+    - Collapse whitespace
+
+    This helps matching copied paper titles that include punctuation like ':' ',' '.' '()' etc.
+    """
+    s = (text or "").lower().strip()
+    if not s:
+        return ""
+    # Replace hyphens and most punctuation with spaces
+    s = re.sub(r"[\-\u2010\u2011\u2012\u2013\u2014]", " ", s)
+    s = re.sub(r"[\:\;\,\.!\?\(\)\[\]\{\}\/\\\|\"\'\`\~\+\=\*\#\$\%\^\&\@]", " ", s)
+    s = " ".join(s.split())
+    return s
+
+
+_ARXIV_ID_RE = re.compile(
+    r"(?:(?:arxiv:)?)(?P<id>(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7}))(?:v(?P<v>\d+))?",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_cjk_query(q: str) -> bool:
+    """Heuristic: query contains mostly CJK and little ASCII."""
+    if not q:
+        return False
+    s = q.strip()
+    if not s:
+        return False
+    cjk = 0
+    ascii_alnum = 0
+    for ch in s:
+        o = ord(ch)
+        if (0x4E00 <= o <= 0x9FFF) or (0x3400 <= o <= 0x4DBF) or (0x3040 <= o <= 0x30FF) or (0xAC00 <= o <= 0xD7AF):
+            cjk += 1
+        elif ch.isascii() and (ch.isalnum() or ch in (".", "-", "/")):
+            ascii_alnum += 1
+    # Treat as CJK query if it has any CJK and very few ASCII tokens.
+    return cjk >= 2 and ascii_alnum <= max(2, len(s) // 12)
+
+
+def _parse_search_query(q: str) -> dict:
+    """Parse a paper-search query.
+
+    Supported syntax (no UI changes; purely query-string semantics):
+    - Field filters: ti:/title:, au:/author:, abs:/abstract:, cat:/category:, id:
+      Examples: ti:"diffusion model" au:goodfellow cat:cs.LG id:2312.12345
+    - Quoted phrases: "graph neural network"
+    - Negation tokens: -term or !term (applies to any searched field)
+
+    Returns a dict with normalized tokens and extracted filters.
+    """
+    raw = (q or "").strip()
+    parsed = {
+        "raw": raw,
+        "raw_lower": raw.lower(),
+        "norm": _normalize_text(raw),
+        "terms": [],
+        "phrases": [],
+        "neg_terms": [],
+        "filters": {"ti": [], "au": [], "abs": [], "cat": [], "id": []},
+        "filters_phrases": {"ti": [], "au": [], "abs": [], "cat": [], "id": []},
+    }
+    if not raw:
+        return parsed
+
+    # 1) Extract key:"..." filters first
+    work = raw
+    for key, canon in (
+        ("title", "ti"),
+        ("ti", "ti"),
+        ("author", "au"),
+        ("au", "au"),
+        ("abstract", "abs"),
+        ("abs", "abs"),
+        ("category", "cat"),
+        ("cat", "cat"),
+        ("id", "id"),
+    ):
+        pat = re.compile(rf"(?i)(?:^|\s){re.escape(key)}:\"([^\"]+)\"(?=\s|$)")
+        while True:
+            m = pat.search(work)
+            if not m:
+                break
+            parsed["filters"][canon].append(m.group(1).strip())
+            parsed["filters_phrases"][canon].append(m.group(1).strip())
+            work = (work[:m.start()] + " " + work[m.end():]).strip()
+
+    # 2) Extract free quoted phrases
+    for m in re.finditer(r"\"([^\"]+)\"", work):
+        phr = m.group(1).strip()
+        if phr:
+            parsed["phrases"].append(phr)
+    work = re.sub(r"\"([^\"]+)\"", " ", work)
+
+    # 3) Tokenize remaining by whitespace and pick up key:value filters
+    tokens = [t for t in re.split(r"\s+", work) if t]
+    for tok in tokens:
+        # Negation
+        if tok.startswith("-") or tok.startswith("!"):
+            val = tok[1:].strip()
+            if val:
+                parsed["neg_terms"].append(val)
+            continue
+
+        m = re.match(r"(?i)^(title|ti|author|au|abstract|abs|category|cat|id):(.+)$", tok)
+        if m:
+            k = m.group(1).lower()
+            v = m.group(2).strip()
+            canon = {
+                "title": "ti",
+                "ti": "ti",
+                "author": "au",
+                "au": "au",
+                "abstract": "abs",
+                "abs": "abs",
+                "category": "cat",
+                "cat": "cat",
+                "id": "id",
+            }[k]
+            if v:
+                parsed["filters"][canon].append(v)
+            continue
+
+        parsed["terms"].append(tok)
+
+    # Normalize filter values by splitting into terms (keep full string too)
+    def _split_terms(values):
+        out = []
+        for v in values:
+            vs = _normalize_text(v)
+            if not vs:
+                continue
+            out.extend([p for p in vs.split() if p])
+        return out
+
+    parsed["filters_terms"] = {
+        "ti": _split_terms(parsed["filters"]["ti"]),
+        "au": _split_terms(parsed["filters"]["au"]),
+        "abs": _split_terms(parsed["filters"]["abs"]),
+        "cat": _split_terms(parsed["filters"]["cat"]),
+        "id": _split_terms(parsed["filters"]["id"]),
+    }
+
+    parsed["filters_phrases_norm"] = {
+        "ti": [_normalize_text(p) for p in parsed["filters_phrases"]["ti"] if p.strip()],
+        "au": [_normalize_text(p) for p in parsed["filters_phrases"]["au"] if p.strip()],
+        "abs": [_normalize_text(p) for p in parsed["filters_phrases"]["abs"] if p.strip()],
+        "cat": [_normalize_text(p) for p in parsed["filters_phrases"]["cat"] if p.strip()],
+        "id": [_normalize_text(p) for p in parsed["filters_phrases"]["id"] if p.strip()],
+    }
+
+    # Normalize terms/neg_terms too
+    parsed["terms_norm"] = [
+        t for t in _normalize_text(" ".join(parsed["terms"])).split() if t and t not in _BOOLEAN_TOKENS
+    ]
+    parsed["neg_terms_norm"] = [t for t in _normalize_text(" ".join(parsed["neg_terms"])).split() if t]
+    parsed["phrases_norm"] = [_normalize_text(p) for p in parsed["phrases"] if p.strip()]
+    return parsed
+
+
+def _extract_arxiv_ids(q: str) -> list[str]:
+    """Return normalized arXiv IDs mentioned in the query."""
+    if not q:
+        return []
+    ids = []
+    for m in _ARXIV_ID_RE.finditer(q.strip()):
+        pid = (m.group("id") or "").strip().lower()
+        ver = (m.group("v") or "").strip()
+        if not pid:
+            continue
+        ids.append(f"{pid}v{ver}" if ver else pid)
+    # de-dup preserve order
+    seen = set()
+    out = []
+    for pid in ids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append(pid)
+    return out
+
+
+def _paper_text_fields(p: dict) -> dict:
+    """Build normalized text fields for scoring."""
+    title = (p.get("title") or "")
+    authors = p.get("authors") or []
+    authors_str = " ".join([a.get("name", "") for a in authors if isinstance(a, dict)])
+    summary = (p.get("summary") or "")
+    tags = p.get("tags") or []
+    tags_str = " ".join([t.get("term", "") for t in tags if isinstance(t, dict)])
+
+    return {
+        "title": title,
+        "title_lower": title.lower(),
+        "title_norm": _normalize_text(title),
+        "title_norm_loose": _normalize_text_loose(title),
+        "authors": authors_str,
+        "authors_lower": authors_str.lower(),
+        "authors_norm": _normalize_text(authors_str),
+        "summary": summary,
+        "summary_lower": summary.lower(),
+        "summary_norm": _normalize_text(summary),
+        "summary_norm_loose": _normalize_text_loose(summary),
+        "tags": tags_str,
+        "tags_lower": tags_str.lower(),
+        "tags_norm": _normalize_text(tags_str),
+    }
+
+
+def _is_title_like_query(parsed: dict) -> bool:
+    """Heuristic: user pasted a paper title."""
+    if not parsed:
+        return False
+    raw = (parsed.get("raw") or "").strip()
+    if not raw:
+        return False
+    # Longer, multi-token queries are more likely titles.
+    terms = parsed.get("terms_norm") or []
+    if len(raw) >= 22 and len(terms) >= 3:
+        return True
+    # Punctuation typical in titles.
+    if ":" in raw and len(raw) >= 16:
+        return True
+    return False
+
+
+def _title_candidate_scan(parsed: dict, max_candidates: int = 500, max_scan: int = 120000, time_budget_s: float = 0.6):
+    """Bounded scan over titles to pull in strong title matches.
+
+    This is a safety net for "paste full title" searches when TF-IDF recall misses
+    due to tokenization/vocab/min_df effects.
+    """
+    q_norm = (parsed.get("norm") or "").strip()
+    q_loose = _normalize_text_loose(parsed.get("raw") or "")
+    if not q_norm and not q_loose:
+        return []
+
+    # Prefer loose form for punctuation-insensitive matching.
+    q_use = q_loose or q_norm
+    if not q_use:
+        return []
+
+    import heapq
+
+    start = time.time()
+    heap = []
+    all_pids = get_pids()
+    if not all_pids:
+        return []
+
+    scan_n = min(len(all_pids), int(max_scan))
+    chunk = 2000
+    for i in range(0, scan_n, chunk):
+        if time.time() - start > time_budget_s:
+            break
+        part = all_pids[i:i + chunk]
+        pid_to_paper = get_papers_bulk(part)
+        for pid in part:
+            p = pid_to_paper.get(pid)
+            if p is None:
+                continue
+            fields = _paper_text_fields(p)
+            title_loose = fields.get("title_norm_loose") or ""
+            title_norm = fields.get("title_norm") or ""
+            if not title_loose and not title_norm:
+                continue
+
+            s = 0.0
+            # Exact loose match is very strong.
+            if q_use and title_loose and q_use == title_loose:
+                s = 2000.0
+            elif q_use and title_loose and q_use in title_loose:
+                # Substring match on loose title.
+                s = 900.0 + min(200.0, 10.0 * (len(q_use) / max(1.0, len(title_loose))))
+            elif q_norm and title_norm and q_norm in title_norm and len(q_norm) >= 18:
+                s = 750.0
+            else:
+                continue
+
+            if len(heap) < max_candidates:
+                heapq.heappush(heap, (s, pid))
+            else:
+                if s > heap[0][0]:
+                    heapq.heapreplace(heap, (s, pid))
+
+    heap.sort(reverse=True)
+    return [pid for _, pid in heap]
+
+
+def _compute_paper_score_parsed(parsed: dict, p: dict, pid: str) -> float:
+    """Paper-oriented lexical scoring with optional field filters.
+
+    This is intentionally simple and fast; it boosts:
+    - ID exact/partial matches
+    - Title/Author matches (stronger)
+    - Category(tag) matches (medium)
+    - Abstract matches (weaker)
+    It also supports negation terms for coarse exclusion.
+    """
+    if not parsed or p is None:
+        return 0.0
+
+    pid_lower = (pid or "").lower()
+    fields = _paper_text_fields(p)
+
+    # If the user input looks like a full title, strongly boost exact/substring title matches.
+    # This makes "search by paper title" behave like users expect.
+    q_raw_lower = (parsed.get("raw_lower") or "").strip()
+    q_norm_full = (parsed.get("norm") or "").strip()
+    q_loose_full = _normalize_text_loose(parsed.get("raw") or "")
+    if q_norm_full and len(q_norm_full) >= 18:
+        if q_norm_full == fields["title_norm"] or (q_loose_full and q_loose_full == fields.get("title_norm_loose", "")):
+            return 1800.0
+        if (q_norm_full in fields["title_norm"]) or (
+            q_loose_full and q_loose_full in (fields.get("title_norm_loose", "") or "")
+        ):
+            # Near-exact title phrase match
+            # (punctuation/case normalized; hyphens treated as spaces)
+            # Keep below ID match fast-path.
+            # Large enough to dominate common-term TF-IDF noise.
+            title_phrase_bonus = 700.0
+            # Extra small bonus if the raw string also appears (helps for shorter normalization collisions)
+            if q_raw_lower and q_raw_lower in fields["title_lower"]:
+                title_phrase_bonus += 50.0
+            score = title_phrase_bonus
+        else:
+            score = 0.0
+    else:
+        score = 0.0
+
+    # Exact ID fast path
+    for want in _extract_arxiv_ids(parsed.get("raw", "")) + parsed.get("filters").get("id", []):
+        want_l = want.strip().lower()
+        if not want_l:
+            continue
+        if want_l == pid_lower:
+            return 2000.0
+        if want_l in pid_lower or pid_lower in want_l:
+            return 1200.0
+
+    # Negation: if any neg term appears anywhere significant, penalize hard
+    neg = parsed.get("neg_terms_norm") or []
+    if neg:
+        hay = " ".join([fields["title_norm"], fields["authors_norm"], fields["tags_norm"], fields["summary_norm"]])
+        for t in neg:
+            if t and t in hay:
+                return -50.0
+
+    # Decide which terms apply to which field
+    f_terms = parsed.get("filters_terms") or {}
+    f_phrases = parsed.get("filters_phrases_norm") or {}
+    general = parsed.get("terms_norm") or []
+    phrases = parsed.get("phrases_norm") or []
+
+    # If the user specified any field filters, do not implicitly search all fields equally.
+    has_field_filters = any(len(parsed.get("filters", {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat"))
+
+    title_terms = (f_terms.get("ti") or []) + ([] if has_field_filters else general)
+    author_terms = (f_terms.get("au") or []) + ([] if has_field_filters else general)
+    abs_terms = (f_terms.get("abs") or []) + ([] if has_field_filters else general)
+    cat_terms = (f_terms.get("cat") or []) + ([] if has_field_filters else general)
+
+    # Enforce explicit field filters: require a match in each filtered field.
+    if f_phrases.get("ti"):
+        if any(ph and ph in fields["title_norm"] for ph in f_phrases["ti"]):
+            score += 180.0
+        elif f_terms.get("ti"):
+            if not any(t and t in fields["title_norm"] for t in f_terms["ti"]):
+                return 0.0
+        else:
+            return 0.0
+    elif f_terms.get("ti"):
+        if not any(t and t in fields["title_norm"] for t in f_terms["ti"]):
+            return 0.0
+
+    if f_phrases.get("au"):
+        if any(ph and ph in fields["authors_norm"] for ph in f_phrases["au"]):
+            score += 120.0
+        elif f_terms.get("au"):
+            if not any(t and t in fields["authors_norm"] for t in f_terms["au"]):
+                return 0.0
+        else:
+            return 0.0
+    elif f_terms.get("au"):
+        if not any(t and t in fields["authors_norm"] for t in f_terms["au"]):
+            return 0.0
+
+    if f_phrases.get("abs"):
+        if any(ph and ph in fields["summary_norm"] for ph in f_phrases["abs"]):
+            score += 60.0
+        elif f_terms.get("abs"):
+            if not any(t and t in fields["summary_norm"] for t in f_terms["abs"]):
+                return 0.0
+        else:
+            return 0.0
+    elif f_terms.get("abs"):
+        if not any(t and t in fields["summary_norm"] for t in f_terms["abs"]):
+            return 0.0
+
+    if f_phrases.get("cat"):
+        if any(ph and ph in fields["tags_norm"] for ph in f_phrases["cat"]):
+            score += 45.0
+        elif f_terms.get("cat"):
+            if not any(t and t in fields["tags_norm"] for t in f_terms["cat"]):
+                return 0.0
+        else:
+            return 0.0
+    elif f_terms.get("cat"):
+        if not any(t and t in fields["tags_norm"] for t in f_terms["cat"]):
+            return 0.0
+
+    # Phrases: strongest in title, then abstract
+    for ph in phrases:
+        if not ph:
+            continue
+        if ph in fields["title_norm"]:
+            score += 140.0
+        elif ph in fields["summary_norm"]:
+            score += 25.0
+
+    # Implicit phrase boost for short multi-keyword queries (technical terms, short titles).
+    if not phrases and general and len(general) >= 2 and not has_field_filters:
+        general_phrase = " ".join(general)
+        if general_phrase and general_phrase in fields["title_norm"]:
+            score += 45.0
+        elif general_phrase and general_phrase in fields["summary_norm"]:
+            score += 12.0
+
+    # Title scoring
+    if title_terms:
+        hits = sum(1 for t in title_terms if t and (t in fields["title_norm"]))
+        if hits:
+            score += 70.0 * (hits / max(1, len(title_terms)))
+            # Frequency cap
+            freq = sum(min(2, fields["title_lower"].count(t)) for t in title_terms if t) / max(1, len(title_terms))
+            score += 12.0 * freq
+            if hits == len(title_terms) and len(title_terms) >= 2:
+                score += 40.0
+
+    # Author scoring
+    if author_terms:
+        hits = sum(1 for t in author_terms if t and (t in fields["authors_norm"]))
+        if hits:
+            score += 55.0 * (hits / max(1, len(author_terms)))
+
+    # Category/tag scoring
+    if cat_terms:
+        hits = sum(1 for t in cat_terms if t and (t in fields["tags_norm"]))
+        if hits:
+            score += 35.0 * (hits / max(1, len(cat_terms)))
+
+    # Abstract scoring (lower weight)
+    if abs_terms:
+        hits = sum(1 for t in abs_terms if t and (t in fields["summary_norm"]))
+        if hits:
+            score += 12.0 * (hits / max(1, len(abs_terms)))
+
+    # Tiny recency tie-breaker (do not overpower lexical relevance)
+    try:
+        meta = get_metas().get(pid)
+        if meta and meta.get("_time"):
+            age_days = max(0.0, (time.time() - float(meta["_time"])) / 86400.0)
+            score += 0.35 * (1.0 / (1.0 + age_days / 365.0))
+    except Exception:
+        pass
+
+    # Boost coverage for multi-keyword queries (prefer papers matching more terms).
+    if general and len(general) > 1 and not has_field_filters:
+        hay = " ".join([fields["title_norm"], fields["authors_norm"], fields["tags_norm"], fields["summary_norm"]])
+        matched = {t for t in general if t and t in hay}
+        if matched:
+            coverage = len(matched) / max(1, len(general))
+            score += 18.0 * coverage
+            if coverage == 1.0:
+                score += 24.0
+
+    return score
+
+
+def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = None):
+    """Score a provided candidate pid list using lexical scoring, returning ranked pids/scores."""
+    if not pids:
+        return [], []
+    try:
+        k = int(limit) if limit is not None else None
+    except Exception:
+        k = None
+
+    # Bulk read for speed
+    pid_to_paper = get_papers_bulk(pids)
+    pairs = []
+    for pid in pids:
+        p = pid_to_paper.get(pid)
+        if p is None:
+            continue
+        s = _compute_paper_score_parsed(parsed, p, pid)
+        if s > 0:
+            pairs.append((s, pid))
+    pairs.sort(reverse=True)
+    out_pids = [pid for _, pid in pairs]
+    out_scores = [float(s) for s, _ in pairs]
+    if k is not None:
+        out_pids, out_scores = _apply_limit(out_pids, out_scores, k)
+    return out_pids, out_scores
+
+
+def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None):
+    """Lexical ranking by scanning the whole corpus.
+
+    Used only as a fallback when TF-IDF candidates are insufficient or when the query
+    is explicitly fielded (e.g., author/title/category filters).
+    """
+    all_pids = get_pids()
+    if not all_pids:
+        return [], []
+
+    try:
+        k = int(limit) if limit is not None else 200
+    except Exception:
+        k = 200
+    k = max(1, min(k, MAX_RESULTS))
+
+    import heapq
+
+    # Keep a min-heap of top-k
+    heap = []
+    if CACHE_PAPERS_IN_MEMORY:
+        pdb = get_papers() or {}
+        for pid in all_pids:
             p = pdb.get(pid)
             if p is None:
                 continue
-            score = 0.0
-            score += 20.0 * match_t(" ".join([a["name"] for a in p["authors"]]))
-            score += 20.0 * match(p["title"])
-            score += 10.0 * match_t(p["title"])
-            score += 5.0 * match(p["summary"])
+            s = _compute_paper_score_parsed(parsed, p, pid)
+            if s <= 0:
+                continue
+            if len(heap) < k:
+                heapq.heappush(heap, (s, pid))
+            else:
+                if s > heap[0][0]:
+                    heapq.heapreplace(heap, (s, pid))
+    else:
+        # Fallback: bulk-read in chunks
+        chunk = 2000
+        for i in range(0, len(all_pids), chunk):
+            part = all_pids[i:i + chunk]
+            pid_to_paper = get_papers_bulk(part)
+            for pid in part:
+                p = pid_to_paper.get(pid)
+                if p is None:
+                    continue
+                s = _compute_paper_score_parsed(parsed, p, pid)
+                if s <= 0:
+                    continue
+                if len(heap) < k:
+                    heapq.heappush(heap, (s, pid))
+                else:
+                    if s > heap[0][0]:
+                        heapq.heapreplace(heap, (s, pid))
+
+    heap.sort(reverse=True)
+    pids = [pid for _, pid in heap]
+    scores = [float(s) for s, _ in heap]
+    return pids, scores
+
+
+def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, pid: str) -> float:
+    """
+    Compute relevance score for a single paper.
+    
+    Scoring philosophy for academic paper search:
+    1. Paper ID match: Highest priority (user knows exactly what they want)
+    2. Title match: Very high priority (titles are precise and informative)
+    3. Author match: High priority (common search pattern)
+    4. Abstract match: Lower priority (used for concept search)
+    
+    Match types (in order of importance):
+    - Exact phrase match: Query appears as-is
+    - All words match: All query words appear (any order)
+    - Partial match: Some query words appear
+    - Word frequency: How often query words appear
+    """
+    score = 0.0
+    
+    # === 1. Paper ID matching (highest priority) ===
+    pid_lower = pid.lower()
+    if q == pid_lower:
+        # Exact ID match - user knows exactly what they want
+        return 1000.0
+    if q in pid_lower or pid_lower in q:
+        # Partial ID match (e.g., "2312.12345" matches "2312.12345v2")
+        score += 500.0
+    
+    # === 2. Title matching (very high priority) ===
+    title = p.get("title", "")
+    title_lower = title.lower()
+    title_norm = _normalize_text(title)
+    
+    # Exact phrase match in title
+    if q in title_lower:
+        score += 100.0
+    elif q_norm in title_norm:
+        score += 90.0  # Normalized match (handles hyphens)
+    
+    # All query words appear in title
+    if len(qs) > 1:
+        if all(qp in title_lower for qp in qs):
+            score += 60.0
+        elif all(qp in title_norm for qp in qs_norm):
+            score += 50.0
+    
+    # Partial word match in title (what fraction of query words appear)
+    words_in_title = sum(1 for qp in qs if qp in title_lower)
+    words_in_title_norm = sum(1 for qp in qs_norm if qp in title_norm)
+    best_partial = max(words_in_title, words_in_title_norm)
+    if best_partial > 0:
+        partial_ratio = best_partial / len(qs)
+        score += 30.0 * partial_ratio
+        
+        # Bonus for word frequency in title (indicates strong relevance)
+        freq_score = sum(min(2, title_lower.count(qp)) for qp in qs) / len(qs)
+        score += 10.0 * freq_score
+    
+    # === 3. Author matching (high priority) ===
+    authors = p.get("authors", [])
+    authors_str = " ".join([a.get("name", "") for a in authors]).lower()
+    
+    # Exact author name match
+    if q in authors_str:
+        score += 80.0
+    # All query words in authors (useful for "first last" name search)
+    elif len(qs) > 1 and all(qp in authors_str for qp in qs):
+        score += 50.0
+    # Partial author match
+    else:
+        author_matches = sum(1 for qp in qs if qp in authors_str)
+        if author_matches > 0:
+            score += 20.0 * (author_matches / len(qs))
+    
+    # === 4. Abstract/summary matching (lower priority, for concept search) ===
+    summary = p.get("summary", "")
+    summary_lower = summary.lower()
+    summary_norm = _normalize_text(summary)
+    
+    # Exact phrase in abstract
+    if q in summary_lower:
+        score += 15.0
+    elif q_norm in summary_norm:
+        score += 12.0
+    
+    # All words in abstract
+    if len(qs) > 1:
+        if all(qp in summary_lower for qp in qs):
+            score += 8.0
+        elif all(qp in summary_norm for qp in qs_norm):
+            score += 6.0
+    
+    # Partial match in abstract
+    words_in_summary = sum(1 for qp in qs if qp in summary_lower)
+    if words_in_summary > 0:
+        score += 3.0 * (words_in_summary / len(qs))
+        # Frequency bonus for abstract (less weight than title)
+        freq_score = sum(min(3, summary_lower.count(qp)) for qp in qs) / len(qs)
+        score += 1.0 * freq_score
+    
+    return score
+
+
+def count_match(q, pid_start, n_pids):
+    """
+    Count-based matching for legacy search.
+    Optimized for academic paper search patterns.
+    """
+    q = q.strip()
+    if not q:
+        return []
+    
+    q_lower = q.lower()
+    qs = q_lower.split()  # Split query by spaces
+    q_norm = _normalize_text(q)
+    qs_norm = q_norm.split()
+    
+    sub_pairs = []
+    
+    with get_papers_db() as pdb:
+        for pid in get_pids()[pid_start:pid_start + n_pids]:
+            p = pdb.get(pid)
+            if p is None:
+                continue
+            
+            score = _compute_paper_score(q_lower, qs, q_norm, qs_norm, p, pid)
+            
             if score > 0:
                 sub_pairs.append((score, pid))
+    
     return sub_pairs
 
 
@@ -1099,6 +1803,10 @@ def _get_query_vectorizer(features):
 
     tfidf_params = features.get("tfidf_params", {})
     ngram_max = int(tfidf_params.get("ngram_max", 1))
+    token_pattern = tfidf_params.get("token_pattern") or TFIDF_TOKEN_PATTERN
+    stop_words = tfidf_params.get("stop_words", TFIDF_STOP_WORDS)
+    if isinstance(stop_words, str) and stop_words.lower() in ("", "none", "null"):
+        stop_words = None
     vocab = features.get("vocab")
     idf = features.get("idf")
 
@@ -1113,11 +1821,18 @@ def _get_query_vectorizer(features):
 
     class _QueryTfidf:
         def __init__(self, vocabulary, idf_values, ngram_max_val):
-            self._cv = CountVectorizer(
-                vocabulary=vocabulary,
-                ngram_range=(1, ngram_max_val),
-                dtype=np.int32,
-            )
+            cv_kwargs = {
+                "vocabulary": vocabulary,
+                "ngram_range": (1, ngram_max_val),
+                "dtype": np.int32,
+                "lowercase": True,
+                "strip_accents": "unicode",
+            }
+            if token_pattern:
+                cv_kwargs["token_pattern"] = token_pattern
+            if stop_words:
+                cv_kwargs["stop_words"] = stop_words
+            self._cv = CountVectorizer(**cv_kwargs)
             self._tfidf = TfidfTransformer(
                 norm="l2",
                 use_idf=True,
@@ -1145,71 +1860,144 @@ def _get_query_vectorizer(features):
 def search_rank(q: str = "", limit=None):
     """
     Fast keyword search using TF-IDF dot-product against the precomputed matrix.
-    Falls back to legacy substring matching if TF-IDF is unavailable or query OOV.
+    Also runs legacy substring matching and merges results to catch papers
+    not in the TF-IDF index (e.g., newly added papers).
     """
     q = (q or "").strip()
     if not q:
         return [], []
 
+    parsed = _parse_search_query(q)
+
+    # If the query contains an explicit arXiv id, return it first (if present).
+    # This is the most common and highest-precision paper search behavior.
+    mentioned_ids = _extract_arxiv_ids(parsed.get("raw", ""))
+    if mentioned_ids:
+        for mid in mentioned_ids:
+            raw_pid, _ = _split_pid_version(mid)
+            if paper_exists(raw_pid):
+                pid = raw_pid
+                # If the user asked for a versioned pid and it exists in db keys, prefer it.
+                if mid != raw_pid and paper_exists(mid):
+                    pid = mid
+                return [pid], [2000.0]
+
+    # Fielded queries (ti:/au:/abs:/cat:/id:) or phrases typically need lexical scoring.
+    has_field_filters = any(len(parsed.get("filters", {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat", "id"))
+    has_phrases = bool(parsed.get("phrases"))
+    is_title_like = _is_title_like_query(parsed)
+
     features = None
-    try:
-        features = get_features_cached()
-    except Exception:
-        features = None
+    if not has_field_filters:
+        try:
+            features = get_features_cached()
+        except Exception:
+            features = None
 
     cache_key = None
     try:
-        cache_key = ("kw", q.lower(), int(limit) if limit is not None else None, FEATURES_FILE_MTIME)
+        cache_key = ("kw_merged", q.lower(), int(limit) if limit is not None else None, FEATURES_FILE_MTIME)
         cached = SEARCH_RANK_CACHE.get(cache_key)
         if cached is not None:
             return cached
     except Exception:
         cache_key = None
 
-    if not features:
-        return legacy_search_rank(q, limit)
-
-    x_tfidf = features.get("x_tfidf")
-    if x_tfidf is None:
-        return legacy_search_rank(q, limit)
-
-    v = _get_query_vectorizer(features)
-    if v is None:
-        return legacy_search_rank(q, limit)
-
-    try:
-        q_vec = v.transform([q])
-        if q_vec.nnz == 0:
-            return legacy_search_rank(q, limit)
-
-        # Sparse dot-product: only docs with matching terms become non-zero.
-        scores_sparse = (x_tfidf @ q_vec.T).tocoo()
-        if scores_sparse.nnz == 0:
-            return [], []
-
-        rows = scores_sparse.row
-        vals = scores_sparse.data
-
-        if limit is not None:
-            k = min(int(limit), len(vals))
-            if k <= 0:
-                return [], []
-            top = np.argpartition(-vals, k - 1)[:k]
-            top = top[np.argsort(-vals[top])]
-        else:
-            top = np.argsort(-vals)
-
-        pids = [features["pids"][int(rows[i])] for i in top]
-        scores = [float(vals[i]) * 100.0 for i in top]
-
+    # If query is explicitly fielded, prefer lexical scan (more like academic search)
+    if has_field_filters or has_phrases:
+        pids, scores = _lexical_rank_fullscan(parsed, limit=limit)
         if cache_key is not None:
             SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
-
         return pids, scores
 
-    except Exception as e:
-        logger.warning(f"TF-IDF keyword search failed, fallback to legacy: {e}")
-        return legacy_search_rank(q, limit)
+    tfidf_pids = []
+
+    # Try TF-IDF candidate generation first (fast, good recall on abstracts)
+    if features:
+        x_tfidf = features.get("x_tfidf")
+        v = _get_query_vectorizer(features) if x_tfidf is not None else None
+
+        if x_tfidf is not None and v is not None:
+            try:
+                q_vec = v.transform([q])
+                if q_vec.nnz > 0:
+                    scores_sparse = (x_tfidf @ q_vec.T).tocoo()
+                    if scores_sparse.nnz > 0:
+                        rows = scores_sparse.row
+                        vals = scores_sparse.data
+                        # Candidate limit to avoid sorting huge nnz arrays
+                        # (keep enough for reranking + pagination buffers)
+                        cand_k = 2000
+                        if limit is not None:
+                            try:
+                                cand_k = max(cand_k, int(limit) * 20)
+                            except Exception:
+                                pass
+                        cand_k = min(cand_k, MAX_RESULTS)
+
+                        if scores_sparse.nnz > cand_k:
+                            top_ix = np.argpartition(-vals, cand_k - 1)[:cand_k]
+                            top_ix = top_ix[np.argsort(-vals[top_ix])]
+                        else:
+                            top_ix = np.argsort(-vals)
+
+                        tfidf_pids = [features["pids"][int(rows[i])] for i in top_ix]
+            except Exception as e:
+                logger.warning(f"TF-IDF keyword search failed: {e}")
+
+    # If TF-IDF found too little (or query is CJK-heavy), lexical scan fallback.
+    # This avoids "no results" for title/author/category queries when TF-IDF corpus is abstract-only.
+    if (not tfidf_pids or len(tfidf_pids) < 30) or _looks_like_cjk_query(parsed.get("raw", "")):
+        # Prefer semantic mode in UI for CJK; but for keyword search we fallback to lexical.
+        pids, scores = _lexical_rank_fullscan(parsed, limit=limit)
+        if cache_key is not None:
+            SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
+        return pids, scores
+
+    # Safety net for pasted full titles: union in strong title matches from a bounded title scan.
+    if is_title_like:
+        extra = _title_candidate_scan(parsed, max_candidates=400)
+        if extra:
+            # Keep TF-IDF order first for stability, then add extras.
+            seen = set(tfidf_pids)
+            for pid in extra:
+                if pid not in seen:
+                    tfidf_pids.append(pid)
+                    seen.add(pid)
+
+    # Rerank TF-IDF candidates using paper-oriented lexical scoring (title/authors/tags boosted)
+    lex_pids, lex_scores = _lexical_rank_over_pids(tfidf_pids, parsed, limit=None)
+
+    # Rank fusion (RRF) is robust across heterogeneous score scales.
+    rrf_k = 60
+    tfidf_rank = {pid: r for r, pid in enumerate(tfidf_pids)}
+    lex_rank = {pid: r for r, pid in enumerate(lex_pids)}
+
+    # Weight lexical slightly higher because it better reflects academic intent.
+    w_tfidf = 0.45
+    w_lex = 0.55
+    combined_scores = {}
+    all_ids = set(tfidf_rank.keys()) | set(lex_rank.keys())
+    for pid in all_ids:
+        tr = tfidf_rank.get(pid)
+        lr = lex_rank.get(pid)
+        s = 0.0
+        if tr is not None:
+            s += w_tfidf / (rrf_k + tr)
+        if lr is not None:
+            s += w_lex / (rrf_k + lr)
+        combined_scores[pid] = s
+
+    merged = sorted(all_ids, key=lambda pid: combined_scores.get(pid, 0.0), reverse=True)
+    pids = merged
+    scores = [combined_scores[pid] * 100.0 for pid in pids]
+
+    pids, scores = _apply_limit(pids, scores, limit)
+    
+    if cache_key is not None:
+        SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
+
+    return pids, scores
 
 
 # Global semantic search related variables
@@ -1755,13 +2543,12 @@ def main():
             pid = p["id"]
             if pid in score_details:
                 details = score_details[pid]
-                keyword_weight = 1 - semantic_weight
                 kw_rank = details.get("keyword_rank")
                 sem_rank = details.get("semantic_rank")
-                p["score_breakdown"] = (
-                    f"{keyword_weight:.1f} kw#{kw_rank if kw_rank is not None else '-'} {details['keyword_score']:.1f} + "
-                    f"{semantic_weight:.1f} sem#{sem_rank if sem_rank is not None else '-'} {details['semantic_score']:.1f}"
-                )
+                # Format: K#rank · S#rank (compact display within badge)
+                kw_part = f"K#{kw_rank}" if kw_rank is not None else "K-"
+                sem_part = f"S#{sem_rank}" if sem_rank is not None else "S-"
+                p["score_breakdown"] = f"{kw_part} · {sem_part}"
 
     # build the current tags for the user, and append the special 'all' tag
     tags = get_tags()
