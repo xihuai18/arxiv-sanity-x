@@ -169,6 +169,14 @@ def save_features(features):
 
 def load_features():
     """loads the features dict from disk"""
-    with open(FEATURES_FILE, "rb") as f:
-        features = pickle.load(f)
-    return features
+    try:
+        with open(FEATURES_FILE, "rb") as f:
+            return pickle.load(f)
+    except ModuleNotFoundError as e:
+        if str(e).startswith("No module named 'numpy._core'"):
+            raise ModuleNotFoundError(
+                "Failed to load features.p due to NumPy version mismatch: this file was likely created under NumPy 2.x, "
+                "but the current environment is NumPy 1.x. Fix by upgrading NumPy to 2.x or regenerating features via "
+                "`python3 compute.py` under the current environment."
+            ) from e
+        raise

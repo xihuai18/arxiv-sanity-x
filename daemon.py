@@ -1,20 +1,68 @@
 import datetime
+import os
 import subprocess
+import sys
 
 import holidays
 from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
 
+PYTHON = sys.executable
+
+
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except Exception:
+        return default
+
+
+FETCH_NUM = _env_int("ARXIV_SANITY_FETCH_NUM", 1000)
+FETCH_MAX = _env_int("ARXIV_SANITY_FETCH_MAX", 200)
+SUMMARY_NUM = _env_int("ARXIV_SANITY_SUMMARY_NUM", 100)
+SUMMARY_WORKERS = _env_int("ARXIV_SANITY_SUMMARY_WORKERS", 2)
+ENABLE_SUMMARY = _truthy_env("ARXIV_SANITY_DAEMON_SUMMARY", "1")
+ENABLE_EMBEDDINGS = _truthy_env("ARXIV_SANITY_DAEMON_EMBEDDINGS", "1")
+
+
+def _run_cmd(cmd, name: str) -> bool:
+    logger.info(f"{name}: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"{name} failed with code {e.returncode}")
+        return False
+    except Exception as e:
+        logger.error(f"{name} failed: {e}")
+        return False
+
 
 def gen_summary():
-    logger.info("Generate summary")
-    subprocess.call(["python", "batch_paper_summarizer.py", "-n", "200", "-w", "2"])
+    if not ENABLE_SUMMARY:
+        logger.info("Summary generation disabled (ARXIV_SANITY_DAEMON_SUMMARY=0)")
+        return True
+    return _run_cmd(
+        [PYTHON, "batch_paper_summarizer.py", "-n", str(SUMMARY_NUM), "-w", str(SUMMARY_WORKERS)],
+        "generate_summary",
+    )
 
 
 def fetch_compute():
     logger.info("Fetch and compute")
-    subprocess.call(["python", "arxiv_daemon.py", "-n", "1000", "-m", "200"])
-    subprocess.call(["python", "compute.py"])
+    if not _run_cmd([PYTHON, "arxiv_daemon.py", "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)], "fetch"):
+        return
+
+    compute_cmd = [PYTHON, "compute.py"]
+    if ENABLE_EMBEDDINGS:
+        compute_cmd.append("--use_embeddings")
+    if not _run_cmd(compute_cmd, "compute"):
+        return
+
     gen_summary()
 
 
@@ -47,7 +95,7 @@ def send_email():
 
     subprocess.call(
         [
-            "python",
+            PYTHON,
             "send_emails.py",
             "-t",
             time_param,
@@ -58,18 +106,42 @@ def send_email():
 def backup_user_data():
     logger.info("Backup user data")
 
-    # from vars import DATA_DIR
-    # DICT_DB_FILE = os.path.join(DATA_DIR, "dict.db")
-    # BACKUP_DIR = "./data"
-    # BACKUP_FILE = os.path.join(BACKUP_DIR, "dict.db")
-    # Ensure the backup directory exists
-    # os.makedirs(BACKUP_DIR, exist_ok=True)
-    # Copy the database file to the backup directory
-    # shutil.copy2(DICT_DB_FILE, BACKUP_FILE)
-    # Now we'll use git to commit and push the changes to the backup directory
-    subprocess.call(["git", "add", "."])
-    subprocess.call(["git", "commit", "-am", '"backup"'])
-    subprocess.call(["git", "push"])
+    enable_git = os.environ.get("ARXIV_SANITY_ENABLE_GIT_BACKUP", "1").lower() in ("1", "true", "yes")
+    if not enable_git:
+        logger.info("Git backup disabled; set ARXIV_SANITY_ENABLE_GIT_BACKUP=1 to enable")
+        return
+
+    try:
+        from aslite.db import DICT_DB_FILE
+    except Exception as e:
+        logger.warning(f"Failed to resolve dict.db path: {e}")
+        return
+
+    if not os.path.isfile(DICT_DB_FILE):
+        logger.warning(f"dict.db not found: {DICT_DB_FILE}")
+        return
+
+    add_result = subprocess.run(["git", "add", DICT_DB_FILE], capture_output=True, text=True)
+    if add_result.returncode != 0:
+        logger.warning(f"git add failed: {add_result.stderr.strip()}")
+        return
+
+    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", DICT_DB_FILE])
+    if diff_result.returncode == 0:
+        logger.info("No changes to back up")
+        return
+    if diff_result.returncode not in (0, 1):
+        logger.warning("git diff failed while checking staged changes")
+        return
+
+    commit_result = subprocess.run(["git", "commit", "-m", "backup dict.db"], capture_output=True, text=True)
+    if commit_result.returncode != 0:
+        logger.warning(f"git commit failed: {commit_result.stderr.strip()}")
+        return
+
+    push_result = subprocess.run(["git", "push"], capture_output=True, text=True)
+    if push_result.returncode != 0:
+        logger.warning(f"git push failed: {push_result.stderr.strip()}")
 
 
 scheduler = BlockingScheduler(timezone="Asia/Shanghai")

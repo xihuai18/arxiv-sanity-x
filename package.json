@@ -1,0 +1,10 @@
+{
+  "name": "arxiv-sanity-x",
+  "private": true,
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "scripts": {
+    "build:static": "esbuild static/paper_list.js static/word_list.js static/paper_detail.js --outdir=static/dist --loader:.js=jsx --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2017 --format=iife --minify"
+  }
+}

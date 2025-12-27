@@ -3,15 +3,19 @@ Batch Paper Summarizer
 
 Features:
 1. Get the latest n papers from the database
-2. Built-in non-singleton paper summarizer for minerU parsing and LLM summarization
+2. Built-in non-singleton paper summarizer for HTML/minerU parsing and LLM summarization
 3. Automatically cache summaries to the directory used by serve.py
 4. Support multi-threaded concurrent processing to improve efficiency
 5. Provide detailed progress tracking and error handling
 """
 
 import argparse
+import heapq
+import json
+import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,7 +27,12 @@ from tqdm import tqdm
 
 from aslite.db import get_metas_db, get_papers_db
 from paper_summarizer import PaperSummarizer
-from vars import SUMMARY_MIN_CHINESE_RATIO
+from vars import (
+    LLM_SUMMARY_LANG,
+    SUMMARY_DIR,
+    SUMMARY_MARKDOWN_SOURCE,
+    SUMMARY_MIN_CHINESE_RATIO,
+)
 
 
 def calculate_chinese_ratio(text: str) -> float:
@@ -55,6 +64,148 @@ def calculate_chinese_ratio(text: str) -> float:
     return ratio
 
 
+def _summary_lock_stale_seconds() -> float:
+    try:
+        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "3600"))
+    except Exception:
+        seconds = 3600.0
+    return max(0.0, seconds)
+
+
+def _is_lock_stale(lock_path: Path, stale_s: float) -> bool:
+    if stale_s <= 0:
+        return False
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return age > stale_s
+
+
+def _acquire_summary_lock(lock_path: Path, timeout_s: int = 300):
+    start_time = time.time()
+    stale_s = _summary_lock_stale_seconds()
+    while time.time() - start_time < timeout_s:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+            return fd
+        except FileExistsError:
+            if _is_lock_stale(lock_path, stale_s):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    logger.warning(f"Removed stale summary lock: {lock_path}")
+                    continue
+                except Exception:
+                    pass
+            time.sleep(0.2)
+    return None
+
+
+def _release_summary_lock(fd, lock_path: Path):
+    try:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to release summary lock: {e}")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    _atomic_write_text(path, json.dumps(data))
+
+
+def _summary_quality(summary_content: str):
+    lang = (LLM_SUMMARY_LANG or "").strip().lower()
+    if lang.startswith("zh"):
+        ratio = calculate_chinese_ratio(summary_content)
+        quality = "ok" if ratio >= SUMMARY_MIN_CHINESE_RATIO else "low_chinese"
+        return quality, ratio
+    return "ok", None
+
+
+def _normalize_summary_result(result):
+    if isinstance(result, dict):
+        content = result.get("content") or ""
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    else:
+        content = result if isinstance(result, str) else str(result or "")
+        meta = {}
+    return content, meta
+
+
+_PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
+
+
+def _split_pid_version(pid: str):
+    pid = (pid or "").strip()
+    match = _PID_VERSION_RE.match(pid)
+    if not match:
+        return pid, None
+    raw_pid = match.group("raw")
+    try:
+        version = int(match.group("ver"))
+    except Exception:
+        return raw_pid, None
+    return raw_pid, version
+
+
+def _resolve_cache_pid(pid: str, meta: Optional[dict] = None) -> str:
+    raw_pid, explicit_version = _split_pid_version(pid)
+    if explicit_version:
+        return pid
+    if isinstance(meta, dict):
+        idv = meta.get("_idv")
+        if isinstance(idv, str) and idv.strip():
+            return idv.strip()
+        version = meta.get("_version")
+        if version is not None:
+            try:
+                return f"{raw_pid}v{int(version)}"
+            except Exception:
+                pass
+    return raw_pid
+
+
+def _normalize_summary_source(source: Optional[str]) -> str:
+    src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
+    if src not in {"html", "mineru"}:
+        return "html"
+    return src
+
+
+def _read_summary_meta(meta_path: Path) -> dict:
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _summary_source_matches(meta: dict, summary_source: str) -> bool:
+    cached_source = (meta.get("source") or "mineru").strip().lower()
+    if cached_source not in {"html", "mineru"}:
+        cached_source = "mineru"
+    return cached_source == summary_source
+
+
 class BatchPaperSummarizer(PaperSummarizer):
     """
     Batch Paper Summarizer Class
@@ -69,7 +220,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             processor: BatchProcessor instance for recording error details
         """
         super().__init__()  # Call parent class initialization
-        self.cache_dir = Path("data/summary")
+        self.cache_dir = Path(SUMMARY_DIR)
         self.processor = processor  # For recording error details
 
         # Ensure cache directory exists
@@ -130,19 +281,20 @@ class BatchPaperSummarizer(PaperSummarizer):
             self._record_failure_detail(pdf_path.stem, "parse_failed", error_msg, e)
             return None
 
-    def generate_summary(self, pid: str) -> str:
+    def generate_summary(self, pid: str, source: Optional[str] = None) -> str:
         """
         Main entry function for generating paper summary, reuse parent class logic
 
         Args:
             pid: Paper ID
+            source: Markdown source override ("html" or "mineru")
 
         Returns:
             Paper summary in Markdown format
         """
         # Directly call parent class generate_summary method
         # Parent class method already includes vlm to auto migration logic
-        return super().generate_summary(pid)
+        return super().generate_summary(pid, source=source)
 
 
 class BatchProcessor:
@@ -156,7 +308,7 @@ class BatchProcessor:
             max_workers: Maximum number of worker threads, now supports true concurrent processing
         """
         self.max_workers = max_workers
-        self.cache_dir = Path("data/summary")
+        self.cache_dir = Path(SUMMARY_DIR)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Statistics - add detailed failure reason statistics
@@ -222,76 +374,102 @@ class BatchProcessor:
         """
         logger.info(f"Fetching the latest {n} papers...")
 
-        # Get all paper metadata
+        if n <= 0:
+            return []
+
+        # Get top-n paper metadata without loading everything into memory
         with get_metas_db() as metas_db:
-            metas = {}
-            # Use progress bar to show loading progress
+            heap = []
             with tqdm(desc="Loading paper data", unit="papers", leave=False) as pbar:
                 for k, v in metas_db.items():
-                    metas[k] = v
+                    t = v.get("_time", 0)
+                    if len(heap) < n:
+                        heapq.heappush(heap, (t, k, v))
+                    elif t > heap[0][0]:
+                        heapq.heapreplace(heap, (t, k, v))
                     pbar.update(1)
 
         # Sort by time in descending order (newest first)
         logger.info("Sorting papers...")
-        sorted_papers = sorted(metas.items(), key=lambda kv: kv[1]["_time"], reverse=True)
-
-        # Take the first n papers
-        latest_papers = sorted_papers[:n]
+        latest_papers = sorted([(pid, meta) for _t, pid, meta in heap], key=lambda kv: kv[1]["_time"], reverse=True)
 
         logger.info(f"Successfully fetched {len(latest_papers)} latest papers")
 
         return latest_papers
 
-    def is_summary_cached(self, pid: str) -> bool:
+    def is_summary_cached(self, cache_pid: str, summary_source: str) -> bool:
         """
         Check if summary is already cached
 
         Args:
-            pid: Paper ID
+            cache_pid: Cache key (raw pid or pidvN)
+            summary_source: Current markdown source
 
         Returns:
             bool: Whether it is cached
         """
-        cache_file = self.cache_dir / f"{pid}.md"
-        return cache_file.exists() and cache_file.stat().st_size > 0
+        cache_file = self.cache_dir / f"{cache_pid}.md"
+        if not (cache_file.exists() and cache_file.stat().st_size > 0):
+            return False
 
-    def cache_summary(self, pid: str, summary_content: str) -> bool:
+        meta_file = self.cache_dir / f"{cache_pid}.meta.json"
+        meta = _read_summary_meta(meta_file)
+        return _summary_source_matches(meta, summary_source)
+
+    def cache_summary(
+        self,
+        cache_pid: str,
+        summary_content: str,
+        source: Optional[str] = None,
+        summary_meta: Optional[dict] = None,
+    ) -> Tuple[bool, Optional[str]]:
         """
         Cache summary to the directory used by serve.py
 
         Args:
-            pid: Paper ID
+            cache_pid: Cache key (raw pid or pidvN)
             summary_content: Summary content
+            source: Markdown source override ("html" or "mineru")
+            summary_meta: Optional metadata from summarizer
 
         Returns:
-            bool: Whether caching was successful
+            Tuple[bool, Optional[str]]: (cached, quality)
         """
         try:
-            cache_file = self.cache_dir / f"{pid}.md"
+            cache_file = self.cache_dir / f"{cache_pid}.md"
+            meta_file = self.cache_dir / f"{cache_pid}.meta.json"
+            summary_source = _normalize_summary_source(source)
 
             # Only cache successful summaries (not error messages)
-            if not summary_content.startswith("# Error") and not summary_content.startswith("# Error"):
-                # Check Chinese ratio before caching
-                chinese_ratio = calculate_chinese_ratio(summary_content)
-                logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
+            if not summary_content.startswith("# Error"):
+                quality, chinese_ratio = _summary_quality(summary_content)
+                if chinese_ratio is not None:
+                    logger.trace(f"Paper {cache_pid} summary Chinese ratio: {chinese_ratio:.2%}")
 
-                if chinese_ratio >= SUMMARY_MIN_CHINESE_RATIO:
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        f.write(summary_content)
-                    logger.debug(f"Summary cached to: {cache_file} (Chinese ratio: {chinese_ratio:.2%})")
-                    return True
+                _atomic_write_text(cache_file, summary_content)
+                meta = {"updated_at": time.time(), "quality": quality, "source": summary_source}
+                if isinstance(summary_meta, dict):
+                    meta.update(summary_meta)
+                if chinese_ratio is not None:
+                    meta["chinese_ratio"] = chinese_ratio
+                if "generated_at" not in meta and "updated_at" in meta:
+                    meta["generated_at"] = meta.get("updated_at")
+                _atomic_write_json(meta_file, meta)
+
+                if quality == "ok":
+                    logger.debug(f"Summary cached to: {cache_file}")
                 else:
                     logger.warning(
-                        f"Chinese ratio too low in summary ({chinese_ratio:.2%} < {SUMMARY_MIN_CHINESE_RATIO:.0%}), not caching: {pid}"
+                        f"Chinese ratio too low in summary ({chinese_ratio:.2%} < {SUMMARY_MIN_CHINESE_RATIO:.0%}), cached with retry: {cache_pid}"
                     )
-                    return False
+                return True, quality
             else:
-                logger.warning(f"Summary generation failed, not caching: {pid}")
-                return False
+                logger.warning(f"Summary generation failed, not caching: {cache_pid}")
+                return False, None
 
         except Exception as e:
-            logger.error(f"Failed to cache summary {pid}: {e}")
-            return False
+            logger.error(f"Failed to cache summary {cache_pid}: {e}")
+            return False, None
 
     def process_single_paper(self, pid: str, paper_info: Dict, skip_cached: bool = True) -> Tuple[str, bool, str]:
         """
@@ -306,8 +484,12 @@ class BatchProcessor:
             Tuple[str, bool, str]: (Paper ID, success status, summary content or error message)
         """
         try:
+            summary_source = _normalize_summary_source(None)
+            cache_pid = _resolve_cache_pid(pid, paper_info)
+            raw_pid, explicit_version = _split_pid_version(pid)
+
             # Check if already cached
-            if skip_cached and self.is_summary_cached(pid):
+            if skip_cached and self.is_summary_cached(cache_pid, summary_source):
                 logger.trace(f"Skipped cached paper: {pid}")
                 with self.stats_lock:
                     self.stats["cached"] += 1
@@ -324,36 +506,62 @@ class BatchProcessor:
             # Create independent BatchPaperSummarizer instance for each thread, pass processor for error recording
             summarizer = BatchPaperSummarizer(processor=self)
 
-            # Call built-in paper summarizer to generate summary
-            start_time = time.time()
-            summary_content = summarizer.generate_summary(pid)
-            end_time = time.time()
+            lock_file = self.cache_dir / f".{cache_pid}.lock"
+            lock_fd = None
 
-            # Check if summary generation was successful
-            if summary_content.startswith("# Error") or summary_content.startswith("# Error"):
-                logger.error(f"Summary generation failed: {pid}")
-                with self.stats_lock:
-                    self.stats["failed"] += 1
-                return pid, False, summary_content
+            try:
+                lock_fd = _acquire_summary_lock(lock_file, timeout_s=300)
+                if lock_fd is None:
+                    if self.is_summary_cached(cache_pid, summary_source):
+                        with self.stats_lock:
+                            self.stats["cached"] += 1
+                        return pid, True, "Cached"
+                    return pid, False, "Summary busy"
 
-            # Cache summary
-            cache_success = self.cache_summary(pid, summary_content)
+                if skip_cached and self.is_summary_cached(cache_pid, summary_source):
+                    logger.trace(f"Skipped cached paper after lock: {pid}")
+                    with self.stats_lock:
+                        self.stats["cached"] += 1
+                    return pid, True, "Cached"
 
-            if cache_success:
-                logger.success(f"Paper processed successfully: {pid} (elapsed: {end_time - start_time:.2f}s)")
-                with self.stats_lock:
-                    self.stats["success"] += 1
-                return pid, True, summary_content
-            else:
-                logger.error(f"Summary cache failed: {pid}")
-                with self.stats_lock:
-                    # Distinguish cache failure reasons
-                    chinese_ratio = calculate_chinese_ratio(summary_content)
-                    if chinese_ratio < SUMMARY_MIN_CHINESE_RATIO:
-                        self.stats["low_chinese"] += 1
-                    else:
+                # Call built-in paper summarizer to generate summary
+                start_time = time.time()
+                if summary_source == "html":
+                    pid_for_summary = cache_pid
+                else:
+                    pid_for_summary = pid if explicit_version else raw_pid
+
+                summary_result = summarizer.generate_summary(pid_for_summary, source=summary_source)
+                summary_content, summary_meta = _normalize_summary_result(summary_result)
+                end_time = time.time()
+
+                # Check if summary generation was successful
+                if summary_content.startswith("# Error"):
+                    logger.error(f"Summary generation failed: {pid}")
+                    with self.stats_lock:
                         self.stats["failed"] += 1
-                return pid, False, "Cache failed"
+                    return pid, False, summary_content
+
+                # Cache summary
+                cache_success, cache_quality = self.cache_summary(
+                    cache_pid, summary_content, source=summary_source, summary_meta=summary_meta
+                )
+
+                if cache_success:
+                    logger.success(f"Paper processed successfully: {pid} (elapsed: {end_time - start_time:.2f}s)")
+                    with self.stats_lock:
+                        self.stats["success"] += 1
+                        if cache_quality == "low_chinese":
+                            self.stats["low_chinese"] += 1
+                    return pid, True, summary_content
+                else:
+                    logger.error(f"Summary cache failed: {pid}")
+                    with self.stats_lock:
+                        self.stats["failed"] += 1
+                    return pid, False, "Cache failed"
+            finally:
+                if lock_fd is not None:
+                    _release_summary_lock(lock_fd, lock_file)
 
         except Exception as e:
             logger.error(f"Error occurred while processing paper {pid}: {e}")
@@ -382,7 +590,7 @@ class BatchProcessor:
         """
         # Get detailed paper information
         with get_papers_db() as pdb:
-            papers_data = {k: v for k, v in pdb.items()}
+            papers_data = {pid: (pdb.get(pid) or {}) for pid, _meta in papers}
 
         self.stats["total"] = len(papers)
 
@@ -396,7 +604,9 @@ class BatchProcessor:
                     title = paper_info.get("title", "Unknown Title")
                     authors = ", ".join(a.get("name", "") for a in paper_info.get("authors", []))
                     time_str = self.format_time_str(meta["_time"])
-                    cached_status = "Cached" if self.is_summary_cached(pid) else "Not Cached"
+                    summary_source = _normalize_summary_source(None)
+                    cache_pid = _resolve_cache_pid(pid, meta)
+                    cached_status = "Cached" if self.is_summary_cached(cache_pid, summary_source) else "Not Cached"
 
                     pbar.set_postfix_str(f"{pid} ({cached_status})")
 

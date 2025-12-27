@@ -2,6 +2,8 @@ import os
 
 # database
 DATA_DIR = "data"  # !put it on an ssd for speed
+SUMMARY_DIR = os.path.join(DATA_DIR, "summary")
+
 # email
 from_email = "your_email@mail.com"
 smtp_server = "smtp.mail.com"
@@ -10,10 +12,19 @@ email_username = "username"
 email_passwd = os.environ.get("YOUR_EMAIL_PASSWD", "")
 HOST = "Web Host"
 
+# LLM API Configuration
+# Recommended: Use OpenRouter with free models
+# Example OpenRouter config:
+#   LLM_BASE_URL = "https://openrouter.ai/api/v1"
+#   LLM_API_KEY = "sk-or-v1-..."
+#   LLM_NAME = "deepseek/deepseek-chat-v3.1:free"
 LLM_SUMMARY_LANG = "zh"
-LLM_BASE_URL = "your_llm_base_url"  # e.g., "https://api.openai.com/v1"
+LLM_BASE_URL = "your_llm_base_url"  # e.g., "https://openrouter.ai/api/v1"
 LLM_API_KEY = os.environ.get("YOUR_LLM_API_KEY", "your_llm_api_key")
-LLM_NAME = "llm_name_for_paper_summaries"  # e.g., "gpt-3.5-turbo"
+LLM_NAME = "llm_name_for_paper_summaries"  # e.g., "deepseek/deepseek-chat-v3.1:free"
+
+# LiteLLM service port (optional, for multi-model gateway)
+LITELLM_PORT = 53000  # LiteLLM service port
 
 # vLLM service port configuration
 VLLM_EMBED_PORT = 51000  # Qwen3 Embedding service port
@@ -22,6 +33,9 @@ VLLM_MINERU_PORT = 52000  # MinerU VLM service port
 # Paper summary related configuration
 SUMMARY_MIN_CHINESE_RATIO = 0.25  # Minimum Chinese character ratio threshold for summary cache
 SUMMARY_DEFAULT_SEMANTIC_WEIGHT = 0.5  # Default weight for semantic search in hybrid search
+SUMMARY_MARKDOWN_SOURCE = os.environ.get("ARXIV_SANITY_SUMMARY_SOURCE", "html")  # html (default) or mineru
+SUMMARY_HTML_SOURCES = os.environ.get("ARXIV_SANITY_HTML_SOURCES", "ar5iv,arxiv")  # HTML source order
+MINERU_BACKEND = os.environ.get("ARXIV_SANITY_MINERU_BACKEND", "pipeline")  # pipeline (default) or vlm-http-client
 
 # paper_summarizer.py related constants
 MAIN_CONTENT_MIN_RATIO = 0.1  # Minimum content ratio after extracting main content

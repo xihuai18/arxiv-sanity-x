@@ -4,21 +4,107 @@
 {% endblock %}
 
 {% block content %}
-<div id="aboutwrap">
-    <div>
-        Arxiv-sanity-X: A robust enhancement of the arXiv-sanity-lite website that significantly expedites the process of academic research. It diligently polls the arXiv API for new papers, enabling users to conveniently tag papers of interest. Based on SVMs over tf-idf features of paper abstracts, it recommends novel papers for each tag. Users can set up keywords that the system will automatically track, enabling a personalized academic journey. The elegant web user interface allows for seamless searching, ranking, sorting, and analysis of results. Uniquely, Arxiv-sanity-X can dispatch daily emails containing recommendations for new papers based on your tags and keywords. Manage your tags and keywords, stay abreast with recent papers in your area, and never miss an important update!
+<div id="aboutwrap" class="about-container">
+    <!-- Hero Section -->
+    <div class="about-hero">
+        <div class="about-hero-icon">🔬</div>
+        <h1>arxiv-sanity-X</h1>
+        <p class="about-tagline">Your personal research assistant for staying on top of the latest arXiv papers</p>
     </div>
 
-    <br>
-    <div>
-        This particular instance indexes papers from cs.CV, cs.CL, cs.LG, cs.AI, cs.NE, cs.RO, stat.ML, cs.GT, cs.HC, cs.MA, but only recent papers.
+    <!-- Features Section -->
+    <div class="about-section">
+        <h2 class="about-section-title">
+            <span class="section-icon">✨</span>
+            Features
+        </h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="feature-icon">🏷️</div>
+                <h3>Smart Tagging</h3>
+                <p>Organize papers with custom tags and get personalized recommendations based on your interests</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🔍</div>
+                <h3>Semantic Search</h3>
+                <p>Find relevant papers using keyword, semantic, or hybrid search modes</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🤖</div>
+                <h3>AI Summaries</h3>
+                <p>Get AI-generated summaries to quickly understand paper contributions</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📧</div>
+                <h3>Email Alerts</h3>
+                <p>Receive daily recommendations for new papers matching your interests</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">📊</div>
+                <h3>SVM Recommendations</h3>
+                <p>TF-IDF powered recommendations learn from your tagged papers</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">🌙</div>
+                <h3>Dark Mode</h3>
+                <p>Easy on your eyes with automatic light/dark theme switching</p>
+            </div>
+        </div>
     </div>
 
-    <br>
-    <div>The code for this website is open source at Github under <a href="https://github.com/xihuai18/arxiv-sanity-x">arxiv-sanity-x</a>.</div>
+    <!-- Indexed Categories -->
+    <div class="about-section">
+        <h2 class="about-section-title">
+            <span class="section-icon">📁</span>
+            Indexed Categories
+        </h2>
+        <p class="about-description">This instance indexes recent papers from the following arXiv categories:</p>
+        <div class="category-tags">
+            <span class="category-tag">cs.CV</span>
+            <span class="category-tag">cs.CL</span>
+            <span class="category-tag">cs.LG</span>
+            <span class="category-tag">cs.AI</span>
+            <span class="category-tag">cs.NE</span>
+            <span class="category-tag">cs.RO</span>
+            <span class="category-tag">stat.ML</span>
+            <span class="category-tag">cs.GT</span>
+            <span class="category-tag">cs.HC</span>
+            <span class="category-tag">cs.MA</span>
+        </div>
+    </div>
 
-    <br>
-    <div>Developed in spare time as a labor of love by <a href="https://github.com/xihuai18">@xihuai18</a>, based on <a href="https://github.com/karpathy/arxiv-sanity-lite">arXiv-sanity-lite</a>.</div>
+    <!-- Open Source Section -->
+    <div class="about-section">
+        <h2 class="about-section-title">
+            <span class="section-icon">💻</span>
+            Open Source
+        </h2>
+        <div class="opensource-card">
+            <p>This project is open source and available on GitHub.</p>
+            <a href="https://github.com/xihuai18/arxiv-sanity-x" class="github-link" target="_blank" rel="noopener noreferrer">
+                <svg class="github-icon" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                </svg>
+                View on GitHub
+            </a>
+        </div>
+    </div>
+
+    <!-- Credits Section -->
+    <div class="about-section">
+        <h2 class="about-section-title">
+            <span class="section-icon">❤️</span>
+            Credits
+        </h2>
+        <div class="credits-card">
+            <p>
+                Developed with ❤️ by <a href="https://github.com/xihuai18" target="_blank" rel="noopener noreferrer">@xihuai18</a>
+            </p>
+            <p class="credits-based">
+                Based on <a href="https://github.com/karpathy/arxiv-sanity-lite" target="_blank" rel="noopener noreferrer">arXiv-sanity-lite</a> by Andrej Karpathy
+            </p>
+        </div>
+    </div>
 </div>
 {% endblock %}
 

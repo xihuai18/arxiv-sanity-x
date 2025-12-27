@@ -42,3 +42,45 @@ repos:
     hooks:
       - id: pyupgrade
         args: ["--py38-plus"]
+  # 隐私信息检查 - 防止敏感信息泄露到开源库
+  - repo: local
+    hooks:
+      - id: no-private-info
+        name: Check for private/sensitive information
+        entry: bash -c '
+          FILES="$@";
+          ERRORS=0;
+          for file in $FILES; do
+            # 跳过二进制文件和模板文件
+            if [[ "$file" == *.png ]] || [[ "$file" == *.jpg ]] || [[ "$file" == *.ico ]]; then
+              continue;
+            fi;
+            if [[ "$file" == *_template.* ]] || [[ "$file" == *template_* ]]; then
+              continue;
+            fi;
+            # 检查敏感模式
+            if grep -qE "(sk-or-v1-[a-zA-Z0-9]+|leoxhwang|sjtu\.edu\.cn|172\.16\.[0-9]+\.[0-9]+|smtp\.sjtu)" "$file" 2>/dev/null; then
+              echo "ERROR: Potential private info found in $file";
+              grep -nE "(sk-or-v1-[a-zA-Z0-9]+|leoxhwang|sjtu\.edu\.cn|172\.16\.[0-9]+\.[0-9]+|smtp\.sjtu)" "$file" 2>/dev/null | head -5;
+              ERRORS=1;
+            fi;
+          done;
+          exit $ERRORS;
+        '
+        language: system
+        types: [text]
+        pass_filenames: true
+      - id: no-sensitive-files
+        name: Check for sensitive files
+        entry: bash -c '
+          for file in "$@"; do
+            base=$(basename "$file");
+            if [[ "$base" == "vars.py" ]] || [[ "$base" == "llm.yml" ]] || [[ "$base" == "secret_key.txt" ]]; then
+              echo "ERROR: Sensitive file should not be committed: $file";
+              exit 1;
+            fi;
+          done;
+        '
+        language: system
+        types: [file]
+        pass_filenames: true

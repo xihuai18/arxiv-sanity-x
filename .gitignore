@@ -1,4 +1,5 @@
 __pycache__
+node_modules
 data/*
 !data/dict.db
 secret_key.txt
@@ -7,8 +8,7 @@ secret_key.txt
 *.ipynb
 *.log
 vars.py
-setup_host.sh
 .vscode
-llm.py
 qwen3*
-vllm-serve-args.md
+llm.yml
+sync_to_opensource.sh
