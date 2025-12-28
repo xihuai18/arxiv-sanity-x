@@ -8,11 +8,9 @@ ideas:
 """
 
 # Multi-core optimization configuration - Ubuntu system
-import json
 import os
 import secrets
 import shutil
-import tempfile
 import threading
 from collections import OrderedDict
 from multiprocessing import Pool, cpu_count
@@ -75,15 +73,26 @@ from aslite.db import (
     load_features,
 )
 from compute import Qwen3EmbeddingVllm
+from paper_summarizer import acquire_summary_lock, atomic_write_json, atomic_write_text
 from paper_summarizer import (
     generate_paper_summary as generate_paper_summary_from_module,
+)
+from paper_summarizer import (
+    normalize_summary_result,
+    normalize_summary_source,
+    read_summary_meta,
+    release_summary_lock,
+    resolve_cache_pid,
+    split_pid_version,
+    summary_cache_paths,
+    summary_quality,
+    summary_source_matches,
 )
 from vars import (
     DATA_DIR,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_NAME,
-    LLM_SUMMARY_LANG,
     SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
     SUMMARY_DIR,
     SUMMARY_MARKDOWN_SOURCE,
@@ -251,9 +260,7 @@ def _normalize_name(value: Optional[str]) -> str:
 
 
 # Keep tokenization consistent with compute.py for query-side TF-IDF.
-TFIDF_TOKEN_PATTERN = (
-    r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b"
-)
+TFIDF_TOKEN_PATTERN = r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b"
 TFIDF_STOP_WORDS = "english"
 
 # Treat common separators (incl. CJK punctuation) as spaces for multi-keyword queries.
@@ -318,37 +325,6 @@ SEARCH_RANK_CACHE = _LRUCacheTTL(maxsize=256, ttl_s=120.0)
 PAPER_CACHE = _LRUCacheTTL(maxsize=2048, ttl_s=300.0)
 THUMB_CACHE = _LRUCacheTTL(maxsize=4096, ttl_s=600.0)
 QUERY_EMBED_CACHE = _LRUCacheTTL(maxsize=256, ttl_s=600.0)
-
-
-# -----------------------------------------------------------------------------
-# Helper function for Chinese text detection
-def calculate_chinese_ratio(text: str) -> float:
-    """
-    Calculate the ratio of Chinese characters in text
-
-    Args:
-        text: Input text
-
-    Returns:
-        float: Chinese character ratio (0.0 to 1.0)
-    """
-    if not text or not text.strip():
-        return 0.0
-
-    # Text after removing whitespace characters
-    clean_text = re.sub(r"\s+", "", text)
-    if not clean_text:
-        return 0.0
-
-    # Count Chinese characters (including Chinese punctuation)
-    chinese_chars = re.findall(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", clean_text)
-    chinese_count = len(chinese_chars)
-
-    # Calculate ratio
-    total_chars = len(clean_text)
-    ratio = chinese_count / total_chars if total_chars > 0 else 0.0
-
-    return ratio
 
 
 # -----------------------------------------------------------------------------
@@ -1155,7 +1131,7 @@ def _parse_search_query(q: str) -> dict:
                 break
             parsed["filters"][canon].append(m.group(1).strip())
             parsed["filters_phrases"][canon].append(m.group(1).strip())
-            work = (work[:m.start()] + " " + work[m.end():]).strip()
+            work = (work[: m.start()] + " " + work[m.end() :]).strip()
 
     # 2) Extract free quoted phrases
     for m in re.finditer(r"\"([^\"]+)\"", work):
@@ -1254,10 +1230,10 @@ def _extract_arxiv_ids(q: str) -> list[str]:
 
 def _paper_text_fields(p: dict) -> dict:
     """Build normalized text fields for scoring."""
-    title = (p.get("title") or "")
+    title = p.get("title") or ""
     authors = p.get("authors") or []
     authors_str = " ".join([a.get("name", "") for a in authors if isinstance(a, dict)])
-    summary = (p.get("summary") or "")
+    summary = p.get("summary") or ""
     tags = p.get("tags") or []
     tags_str = " ".join([t.get("term", "") for t in tags if isinstance(t, dict)])
 
@@ -1325,7 +1301,7 @@ def _title_candidate_scan(parsed: dict, max_candidates: int = 500, max_scan: int
     for i in range(0, scan_n, chunk):
         if time.time() - start > time_budget_s:
             break
-        part = all_pids[i:i + chunk]
+        part = all_pids[i : i + chunk]
         pid_to_paper = get_papers_bulk(part)
         for pid in part:
             p = pid_to_paper.get(pid)
@@ -1614,7 +1590,7 @@ def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None):
         # Fallback: bulk-read in chunks
         chunk = 2000
         for i in range(0, len(all_pids), chunk):
-            part = all_pids[i:i + chunk]
+            part = all_pids[i : i + chunk]
             pid_to_paper = get_papers_bulk(part)
             for pid in part:
                 p = pid_to_paper.get(pid)
@@ -1638,13 +1614,13 @@ def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None):
 def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, pid: str) -> float:
     """
     Compute relevance score for a single paper.
-    
+
     Scoring philosophy for academic paper search:
     1. Paper ID match: Highest priority (user knows exactly what they want)
     2. Title match: Very high priority (titles are precise and informative)
     3. Author match: High priority (common search pattern)
     4. Abstract match: Lower priority (used for concept search)
-    
+
     Match types (in order of importance):
     - Exact phrase match: Query appears as-is
     - All words match: All query words appear (any order)
@@ -1652,7 +1628,7 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
     - Word frequency: How often query words appear
     """
     score = 0.0
-    
+
     # === 1. Paper ID matching (highest priority) ===
     pid_lower = pid.lower()
     if q == pid_lower:
@@ -1661,25 +1637,25 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
     if q in pid_lower or pid_lower in q:
         # Partial ID match (e.g., "2312.12345" matches "2312.12345v2")
         score += 500.0
-    
+
     # === 2. Title matching (very high priority) ===
     title = p.get("title", "")
     title_lower = title.lower()
     title_norm = _normalize_text(title)
-    
+
     # Exact phrase match in title
     if q in title_lower:
         score += 100.0
     elif q_norm in title_norm:
         score += 90.0  # Normalized match (handles hyphens)
-    
+
     # All query words appear in title
     if len(qs) > 1:
         if all(qp in title_lower for qp in qs):
             score += 60.0
         elif all(qp in title_norm for qp in qs_norm):
             score += 50.0
-    
+
     # Partial word match in title (what fraction of query words appear)
     words_in_title = sum(1 for qp in qs if qp in title_lower)
     words_in_title_norm = sum(1 for qp in qs_norm if qp in title_norm)
@@ -1687,15 +1663,15 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
     if best_partial > 0:
         partial_ratio = best_partial / len(qs)
         score += 30.0 * partial_ratio
-        
+
         # Bonus for word frequency in title (indicates strong relevance)
         freq_score = sum(min(2, title_lower.count(qp)) for qp in qs) / len(qs)
         score += 10.0 * freq_score
-    
+
     # === 3. Author matching (high priority) ===
     authors = p.get("authors", [])
     authors_str = " ".join([a.get("name", "") for a in authors]).lower()
-    
+
     # Exact author name match
     if q in authors_str:
         score += 80.0
@@ -1707,25 +1683,25 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
         author_matches = sum(1 for qp in qs if qp in authors_str)
         if author_matches > 0:
             score += 20.0 * (author_matches / len(qs))
-    
+
     # === 4. Abstract/summary matching (lower priority, for concept search) ===
     summary = p.get("summary", "")
     summary_lower = summary.lower()
     summary_norm = _normalize_text(summary)
-    
+
     # Exact phrase in abstract
     if q in summary_lower:
         score += 15.0
     elif q_norm in summary_norm:
         score += 12.0
-    
+
     # All words in abstract
     if len(qs) > 1:
         if all(qp in summary_lower for qp in qs):
             score += 8.0
         elif all(qp in summary_norm for qp in qs_norm):
             score += 6.0
-    
+
     # Partial match in abstract
     words_in_summary = sum(1 for qp in qs if qp in summary_lower)
     if words_in_summary > 0:
@@ -1733,7 +1709,7 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
         # Frequency bonus for abstract (less weight than title)
         freq_score = sum(min(3, summary_lower.count(qp)) for qp in qs) / len(qs)
         score += 1.0 * freq_score
-    
+
     return score
 
 
@@ -1745,25 +1721,25 @@ def count_match(q, pid_start, n_pids):
     q = q.strip()
     if not q:
         return []
-    
+
     q_lower = q.lower()
     qs = q_lower.split()  # Split query by spaces
     q_norm = _normalize_text(q)
     qs_norm = q_norm.split()
-    
+
     sub_pairs = []
-    
+
     with get_papers_db() as pdb:
-        for pid in get_pids()[pid_start:pid_start + n_pids]:
+        for pid in get_pids()[pid_start : pid_start + n_pids]:
             p = pdb.get(pid)
             if p is None:
                 continue
-            
+
             score = _compute_paper_score(q_lower, qs, q_norm, qs_norm, p, pid)
-            
+
             if score > 0:
                 sub_pairs.append((score, pid))
-    
+
     return sub_pairs
 
 
@@ -1874,7 +1850,7 @@ def search_rank(q: str = "", limit=None):
     mentioned_ids = _extract_arxiv_ids(parsed.get("raw", ""))
     if mentioned_ids:
         for mid in mentioned_ids:
-            raw_pid, _ = _split_pid_version(mid)
+            raw_pid, _ = split_pid_version(mid)
             if paper_exists(raw_pid):
                 pid = raw_pid
                 # If the user asked for a versioned pid and it exists in db keys, prefer it.
@@ -1883,7 +1859,9 @@ def search_rank(q: str = "", limit=None):
                 return [pid], [2000.0]
 
     # Fielded queries (ti:/au:/abs:/cat:/id:) or phrases typically need lexical scoring.
-    has_field_filters = any(len(parsed.get("filters", {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat", "id"))
+    has_field_filters = any(
+        len(parsed.get("filters", {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat", "id")
+    )
     has_phrases = bool(parsed.get("phrases"))
     is_title_like = _is_title_like_query(parsed)
 
@@ -1993,7 +1971,7 @@ def search_rank(q: str = "", limit=None):
     scores = [combined_scores[pid] * 100.0 for pid in pids]
 
     pids, scores = _apply_limit(pids, scores, limit)
-    
+
     if cache_key is not None:
         SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
 
@@ -2655,7 +2633,7 @@ def summary():
     # Get paper ID
     pid = request.args.get("pid", "")
     logger.info(f"show paper summary page for paper {pid}")
-    raw_pid, _ = _split_pid_version(pid)
+    raw_pid, _ = split_pid_version(pid)
     if not paper_exists(raw_pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
@@ -2697,7 +2675,7 @@ def api_get_paper_summary():
         logger.info(f"Getting paper summary for: {pid}")
 
         # Check if paper exists
-        raw_pid, _ = _split_pid_version(pid)
+        raw_pid, _ = split_pid_version(pid)
         if not paper_exists(raw_pid):
             return jsonify({"success": False, "error": "Paper not found"}), 404
 
@@ -2734,7 +2712,7 @@ def api_clear_paper_cache():
         if not pid:
             return jsonify({"success": False, "error": "Paper ID is required"}), 400
 
-        raw_pid, _ = _split_pid_version(pid)
+        raw_pid, _ = split_pid_version(pid)
         if not paper_exists(raw_pid):
             return jsonify({"success": False, "error": "Paper not found"}), 404
 
@@ -2789,136 +2767,9 @@ def _summary_retry_seconds() -> float:
     return max(0.0, hours) * 3600.0
 
 
-def _summary_lock_stale_seconds() -> float:
-    try:
-        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "3600"))
-    except Exception:
-        seconds = 3600.0
-    return max(0.0, seconds)
-
-
-def _is_lock_stale(lock_path: Path, stale_s: float) -> bool:
-    if stale_s <= 0:
-        return False
-    try:
-        age = time.time() - lock_path.stat().st_mtime
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-    return age > stale_s
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            os.remove(tmp_path)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    _atomic_write_text(path, json.dumps(data))
-
-
-def _summary_quality(summary_content: str):
-    lang = (LLM_SUMMARY_LANG or "").strip().lower()
-    if lang.startswith("zh"):
-        ratio = calculate_chinese_ratio(summary_content)
-        quality = "ok" if ratio >= SUMMARY_MIN_CHINESE_RATIO else "low_chinese"
-        return quality, ratio
-    return "ok", None
-
-
-_PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
-
-
-def _split_pid_version(pid: str):
-    pid = (pid or "").strip()
-    match = _PID_VERSION_RE.match(pid)
-    if not match:
-        return pid, None
-    raw_pid = match.group("raw")
-    try:
-        version = int(match.group("ver"))
-    except Exception:
-        return raw_pid, None
-    return raw_pid, version
-
-
-def _resolve_cache_pid(pid: str):
-    raw_pid, explicit_version = _split_pid_version(pid)
-    if explicit_version:
-        return pid, raw_pid, True
-
-    meta = get_metas().get(raw_pid) if raw_pid else None
-    if isinstance(meta, dict):
-        version = meta.get("_version")
-        if version is not None:
-            try:
-                return f"{raw_pid}v{int(version)}", raw_pid, False
-            except Exception:
-                pass
-    return raw_pid, raw_pid, False
-
-
-def _model_cache_key(model: Optional[str]) -> str:
-    model = (model or "").strip()
-    if not model:
-        raise ValueError("Model name is required for summary caching")
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", model)
-    if not cleaned:
-        raise ValueError("Model name is invalid for summary caching")
-    return cleaned
-
-
-def _summary_cache_paths(cache_pid: str, model: Optional[str]):
-    base_dir = Path(SUMMARY_DIR) / cache_pid
-    model_key = _model_cache_key(model)
-    cache_file = base_dir / f"{model_key}.md"
-    meta_file = base_dir / f"{model_key}.meta.json"
-    lock_file = base_dir / f".{model_key}.lock"
-
-    legacy_cache = Path(SUMMARY_DIR) / f"{cache_pid}.md"
-    legacy_meta = Path(SUMMARY_DIR) / f"{cache_pid}.meta.json"
-    legacy_lock = Path(SUMMARY_DIR) / f".{cache_pid}.lock"
-    return cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock
-
-
-def _normalize_summary_source(source: str) -> str:
-    src = (source or "").strip().lower()
-    if src not in {"html", "mineru"}:
-        return "html"
-    return src
-
-
-def _summary_source_matches(meta: dict, summary_source: str) -> bool:
-    cached_source = (meta.get("source") or "mineru").strip().lower()
-    if cached_source not in {"html", "mineru"}:
-        cached_source = "mineru"
-    return cached_source == summary_source
-
-
-def _read_summary_meta(meta_path: Path) -> dict:
-    try:
-        with open(meta_path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def _write_summary_meta(meta_path: Path, data: dict) -> None:
     try:
-        _atomic_write_json(meta_path, data)
+        atomic_write_json(meta_path, data)
     except Exception as e:
         logger.warning(f"Failed to write summary meta: {e}")
 
@@ -2929,16 +2780,6 @@ def _public_summary_meta(meta: dict) -> dict:
         return {}
     allowed = ("updated_at", "generated_at", "quality", "source", "chinese_ratio", "model")
     return {key: meta.get(key) for key in allowed if meta.get(key) is not None}
-
-
-def _normalize_summary_result(result):
-    if isinstance(result, dict):
-        content = result.get("content") or ""
-        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-    else:
-        content = result if isinstance(result, str) else str(result or "")
-        meta = {}
-    return content, meta
 
 
 def _sanitize_summary_meta(meta: dict) -> dict:
@@ -2953,33 +2794,6 @@ class SummaryCacheMiss(Exception):
     pass
 
 
-def _acquire_summary_lock(lock_path: Path, timeout_s: int = 300):
-    start_time = time.time()
-    stale_s = _summary_lock_stale_seconds()
-    while time.time() - start_time < timeout_s:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
-            return fd
-        except FileExistsError:
-            if _is_lock_stale(lock_path, stale_s):
-                try:
-                    lock_path.unlink(missing_ok=True)
-                    logger.warning(f"Removed stale summary lock: {lock_path}")
-                    continue
-                except Exception:
-                    pass
-            time.sleep(0.2)
-    return None
-
-
-def _release_summary_lock(fd, lock_path: Path):
-    try:
-        os.close(fd)
-        lock_path.unlink(missing_ok=True)
-    except Exception as e:
-        logger.warning(f"Failed to release summary lock: {e}")
-
-
 def generate_paper_summary(
     pid: str, model: Optional[str] = None, force_refresh: bool = False, cache_only: bool = False
 ):
@@ -2990,16 +2804,16 @@ def generate_paper_summary(
     3. If not exists, call paper_summarizer to generate and cache the summary
     """
     try:
-        cache_pid, raw_pid, has_explicit_version = _resolve_cache_pid(pid)
+        # Use shared resolve_cache_pid with local meta lookup
+        meta = get_metas().get(pid.split("v")[0] if "v" in pid else pid) if pid else None
+        cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, meta)
         if not paper_exists(raw_pid):
             return "# Error\n\nPaper not found.", {}
 
-        summary_source = _normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+        summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
 
         # Define cache file path
-        cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = _summary_cache_paths(
-            cache_pid, model
-        )
+        cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
         if legacy_cache.exists() and not cache_file.exists():
             lock_file = legacy_lock
         retry_seconds = _summary_retry_seconds()
@@ -3014,7 +2828,7 @@ def generate_paper_summary(
                 with open(body_path, encoding="utf-8") as f:
                     cached = f.read()
                 cached = cached if cached.strip() else None
-                meta = _read_summary_meta(meta_path)
+                meta = read_summary_meta(meta_path)
                 if "generated_at" not in meta and "updated_at" in meta:
                     meta["generated_at"] = meta.get("updated_at")
                 if meta and "source" not in meta:
@@ -3060,14 +2874,14 @@ def generate_paper_summary(
         # Check if cached summary exists (must match current markdown source)
         cached_summary, cached_meta = _read_cached_summary()
         if cached_summary and not force_refresh:
-            if not _summary_source_matches(cached_meta, summary_source):
+            if not summary_source_matches(cached_meta, summary_source):
                 cached_summary = None
             elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
                 logger.info(f"Using cached paper summary: {pid}")
                 if model:
                     cached_meta.setdefault("model", model)
                 return cached_summary, _sanitize_summary_meta(cached_meta)
-        elif cached_summary and force_refresh and _summary_source_matches(cached_meta, summary_source):
+        elif cached_summary and force_refresh and summary_source_matches(cached_meta, summary_source):
             if _matches_requested_model(cached_meta):
                 logger.info(f"Using cached paper summary (model match): {pid}")
                 cached_meta.setdefault("model", model)
@@ -3076,7 +2890,7 @@ def generate_paper_summary(
         if cache_only:
             raise SummaryCacheMiss("Summary cache not found")
 
-        lock_fd = _acquire_summary_lock(lock_file, timeout_s=300)
+        lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
         if lock_fd is None:
             if cached_summary and not force_refresh:
                 if model:
@@ -3087,14 +2901,14 @@ def generate_paper_summary(
         try:
             cached_summary, cached_meta = _read_cached_summary()
             if cached_summary and not force_refresh:
-                if not _summary_source_matches(cached_meta, summary_source):
+                if not summary_source_matches(cached_meta, summary_source):
                     cached_summary = None
                 elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
                     logger.info(f"Using cached paper summary after lock: {pid}")
                     if model:
                         cached_meta.setdefault("model", model)
                     return cached_summary, _sanitize_summary_meta(cached_meta)
-            elif cached_summary and force_refresh and _summary_source_matches(cached_meta, summary_source):
+            elif cached_summary and force_refresh and summary_source_matches(cached_meta, summary_source):
                 if _matches_requested_model(cached_meta):
                     logger.info(f"Using cached paper summary after lock (model match): {pid}")
                     if model:
@@ -3112,7 +2926,7 @@ def generate_paper_summary(
                 pid_for_summary = pid if has_explicit_version else raw_pid
 
             summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
-            summary_content, summary_meta = _normalize_summary_result(summary_result)
+            summary_content, summary_meta = normalize_summary_result(summary_result)
             summary_meta = summary_meta if isinstance(summary_meta, dict) else {}
             if model and "model" not in summary_meta:
                 summary_meta["model"] = model
@@ -3120,12 +2934,12 @@ def generate_paper_summary(
 
             # Only cache successful summaries (not error messages)
             if not summary_content.startswith("# Error"):
-                quality, chinese_ratio = _summary_quality(summary_content)
+                quality, chinese_ratio = summary_quality(summary_content)
                 if chinese_ratio is not None:
                     logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
 
                 try:
-                    _atomic_write_text(cache_file, summary_content)
+                    atomic_write_text(cache_file, summary_content)
                     meta = {
                         "updated_at": time.time(),
                         "quality": quality,
@@ -3153,7 +2967,7 @@ def generate_paper_summary(
 
             return summary_content, response_meta
         finally:
-            _release_summary_lock(lock_fd, lock_file)
+            release_summary_lock(lock_fd, lock_file)
 
     except SummaryCacheMiss:
         raise
@@ -3163,7 +2977,8 @@ def generate_paper_summary(
 
 
 def _clear_paper_cache(pid: str):
-    cache_pid, raw_pid, _ = _resolve_cache_pid(pid)
+    meta = get_metas().get(pid.split("v")[0] if "v" in pid else pid) if pid else None
+    cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
     ids_to_clear = {cache_pid, raw_pid}
 
     # Clear summary caches (all models) including legacy flat files

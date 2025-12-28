@@ -422,8 +422,17 @@ button.link-button:hover {
     margin: 0 12px;
 }
 
+/* ===== Page Content Container - Unified Width Limit ===== */
+.page-content {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 20px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
 #controls {
-    margin: 20px 20px 24px 20px;
+    margin: 20px 0 24px 0;
     background: var(--glass-bg);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
@@ -444,12 +453,12 @@ button.link-button:hover {
 }
 
 #wrap, #tagwrap, #tagcombwrap, #keywrap {
-    margin: 0 20px 20px 20px;
+    margin: 0 0 20px 0;
     font-size: 15px;
 }
 
 .empty-state {
-    margin: 20px;
+    margin: 20px 0;
     padding: 48px 32px;
     background: var(--card-bg);
     border: 2px dashed var(--border-color);
@@ -472,7 +481,7 @@ button.link-button:hover {
 }
 
 #wordwrap {
-    margin: 0 16px 12px 16px;
+    margin: 0 0 12px 0;
     font-size: 15px;
 }
 
@@ -2025,17 +2034,17 @@ input[type="range"]::-moz-range-thumb {
 }
 
 #statswrap {
-    margin: 10px 40px 0 40px;
+    margin: 10px 0 0 0;
     font-size: 16px;
 }
 
 #profilewrap {
-    margin: 10px 40px 0 40px;
+    margin: 10px 0 0 0;
     font-size: 16px;
 }
 
 #aboutwrap {
-    margin: 10px 40px 0 40px;
+    margin: 10px 0 0 0;
     font-size: 16px;
 }
 
@@ -2113,7 +2122,11 @@ input[type="range"]::-moz-range-thumb {
     #wordwrap,
     #aboutwrap,
     #statswrap {
-        margin: 10px 20px 0 20px;
+        margin: 10px 0 0 0;
+    }
+
+    .page-content {
+        padding: 0 12px;
     }
 
 }
@@ -3723,11 +3736,11 @@ body {
 
 /* 内容区块间距优化 */
 #wrap, #tagwrap, #tagcombwrap, #keywrap {
-    margin: 0 16px 16px 16px; /* 稍大的外边距 */
+    margin: 0 0 16px 0; /* 稍大的外边距 */
 }
 
 #wordwrap {
-    margin: 0 16px 12px 16px;
+    margin: 0 0 12px 0;
 }
 
 .rel_paper {
@@ -3761,7 +3774,7 @@ body {
 
 /* 控制面板优化 */
 #controls {
-    margin: 12px 12px 14px 12px; /* 稍大的外边距 */
+    margin: 12px 0 14px 0; /* 稍大的外边距 */
     padding: 12px 14px; /* 更舒适的内边距 */
 }
 
@@ -3847,7 +3860,7 @@ body {
 
 /* 控制面板更紧凑 */
 #controls {
-    margin: 8px 8px 8px 8px !important;
+    margin: 8px 0 8px 0 !important;
     padding: 7px 8px !important;
     border-radius: 4px !important;
 }
@@ -3927,9 +3940,7 @@ body {
 
 /* Summary page layout */
 .summary-page {
-    max-width: 1100px;
-    margin: 0 auto !important;
-    padding: 24px 20px;
+    padding: 24px 0;
     width: 100%;
     box-sizing: border-box;
 }
@@ -4756,7 +4767,7 @@ html {
 #profilewrap {
     margin: 24px auto;
     max-width: 600px;
-    padding: 0 20px;
+    padding: 0;
     font-size: 15px;
 }
 
@@ -5088,7 +5099,7 @@ html {
 
 /* ===== Stats Page Enhanced Styles ===== */
 .stats-container {
-    max-width: 900px;
+    max-width: 1100px;
     margin: 0 auto;
 }
 
@@ -5236,7 +5247,7 @@ html {
 
 /* ===== About Page Enhanced Styles ===== */
 .about-container {
-    max-width: 900px;
+    max-width: 1100px;
     margin: 0 auto;
 }
 

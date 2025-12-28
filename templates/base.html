@@ -70,8 +70,10 @@ var user = {{ user | tojson }};
     </div>
 </div>
 
+<div class="page-content">
 {% block content %}
 {% endblock %}
+</div>
 
 <!-- Load our React component -->
 {% block elements %}
