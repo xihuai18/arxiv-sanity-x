@@ -107,6 +107,17 @@ function renderMarkdownWithMath(text, container) {
                     return `MATHBLOCK${index}MATHBLOCK`;
                 });
 
+                // 2.1 保護 \[ \] 塊級數學公式
+                processedText = processedText.replace(/\\\[([\s\S]*?)\\\]/g, (match, formula, offset, string) => {
+                    const prevChar = offset > 0 ? string[offset - 1] : '';
+                    if (prevChar === '\\') {
+                        return match;
+                    }
+                    const index = protectedContent.mathBlocks.length;
+                    protectedContent.mathBlocks.push(match);
+                    return `MATHBLOCK${index}MATHBLOCK`;
+                });
+
                 // 3. 保護行內數學公式（兼容性更好的版本）
                 // 避免使用 lookbehind，因為某些瀏覽器不支持
                 processedText = processedText.replace(/\$([^\$\n]+?)\$/g, (match, formula, offset, string) => {
@@ -125,6 +136,17 @@ function renderMarkdownWithMath(text, container) {
                         return `MATHINLINE${index}MATHINLINE`;
                     }
                     return match;
+                });
+
+                // 3.1 保護 \( \) 行內數學公式
+                processedText = processedText.replace(/\\\(([^\r\n]*?)\\\)/g, (match, formula, offset, string) => {
+                    const prevChar = offset > 0 ? string[offset - 1] : '';
+                    if (prevChar === '\\') {
+                        return match;
+                    }
+                    const index = protectedContent.mathInlines.length;
+                    protectedContent.mathInlines.push(match);
+                    return `MATHINLINE${index}MATHINLINE`;
                 });
 
                 console.log('Protected content counts:', {

@@ -30,8 +30,10 @@ from vars import (
     LLM_SUMMARY_LANG,
     MAIN_CONTENT_MIN_RATIO,
     MINERU_BACKEND,
+    SUMMARY_DIR,
     SUMMARY_HTML_SOURCES,
     SUMMARY_MARKDOWN_SOURCE,
+    SUMMARY_MIN_CHINESE_RATIO,
     VLLM_MINERU_PORT,
 )
 
@@ -499,7 +501,10 @@ class PaperSummarizer:
                     "-b",
                     backend,
                 ]
-                if backend == "vlm-http-client":
+                # pipeline 模式强制使用 CPU 运行
+                if backend == "pipeline":
+                    cmd.extend(["-d", "cpu"])
+                elif backend == "vlm-http-client":
                     cmd.extend(["-u", f"http://127.0.0.1:{VLLM_MINERU_PORT}"])
 
                 logger.trace(f"Executing command: {' '.join(cmd)}")
@@ -1032,6 +1037,332 @@ def generate_paper_summary(pid: str, source: Optional[str] = None, model: Option
     """
     summarizer = get_summarizer()
     return summarizer.generate_summary(pid, source=source, model=model)
+
+
+# =============================================================================
+# Reusable Summary Caching Utilities
+# =============================================================================
+
+_PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
+
+
+def split_pid_version(pid: str) -> Tuple[str, Optional[int]]:
+    """
+    Split paper ID into raw ID and version number.
+
+    Args:
+        pid: Paper ID, possibly with version suffix (e.g., "2301.00001v2")
+
+    Returns:
+        Tuple of (raw_pid, version). Version is None if no version suffix.
+    """
+    pid = (pid or "").strip()
+    if not pid:
+        return "", None
+    match = _PID_VERSION_RE.match(pid)
+    if not match:
+        return pid, None
+    raw_pid = match.group("raw")
+    try:
+        version = int(match.group("ver"))
+    except (ValueError, TypeError):
+        return pid, None
+    return raw_pid, version
+
+
+def resolve_cache_pid(pid: str, meta: Optional[dict] = None) -> Tuple[str, str, bool]:
+    """
+    Resolve cache PID from paper ID and optional metadata.
+
+    Args:
+        pid: Paper ID
+        meta: Optional paper metadata dict
+
+    Returns:
+        Tuple of (cache_pid, raw_pid, has_explicit_version)
+    """
+    raw_pid, explicit_version = split_pid_version(pid)
+    if explicit_version:
+        return pid, raw_pid, True
+
+    if isinstance(meta, dict):
+        # Try _idv first
+        idv = meta.get("_idv")
+        if isinstance(idv, str) and idv.strip():
+            return idv.strip(), raw_pid, False
+        # Try _version
+        version = meta.get("_version")
+        if version is not None:
+            try:
+                return f"{raw_pid}v{int(version)}", raw_pid, False
+            except Exception:
+                pass
+
+    return raw_pid, raw_pid, False
+
+
+def model_cache_key(model: Optional[str]) -> str:
+    """
+    Generate cache key from model name.
+
+    Args:
+        model: Model name
+
+    Returns:
+        Sanitized model key for cache filenames
+
+    Raises:
+        ValueError: If model name is empty or invalid
+    """
+    model = (model or "").strip()
+    if not model:
+        raise ValueError("Model name is required for summary caching")
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", model)
+    if not cleaned:
+        raise ValueError("Model name is invalid for summary caching")
+    return cleaned
+
+
+def summary_cache_paths(cache_pid: str, model: Optional[str]) -> Tuple[Path, Path, Path, Path, Path, Path]:
+    """
+    Get cache file paths for summary.
+
+    Args:
+        cache_pid: Cache key (raw pid or pidvN)
+        model: Model name
+
+    Returns:
+        Tuple of (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock)
+    """
+    base_dir = Path(SUMMARY_DIR) / cache_pid
+    model_key = model_cache_key(model)
+    cache_file = base_dir / f"{model_key}.md"
+    meta_file = base_dir / f"{model_key}.meta.json"
+    lock_file = base_dir / f".{model_key}.lock"
+
+    legacy_cache = Path(SUMMARY_DIR) / f"{cache_pid}.md"
+    legacy_meta = Path(SUMMARY_DIR) / f"{cache_pid}.meta.json"
+    legacy_lock = Path(SUMMARY_DIR) / f".{cache_pid}.lock"
+    return cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock
+
+
+def normalize_summary_source(source: Optional[str]) -> str:
+    """
+    Normalize summary markdown source.
+
+    Args:
+        source: Source string ("html" or "mineru")
+
+    Returns:
+        Normalized source string
+    """
+    src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
+    if src not in {"html", "mineru"}:
+        return "html"
+    return src
+
+
+def summary_source_matches(meta: dict, summary_source: str) -> bool:
+    """
+    Check if cached summary source matches requested source.
+
+    Args:
+        meta: Summary metadata dict
+        summary_source: Requested source
+
+    Returns:
+        True if sources match
+    """
+    cached_source = (meta.get("source") or "mineru").strip().lower()
+    if cached_source not in {"html", "mineru"}:
+        cached_source = "mineru"
+    return cached_source == summary_source
+
+
+def read_summary_meta(meta_path: Path) -> dict:
+    """
+    Read summary metadata from file.
+
+    Args:
+        meta_path: Path to metadata JSON file
+
+    Returns:
+        Metadata dict, empty dict on error
+    """
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def normalize_summary_result(result) -> Tuple[str, dict]:
+    """
+    Normalize summary result from various formats.
+
+    Args:
+        result: Summary result (dict with content/meta, or string)
+
+    Returns:
+        Tuple of (content, meta)
+    """
+    if isinstance(result, dict):
+        content = result.get("content") or ""
+        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    else:
+        content = result if isinstance(result, str) else str(result or "")
+        meta = {}
+    return content, meta
+
+
+def calculate_chinese_ratio(text: str) -> float:
+    """
+    Calculate the ratio of Chinese characters in text.
+
+    Args:
+        text: Input text
+
+    Returns:
+        float: Chinese character ratio (0.0 to 1.0)
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    # Text after removing whitespace characters
+    clean_text = re.sub(r"\s+", "", text)
+    if not clean_text:
+        return 0.0
+
+    # Count Chinese characters (including Chinese punctuation)
+    chinese_chars = re.findall(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", clean_text)
+    chinese_count = len(chinese_chars)
+
+    # Calculate ratio
+    total_chars = len(clean_text)
+    ratio = chinese_count / total_chars if total_chars > 0 else 0.0
+
+    return ratio
+
+
+def summary_quality(summary_content: str) -> Tuple[str, Optional[float]]:
+    """
+    Evaluate summary quality based on language settings.
+
+    Args:
+        summary_content: Summary text content
+
+    Returns:
+        Tuple of (quality, chinese_ratio). Quality is "ok" or "low_chinese".
+        chinese_ratio is None for non-Chinese languages.
+    """
+    lang = (LLM_SUMMARY_LANG or "").strip().lower()
+    if lang.startswith("zh"):
+        ratio = calculate_chinese_ratio(summary_content)
+        quality = "ok" if ratio >= SUMMARY_MIN_CHINESE_RATIO else "low_chinese"
+        return quality, ratio
+    return "ok", None
+
+
+def _summary_lock_stale_seconds() -> float:
+    """Get stale lock timeout from environment."""
+    try:
+        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "3600"))
+    except Exception:
+        seconds = 3600.0
+    return max(0.0, seconds)
+
+
+def _is_lock_stale(lock_path: Path, stale_s: float) -> bool:
+    """Check if lock file is stale."""
+    if stale_s <= 0:
+        return False
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+    return age > stale_s
+
+
+def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]:
+    """
+    Acquire a file-based lock for summary caching.
+
+    Args:
+        lock_path: Path to lock file
+        timeout_s: Timeout in seconds
+
+    Returns:
+        File descriptor if lock acquired, None if timeout
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    start_time = time.time()
+    stale_s = _summary_lock_stale_seconds()
+    while time.time() - start_time < timeout_s:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+            return fd
+        except FileExistsError:
+            if _is_lock_stale(lock_path, stale_s):
+                try:
+                    lock_path.unlink(missing_ok=True)
+                    logger.warning(f"Removed stale summary lock: {lock_path}")
+                    continue
+                except Exception:
+                    pass
+            time.sleep(0.2)
+    return None
+
+
+def release_summary_lock(fd: int, lock_path: Path) -> None:
+    """
+    Release a file-based lock.
+
+    Args:
+        fd: File descriptor from acquire_summary_lock
+        lock_path: Path to lock file
+    """
+    try:
+        os.close(fd)
+        lock_path.unlink(missing_ok=True)
+    except Exception as e:
+        logger.warning(f"Failed to release summary lock: {e}")
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """
+    Atomically write text to disk to avoid partial reads.
+
+    Args:
+        path: Target file path
+        content: Text content to write
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    """
+    Atomically write JSON to disk.
+
+    Args:
+        path: Target file path
+        data: Dict to write as JSON
+    """
+    atomic_write_text(path, json.dumps(data))
 
 
 if __name__ == "__main__":
