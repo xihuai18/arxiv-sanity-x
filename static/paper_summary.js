@@ -23,322 +23,489 @@ function isSafeUrl(href) {
     }
 }
 
-function configureMarkedOnce() {
-    if (typeof marked === 'undefined' || !marked.use) return;
-    if (configureMarkedOnce._done) return;
+function markdownItMathPlugin(md) {
+    function isValidDelim(state, pos) {
+        const max = state.posMax;
+        const prevChar = pos > 0 ? state.src.charCodeAt(pos - 1) : -1;
+        const nextChar = pos + 1 <= max ? state.src.charCodeAt(pos + 1) : -1;
+        let canOpen = true;
+        let canClose = true;
 
-    const safeRenderer = {
-        html() {
-            return '';
-        },
-        image() {
-            return '';
-        },
-        link(hrefOrToken, title, text) {
-            // marked 9+: link(token); older: link(href, title, text)
-            const token = (hrefOrToken && typeof hrefOrToken === 'object') ? hrefOrToken : null;
-            const href = token ? token.href : hrefOrToken;
-            const linkText = token ? token.text : text;
-            const linkTitle = token ? token.title : title;
+        if (prevChar === 0x20 || prevChar === 0x09 || (nextChar >= 0x30 && nextChar <= 0x39)) {
+            canClose = false;
+        }
+        if (nextChar === 0x20 || nextChar === 0x09) {
+            canOpen = false;
+        }
 
-            if (!isSafeUrl(href)) {
-                return escapeHtml(linkText);
-            }
-
-            const t = escapeHtml(linkText);
-            const h = escapeHtml(href);
-            const ttl = linkTitle ? ` title="${escapeHtml(linkTitle)}"` : '';
-            return `<a href="${h}"${ttl}>${t}</a>`;
-        },
-    };
-
-    marked.use({ renderer: safeRenderer });
-    if (marked.setOptions) {
-        marked.setOptions({
-            breaks: true,
-            gfm: true,
-            headerIds: false,
-            mangle: false,
-            pedantic: false,
-            smartLists: true,
-            smartypants: false,
-            xhtml: false
-        });
+        return { can_open: canOpen, can_close: canClose };
     }
 
-    configureMarkedOnce._done = true;
+    function htmlLineBreak(state, silent) {
+        if (state.src[state.pos] !== '<') return false;
+        const slice = state.src.slice(state.pos);
+        const match = slice.match(/^<br\s*\/?>/i);
+        if (!match) return false;
+
+        if (!silent) {
+            const token = state.push('hardbreak', 'br', 0);
+            token.markup = match[0];
+        }
+        state.pos += match[0].length;
+        return true;
+    }
+
+    function mathInlineDollar(state, silent) {
+        if (state.src[state.pos] !== '$') return false;
+
+        const res = isValidDelim(state, state.pos);
+        if (!res.can_open) {
+            if (!silent) {
+                state.pending += '$';
+            }
+            state.pos += 1;
+            return true;
+        }
+
+        const start = state.pos + 1;
+        let match = start;
+        let pos;
+
+        while ((match = state.src.indexOf('$', match)) !== -1) {
+            pos = match - 1;
+            while (state.src[pos] === '\\') {
+                pos -= 1;
+            }
+            if ((match - pos) % 2 === 1) {
+                break;
+            }
+            match += 1;
+        }
+
+        if (match === -1) {
+            if (!silent) {
+                state.pending += '$';
+            }
+            state.pos = start;
+            return true;
+        }
+
+        if (match - start === 0) {
+            if (!silent) {
+                state.pending += '$$';
+            }
+            state.pos = start + 1;
+            return true;
+        }
+
+        const resClose = isValidDelim(state, match);
+        if (!resClose.can_close) {
+            if (!silent) {
+                state.pending += '$';
+            }
+            state.pos = start;
+            return true;
+        }
+
+        if (!silent) {
+            const token = state.push('math_inline', 'math', 0);
+            token.content = state.src.slice(start, match);
+            token.markup = '$';
+        }
+
+        state.pos = match + 1;
+        return true;
+    }
+
+    function mathInlineParen(state, silent) {
+        if (state.src.slice(state.pos, state.pos + 2) !== '\\(') return false;
+
+        const start = state.pos + 2;
+        let match = start;
+        let pos;
+
+        while ((match = state.src.indexOf('\\)', match)) !== -1) {
+            pos = match - 1;
+            while (pos >= 0 && state.src[pos] === '\\') {
+                pos -= 1;
+            }
+            if ((match - pos) % 2 === 1) {
+                break;
+            }
+            match += 2;
+        }
+
+        if (match === -1) {
+            return false;
+        }
+
+        if (!silent) {
+            const token = state.push('math_inline', 'math', 0);
+            token.content = state.src.slice(start, match);
+            token.markup = '\\(';
+        }
+
+        state.pos = match + 2;
+        return true;
+    }
+
+    function mathInlineBracket(state, silent) {
+        if (state.src.slice(state.pos, state.pos + 2) !== '\\[') return false;
+
+        const start = state.pos + 2;
+        let match = start;
+        let pos;
+
+        while ((match = state.src.indexOf('\\]', match)) !== -1) {
+            pos = match - 1;
+            while (pos >= 0 && state.src[pos] === '\\') {
+                pos -= 1;
+            }
+            if ((match - pos) % 2 === 1) {
+                break;
+            }
+            match += 2;
+        }
+
+        if (match === -1) {
+            return false;
+        }
+
+        if (!silent) {
+            const token = state.push('math_inline', 'math', 0);
+            token.content = state.src.slice(start, match);
+            token.markup = '\\[';
+            token.displayMode = true;
+        }
+
+        state.pos = match + 2;
+        return true;
+    }
+
+    function mathBlock(state, startLine, endLine, silent) {
+        let pos = state.bMarks[startLine] + state.tShift[startLine];
+        let max = state.eMarks[startLine];
+
+        if (pos + 2 > max) return false;
+
+        const opener = state.src.slice(pos, pos + 2);
+        if (opener !== '$$' && opener !== '\\[') return false;
+
+        const closer = opener === '$$' ? '$$' : '\\]';
+        pos += 2;
+
+        let firstLine = state.src.slice(pos, max);
+        let found = false;
+        let lastLine = '';
+        let nextLine = startLine;
+
+        if (silent) return true;
+
+        if (firstLine.trim().endsWith(closer)) {
+            firstLine = firstLine.trim().slice(0, -closer.length);
+            found = true;
+        }
+
+        for (nextLine = startLine; !found;) {
+            nextLine += 1;
+            if (nextLine >= endLine) {
+                break;
+            }
+
+            pos = state.bMarks[nextLine] + state.tShift[nextLine];
+            max = state.eMarks[nextLine];
+
+            if (pos < max && state.tShift[nextLine] < state.blkIndent) {
+                break;
+            }
+
+            const line = state.src.slice(pos, max);
+            if (line.trim().endsWith(closer)) {
+                const lastPos = line.lastIndexOf(closer);
+                lastLine = line.slice(0, lastPos);
+                found = true;
+            }
+        }
+
+        state.line = nextLine + 1;
+
+        const token = state.push('math_block', 'math', 0);
+        token.block = true;
+        token.content = (firstLine && firstLine.trim() ? `${firstLine}\n` : '')
+            + state.getLines(startLine + 1, nextLine, state.tShift[startLine], true)
+            + (lastLine && lastLine.trim() ? lastLine : '');
+        token.map = [startLine, state.line];
+        token.markup = opener;
+
+        return true;
+    }
+
+    md.inline.ruler.before('escape', 'html_line_break', htmlLineBreak);
+    md.inline.ruler.before('escape', 'math_inline_paren', mathInlineParen);
+    md.inline.ruler.before('escape', 'math_inline_bracket', mathInlineBracket);
+    md.inline.ruler.after('escape', 'math_inline_dollar', mathInlineDollar);
+    md.block.ruler.after('blockquote', 'math_block', mathBlock, {
+        alt: ['paragraph', 'reference', 'blockquote', 'list']
+    });
+
+    md.renderer.rules.math_inline = function(tokens, idx) {
+        const content = escapeHtml(tokens[idx].content);
+        if (tokens[idx].displayMode || tokens[idx].markup === '\\[') {
+            return `<span class="math-display">\\[${content}\\]</span>`;
+        }
+        return `<span class="math-inline">\\(${content}\\)</span>`;
+    };
+
+    md.renderer.rules.math_block = function(tokens, idx) {
+        const content = escapeHtml(tokens[idx].content);
+        return `<div class="math-display">\\[${content}\\]</div>`;
+    };
 }
 
-// 先 Marked 後 MathJax 的渲染函數（完全重寫版）
-function renderMarkdownWithMath(text, container) {
-    if (!text || !container) return Promise.resolve();
+let markdownRenderer = null;
+let tocObserver = null;
+let tocCollapsed = null;
 
-    return new Promise((resolve) => {
-        try {
-            console.log('Starting markdown rendering, text length:', text.length);
+function getMarkdownRenderer() {
+    if (markdownRenderer) return markdownRenderer;
+    if (typeof markdownit === 'undefined') return null;
 
-            let htmlContent = '';
+    const md = markdownit({
+        html: false,
+        linkify: true,
+        typographer: false,
+        breaks: true
+    });
 
-            // 檢查 marked 是否可用
-            if (typeof marked !== 'undefined') {
-                configureMarkedOnce();
+    md.validateLink = (url) => isSafeUrl(url);
+    md.use(markdownItMathPlugin);
 
-                // 保存所有需要保護的內容
-                const protectedContent = {
-                    mathBlocks: [],
-                    mathInlines: [],
-                    codeBlocks: []
-                };
+    const defaultLinkRender = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
+        return self.renderToken(tokens, idx, options);
+    };
 
-                // 第一步：保護所有特殊內容
-                let processedText = text;
-
-                // 1. 保護代碼塊
-                processedText = processedText.replace(/```[\s\S]*?```/g, (match) => {
-                    const index = protectedContent.codeBlocks.length;
-                    protectedContent.codeBlocks.push(match);
-                    return `\n\nCODEBLOCK${index}CODEBLOCK\n\n`;
-                });
-
-                // 2. 保護塊級數學公式
-                processedText = processedText.replace(/\$\$([\s\S]*?)\$\$/g, (match) => {
-                    const index = protectedContent.mathBlocks.length;
-                    protectedContent.mathBlocks.push(match);
-                    return `MATHBLOCK${index}MATHBLOCK`;
-                });
-
-                // 2.1 保護 \[ \] 塊級數學公式
-                processedText = processedText.replace(/\\\[([\s\S]*?)\\\]/g, (match, formula, offset, string) => {
-                    const prevChar = offset > 0 ? string[offset - 1] : '';
-                    if (prevChar === '\\') {
-                        return match;
-                    }
-                    const index = protectedContent.mathBlocks.length;
-                    protectedContent.mathBlocks.push(match);
-                    return `MATHBLOCK${index}MATHBLOCK`;
-                });
-
-                // 3. 保護行內數學公式（兼容性更好的版本）
-                // 避免使用 lookbehind，因為某些瀏覽器不支持
-                processedText = processedText.replace(/\$([^\$\n]+?)\$/g, (match, formula, offset, string) => {
-                    // 檢查前後是否是 $（避免匹配 $$）
-                    const prevChar = offset > 0 ? string[offset - 1] : '';
-                    const nextChar = offset + match.length < string.length ? string[offset + match.length] : '';
-
-                    if (prevChar === '$' || nextChar === '$') {
-                        return match; // 這是 $$ 的一部分，不處理
-                    }
-
-                    // 檢查是否包含數學符號特徵
-                    if (formula.match(/[a-zA-Z_\\{}\^\(\)\[\]]/)) {
-                        const index = protectedContent.mathInlines.length;
-                        protectedContent.mathInlines.push(match);
-                        return `MATHINLINE${index}MATHINLINE`;
-                    }
-                    return match;
-                });
-
-                // 3.1 保護 \( \) 行內數學公式
-                processedText = processedText.replace(/\\\(([^\r\n]*?)\\\)/g, (match, formula, offset, string) => {
-                    const prevChar = offset > 0 ? string[offset - 1] : '';
-                    if (prevChar === '\\') {
-                        return match;
-                    }
-                    const index = protectedContent.mathInlines.length;
-                    protectedContent.mathInlines.push(match);
-                    return `MATHINLINE${index}MATHINLINE`;
-                });
-
-                console.log('Protected content counts:', {
-                    codeBlocks: protectedContent.codeBlocks.length,
-                    mathBlocks: protectedContent.mathBlocks.length,
-                    mathInlines: protectedContent.mathInlines.length
-                });
-
-                // 第二步：處理 Markdown
-                try {
-                    // 嘗試直接解析
-                    htmlContent = marked.parse(processedText);
-                    console.log('Marked parsing successful, output length:', htmlContent.length);
-                } catch (parseError) {
-                    console.error('Marked parsing failed:', parseError);
-                    // 如果失敗，嘗試分段處理
-                    const segments = processedText.split(/\n\n+/);
-                    const processedSegments = [];
-
-                    for (let segment of segments) {
-                        try {
-                            processedSegments.push(marked.parse(segment));
-                        } catch (segmentError) {
-                            console.warn('Segment parsing failed, using fallback:', segmentError);
-                            // 對失敗的段落使用簡單處理
-                            processedSegments.push(
-                                segment
-                                    .replace(/&/g, '&amp;')
-                                    .replace(/</g, '&lt;')
-                                    .replace(/>/g, '&gt;')
-                                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                                    .replace(/`(.*?)`/g, '<code>$1</code>')
-                            );
-                        }
-                    }
-
-                    htmlContent = processedSegments.join('</p><p>');
-                    // 確保段落標籤正確
-                    if (!htmlContent.startsWith('<p>')) {
-                        htmlContent = '<p>' + htmlContent;
-                    }
-                    if (!htmlContent.endsWith('</p>')) {
-                        htmlContent = htmlContent + '</p>';
-                    }
+    md.renderer.rules.link_open = function(tokens, idx, options, env, self) {
+        const href = tokens[idx].attrGet('href') || '';
+        if (isSafeUrl(href)) {
+            try {
+                const url = new URL(href, window.location.href);
+                if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== window.location.origin) {
+                    tokens[idx].attrSet('target', '_blank');
+                    tokens[idx].attrSet('rel', 'noopener noreferrer');
                 }
-
-                // 第三步：恢復保護的內容
-                // 注意：不要全局替換HTML實體，只在占位符周圍處理
-
-                // 恢復代碼塊
-                htmlContent = htmlContent.replace(/CODEBLOCK(\d+)CODEBLOCK/g, (match, index) => {
-                    const code = protectedContent.codeBlocks[parseInt(index)];
-                    if (code) {
-                        // 更靈活的代碼塊匹配
-                        const codeMatch = code.match(/^```([^\n]*)\n?([\s\S]*?)\n?```$/);
-                        if (codeMatch) {
-                            const lang = (codeMatch[1] || '').trim();
-                            const content = codeMatch[2] || '';
-                            const escapedContent = content
-                                .replace(/&/g, '&amp;')
-                                .replace(/</g, '&lt;')
-                                .replace(/>/g, '&gt;');
-                            return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escapedContent}</code></pre>`;
-                        } else {
-                            // 如果正則匹配失敗，直接返回原始代碼塊（去掉```）
-                            const simpleContent = code.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '');
-                            const escapedContent = simpleContent
-                                .replace(/&/g, '&amp;')
-                                .replace(/</g, '&lt;')
-                                .replace(/>/g, '&gt;');
-                            return `<pre><code>${escapedContent}</code></pre>`;
-                        }
-                    }
-                    return match;
-                });
-
-                // 恢復數學公式 - 處理可能被包裹在標籤中或被HTML編碼的情況
-                // 先處理被<p>標籤包裹的塊級數學公式
-                htmlContent = htmlContent.replace(/<p>MATHBLOCK(\d+)MATHBLOCK<\/p>/g, (match, index) => {
-                    const math = protectedContent.mathBlocks[parseInt(index)];
-                    return math ? `<p>${math}</p>` : match;
-                });
-
-                // 處理普通的塊級數學公式
-                htmlContent = htmlContent.replace(/MATHBLOCK(\d+)MATHBLOCK/g, (match, index) => {
-                    return protectedContent.mathBlocks[parseInt(index)] || match;
-                });
-
-                // 處理行內數學公式
-                htmlContent = htmlContent.replace(/MATHINLINE(\d+)MATHINLINE/g, (match, index) => {
-                    return protectedContent.mathInlines[parseInt(index)] || match;
-                });
-
-                // 如果還有被HTML編碼的占位符，嘗試恢復
-                if (htmlContent.includes('&lt;') || htmlContent.includes('&gt;') || htmlContent.includes('&amp;')) {
-                    // 只在占位符區域進行HTML解碼
-                    htmlContent = htmlContent.replace(/(&lt;|&gt;|&amp;)?(CODEBLOCK|MATHBLOCK|MATHINLINE)(\d+)\2(&lt;|&gt;|&amp;)?/g,
-                        (match, pre, type, index, post) => {
-                            const realType = type;
-                            const realIndex = parseInt(index);
-
-                            if (realType === 'CODEBLOCK' && protectedContent.codeBlocks[realIndex]) {
-                                const code = protectedContent.codeBlocks[realIndex];
-                                const codeMatch = code.match(/^```([^\n]*)\n?([\s\S]*?)\n?```$/);
-                                if (codeMatch) {
-                                    const lang = (codeMatch[1] || '').trim();
-                                    const content = codeMatch[2] || '';
-                                    const escapedContent = content
-                                        .replace(/&/g, '&amp;')
-                                        .replace(/</g, '&lt;')
-                                        .replace(/>/g, '&gt;');
-                                    return `<pre><code${lang ? ` class="language-${lang}"` : ''}>${escapedContent}</code></pre>`;
-                                }
-                            } else if (realType === 'MATHBLOCK' && protectedContent.mathBlocks[realIndex]) {
-                                return protectedContent.mathBlocks[realIndex];
-                            } else if (realType === 'MATHINLINE' && protectedContent.mathInlines[realIndex]) {
-                                return protectedContent.mathInlines[realIndex];
-                            }
-
-                            return match;
-                        }
-                    );
-                }
-
-                // 檢查恢復情況 - 更準確的檢查
-                const codeBlocksRemaining = (htmlContent.match(/CODEBLOCK\d+CODEBLOCK/g) || []).length;
-                const mathBlocksRemaining = (htmlContent.match(/MATHBLOCK\d+MATHBLOCK/g) || []).length;
-                const mathInlinesRemaining = (htmlContent.match(/MATHINLINE\d+MATHINLINE/g) || []).length;
-                const totalRemaining = codeBlocksRemaining + mathBlocksRemaining + mathInlinesRemaining;
-
-                if (totalRemaining > 0) {
-                    console.warn(`Warning: ${totalRemaining} placeholders were not restored:`, {
-                        codeBlocks: codeBlocksRemaining,
-                        mathBlocks: mathBlocksRemaining,
-                        mathInlines: mathInlinesRemaining
-                    });
-                }
-
-            } else {
-                // marked 不可用時的後備方案
-                console.log('Marked not available, using fallback');
-                htmlContent = text
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
-                    .replace(/`(.*?)`/g, '<code>$1</code>')
-                    .replace(/\n\n+/g, '</p><p>')
-                    .replace(/\n/g, '<br>');
-                htmlContent = '<p>' + htmlContent + '</p>';
+            } catch (e) {
+                // ignore invalid URLs
             }
+        }
+        return defaultLinkRender(tokens, idx, options, env, self);
+    };
 
-            console.log('Final HTML length:', htmlContent.length);
+    markdownRenderer = md;
+    return markdownRenderer;
+}
 
-            // 設置 HTML 內容
-            container.innerHTML = htmlContent;
+function slugifyHeading(text, slugCounts) {
+    const cleaned = String(text || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '')
+        .replace(/\s+/g, '-');
+    const base = cleaned || 'section';
+    const count = slugCounts[base] || 0;
+    slugCounts[base] = count + 1;
+    return count > 0 ? `${base}-${count + 1}` : base;
+}
 
-            // 第四步：渲染數學公式
-            if (typeof MathJax !== 'undefined' && MathJax.startup) {
-                MathJax.startup.promise.then(() => {
-                    console.log('Starting MathJax rendering');
-                    return MathJax.typesetPromise([container]);
-                }).then(() => {
-                    console.log('MathJax rendering completed');
-                    resolve();
-                }).catch((err) => {
-                    console.warn('MathJax rendering error:', err);
-                    resolve();
-                });
-            } else {
-                console.log('MathJax not available');
-                resolve();
+function extractHeadingText(token) {
+    if (!token) return '';
+    if (token.type === 'inline' && Array.isArray(token.children)) {
+        return token.children.map((child) => {
+            if (child.type === 'text' || child.type === 'code_inline') {
+                return child.content;
             }
+            return '';
+        }).join('');
+    }
+    return token.content || '';
+}
 
-        } catch (err) {
-            console.error('Critical rendering error:', err);
-            console.error('Error stack:', err.stack);
+function buildTocHtml(items) {
+    if (!items || items.length < 2) return '';
+    const list = items.map((item) => {
+        const title = escapeHtml(item.title);
+        const slug = escapeHtml(item.slug);
+        return `<li class="toc-item toc-level-${item.level}"><a href="#${slug}">${title}</a></li>`;
+    }).join('');
+    return `
+        <div class="toc-header">
+            <div class="toc-title">Contents</div>
+            <div class="toc-actions">
+                <span class="toc-count">${items.length}</span>
+                <button type="button" class="toc-toggle" aria-expanded="true">Collapse</button>
+            </div>
+        </div>
+        <ul class="toc-list">
+            ${list}
+        </ul>
+    `;
+}
 
-            // 最後的後備方案：顯示原始文本
-            const lines = text.split('\n');
-            const escapedLines = lines.map(line => {
-                return line
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-            });
-            container.innerHTML = '<pre>' + escapedLines.join('\n') + '</pre>';
-            resolve();
+function setActiveTocLink(tocContainer, link) {
+    if (!tocContainer) return;
+    const active = tocContainer.querySelector('.toc-item a.is-active');
+    if (active) {
+        active.classList.remove('is-active');
+    }
+    if (link) {
+        link.classList.add('is-active');
+    }
+}
+
+function setupTocObserver(tocContainer, markdownContainer) {
+    if (tocObserver) {
+        tocObserver.disconnect();
+        tocObserver = null;
+    }
+    if (!tocContainer || !markdownContainer) return;
+
+    const headings = markdownContainer.querySelectorAll('h1, h2, h3, h4');
+    if (!headings.length) return;
+
+    const linkMap = new Map();
+    const links = tocContainer.querySelectorAll('a[href^="#"]');
+    links.forEach((link) => {
+        const href = link.getAttribute('href') || '';
+        const id = href.slice(1);
+        if (id) {
+            linkMap.set(id, link);
         }
     });
+
+    tocObserver = new IntersectionObserver((entries) => {
+        const visible = entries.filter((entry) => entry.isIntersecting);
+        if (!visible.length) return;
+        visible.sort((a, b) => {
+            if (b.intersectionRatio !== a.intersectionRatio) {
+                return b.intersectionRatio - a.intersectionRatio;
+            }
+            return a.boundingClientRect.top - b.boundingClientRect.top;
+        });
+        const target = visible[0].target;
+        const link = linkMap.get(target.id);
+        setActiveTocLink(tocContainer, link);
+    }, {
+        rootMargin: '0px 0px -70% 0px',
+        threshold: [0, 1]
+    });
+
+    headings.forEach((heading) => {
+        tocObserver.observe(heading);
+    });
+}
+
+function setupTocToggle(tocContainer) {
+    if (!tocContainer) return;
+    const toggle = tocContainer.querySelector('.toc-toggle');
+    if (!toggle) return;
+
+    if (tocCollapsed === null) {
+        tocCollapsed = window.matchMedia('(max-width: 960px)').matches;
+    }
+
+    const applyState = (collapsed) => {
+        tocContainer.classList.toggle('is-collapsed', collapsed);
+        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+        toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+    };
+
+    applyState(tocCollapsed);
+
+    toggle.addEventListener('click', () => {
+        tocCollapsed = !tocCollapsed;
+        applyState(tocCollapsed);
+    });
+}
+
+function wrapMarkdownTables(container) {
+    const tables = container.querySelectorAll('table');
+    tables.forEach((table) => {
+        const parent = table.parentElement;
+        if (parent && parent.classList.contains('table-wrap')) return;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-wrap';
+        if (parent) {
+            parent.insertBefore(wrapper, table);
+        }
+        wrapper.appendChild(table);
+    });
+}
+
+function renderSummaryMarkdown(text, markdownContainer, tocContainer) {
+    if (!text || !markdownContainer) return;
+
+    const md = getMarkdownRenderer();
+    if (!md) {
+        markdownContainer.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+        return;
+    }
+
+    try {
+        if (tocObserver) {
+            tocObserver.disconnect();
+            tocObserver = null;
+        }
+        const env = {};
+        const tokens = md.parse(text, env);
+        const slugCounts = {};
+        const tocItems = [];
+
+        for (let i = 0; i < tokens.length; i += 1) {
+            const token = tokens[i];
+            if (token.type !== 'heading_open') continue;
+            const level = Number(token.tag.slice(1));
+            if (Number.isNaN(level) || level > 4) continue;
+
+            const inlineToken = tokens[i + 1];
+            const title = extractHeadingText(inlineToken);
+            if (!title) continue;
+
+            const slug = slugifyHeading(title, slugCounts);
+            token.attrSet('id', slug);
+            tocItems.push({ level, title, slug });
+        }
+
+        markdownContainer.innerHTML = md.renderer.render(tokens, md.options, env);
+        wrapMarkdownTables(markdownContainer);
+
+        if (tocContainer) {
+            const tocHtml = buildTocHtml(tocItems);
+            tocContainer.innerHTML = tocHtml;
+            tocContainer.classList.toggle('is-empty', !tocHtml);
+            const contentContainer = tocContainer.closest('.summary-content');
+            if (contentContainer) {
+                contentContainer.classList.toggle('has-toc', Boolean(tocHtml));
+            }
+            if (tocHtml) {
+                setupTocToggle(tocContainer);
+                setupTocObserver(tocContainer, markdownContainer);
+                const firstLink = tocContainer.querySelector('.toc-item a');
+                if (firstLink) {
+                    setActiveTocLink(tocContainer, firstLink);
+                }
+            }
+        }
+
+        if (typeof MathJax !== 'undefined' && MathJax.startup) {
+            MathJax.startup.promise
+                .then(() => MathJax.typesetPromise([markdownContainer]))
+                .catch((err) => {
+                    console.warn('MathJax rendering error:', err);
+                });
+        }
+    } catch (err) {
+        console.error('Markdown render error:', err);
+        markdownContainer.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
+    }
 }
 
 // Simplified state management
@@ -373,18 +540,14 @@ class SummaryState {
 
         const htmlContent = this.getHTML();
 
-        // 如果內容包含 summary，使用新的渲染方式處理數學公式
-        if (this.content && htmlContent.includes('markdown-content')) {
-            // 先設置基本 HTML 結構
+        if (this.content) {
             container.innerHTML = htmlContent;
-
-            // 然後對 markdown 內容進行特殊處理
-            const markdownContainer = container.querySelector('.markdown-content');
+            const markdownContainer = container.querySelector('.summary-markdown');
+            const tocContainer = container.querySelector('.summary-toc');
             if (markdownContainer) {
-                renderMarkdownWithMath(this.content, markdownContainer);
+                renderSummaryMarkdown(this.content, markdownContainer, tocContainer);
             }
         } else {
-            // 對於不含 markdown 的內容，直接設置
             container.innerHTML = htmlContent;
             this.renderMath();
         }
@@ -588,7 +751,7 @@ class SummaryState {
                 </div>
             `;
         } else if (this.content) {
-            // 不在這裡處理 markdown，讓 render() 方法中的 renderMarkdownWithMath 函數處理
+            // 不在這裡處理 markdown，讓 render() 方法中的 renderSummaryMarkdown 處理
             summaryHTML = `
                 <div class="summary-container" aria-busy="false">
                     <div class="summary-header">
@@ -596,8 +759,9 @@ class SummaryState {
                         ${this.renderMetaLine()}
                     </div>
                     ${this.renderActions()}
-                    <div class="summary-content markdown-content" aria-live="polite">
-                        <!-- 內容將由 renderMarkdownWithMath 函數處理 -->
+                    <div class="summary-content" aria-live="polite">
+                        <nav class="summary-toc" aria-label="Table of contents"></nav>
+                        <div class="summary-markdown markdown-content"></div>
                     </div>
                 </div>
             `;

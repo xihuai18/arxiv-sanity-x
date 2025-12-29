@@ -10,13 +10,16 @@ var defaultSummaryModel = {{ default_summary_model | tojson }};
 
 {% block head_extra %}
 <!-- Markdown + Math rendering (summary page only) -->
-<script defer src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
 <script>
 window.MathJax = {
     tex: {
         inlineMath: [['\\(', '\\)'], ['$', '$']],
         displayMath: [['\\[', '\\]'], ['$$', '$$']],
         processEscapes: true
+    },
+    options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
     }
 };
 </script>
