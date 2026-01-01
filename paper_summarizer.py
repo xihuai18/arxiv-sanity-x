@@ -121,19 +121,8 @@ class PaperSummarizer:
                     if mineru_meta.get("cached_version"):
                         cached_version = mineru_meta["cached_version"]
                         logger.trace(f"Using version {cached_version} from MinerU meta")
-                    else:
-                        # Strategy 3: Make a HEAD request to get current version from redirect
-                        try:
-                            head_response = requests.head(pdf_url, allow_redirects=True, timeout=10)
-                            if head_response.ok:
-                                version_from_url = self._extract_version_from_url(head_response.url, raw_pid)
-                                if version_from_url:
-                                    cached_version = version_from_url
-                                    logger.trace(
-                                        f"Detected version {cached_version} from HEAD request: {head_response.url}"
-                                    )
-                        except Exception as e:
-                            logger.trace(f"Failed to determine version from HEAD request: {e}")
+                    # Note: Removed Strategy 3 (HEAD request) as it causes significant slowdown
+                    # in batch processing. Version info is nice-to-have, not critical.
 
                 return pdf_path, cached_version
 
@@ -388,27 +377,60 @@ class PaperSummarizer:
         return md_path, meta_path, images_dir
 
     def _read_html_meta(self, cache_pid: str) -> dict:
+        # Try new folder structure first
         _, meta_path, _ = self._html_cache_paths(cache_pid)
-        if not meta_path.exists():
-            return {}
-        try:
-            with open(meta_path, encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+        if meta_path.exists():
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+
+        # Fallback to legacy flat structure
+        _, legacy_meta = self._legacy_html_cache_paths(cache_pid)
+        if legacy_meta.exists():
+            try:
+                with open(legacy_meta, encoding="utf-8") as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                pass
+
+        return {}
+
+    def _legacy_html_cache_paths(self, cache_pid: str) -> Tuple[Path, Path]:
+        """Get legacy flat HTML cache paths for backward compatibility."""
+        md_path = self.html_md_dir / f"{cache_pid}.md"
+        meta_path = self.html_md_dir / f"{cache_pid}.meta.json"
+        return md_path, meta_path
 
     def _read_html_markdown_cache(self, cache_pid: str) -> Optional[str]:
+        # Try new folder structure first
         md_path, _, _ = self._html_cache_paths(cache_pid)
-        if not md_path.exists():
-            return None
-        try:
-            with open(md_path, encoding="utf-8") as f:
-                content = f.read()
-            return content if content.strip() else None
-        except Exception as e:
-            logger.trace(f"Failed to read HTML markdown cache for {cache_pid}: {e}")
-            return None
+        if md_path.exists():
+            try:
+                with open(md_path, encoding="utf-8") as f:
+                    content = f.read()
+                if content.strip():
+                    return content
+            except Exception as e:
+                logger.trace(f"Failed to read HTML markdown cache for {cache_pid}: {e}")
+
+        # Fallback to legacy flat structure
+        legacy_md, _ = self._legacy_html_cache_paths(cache_pid)
+        if legacy_md.exists():
+            try:
+                with open(legacy_md, encoding="utf-8") as f:
+                    content = f.read()
+                if content.strip():
+                    logger.trace(f"Using legacy HTML cache for {cache_pid}")
+                    return content
+            except Exception as e:
+                logger.trace(f"Failed to read legacy HTML cache for {cache_pid}: {e}")
+
+        return None
 
     def _write_html_markdown_cache(self, cache_pid: str, markdown: str, source: str, url: str) -> None:
         """Write HTML markdown cache with metadata.
@@ -461,11 +483,16 @@ class PaperSummarizer:
             True if download successful, False otherwise
         """
         try:
+            # Check if image already exists (skip download)
+            if save_path.exists() and save_path.stat().st_size > 0:
+                logger.trace(f"Image already cached: {save_path.name}")
+                return True
+
             # Ensure parent directory exists
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+            response = requests.get(img_url, headers=headers, timeout=10, stream=True)
             if response.status_code != 200:
                 logger.trace(f"Failed to download image {img_url}: {response.status_code}")
                 return False
@@ -523,13 +550,14 @@ class PaperSummarizer:
             else:
                 math.decompose()
 
-    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str) -> Optional[str]:
+    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str, max_images: int = 20) -> Optional[str]:
         """Convert HTML to Markdown and download images.
 
         Args:
             html: HTML content
             cache_pid: Cache paper ID for organizing images
             base_url: Base URL for resolving relative image paths
+            max_images: Maximum number of images to download (default: 20)
 
         Returns:
             Markdown content with updated image references
@@ -552,6 +580,7 @@ class PaperSummarizer:
         # Download images and update references
         _, _, images_dir = self._html_cache_paths(cache_pid)
         img_counter = {}
+        download_tasks = []  # (img_tag, img_url, img_path, img_filename)
 
         for img_tag in (main or soup).find_all("img"):
             src = img_tag.get("src")
@@ -590,14 +619,34 @@ class PaperSummarizer:
             img_filename = f"{safe_name}{ext}"
             img_path = images_dir / img_filename
 
-            # Download image
-            if self._download_image(img_url, img_path):
-                # Update img tag src to point to local file
-                img_tag["src"] = f"images/{img_filename}"
+            # Collect download task (limit to max_images)
+            if len(download_tasks) < max_images:
+                download_tasks.append((img_tag, img_url, img_path, img_filename))
             else:
-                # Remove img tag if download fails to prevent LLM from referencing broken images
-                logger.trace(f"Removing image tag due to failed download: {img_url}")
+                # Too many images, remove this one
                 img_tag.decompose()
+
+        # Download images in parallel using thread pool
+        if download_tasks:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def download_task(task):
+                img_tag, img_url, img_path, img_filename = task
+                success = self._download_image(img_url, img_path)
+                return img_tag, img_filename, success
+
+            # Use up to 8 threads for parallel download
+            with ThreadPoolExecutor(max_workers=min(8, len(download_tasks))) as executor:
+                futures = [executor.submit(download_task, t) for t in download_tasks]
+                for future in as_completed(futures):
+                    try:
+                        img_tag, img_filename, success = future.result()
+                        if success:
+                            img_tag["src"] = f"images/{img_filename}"
+                        else:
+                            img_tag.decompose()
+                    except Exception:
+                        pass
 
         markdown = html_to_markdown(str(main), heading_style="ATX")
         markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
@@ -611,7 +660,7 @@ class PaperSummarizer:
 
         try:
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=15)
             if response.status_code != 200:
                 logger.trace(f"HTML fetch failed ({source}) {response.status_code}: {url}")
                 return None, url
