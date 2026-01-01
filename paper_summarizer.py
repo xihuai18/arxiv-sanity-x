@@ -30,11 +30,11 @@ from vars import (
     LLM_SUMMARY_LANG,
     MAIN_CONTENT_MIN_RATIO,
     MINERU_BACKEND,
+    MINERU_PORT,
     SUMMARY_DIR,
     SUMMARY_HTML_SOURCES,
     SUMMARY_MARKDOWN_SOURCE,
     SUMMARY_MIN_CHINESE_RATIO,
-    VLLM_MINERU_PORT,
 )
 
 
@@ -505,7 +505,7 @@ class PaperSummarizer:
                 if backend == "pipeline":
                     cmd.extend(["-d", "cpu"])
                 elif backend == "vlm-http-client":
-                    cmd.extend(["-u", f"http://127.0.0.1:{VLLM_MINERU_PORT}"])
+                    cmd.extend(["-u", f"http://127.0.0.1:{MINERU_PORT}"])
 
                 logger.trace(f"Executing command: {' '.join(cmd)}")
                 start_time = time.time()

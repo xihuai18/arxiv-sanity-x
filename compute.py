@@ -9,7 +9,7 @@ from multiprocessing import cpu_count
 
 from loguru import logger
 
-from vars import VLLM_EMBED_PORT
+from vars import EMBED_MODEL_NAME, EMBED_PORT
 
 # Set multi-threading environment variables
 num_threads = min(cpu_count(), 192)  # Reasonable thread limit
@@ -124,46 +124,72 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 
 
 class Qwen3EmbeddingVllm:
-    """Qwen3 embedding model API client implementation"""
+    """Embedding model API client via Ollama `/api/embed`."""
 
     def __init__(self, model_name_or_path, instruction=None, api_base=None):
         if api_base is None:
-            api_base = f"http://localhost:{VLLM_EMBED_PORT}/v1"
+            api_base = f"http://localhost:{EMBED_PORT}"
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
-        self.client = None
+        self.session = None
         self.model_path = model_name_or_path
-        self.api_base = api_base
+        self.api_base = self._normalize_api_base(api_base)
         self.model_name = None
+
+    @staticmethod
+    def _normalize_api_base(api_base: str) -> str:
+        base = (api_base or "").strip().rstrip("/")
+        if base.endswith("/v1"):
+            base = base[: -len("/v1")]
+        return base.rstrip("/")
+
+    @staticmethod
+    def _normalize_model_name(model_name_or_path: str) -> str:
+        if not model_name_or_path:
+            return ""
+        # Backward compatibility: previous code used a local HF path like ./qwen3-embed-0.6B
+        # With Ollama, we use the model name; if a local path exists, take its basename.
+        try:
+            if os.path.exists(model_name_or_path):
+                return os.path.basename(os.path.abspath(model_name_or_path))
+        except Exception:
+            pass
+        return str(model_name_or_path).strip()
 
     def initialize(self):
         """Initialize API client"""
         try:
-            from openai import OpenAI
+            import requests
 
-            logger.info(f"Connecting to vLLM API server: {self.api_base}")
-            self.client = OpenAI(api_key="EMPTY", base_url=self.api_base)  # vLLM doesn't need real API key
+            logger.info(f"Connecting to Ollama API server: {self.api_base}")
+            self.session = requests.Session()
+            # Local service calls should not be routed via HTTP(S)_PROXY.
+            self.session.trust_env = False
 
-            # Get available model list
+            # Basic readiness probe (Ollama)
             try:
-                models = self.client.models.list()
-                if models.data:
-                    self.model_name = models.data[0].id
-                    logger.info(f"Using model: {self.model_name}")
+                version_url = f"{self.api_base}/api/version"
+                resp = self.session.get(version_url, timeout=(2, 5))
+                if resp.status_code == 200:
+                    version = (resp.json() or {}).get("version")
+                    logger.info(f"Ollama server version: {version}")
                 else:
-                    logger.error("No available model found")
+                    logger.error(f"Ollama version check failed: HTTP {resp.status_code} ({version_url})")
                     return False
             except Exception as e:
-                logger.error(f"Failed to get model list: {e}")
+                logger.error(f"Failed to connect to Ollama server: {e}")
+                logger.error(f"API address: {self.api_base}")
                 return False
 
+            self.model_name = self._normalize_model_name(self.model_path)
+            if not self.model_name:
+                logger.error("Embedding model name is empty")
+                return False
+
+            logger.info(f"Using embedding model: {self.model_name}")
             logger.info("Embedding API client initialized successfully")
             return True
-        except ImportError as e:
-            logger.error(f"Failed to import OpenAI library: {e}")
-            logger.error("Please make sure openai is installed: pip install openai")
-            return False
         except Exception as e:
             logger.error(f"Error occurred while initializing API client: {e}")
             logger.error(f"API address: {self.api_base}")
@@ -176,7 +202,7 @@ class Qwen3EmbeddingVllm:
     def encode(self, sentences, dim=1024):
         """Encode text to embedding vectors via API"""
         try:
-            if self.client is None:
+            if self.session is None:
                 logger.error("API client not initialized, cannot encode")
                 return None
 
@@ -197,12 +223,39 @@ class Qwen3EmbeddingVllm:
 
             # Call API to generate embeddings
             try:
-                response = self.client.embeddings.create(
-                    input=instructed_sentences, model=self.model_name, dimensions=dim
-                )
+                embed_url = f"{self.api_base}/api/embed"
+                payload = {
+                    "model": self.model_name,
+                    "input": instructed_sentences,
+                    "truncate": True,
+                    "dimensions": int(dim) if dim is not None else None,
+                    # Extra guardrail: request CPU-only when supported (server-side env still recommended).
+                    "options": {"num_gpu": 0},
+                }
+                if payload["dimensions"] is None:
+                    payload.pop("dimensions", None)
 
-                # Extract embedding vectors
-                embeddings = np.array([data.embedding for data in response.data], dtype=np.float32)
+                resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                if resp.status_code != 200:
+                    logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
+                    try:
+                        logger.error(f"Response: {resp.text[:500]}")
+                    except Exception:
+                        pass
+                    return None
+
+                data = resp.json() or {}
+                vectors = data.get("embeddings")
+                if vectors is None and "embedding" in data:
+                    # Backward compatibility with older Ollama embedding response
+                    vectors = [data.get("embedding")]
+                if not vectors:
+                    logger.error(f"Ollama embed API returned empty embeddings (keys={list(data.keys())})")
+                    return None
+
+                embeddings = np.asarray(vectors, dtype=np.float32)
+                if embeddings.ndim == 1:
+                    embeddings = embeddings.reshape(1, -1)
 
                 # Convert to torch tensor to maintain compatibility with original interface
                 import torch
@@ -225,8 +278,12 @@ class Qwen3EmbeddingVllm:
     def stop(self):
         """Clean up client resources"""
         try:
-            # API client doesn't need special cleanup
-            self.client = None
+            if self.session is not None:
+                try:
+                    self.session.close()
+                except Exception:
+                    pass
+            self.session = None
             logger.debug("API client resources cleaned up")
         except Exception as e:
             logger.warning(f"Error occurred while cleaning up API client: {e}")
@@ -276,7 +333,7 @@ def generate_embeddings_incremental(
     api_base=None,
 ):
     if api_base is None:
-        api_base = f"http://localhost:{VLLM_EMBED_PORT}/v1"
+        api_base = f"http://localhost:{EMBED_PORT}"
     """
     Generate embedding vectors incrementally, optimize corpus preparation order
 
@@ -286,7 +343,7 @@ def generate_embeddings_incremental(
         model_path: Embedding model path
         embed_dim: Embedding dimension
         batch_size: Batch size
-        api_base: vLLM server API address
+        api_base: Ollama server base URL (e.g. http://localhost:11434)
 
     Returns:
         embeddings: numpy array (n_samples, embed_dim)
@@ -454,14 +511,19 @@ if __name__ == "__main__":
         dest="use_embeddings",
         help="Disable embedding vectors",
     )
-    parser.add_argument("--embed_model", type=str, default="./qwen3-embed-0.6B", help="Embedding model path")
+    parser.add_argument(
+        "--embed_model",
+        type=str,
+        default=EMBED_MODEL_NAME,
+        help="Ollama embedding model name (or legacy local path basename)",
+    )
     parser.add_argument("--embed_dim", type=int, default=512, help="Embedding vector dimension")
     parser.add_argument("--embed_batch_size", type=int, default=2048, help="Embedding generation batch size")
     parser.add_argument(
         "--embed_api_base",
         type=str,
-        default=f"http://localhost:{VLLM_EMBED_PORT}/v1",
-        help="vLLM embedding server API address",
+        default=f"http://localhost:{EMBED_PORT}",
+        help="Ollama embedding server base URL (e.g. http://localhost:11434)",
     )
 
     args = parser.parse_args()

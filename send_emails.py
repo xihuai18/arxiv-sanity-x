@@ -86,16 +86,24 @@ template = """
         }
 
         .header {
-            background: #dc3545;
+            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
             color: white;
-            padding: 20px;
+            padding: 30px 20px;
             text-align: center;
         }
 
         .header h1 {
             margin: 0;
-            font-size: 24px;
-            font-weight: 600;
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.15);
+        }
+
+        .header .subtitle {
+            margin-top: 8px;
+            font-size: 14px;
+            opacity: 0.9;
         }
 
         .content {
@@ -114,187 +122,229 @@ template = """
 
         .section-title {
             font-size: 18px;
-            font-weight: 600;
-            color: #2c3e50;
-            margin-bottom: 10px;
-            padding-bottom: 5px;
-            border-bottom: 2px solid #e74c3c;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #b31b1b;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
 
         .section-stats {
-            background-color: #f8f9fa;
-            padding: 10px 15px;
-            border-radius: 5px;
-            margin-bottom: 15px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            padding: 12px 18px;
+            border-radius: 8px;
+            margin-bottom: 20px;
             font-size: 13px;
             color: #6c757d;
-            border-left: 3px solid #007bff;
+            border-left: 4px solid #b31b1b;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         }
 
         .paper-item {
-            border: 1px solid #e9ecef;
-            border-radius: 5px;
-            margin-bottom: 15px;
-            padding: 15px;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            margin-bottom: 18px;
+            padding: 18px;
             background-color: #ffffff;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .paper-item::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            width: 4px;
+            background: linear-gradient(180deg, #b31b1b 0%, #8b1515 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
         }
 
         .paper-item:hover {
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 4px 12px rgba(179, 27, 27, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .paper-item:hover::before {
+            opacity: 1;
         }
 
         .paper-header {
             display: flex;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             flex-wrap: wrap;
             gap: 8px;
         }
 
         .score {
-            background: transparent;
-            color: #000000;
-            padding: 3px 6px;
-            border-radius: 10px;
-            font-weight: 500;
+            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
+            color: #ffffff;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-weight: 600;
             font-size: 11px;
             display: inline-block;
             margin-right: 6px;
+            box-shadow: 0 2px 4px rgba(179, 27, 27, 0.3);
         }
 
         .paper-source {
             display: inline-block;
-            background-color: #b3d9ff;
-            color: #0056b3;
-            padding: 3px 6px;
-            border-radius: 10px;
+            background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
+            color: #0369a1;
+            padding: 4px 10px;
+            border-radius: 12px;
             font-size: 11px;
-            font-weight: 500;
+            font-weight: 600;
             margin-right: 6px;
-            border: 1px solid #87ceeb;
+            border: none;
         }
 
         .paper-source.keyword-source {
-            background-color: #ffd280;
-            color: #b8860b;
-            border: 1px solid #daa520;
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            color: #b45309;
+            border: none;
+        }
+
+        .paper-source.ctag-source {
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            color: #047857;
+            border: none;
         }
 
         .paper-title {
-            font-size: 15px;
-            font-weight: 500;
-            color: #2c3e50;
-            margin: 8px 0;
-            line-height: 1.3;
+            font-size: 16px;
+            font-weight: 600;
+            color: #1e293b;
+            margin: 10px 0;
+            line-height: 1.4;
         }
 
         .paper-links {
-            margin-bottom: 8px;
+            margin-bottom: 12px;
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 8px;
+            flex-wrap: wrap;
         }
 
         .paper-links a {
             display: inline-block;
-            background-color: #dc3545;
+            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
             color: white;
             text-decoration: none;
-            padding: 4px 8px;
-            border-radius: 12px;
+            padding: 6px 12px;
+            border-radius: 16px;
             font-size: 11px;
-            font-weight: 500;
-            margin-right: 4px;
-            transition: background-color 0.2s ease;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(179, 27, 27, 0.3);
         }
 
         .paper-links a:hover {
-            background-color: #c82333;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(179, 27, 27, 0.4);
         }
 
         .paper-links a.arxiv-link {
-            background-color: #b31b1b;
+            background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
+            box-shadow: 0 2px 4px rgba(30, 64, 175, 0.3);
         }
 
         .paper-links a.arxiv-link:hover {
-            background-color: #9a1717;
+            box-shadow: 0 4px 8px rgba(30, 64, 175, 0.4);
         }
 
-        .paper-links a.alphaxiv-link {
-            background-color: transparent;
-            color: #dc3545;
-            font-weight: bold;
-            padding: 0;
-            border-radius: 0;
-            font-size: 11px;
-            margin-right: 8px;
-        }
-
-        .paper-links a.alphaxiv-link:hover {
-            background-color: transparent;
-            color: #c82333;
-            text-decoration: underline;
-        }
-
+        .paper-links a.alphaxiv-link,
         .paper-links a.cool-link {
-            background-color: transparent;
-            color: #28a745;
-            font-weight: bold;
-            padding: 0;
-            border-radius: 0;
-            font-size: 11px;
+            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+            color: white;
+            padding: 6px 12px;
+            box-shadow: 0 2px 4px rgba(100, 116, 139, 0.3);
         }
 
+        .paper-links a.alphaxiv-link:hover,
         .paper-links a.cool-link:hover {
-            background-color: transparent;
-            color: #218838;
-            text-decoration: underline;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(100, 116, 139, 0.4);
         }
 
         .paper-links .right-links {
             margin-left: auto;
             display: flex;
-            gap: 6px;
+            gap: 12px;
         }
 
         .paper-authors {
             font-size: 13px;
-            color: #6c757d;
-            margin-bottom: 6px;
+            color: #64748b;
+            margin-bottom: 8px;
             font-style: italic;
+            padding-left: 2px;
+        }
+
+        .paper-authors::before {
+            content: "👤 ";
         }
 
         .paper-date {
             font-size: 12px;
-            color: #28a745;
-            font-weight: 500;
-            margin-bottom: 8px;
+            color: #059669;
+            font-weight: 600;
+            margin-bottom: 10px;
+            padding-left: 2px;
         }
 
         .paper-summary {
             font-size: 13px;
-            color: #495057;
-            line-height: 1.4;
+            color: #475569;
+            line-height: 1.6;
             text-align: justify;
+            background: #f8fafc;
+            padding: 12px;
+            border-radius: 8px;
+            border-left: 3px solid #e2e8f0;
         }
 
         .footer {
-            background-color: #f8f9fa;
-            padding: 25px 30px;
+            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            padding: 30px;
             text-align: center;
-            border-top: 1px solid #e9ecef;
+            border-top: 1px solid #e2e8f0;
         }
 
         .footer p {
-            margin: 0 0 10px 0;
+            margin: 0 0 12px 0;
             font-size: 14px;
-            color: #6c757d;
+            color: #64748b;
+        }
+
+        .footer a {
+            color: #b31b1b;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
         }
 
         .footer .brand {
-            font-weight: 600;
-            color: #2c3e50;
-            font-size: 16px;
+            font-weight: 700;
+            color: #1e293b;
+            font-size: 18px;
+            margin-top: 15px;
+            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
 
         @media (max-width: 600px) {
@@ -303,7 +353,7 @@ template = """
             }
 
             .container {
-                border-radius: 8px;
+                border-radius: 12px;
             }
 
             .header, .content, .footer {
@@ -311,16 +361,21 @@ template = """
             }
 
             .header h1 {
-                font-size: 24px;
+                font-size: 22px;
             }
 
-            .score-cell {
-                width: 60px;
-                padding: 15px 10px;
+            .paper-item {
+                padding: 14px;
+                margin-bottom: 14px;
             }
 
-            .paper-cell {
-                padding: 15px 10px;
+            .paper-links {
+                gap: 6px;
+            }
+
+            .paper-links a {
+                padding: 5px 10px;
+                font-size: 10px;
             }
         }
     </style>
@@ -329,12 +384,13 @@ template = """
 <body>
     <div class="container">
         <div class="header">
-            <h1>Arxiv Sanity X</h1>
+            <h1>🎓 Arxiv Sanity X</h1>
+            <div class="subtitle">Your Daily Research Companion</div>
         </div>
 
         <div class="content">
             <div class="greeting">
-                Hi <strong>__USER__</strong>! Here are your personalized <a href="__HOST__" style="color: #007bff; text-decoration: none;">__WEB__</a> recommendations.
+                👋 Hi <strong>__USER__</strong>! Here are your personalized <a href="__HOST__" style="color: #667eea; text-decoration: none; font-weight: 600;">__WEB__</a> recommendations.
             </div>
 
             __SECTION_TAG__
@@ -345,9 +401,9 @@ template = """
         </div>
 
         <div class="footer">
-            <p>To stop these emails, remove your email in your <a href="__HOST__/profile" style="color: #667eea; text-decoration: none;">account settings</a>.</p>
+            <p>To stop these emails, remove your email in your <a href="__HOST__/profile">account settings</a>.</p>
             <p>Your account: <strong>__ACCOUNT__</strong></p>
-            <div class="brand">__WEB__</div>
+            <div class="brand">🎓 __WEB__</div>
         </div>
     </div>
 </body>
@@ -383,16 +439,16 @@ def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, s
     return f"""
     <div class="paper-item">
         <div class="paper-header">
-            <div class="{source_class}">{_h(source_label)}</div>
-            <div class="score">{float(score):.2f}</div>
+            <div class="score">⭐ {float(score):.2f}</div>
+            <div class="{source_class}">🏷️ {_h(source_label)}</div>
         </div>
-        <div class="paper-title">{title}</div>
+        <div class="paper-title">📄 {title}</div>
         <div class="paper-links">
-            <a href="{url}">Sanity</a>
-            <a href="{summary_url}">📝 Sanity Summary</a>
-            <a href="{arxiv_url}" class="arxiv-link">Arxiv</a>
+            <a href="{url}">🔍 Sanity</a>
+            <a href="{summary_url}">📝 Summary</a>
+            <a href="{arxiv_url}" class="arxiv-link">📚 arXiv</a>
             <div class="right-links">
-                <a href="{alphaxiv_url}" class="alphaxiv-link">alphaXiv</a>
+                <a href="{alphaxiv_url}" class="alphaxiv-link">αXiv</a>
                 <a href="{cool_url}" class="cool-link">Cool</a>
             </div>
         </div>
@@ -722,16 +778,14 @@ def render_recommendations(
         num_papers_tagged = len(set().union(*tags.values()))
         tags_str = ", ".join([f'"{_h(t)}" ({len(tags[t])})' for t in tags.keys()])
         n = len(parts)
-        stats = f"We took the {num_papers_tagged} papers across your {len(tags)} tags ({tags_str}) and \
-                ranked {len(pids)} papers that showed up on arxiv over the last \
-                {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
-                top {n} papers. Remember that the more you tag, \
-                the better this gets:"
+        stats = f"📊 Analyzed <strong>{num_papers_tagged}</strong> papers across your <strong>{len(tags)}</strong> tags ({tags_str}). \
+                Found <strong>{len(pids)}</strong> new papers from the last <strong>{args.time_delta}</strong> days. \
+                Showing top <strong>{n}</strong> recommendations."
 
         # render the complete section
         section_html = f"""
             <div class="section">
-                <div class="section-title">Tag-based Recommendations</div>
+                <div class="section-title" style="border-color: #1e40af;">🏷️ Tag-based Recommendations</div>
                 <div class="section-stats">{stats}</div>
                 <div>{final}</div>
             </div>"""
@@ -765,7 +819,9 @@ def render_recommendations(
             if p is None:
                 logger.warning(f"Missing paper in db for ctag recommendation: {pid}")
                 continue
-            parts.append(_render_paper_html(p, pid, score, max_source_ctag.get(pid, "")))
+            parts.append(
+                _render_paper_html(p, pid, score, max_source_ctag.get(pid, ""), source_class="paper-source ctag-source")
+            )
 
         # render the recommendations
         final = "".join(parts)
@@ -782,16 +838,14 @@ def render_recommendations(
 
         ctags_str = ", ".join([f'"{_h(t)}"' for t in ctags])
         n = len(parts)
-        stats = f"We took the {num_papers_ctagged} papers across your {len(ctags)} registered combined tags ({ctags_str}) and \
-                ranked {len(pids)} papers that showed up on arxiv over the last \
-                {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
-                top {n} papers. Remember that the more you tag, \
-                the better this gets:"
+        stats = f"🔗 Analyzed <strong>{num_papers_ctagged}</strong> papers across your <strong>{len(ctags)}</strong> combined tags ({ctags_str}). \
+                Found <strong>{len(pids)}</strong> new papers from the last <strong>{args.time_delta}</strong> days. \
+                Showing top <strong>{n}</strong> recommendations."
 
         # render the complete section
         section_html = f"""
             <div class="section">
-                <div class="section-title">Combined Tag Recommendations</div>
+                <div class="section-title" style="border-color: #10b981;">🔗 Combined Tag Recommendations</div>
                 <div class="section-stats">{stats}</div>
                 <div>{final}</div>
             </div>"""
@@ -837,16 +891,14 @@ def render_recommendations(
         # render the stats
         keywords_str = ", ".join([f'"{_h(k)}"' for k, pids in keywords.items()])
         n = len(parts)
-        stats = f"We search your {len(keywords)} keywords ({keywords_str}) and \
-                ranked {len(pids)} papers that showed up on arxiv over the last \
-                {args.time_delta} days using tfidf SVMs over paper abstracts. Below are the \
-                top {n} papers. Remember that the more keywords, \
-                the better this gets:"
+        stats = f"🔍 Searched your <strong>{len(keywords)}</strong> keywords ({keywords_str}). \
+                Found <strong>{len(pids)}</strong> matching papers from the last <strong>{args.time_delta}</strong> days. \
+                Showing top <strong>{n}</strong> recommendations."
 
         # render the complete section
         section_html = f"""
             <div class="section">
-                <div class="section-title">Keyword-based Recommendations</div>
+                <div class="section-title" style="border-color: #d97706;">🔑 Keyword-based Recommendations</div>
                 <div class="section-stats">{stats}</div>
                 <div>{final}</div>
             </div>"""

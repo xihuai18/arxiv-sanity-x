@@ -52,7 +52,7 @@
     --glass-border: rgba(255, 255, 255, 0.3);
     --content-max-width: 1280px;
     --toc-width: 220px;
-    --toc-gap: 16px;
+    --toc-gap: 10px;
 }
 
 [data-theme="dark"] {
@@ -4371,11 +4371,23 @@ html[data-theme="dark"] .summary-actions select {
 }
 
 .summary-content.has-toc {
+    /* When TOC is present, keep right side a bit tighter so the sidebar
+       doesn't feel overly padded on wide screens. */
+    padding-left: 24px;
+    padding-right: 18px;
+}
+
+.summary-content.has-toc {
     display: block;
 }
 
 .summary-content.has-toc .summary-markdown {
     min-width: 0;
+}
+
+/* Remove the big "first heading" top gap in summary markdown */
+.summary-markdown > :first-child {
+    margin-top: 0;
 }
 
 .markdown-content h1 {
@@ -4498,7 +4510,7 @@ html[data-theme="dark"] .summary-actions select {
 /* Summary table of contents */
 .summary-toc {
     margin: 0 0 16px 0;
-    padding: 10px 12px;
+    padding: 10px;
     border-radius: 10px;
     border: 1px solid var(--border-color);
     background: var(--body-bg);
@@ -4575,7 +4587,8 @@ html[data-theme="dark"] .summary-actions select {
     font-size: 13px;
     line-height: 1.35;
     transition: background-color var(--transition-fast);
-    width: 100%;
+    max-width: 100%;
+    white-space: normal;
 }
 
 .summary-toc .toc-item a:hover {
@@ -4668,12 +4681,20 @@ html[data-theme="dark"] .summary-actions select {
 @media (min-width: 960px) {
     .summary-content.has-toc {
         display: grid;
-        grid-template-columns: var(--toc-width) minmax(0, 1fr);
+        /* Markdown on the left, TOC on the right */
+        grid-template-columns: minmax(0, 1fr) var(--toc-width);
+        grid-template-areas: "markdown toc";
         gap: var(--toc-gap);
         align-items: start;
     }
 
+    .summary-content.has-toc .summary-markdown {
+        grid-area: markdown;
+    }
+
     .summary-content.has-toc .summary-toc {
+        grid-area: toc;
+        margin: 0;
         position: sticky;
         top: 76px;
         max-height: calc(100vh - 96px);
@@ -4713,7 +4734,8 @@ html[data-theme="dark"] .summary-actions select {
 
     .summary-content.has-toc {
         display: block;
-        padding-left: 0;
+        padding-left: 16px;
+        padding-right: 16px;
     }
 
     .summary-content.has-toc .summary-toc {

@@ -90,9 +90,12 @@ from paper_summarizer import (
 )
 from vars import (
     DATA_DIR,
+    EMBED_MODEL_NAME,
+    EMBED_PORT,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_NAME,
+    MINERU_PORT,
     SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
     SUMMARY_DIR,
     SUMMARY_MARKDOWN_SOURCE,
@@ -100,8 +103,6 @@ from vars import (
     SVM_C,
     SVM_MAX_ITER,
     SVM_TOL,
-    VLLM_EMBED_PORT,
-    VLLM_MINERU_PORT,
 )
 
 # -----------------------------------------------------------------------------
@@ -1995,9 +1996,9 @@ def get_semantic_model():
         try:
             logger.info("Initializing semantic model API client for query encoding...")
             _semantic_model = Qwen3EmbeddingVllm(
-                model_name_or_path="./qwen3-embed-0.6B",
+                model_name_or_path=EMBED_MODEL_NAME,
                 instruction="Extract key concepts from this query to search computer science and AI paper",
-                api_base=f"http://localhost:{VLLM_EMBED_PORT}/v1",
+                api_base=f"http://localhost:{EMBED_PORT}",
             )
             if not _semantic_model.initialize():
                 logger.error("Failed to initialize semantic model API client")
@@ -3322,14 +3323,16 @@ def cache_status():
     global FEATURES_CACHE, FEATURES_FILE_MTIME, FEATURES_CACHE_TIME
     global PAPERS_CACHE, METAS_CACHE, PIDS_CACHE, PAPERS_DB_FILE_MTIME, PAPERS_DB_CACHE_TIME
 
-    # Check vLLM service status
-    def check_vllm_service(port, service_name):
-        """Check if vLLM service is available"""
+    # Check backend service status
+    def check_http_service(port, path, service_name):
+        """Check if a local HTTP service is available"""
         try:
             import requests
 
             logger.trace(f"Checking {service_name} at port {port}...")
-            response = requests.get(f"http://localhost:{port}/health", timeout=2)
+            sess = requests.Session()
+            sess.trust_env = False
+            response = sess.get(f"http://localhost:{port}{path}", timeout=2)
             is_available = response.status_code == 200
             if is_available:
                 logger.success(f"{service_name} is available (status: {response.status_code})")
@@ -3361,11 +3364,11 @@ def cache_status():
             "cache_time": PAPERS_DB_CACHE_TIME,
             "db_file_mtime": PAPERS_DB_FILE_MTIME,
         },
-        "vllm_services": {
-            "embedding_service": check_vllm_service(
-                VLLM_EMBED_PORT, f"Qwen3 Embedding Service (port {VLLM_EMBED_PORT})"
+        "backend_services": {
+            "embedding_service": check_http_service(
+                EMBED_PORT, "/api/version", f"Ollama Embedding Service (port {EMBED_PORT})"
             ),
-            "mineru_service": check_vllm_service(VLLM_MINERU_PORT, f"MinerU VLM Service (port {VLLM_MINERU_PORT})"),
+            "mineru_service": check_http_service(MINERU_PORT, "/health", f"MinerU VLM Service (port {MINERU_PORT})"),
         },
     }
 

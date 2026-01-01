@@ -1,4 +1,12 @@
 #!/bin/bash
 # 从 vars.py 读取端口配置
-EMBED_PORT=$(python3 -c "from vars import VLLM_EMBED_PORT; print(VLLM_EMBED_PORT)")
-vllm serve ./qwen3-embed-0.6B --task embed --hf-overrides '{"is_matryoshka": true}' --gpu-memory-utilization 0.1 --port ${EMBED_PORT} --served-model-name qwen3-embed-0.6B --disable-log-requests --max-num-seqs 10 --max-model-len 4096
+EMBED_PORT=$(python3 -c "from vars import EMBED_PORT; print(EMBED_PORT)")
+
+# Ollama embedding service (CPU-only)
+export OLLAMA_HOST="127.0.0.1:${EMBED_PORT}"
+export OLLAMA_LLM_LIBRARY="cpu"
+export CUDA_VISIBLE_DEVICES=""
+export HIP_VISIBLE_DEVICES=""
+export ROCR_VISIBLE_DEVICES=""
+
+exec ollama serve

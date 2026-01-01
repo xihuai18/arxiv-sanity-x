@@ -3,7 +3,7 @@
 One-command launcher for arxiv-sanity-X services.
 
 Starts (optionally):
-- vLLM embedding server (embedding_serve.sh)
+- Ollama embedding server (embedding_serve.sh)
 - minerU vLLM server (mineru_serve.sh)
 - LiteLLM gateway (litellm.sh)
 - Web app (serve.py or up.sh)
@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,9 @@ class ServiceSpec:
 def _http_ok(url: str, timeout_s: float = 1.0) -> bool:
     try:
         req = Request(url, headers={"User-Agent": "arxiv-sanity-x-launcher"})
-        with urlopen(req, timeout=timeout_s) as resp:  # nosec - local health checks only
+        # Ignore env proxies (HTTP(S)_PROXY) for local health checks.
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(req, timeout=timeout_s) as resp:  # nosec - local health checks only
             return 200 <= resp.status < 300
     except Exception:
         return False
@@ -145,7 +147,7 @@ def _run_fetch_compute(repo_root: Path, num_papers: int, max_r: int) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run arxiv-sanity-X services in one terminal.")
-    parser.add_argument("--no-embed", action="store_true", help="Do not start vLLM embedding service.")
+    parser.add_argument("--no-embed", action="store_true", help="Do not start Ollama embedding service.")
     parser.add_argument("--no-mineru", action="store_true", help="Do not start minerU service.")
     parser.add_argument("--no-litellm", action="store_true", help="Do not start LiteLLM gateway.")
     parser.add_argument(
@@ -181,11 +183,11 @@ def main() -> int:
 
     try:
         from vars import (
+            EMBED_PORT,
             LITELLM_PORT,
             MINERU_BACKEND,
+            MINERU_PORT,
             SERVE_PORT,
-            VLLM_EMBED_PORT,
-            VLLM_MINERU_PORT,
         )
     except Exception as e:
         print(f"[launcher] Failed to import vars.py: {e}", file=sys.stderr)
@@ -212,7 +214,7 @@ def main() -> int:
                 name="mineru",
                 cmd=["bash", "mineru_serve.sh"],
                 cwd=repo_root,
-                health_url=f"http://localhost:{VLLM_MINERU_PORT}/health",
+                health_url=f"http://localhost:{MINERU_PORT}/health",
             )
         )
 
@@ -222,7 +224,7 @@ def main() -> int:
                 name="embed",
                 cmd=["bash", "embedding_serve.sh"],
                 cwd=repo_root,
-                health_url=f"http://localhost:{VLLM_EMBED_PORT}/health",
+                health_url=f"http://localhost:{EMBED_PORT}/api/version",
             )
         )
 

@@ -12,3 +12,5 @@ vars.py
 qwen3*
 llm.yml
 sync_to_opensource.sh
+AGENTS.md
+*.pyc
