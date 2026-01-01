@@ -183,13 +183,104 @@ export ARXIV_SANITY_HTML_SOURCES=ar5iv,arxiv
 
 # 使用 minerU（PDF）解析
 export ARXIV_SANITY_SUMMARY_SOURCE=mineru
+```
 
-# MinerU 后端（默认：pipeline）
+### MinerU 配置
+
+MinerU 支持两种后端模式和灵活的设备选择：
+
+#### 后端选择
+```bash
+# Pipeline 后端（默认，推荐）- 支持 GPU/CPU 本地解析
 export ARXIV_SANITY_MINERU_BACKEND=pipeline
-# 或使用 VLM http-client 后端（需要启动 minerU OpenAI 兼容服务）
+
+# VLM HTTP 后端 - 使用远程 vLLM 服务
 export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
 ```
-说明：HTML 模式不依赖 minerU；若 `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`，需在 `MINERU_PORT` 启动 minerU 的 OpenAI 兼容服务。
+
+#### Pipeline 后端配置（推荐）
+
+**1. GPU 模式（默认）**
+```bash
+# vars.py 配置
+MINERU_BACKEND = "pipeline"
+MINERU_DEVICE = "cuda"          # 使用 GPU
+MINERU_MAX_WORKERS = 2          # 最多2个并发进程
+MINERU_MAX_VRAM = 8             # 每进程最大8GB显存
+
+# 或使用环境变量
+export ARXIV_SANITY_MINERU_BACKEND=pipeline
+export ARXIV_SANITY_MINERU_DEVICE=cuda
+export ARXIV_SANITY_MINERU_MAX_WORKERS=2
+export ARXIV_SANITY_MINERU_MAX_VRAM=8
+```
+
+特点：
+- ✅ 使用 GPU 加速解析，速度快
+- ✅ 通过槽位机制限制并发数，避免显存耗尽
+- ✅ 支持 `--vram` 参数限制单进程显存
+- ✅ 总显存使用 = `MAX_WORKERS × MAX_VRAM`（例：2×8GB=16GB）
+
+**2. CPU 模式**
+```bash
+# vars.py 配置
+MINERU_BACKEND = "pipeline"
+MINERU_DEVICE = "cpu"           # 使用 CPU
+# MAX_WORKERS 和 MAX_VRAM 在 CPU 模式下不起作用
+```
+
+特点：
+- ✅ 不需要 GPU，适合纯 CPU 服务器
+- ⚠️ 解析速度较慢
+- ✅ 不受并发限制
+
+**3. GPU 并发控制说明**
+
+GPU 槽位机制（仅 pipeline + cuda 模式）：
+- 使用文件锁实现跨进程同步
+- 最多允许 `MINERU_MAX_WORKERS` 个并发 GPU 进程
+- 每个进程限制 `MINERU_MAX_VRAM` GB 显存
+- 超出限制的请求会等待可用槽位（最长10分钟）
+
+示例配置：
+```python
+# 单卡 24GB GPU
+MINERU_MAX_WORKERS = 2
+MINERU_MAX_VRAM = 10
+
+# 双卡 48GB GPU
+MINERU_MAX_WORKERS = 4
+MINERU_MAX_VRAM = 10
+
+# 大显存 80GB GPU
+MINERU_MAX_WORKERS = 8
+MINERU_MAX_VRAM = 8
+```
+
+查看 GPU 槽位占用：
+```bash
+ls -la data/mineru/.gpu_slots/
+```
+
+强制释放所有槽位：
+```bash
+rm -rf data/mineru/.gpu_slots/
+```
+
+#### VLM HTTP 后端配置
+
+需要先启动 minerU 的 OpenAI 兼容服务：
+```bash
+# 在 MINERU_PORT（默认52000）启动服务
+export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
+```
+
+特点：
+- ✅ 解析任务分发到远程服务
+- ✅ 支持多客户端共享同一服务
+- ⚠️ 需要单独启动和维护 vLLM 服务
+
+说明：HTML 模式不依赖 minerU；VLM 模式需在 `MINERU_PORT` 启动 minerU OpenAI 兼容服务。
 说明：摘要与 HTML 缓存按 arXiv 版本（pidvN）区分，新版本会自动重新生成。
 
 ### 调度器环境变量
@@ -497,6 +588,19 @@ python3 daemon.py
 
 #### 论文总结
 - `GET /summary?pid=<paper_id>` - 查看 AI 生成的论文总结，支持异步加载和 MathJax
+- `POST /api/get_paper_summary` - 获取 AI 生成的论文总结（JSON: `{"pid": "paper_id", "model": "model_name", "force": false}`）
+- `POST /api/clear_model_summary` - 清除特定模型的总结缓存（JSON: `{"pid": "paper_id", "model": "model_name"}`）
+- `POST /api/clear_paper_cache` - 清除论文的所有缓存（JSON: `{"pid": "paper_id"}`）
+
+**总结页面清除功能：**
+- **清除当前模型（Clear Current Summary）**：仅删除当前选择模型生成的总结文件，保留其他模型的总结和所有其他缓存（HTML、MinerU等）。适用于重新生成单个模型的总结。
+- **清除所有缓存（Clear All）**：删除该论文的所有相关缓存，包括：
+  - 所有模型的总结文件（`data/summary/<pid>/*.md`）
+  - HTML/Markdown 缓存（`data/html_md/<pid>/`）
+  - MinerU 缓存（`data/mineru/<pid>/`）
+  - 所有相关元数据文件
+
+  适用于完全重置论文缓存，从头重新生成所有内容。
 
 #### 标签管理
 - `GET /add/<pid>/<tag>` - 为论文添加标签

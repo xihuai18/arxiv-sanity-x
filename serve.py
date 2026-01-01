@@ -54,6 +54,7 @@ from flask import (  # global session-level object
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -89,7 +90,6 @@ from paper_summarizer import (
     summary_source_matches,
 )
 from vars import (
-    DATA_DIR,
     EMBED_MODEL_NAME,
     EMBED_PORT,
     LLM_API_KEY,
@@ -2629,23 +2629,49 @@ def inspect():
 @app.route("/summary", methods=["GET"])
 def summary():
     """
-    Display AI-generated markdown format summary of the paper
+    Display AI-generated markdown format summary of the paper.
+
+    If a versioned PID is provided (e.g., 2512.21789v1), redirect to the
+    unversioned URL (/summary?pid=2512.21789) since we only cache the latest version.
     """
     # Get paper ID
     pid = request.args.get("pid", "")
     logger.info(f"show paper summary page for paper {pid}")
-    raw_pid, _ = split_pid_version(pid)
+    raw_pid, version = split_pid_version(pid)
+
+    # If versioned PID provided, redirect to unversioned URL
+    if version is not None:
+        return redirect(url_for("summary", pid=raw_pid), code=302)
+
     if not paper_exists(raw_pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
-    # Get basic paper information
-    paper = render_pid(raw_pid)
+    # Get basic paper information with user tags
+    pid_to_utags = None
+    if g.user:
+        try:
+            user_tags = get_tags()
+            pid_to_utags = {raw_pid: []}
+            for tag, tag_pids in user_tags.items():
+                if raw_pid in tag_pids:
+                    pid_to_utags[raw_pid].append(tag)
+        except Exception:
+            pid_to_utags = None
+
+    paper = render_pid(raw_pid, pid_to_utags=pid_to_utags)
+
+    # Build the current tags for the user (same as main page)
+    tags = get_tags() if g.user else {}
+    rtags = [{"name": t, "n": len(pids)} for t, pids in tags.items()]
+    if rtags:
+        rtags.append({"name": "all"})
 
     # Build page context, don't call get_paper_summary here
     context = default_context()
     context["paper"] = paper
-    context["pid"] = pid  # Preserve versioned pid if provided
+    context["pid"] = raw_pid  # Always use raw_pid (unversioned)
     context["default_summary_model"] = LLM_NAME or ""
+    context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
     # Add paper name to page title
     context["title"] = f"Paper Summary - {paper['title']}"
     return render_template("summary.html", **context)
@@ -2701,8 +2727,42 @@ def api_get_paper_summary():
         return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
 
 
+@app.route("/api/clear_model_summary", methods=["POST"])
+def api_clear_model_summary():
+    """
+    API endpoint: Clear summary for a specific model only
+    """
+    try:
+        _csrf_protect()
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "error": "No JSON data provided"}), 400
+
+        pid = data.get("pid", "").strip()
+        model = data.get("model", "").strip()
+
+        if not pid:
+            return jsonify({"success": False, "error": "Paper ID is required"}), 400
+        if not model:
+            return jsonify({"success": False, "error": "Model name is required"}), 400
+
+        raw_pid, _ = split_pid_version(pid)
+        if not paper_exists(raw_pid):
+            return jsonify({"success": False, "error": "Paper not found"}), 404
+
+        _clear_model_summary(pid, model)
+        return jsonify({"success": True, "pid": pid, "model": model})
+
+    except Exception as e:
+        logger.error(f"Failed to clear model summary: {e}")
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+
+
 @app.route("/api/clear_paper_cache", methods=["POST"])
 def api_clear_paper_cache():
+    """
+    API endpoint: Clear all caches for a paper (all models, HTML, MinerU, etc.)
+    """
     try:
         _csrf_protect()
         data = request.get_json()
@@ -2723,6 +2783,121 @@ def api_clear_paper_cache():
     except Exception as e:
         logger.error(f"Failed to clear paper cache: {e}")
         return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+
+
+@app.route("/api/paper_image/<pid>/<filename>", methods=["GET"])
+def api_paper_image(pid: str, filename: str):
+    """
+    Serve paper images from HTML markdown cache.
+
+    Args:
+        pid: Paper ID (e.g., "2301.00001" or "2301.00001v1" - version stripped)
+        filename: Image filename
+
+    Returns:
+        Image file or 404 error
+    """
+    try:
+        # Sanitize inputs to prevent path traversal
+        pid = pid.strip()
+        filename = filename.strip()
+
+        if not pid or not filename:
+            abort(400, "Invalid paper ID or filename")
+
+        # Prevent path traversal attacks
+        if ".." in pid or ".." in filename or "/" in filename or "\\" in filename:
+            abort(400, "Invalid path")
+
+        # Use raw PID only (strip version if present)
+        raw_pid, _ = split_pid_version(pid)
+
+        # Construct image path directly
+        image_path = Path("data/html_md") / raw_pid / "images" / filename
+
+        if not image_path.exists():
+            abort(404, f"Image not found: {filename}")
+
+        # Determine MIME type based on extension
+        suffix = image_path.suffix.lower()
+        mime_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+        }
+        mimetype = mime_types.get(suffix, "application/octet-stream")
+
+        return send_file(image_path, mimetype=mimetype)
+
+    except Exception as e:
+        if hasattr(e, "code"):  # Flask abort exception
+            raise
+        logger.error(f"Failed to serve paper image: {e}")
+        abort(500, f"Server error: {str(e)}")
+
+
+@app.route("/api/mineru_image/<pid>/<filename>", methods=["GET"])
+def api_mineru_image(pid: str, filename: str):
+    """
+    Serve paper images from MinerU parsed cache.
+
+    Args:
+        pid: Paper ID (e.g., "2301.00001" or "2301.00001v1" - version stripped)
+        filename: Image filename
+
+    Returns:
+        Image file or 404 error
+    """
+    try:
+        # Sanitize inputs to prevent path traversal
+        pid = pid.strip()
+        filename = filename.strip()
+
+        if not pid or not filename:
+            abort(400, "Invalid paper ID or filename")
+
+        # Prevent path traversal attacks
+        if ".." in pid or ".." in filename or "/" in filename or "\\" in filename:
+            abort(400, "Invalid path")
+
+        # Use raw PID only (strip version if present)
+        raw_pid, _ = split_pid_version(pid)
+
+        # Construct image path - MinerU stores images in {pid}/auto/images/ or {pid}/vlm/images/
+        # Try both backends
+        mineru_base = Path("data/mineru") / raw_pid
+        image_path = None
+        for backend_dir in ["auto", "vlm"]:
+            candidate = mineru_base / backend_dir / "images" / filename
+            if candidate.exists():
+                image_path = candidate
+                break
+
+        if not image_path:
+            abort(404, f"Image not found: {filename}")
+
+        # Determine MIME type based on extension
+        suffix = image_path.suffix.lower()
+        mime_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+        }
+        mimetype = mime_types.get(suffix, "application/octet-stream")
+
+        return send_file(image_path, mimetype=mimetype)
+
+    except Exception as e:
+        if hasattr(e, "code"):  # Flask abort exception
+            raise
+        logger.error(f"Failed to serve MinerU image: {e}")
+        abort(500, f"Server error: {str(e)}")
 
 
 @app.route("/api/llm_models", methods=["GET"])
@@ -2977,6 +3152,61 @@ def generate_paper_summary(
         return f"# Error\n\nFailed to generate summary: {str(e)}", {}
 
 
+def _clear_model_summary(pid: str, model: str):
+    """
+    Clear summary cache for a specific model only.
+
+    Args:
+        pid: Paper ID (with or without version)
+        model: Model name to clear summary for
+    """
+    meta = get_metas().get(pid.split("v")[0] if "v" in pid else pid) if pid else None
+    cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
+    ids_to_clear = {cache_pid, raw_pid}
+
+    model = (model or "").strip()
+    cleared = False
+    removed_paths = []
+
+    for paper_id in ids_to_clear:
+        cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(paper_id, model)
+
+        # Primary per-model cache (dir-based)
+        for file_path in (cache_file, meta_file, lock_file):
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    removed_paths.append(str(file_path))
+                    cleared = True
+                except Exception as e:
+                    logger.warning(f"Failed to remove {file_path}: {e}")
+
+        # Legacy flat cache (single file) only applies if it matches the requested model
+        if legacy_meta.exists() and legacy_cache.exists():
+            try:
+                legacy_meta_data = read_summary_meta(legacy_meta)
+            except Exception:
+                legacy_meta_data = {}
+
+            legacy_model = (legacy_meta_data.get("model") or "").strip()
+            if legacy_model and legacy_model == model:
+                for file_path in (legacy_cache, legacy_meta, legacy_lock):
+                    if file_path.exists():
+                        try:
+                            file_path.unlink()
+                            removed_paths.append(str(file_path))
+                            cleared = True
+                        except Exception as e:
+                            logger.warning(f"Failed to remove legacy file {file_path}: {e}")
+
+    if cleared:
+        logger.info(f"Cleared summary for model '{model}' for paper {pid}")
+        for p in removed_paths:
+            logger.trace(f"Removed: {p}")
+    else:
+        logger.info(f"No summary cache found for model '{model}' for paper {pid}")
+
+
 def _clear_paper_cache(pid: str):
     meta = get_metas().get(pid.split("v")[0] if "v" in pid else pid) if pid else None
     cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
@@ -2995,37 +3225,51 @@ def _clear_paper_cache(pid: str):
         legacy_meta = Path(SUMMARY_DIR) / f"{paper_id}.meta.json"
         legacy_lock = Path(SUMMARY_DIR) / f".{paper_id}.lock"
         for path in (legacy_md, legacy_meta, legacy_lock):
-            try:
-                path.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning(f"Failed to remove legacy summary cache {path}: {e}")
+            if path.exists():
+                try:
+                    path.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to remove legacy file {path}: {e}")
 
-    # Clear parsed HTML/markdown caches
-    html_dir = Path(DATA_DIR) / "html_md"
+    # Clear HTML markdown caches
     for paper_id in ids_to_clear:
-        for suffix in (".md", ".meta.json"):
+        html_dir = Path("data/html_md") / paper_id
+        if html_dir.exists():
             try:
-                (html_dir / f"{paper_id}{suffix}").unlink(missing_ok=True)
+                shutil.rmtree(html_dir)
+                logger.trace(f"Cleared HTML cache: {html_dir}")
             except Exception as e:
-                logger.warning(f"Failed to remove html cache {paper_id}{suffix}: {e}")
+                logger.warning(f"Failed to remove HTML cache {html_dir}: {e}")
 
-    # Clear minerU outputs
-    mineru_dir = Path(DATA_DIR) / "mineru"
+    # Clear MinerU caches
     for paper_id in ids_to_clear:
-        target_dir = mineru_dir / paper_id
-        if target_dir.exists():
+        mineru_dir = Path("data/mineru") / paper_id
+        if mineru_dir.exists():
             try:
-                shutil.rmtree(target_dir)
+                shutil.rmtree(mineru_dir)
+                logger.trace(f"Cleared MinerU cache: {mineru_dir}")
             except Exception as e:
-                logger.warning(f"Failed to remove minerU cache {target_dir}: {e}")
+                logger.warning(f"Failed to remove MinerU cache {mineru_dir}: {e}")
 
-    # Clear downloaded PDFs
-    pdf_dir = Path(DATA_DIR) / "pdfs"
-    for paper_id in ids_to_clear:
-        try:
-            (pdf_dir / f"{paper_id}.pdf").unlink(missing_ok=True)
-        except Exception as e:
-            logger.warning(f"Failed to remove cached PDF for {paper_id}: {e}")
+
+def _find_actual_cache_path(base_dir: Path, pid: str, meta: Optional[dict] = None) -> Optional[Path]:
+    """
+    Find the cache directory for a paper ID using raw PID.
+
+    Simplified approach: arXiv/ar5iv automatically return latest version,
+    so we always store with raw PID only.
+
+    Args:
+        base_dir: Base directory to search in (e.g., Path("data/html_md"))
+        pid: Paper ID (version suffix will be stripped if present)
+        meta: Unused, kept for backward compatibility
+
+    Returns:
+        Path to cache directory if found, None otherwise
+    """
+    raw_pid, _ = split_pid_version(pid)
+    cache_dir = base_dir / raw_pid
+    return cache_dir if cache_dir.exists() else None
 
 
 @app.route("/profile")
