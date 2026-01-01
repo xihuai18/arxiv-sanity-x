@@ -26,9 +26,16 @@ LLM_NAME = "llm_name_for_paper_summaries"  # e.g., "deepseek/deepseek-chat-v3.1:
 # LiteLLM service port (optional, for multi-model gateway)
 LITELLM_PORT = 53000  # LiteLLM service port
 
-# vLLM service port configuration
-VLLM_EMBED_PORT = 51000  # Qwen3 Embedding service port
-VLLM_MINERU_PORT = 52000  # MinerU VLM service port
+# Service port configuration
+EMBED_PORT = 51000  # Ollama embedding service port
+MINERU_PORT = 52000  # MinerU VLM service port (vLLM)
+
+# Backward-compatible aliases (deprecated)
+VLLM_EMBED_PORT = EMBED_PORT
+VLLM_MINERU_PORT = MINERU_PORT
+
+# Ollama embedding model name (pulled via `ollama pull <name>`)
+EMBED_MODEL_NAME = "qwen3-embedding:0.6b"
 
 # Paper summary related configuration
 SUMMARY_MIN_CHINESE_RATIO = 0.25  # Minimum Chinese character ratio threshold for summary cache

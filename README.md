@@ -33,7 +33,7 @@ python3 run_services.py
 - **🎯 Smart Recommendations**: Hybrid TF-IDF + embedding features with dynamic SVM classifiers trained on user preferences
 - **🏷️ Flexible Organization**: Personal tags, combined tags, keyword tracking with AND/OR logic operations
 - **📧 Email Intelligence**: Automated daily recommendations with personalized HTML templates and holiday-aware scheduling
-- **⚡ High Performance**: Multi-core processing, Intel extensions, incremental updates, vLLM integration, and smart caching
+- **⚡ High Performance**: Multi-core processing, Intel extensions, incremental updates, Ollama embeddings + minerU(vLLM), and smart caching
 - **🔗 Modern Architecture**: RESTful APIs, responsive web interface, async summary loading, and comprehensive error handling
 - **🔄 Full Automation**: Built-in scheduler managing fetch→compute→summarize→email pipeline with intelligent resource management
 
@@ -54,7 +54,7 @@ python3 run_services.py
 - 🔄 **Retry Mechanism**: Smart retry for failed paper processing tasks
 - 📈 **Progress Tracking**: Real-time progress bars and processing status display
 - 🔧 **Configuration Optimization**: Support for multiple LLM providers (OpenRouter free models, OpenAI-compatible APIs)
-- 📊 **Service Integration**: Complete vLLM and minerU service integration
+- 📊 **Service Integration**: Ollama embedding + minerU(vLLM) service integration
 - 🎨 **Interface Enhancement**: Better responsive design and MathJax mathematical formula support
 - 🛠️ **Error Handling**: Enhanced exception handling and retry mechanisms
 
@@ -79,7 +79,7 @@ python3 run_services.py
 ### v2.1 - API & Semantic Search
 - ✨ **New**: Semantic search with keyword, semantic, and hybrid modes
 - 🔗 **API Integration**: RESTful API endpoints for recommendations and paper summaries
-- 🚀 **VLLM Support**: High-performance model serving with vLLM for embedding generation
+- 🚀 **Embedding Support**: Ollama-powered embedding generation via `/api/embed` (supports `dimensions`)
 - 🎯 **Enhanced Search**: Configurable semantic weights for hybrid search (0.0-1.0)
 - 🔧 **Refactored Architecture**: API client implementation for embedding models with proper error handling
 
@@ -169,7 +169,7 @@ Configure the following settings in `vars.py`:
 - **Database Configuration**: Data storage paths and web service URL
 - **Email Service Configuration**: SMTP server settings for paper recommendation emails
 - **LLM API Configuration**: Support for multiple LLM providers (OpenAI-compatible API)
-- **vLLM Service Ports**: Port configuration for embedding models and minerU services
+- **Service Ports**: Port configuration for embedding (Ollama) and minerU (vLLM) services
 - **Summary Markdown Source**: Choose `html` (default) or `mineru`, and set HTML source order
 
 The project supports multiple LLM providers, including OpenRouter (recommended with many free models) and other OpenAI-compatible APIs.
@@ -188,7 +188,7 @@ export ARXIV_SANITY_MINERU_BACKEND=pipeline
 # Or use VLM http-client backend (requires minerU OpenAI-compatible server)
 export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
 ```
-Note: HTML mode does not require minerU. If you use `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`, start a minerU OpenAI-compatible server on `VLLM_MINERU_PORT`.
+Note: HTML mode does not require minerU. If you use `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`, start a minerU OpenAI-compatible server on `MINERU_PORT`.
 Note: Summary and HTML caches are version-aware (pidvN), so new arXiv versions regenerate automatically.
 
 ### Daemon Environment Variables
@@ -254,7 +254,7 @@ arxiv-sanity-X/
 ├── litellm.sh                  # LiteLLM gateway startup script
 ├── llm.yml                     # LiteLLM configuration file
 ├── mineru_serve.sh             # minerU VLM server startup script
-├── embedding_serve.sh          # vLLM embedding server startup script
+├── embedding_serve.sh          # Ollama embedding server startup script
 ├── aslite/                     # Core library
 │   ├── db.py                  # Database operations (SQLite + compression)
 │   └── arxiv.py               # arXiv API interface
@@ -287,7 +287,7 @@ arxiv-sanity-X/
 ### Service Dependencies
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Flask Web     │    │  vLLM Embedding  │    │  minerU VLM     │
+│   Flask Web     │    │ Ollama Embedding │    │  minerU VLM     │
 │  (port 55555)  │<-->│   (port 51000)   │    │  (port 52000)   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
@@ -419,12 +419,12 @@ LLM_NAME = "gpt-4o-mini"
 
 ### Embedding Models & Performance
 ```bash
-# Download and start embedding model
-huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
-bash embedding_serve.sh
+# Pull and start embedding model (Ollama)
+ollama pull nomic-embed-text
+bash embedding_serve.sh  # starts `ollama serve` on EMBED_PORT (CPU-only)
 
 # Enable embedding computation with API client
-python3 compute.py --use_embeddings --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
+python3 compute.py --use_embeddings --embed_model nomic-embed-text --embed_api_base http://localhost:51000
 ```
 
 Features:
@@ -531,4 +531,5 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## ⭐ Acknowledgments
 - Original [arxiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) by Andrej Karpathy
 - [minerU](https://github.com/opendatalab/MinerU) for advanced PDF parsing
-- [vLLM](https://github.com/vllm-project/vllm) for high-performance model serving
+- [Ollama](https://github.com/ollama/ollama) for local embedding serving
+- [vLLM](https://github.com/vllm-project/vllm) for MinerU VLM serving

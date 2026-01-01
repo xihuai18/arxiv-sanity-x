@@ -21,8 +21,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-FETCH_NUM = _env_int("ARXIV_SANITY_FETCH_NUM", 1000)
-FETCH_MAX = _env_int("ARXIV_SANITY_FETCH_MAX", 200)
+FETCH_NUM = _env_int("ARXIV_SANITY_FETCH_NUM", 2000)
+FETCH_MAX = _env_int("ARXIV_SANITY_FETCH_MAX", 1000)
 SUMMARY_NUM = _env_int("ARXIV_SANITY_SUMMARY_NUM", 100)
 SUMMARY_WORKERS = _env_int("ARXIV_SANITY_SUMMARY_WORKERS", 2)
 ENABLE_SUMMARY = _truthy_env("ARXIV_SANITY_DAEMON_SUMMARY", "1")
@@ -54,8 +54,7 @@ def gen_summary():
 
 def fetch_compute():
     logger.info("Fetch and compute")
-    if not _run_cmd([PYTHON, "arxiv_daemon.py", "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)], "fetch"):
-        return
+    _run_cmd([PYTHON, "arxiv_daemon.py", "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)], "fetch")
 
     compute_cmd = [PYTHON, "compute.py"]
     if ENABLE_EMBEDDINGS:
@@ -88,7 +87,7 @@ def send_email():
     weekday_int = now.weekday() + 1
     logger.info("Send emails")
 
-    time_param = "2" if weekday_int not in [1, 2] else "5"
+    time_param = "2" if weekday_int not in [1, 2] else "4"
     if is_post_holiday(now):
         holiday_duration = count_holiday_duration(now)
         time_param = str(float(time_param) + holiday_duration)

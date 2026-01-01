@@ -34,7 +34,7 @@ python3 run_services.py
 - **🎯 智能推荐系统**：混合 TF-IDF + 嵌入特征，基于用户偏好训练动态 SVM 分类器
 - **🏷️ 灵活组织管理**：个人标签、组合标签、关键词跟踪，支持 AND/OR 逻辑操作
 - **📧 邮件智能服务**：自动化每日推荐，个性化 HTML 模板和假期感知调度
-- **⚡ 高性能优化**：多核处理、Intel 扩展、增量更新、vLLM 集成和智能缓存
+- **⚡ 高性能优化**：多核处理、Intel 扩展、增量更新、Ollama 嵌入 + minerU(vLLM) 和智能缓存
 - **🔗 现代化架构**：RESTful API、响应式 Web 界面、异步总结加载和全面错误处理
 - **🔄 完全自动化**：内置调度器管理 获取→计算→总结→邮件 流程，智能资源管理
 
@@ -55,7 +55,7 @@ python3 run_services.py
 - 🔄 **重试机制**：智能重试失败的论文处理任务
 - 📈 **进度跟踪**：实时进度条和处理状态显示
 - 🔧 **配置优化**：支持多种 LLM 服务商（OpenRouter 免费模型、OpenAI 兼容 API）
-- 📊 **服务集成**：完善的 vLLM 和 minerU 服务集成
+- 📊 **服务集成**：完善的 Ollama 嵌入 + minerU(vLLM) 服务集成
 - 🎨 **界面增强**：更好的响应式设计和 MathJax 数学公式支持
 - 🛠️ **错误处理**：增强的异常处理和重试机制
 
@@ -80,7 +80,7 @@ python3 run_services.py
 ### v2.1 - API 与语义搜索
 - ✨ **新功能**：语义搜索，支持关键词、语义和混合模式
 - 🔗 **API 集成**：提供 RESTful API 端点用于推荐和论文总结
-- 🚀 **VLLM 支持**：使用 vLLM 进行高性能模型服务和嵌入生成
+- 🚀 **嵌入支持**：使用 Ollama `/api/embed` 进行嵌入生成（支持 `dimensions`）
 - 🎯 **增强搜索**：混合搜索的可配置语义权重（0.0-1.0）
 - 🔧 **重构架构**：嵌入模型的 API 客户端实现，支持适当错误处理
 
@@ -170,7 +170,7 @@ bash up.sh
 - **数据库配置**：数据存储路径和Web服务URL
 - **邮件服务配置**：SMTP服务器设置，用于论文推荐邮件
 - **LLM API 配置**：支持多种LLM服务商（OpenAI接口）
-- **vLLM 服务端口**：嵌入模型和minerU服务的端口配置
+- **服务端口**：嵌入（Ollama）和 minerU（vLLM）服务的端口配置
 - **总结 Markdown 来源**：选择 `html`（默认）或 `mineru`，并设置 HTML 来源顺序
 
 项目支持多种LLM服务商，包括OpenRouter（推荐，提供大量免费模型）和其他OpenAI兼容API。
@@ -189,7 +189,7 @@ export ARXIV_SANITY_MINERU_BACKEND=pipeline
 # 或使用 VLM http-client 后端（需要启动 minerU OpenAI 兼容服务）
 export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
 ```
-说明：HTML 模式不依赖 minerU；若 `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`，需在 `VLLM_MINERU_PORT` 启动 minerU 的 OpenAI 兼容服务。
+说明：HTML 模式不依赖 minerU；若 `ARXIV_SANITY_MINERU_BACKEND=vlm-http-client`，需在 `MINERU_PORT` 启动 minerU 的 OpenAI 兼容服务。
 说明：摘要与 HTML 缓存按 arXiv 版本（pidvN）区分，新版本会自动重新生成。
 
 ### 调度器环境变量
@@ -255,7 +255,7 @@ arxiv-sanity-X/
 ├── litellm.sh                  # LiteLLM 网关启动脚本
 ├── llm.yml                     # LiteLLM 配置文件
 ├── mineru_serve.sh             # minerU VLM 服务器启动脚本
-├── embedding_serve.sh          # vLLM 嵌入服务器启动脚本
+├── embedding_serve.sh          # Ollama 嵌入服务器启动脚本
 ├── aslite/                     # 核心库
 │   ├── db.py                  # 数据库操作（SQLite + 压缩）
 │   └── arxiv.py               # arXiv API 接口
@@ -288,7 +288,7 @@ arxiv-sanity-X/
 ### 服务依赖关系
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Flask Web     │    │  vLLM Embedding  │    │  minerU VLM     │
+│   Flask Web     │    │ Ollama Embedding │    │  minerU VLM     │
 │  (port 55555)  │<-->│   (port 51000)   │    │  (port 52000)   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
          │                       │                       │
@@ -420,12 +420,12 @@ LLM_NAME = "gpt-4o-mini"
 
 ### 嵌入模型与性能
 ```bash
-# 下载并启动嵌入模型
-huggingface-cli download Qwen/Qwen3-Embedding-0.6B --local-dir ./qwen3-embed-0.6B
-bash embedding_serve.sh
+# 拉取并启动嵌入模型（Ollama）
+ollama pull nomic-embed-text
+bash embedding_serve.sh  # 使用 `ollama serve`，并强制 CPU-only
 
-# 使用 API 客户端启用嵌入计算
-python3 compute.py --use_embeddings --embed_model ./qwen3-embed-0.6B --embed_api_base http://localhost:51000/v1
+# 使用 API 客户端启用嵌入计算（Ollama /api/embed）
+python3 compute.py --use_embeddings --embed_model nomic-embed-text --embed_api_base http://localhost:51000
 ```
 
 功能特性：
@@ -534,4 +534,5 @@ python3 daemon.py
 ## ⭐ 致谢
 - 原始 [arxiv-sanity-lite](https://github.com/karpathy/arxiv-sanity-lite) 项目，作者 Andrej Karpathy
 - [minerU](https://github.com/opendatalab/MinerU) 提供高级 PDF 解析功能
-- [vLLM](https://github.com/vllm-project/vllm) 提供高性能模型服务
+- [Ollama](https://github.com/ollama/ollama) 提供本地嵌入服务
+- [vLLM](https://github.com/vllm-project/vllm) 提供 MinerU VLM 服务
