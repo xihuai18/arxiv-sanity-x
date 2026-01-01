@@ -5,6 +5,7 @@
 var paper = {{ paper | tojson }};
 var pid = {{ pid | tojson }};
 var defaultSummaryModel = {{ default_summary_model | tojson }};
+var tags = {{ tags | tojson }};
 </script>
 {% endblock %}
 
@@ -12,18 +13,181 @@ var defaultSummaryModel = {{ default_summary_model | tojson }};
 <!-- Markdown + Math rendering (summary page only) -->
 <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
 <script>
+{% raw %}
 window.MathJax = {
+    loader: {
+        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics']
+    },
     tex: {
         inlineMath: [['\\(', '\\)'], ['$', '$']],
         displayMath: [['\\[', '\\]'], ['$$', '$$']],
-        processEscapes: true
+        processEscapes: true,
+        processEnvironments: true,
+        processRefs: true,
+        // Load additional packages for extended LaTeX support
+        packages: {
+            '[+]': [
+                'base',        // Basic LaTeX
+                'ams',         // AMS math environments and symbols
+                'boldsymbol',  // Bold symbols
+                'braket',      // Bra-ket notation for quantum mechanics
+                'cancel',      // Strikethrough
+                'color',       // Colors
+                'enclose',     // Enclosing notations
+                'mathtools',   // Extended math tools
+                'newcommand',  // Custom commands
+                'noerrors',    // Don't show error messages inline
+                'noundefined', // Don't show undefined command errors
+                'physics',     // Physics package macros
+                'textmacros',  // Text mode macros
+                'unicode',     // Unicode support
+                'verb'         // Verbatim
+            ]
+        },
+        tags: 'ams',  // Enable \tag, \notag, \label, \ref support
+        tagSide: 'right',
+        tagIndent: '0.8em',
+        useLabelIds: true,
+        multlineWidth: '85%',
+        // Define custom macros for common LaTeX commands
+        macros: {
+            // Bold and emphasis (fix unstable boldsymbol)
+            bm: ['\\mathbf{#1}', 1],
+            boldsymbol: ['\\mathbf{#1}', 1],
+            bold: ['\\mathbf{#1}', 1],
+            pmb: ['\\mathbf{#1}', 1],  // poor man's bold
+
+            // Common sets
+            RR: '\\mathbb{R}',
+            NN: '\\mathbb{N}',
+            ZZ: '\\mathbb{Z}',
+            QQ: '\\mathbb{Q}',
+            CC: '\\mathbb{C}',
+            PP: '\\mathbb{P}',
+            EE: '\\mathbb{E}',
+            HH: '\\mathbb{H}',
+            FF: '\\mathbb{F}',
+
+            // Delimiters
+            abs: ['\\left|#1\\right|', 1],
+            norm: ['\\left\\|#1\\right\\|', 1],
+            inner: ['\\left\\langle#1,#2\\right\\rangle', 2],
+            set: ['\\left\\{#1\\right\\}', 1],
+            floor: ['\\left\\lfloor#1\\right\\rfloor', 1],
+            ceil: ['\\left\\lceil#1\\right\\rceil', 1],
+            paren: ['\\left(#1\\right)', 1],
+            bracket: ['\\left[#1\\right]', 1],
+
+            // Calculus and analysis
+            dd: '\\mathrm{d}',
+            diff: ['\\frac{\\mathrm{d}#1}{\\mathrm{d}#2}', 2],
+            pdiff: ['\\frac{\\partial #1}{\\partial #2}', 2],
+            grad: '\\nabla',
+            div: '\\nabla\\cdot',
+            curl: '\\nabla\\times',
+
+            // Linear algebra
+            rank: '\\mathrm{rank}',
+            tr: '\\mathrm{tr}',
+            Tr: '\\mathrm{Tr}',
+            diag: '\\mathrm{diag}',
+            span: '\\mathrm{span}',
+            dim: '\\mathrm{dim}',
+            det: '\\mathrm{det}',
+            vec: ['\\mathbf{#1}', 1],
+            mat: ['\\mathbf{#1}', 1],
+
+            // Probability and statistics
+            Var: '\\mathrm{Var}',
+            Cov: '\\mathrm{Cov}',
+            Corr: '\\mathrm{Corr}',
+            Pr: '\\mathrm{Pr}',
+            E: '\\mathbb{E}',
+            supp: '\\mathrm{supp}',
+            KL: '\\mathrm{KL}',
+            TV: '\\mathrm{TV}',
+
+            // Common operators
+            argmax: '\\operatorname*{arg\\,max}',
+            argmin: '\\operatorname*{arg\\,min}',
+            minimize: '\\operatorname*{minimize}',
+            maximize: '\\operatorname*{maximize}',
+            sign: '\\mathrm{sign}',
+            softmax: '\\mathrm{softmax}',
+            sigmoid: '\\mathrm{sigmoid}',
+            relu: '\\mathrm{ReLU}',
+            st: '\\text{s.t.}',
+            subjectto: '\\text{subject to}',
+
+            // Information theory
+            H: '\\mathrm{H}',
+            I: '\\mathrm{I}',
+
+            // Complexity and Big O notation
+            bigO: ['\\mathcal{O}\\left(#1\\right)', 1],
+            bigTheta: ['\\Theta\\left(#1\\right)', 1],
+            bigOmega: ['\\Omega\\left(#1\\right)', 1],
+            littleo: ['\\mathrm{o}\\left(#1\\right)', 1],
+
+            // Arrows (ensure compatibility)
+            xrightarrow: ['\\xrightarrow[#1]{#2}', 2],
+            xleftarrow: ['\\xleftarrow[#1]{#2}', 2],
+            implies: '\\Rightarrow',
+            impliedby: '\\Leftarrow',
+            iff: '\\Leftrightarrow',
+            to: '\\rightarrow',
+
+            // Text in math mode (ensure \text works reliably)
+            textit: ['\\textit{#1}', 1],
+            textbf: ['\\textbf{#1}', 1],
+            textrm: ['\\textrm{#1}', 1],
+            textsf: ['\\textsf{#1}', 1],
+            texttt: ['\\texttt{#1}', 1],
+
+            // Common abbreviations
+            iid: '\\text{i.i.d.}',
+            wrt: '\\text{w.r.t.}',
+            aka: '\\text{a.k.a.}',
+
+            // Spacing fixes
+            given: '\\,|\\,',
+            mid: '\\,|\\,',
+
+            // Matrix/Vector norms
+            Fnorm: '\\|\\cdot\\|_{\\mathrm{F}}',
+            opnorm: '\\|\\cdot\\|_{\\mathrm{op}}',
+
+            // Indicator function
+            ind: '\\mathbb{1}',
+            indicator: '\\mathbb{1}',
+            one: '\\mathbb{1}'
+        }
     },
     options: {
-        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+        ignoreHtmlClass: 'tex2jax_ignore',
+        processHtmlClass: 'tex2jax_process'
+    },
+    chtml: {
+        scale: 1.0,
+        mtextInheritFont: false,
+        merrorInheritFont: true,
+        mathmlSpacing: false,
+        skipAttributes: {},
+        exFactor: 0.5,
+        displayAlign: 'center',
+        displayIndent: '0'
+    },
+    startup: {
+        ready: () => {
+            console.log('MathJax is ready with extended packages');
+            MathJax.startup.defaultReady();
+        }
     }
 };
+{% endraw %}
 </script>
-<script id="MathJax-script" defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+<script id="MathJax-script" defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"></script>
 {% endblock %}
 
 {% block content %}

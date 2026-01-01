@@ -42,7 +42,16 @@ SUMMARY_MIN_CHINESE_RATIO = 0.25  # Minimum Chinese character ratio threshold fo
 SUMMARY_DEFAULT_SEMANTIC_WEIGHT = 0.5  # Default weight for semantic search in hybrid search
 SUMMARY_MARKDOWN_SOURCE = os.environ.get("ARXIV_SANITY_SUMMARY_SOURCE", "html")  # html (default) or mineru
 SUMMARY_HTML_SOURCES = os.environ.get("ARXIV_SANITY_HTML_SOURCES", "ar5iv,arxiv")  # HTML source order
+
+# MinerU configuration
 MINERU_BACKEND = os.environ.get("ARXIV_SANITY_MINERU_BACKEND", "pipeline")  # pipeline (default) or vlm-http-client
+MINERU_DEVICE = os.environ.get("ARXIV_SANITY_MINERU_DEVICE", "cuda")  # cuda (default) or cpu (pipeline backend only)
+MINERU_MAX_WORKERS = int(
+    os.environ.get("ARXIV_SANITY_MINERU_MAX_WORKERS", "2")
+)  # Maximum concurrent mineru processes (pipeline backend only)
+MINERU_MAX_VRAM = int(
+    os.environ.get("ARXIV_SANITY_MINERU_MAX_VRAM", "3")
+)  # Max VRAM per mineru process in GB (pipeline+cuda only)
 
 # paper_summarizer.py related constants
 MAIN_CONTENT_MIN_RATIO = 0.1  # Minimum content ratio after extracting main content

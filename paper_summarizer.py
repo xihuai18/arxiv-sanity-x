@@ -30,6 +30,9 @@ from vars import (
     LLM_SUMMARY_LANG,
     MAIN_CONTENT_MIN_RATIO,
     MINERU_BACKEND,
+    MINERU_DEVICE,
+    MINERU_MAX_VRAM,
+    MINERU_MAX_WORKERS,
     MINERU_PORT,
     SUMMARY_DIR,
     SUMMARY_HTML_SOURCES,
@@ -64,7 +67,28 @@ class PaperSummarizer:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
 
-    def download_arxiv_paper(self, pid: str) -> Optional[Path]:
+    @staticmethod
+    def _extract_version_from_url(url: str, raw_pid: str) -> Optional[str]:
+        """Extract version number from arXiv URL.
+
+        Args:
+            url: The final URL after redirects (e.g., https://arxiv.org/pdf/2301.00001v3)
+            raw_pid: The raw paper ID without version
+
+        Returns:
+            Version string (e.g., "3") or None if not found
+        """
+        # Look for version pattern in URL path
+        # URL might be like: https://arxiv.org/pdf/2301.00001v3.pdf or https://arxiv.org/pdf/2301.00001v3
+        import re
+
+        pattern = re.escape(raw_pid) + r"v(\d+)"
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+        return None
+
+    def download_arxiv_paper(self, pid: str) -> Tuple[Optional[Path], Optional[str]]:
         """
         Download arXiv paper PDF
 
@@ -72,25 +96,59 @@ class PaperSummarizer:
             pid: Paper ID, e.g. "2301.00001"
 
         Returns:
-            Downloaded PDF file path, None if failed
+            Tuple of (pdf_path, version):
+            - pdf_path: Downloaded PDF file path, None if failed
+            - version: The actual version downloaded (e.g., "3"), None if unknown
         """
         try:
-            # arXiv PDF URL format
-            pdf_url = f"https://arxiv.org/pdf/{pid}"
-            pdf_path = self.pdfs_dir / f"{pid}.pdf"
+            raw_pid = self._strip_version_suffix(pid)
+            pdf_url = f"https://arxiv.org/pdf/{raw_pid}"
+            pdf_path = self.pdfs_dir / f"{raw_pid}.pdf"
+            cached_version = None
 
-            # If file already exists, return directly
+            # If file already exists, try to determine version
             if pdf_path.exists():
                 logger.trace(f"PDF file already exists: {pdf_path}")
-                return pdf_path
+
+                # Strategy 1: Try to get version from database metadata
+                db_version = self._get_latest_version_from_meta(pid)
+                if db_version:
+                    cached_version = str(db_version)
+                    logger.trace(f"Using version {cached_version} from database for cached PDF")
+                else:
+                    # Strategy 2: Check existing MinerU meta.json
+                    mineru_meta = self._read_mineru_meta(raw_pid)
+                    if mineru_meta.get("cached_version"):
+                        cached_version = mineru_meta["cached_version"]
+                        logger.trace(f"Using version {cached_version} from MinerU meta")
+                    else:
+                        # Strategy 3: Make a HEAD request to get current version from redirect
+                        try:
+                            head_response = requests.head(pdf_url, allow_redirects=True, timeout=10)
+                            if head_response.ok:
+                                version_from_url = self._extract_version_from_url(head_response.url, raw_pid)
+                                if version_from_url:
+                                    cached_version = version_from_url
+                                    logger.trace(
+                                        f"Detected version {cached_version} from HEAD request: {head_response.url}"
+                                    )
+                        except Exception as e:
+                            logger.trace(f"Failed to determine version from HEAD request: {e}")
+
+                return pdf_path, cached_version
 
             # Use atomic file write with temporary file
-            logger.trace(f"Downloading paper {pid} ...")
-            with requests.get(pdf_url, stream=True, timeout=30) as response:
+            logger.trace(f"Downloading paper {raw_pid} ...")
+            with requests.get(pdf_url, stream=True, timeout=30, allow_redirects=True) as response:
                 response.raise_for_status()
 
+                # Try to extract version from final URL after redirects
+                cached_version = self._extract_version_from_url(response.url, raw_pid)
+                if cached_version:
+                    logger.trace(f"Detected version {cached_version} from redirect URL: {response.url}")
+
                 # Write to temporary file first, then atomic rename
-                temp_fd, temp_path = tempfile.mkstemp(dir=self.pdfs_dir, prefix=f"{pid}_", suffix=".pdf.tmp")
+                temp_fd, temp_path = tempfile.mkstemp(dir=self.pdfs_dir, prefix=f"{raw_pid}_", suffix=".pdf.tmp")
                 try:
                     with os.fdopen(temp_fd, "wb") as f:
                         shutil.copyfileobj(response.raw, f)
@@ -103,7 +161,7 @@ class PaperSummarizer:
                         # Another process already downloaded the file
                         temp_file.unlink()
                         logger.trace(f"PDF file was downloaded by another process: {pdf_path}")
-                        return pdf_path if pdf_path.exists() else None
+                        return (pdf_path, cached_version) if pdf_path.exists() else (None, None)
 
                 except Exception:
                     # Clean up temporary file on error
@@ -112,11 +170,11 @@ class PaperSummarizer:
                     raise
 
             logger.trace(f"Paper download complete: {pdf_path}")
-            return pdf_path
+            return pdf_path, cached_version
 
         except Exception as e:
             logger.trace(f"Failed to download paper {pid}: {e}")
-            return None
+            return None, None
 
     @staticmethod
     def _atomic_write_text(path: Path, content: str) -> None:
@@ -137,9 +195,22 @@ class PaperSummarizer:
 
     @staticmethod
     def _atomic_write_json(path: Path, data: dict) -> None:
-        PaperSummarizer._atomic_write_text(path, json.dumps(data))
+        PaperSummarizer._atomic_write_text(path, json.dumps(data, ensure_ascii=False))
 
     _PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
+
+    @classmethod
+    def _strip_version_suffix(cls, pid: str) -> str:
+        """Remove version suffix from paper ID.
+
+        Args:
+            pid: Paper ID, possibly with version suffix (e.g., "2301.00001v2")
+
+        Returns:
+            Raw PID without version suffix
+        """
+        raw_pid, _ = cls._split_pid_version(pid)
+        return raw_pid
 
     @classmethod
     def _split_pid_version(cls, pid: str) -> Tuple[str, Optional[int]]:
@@ -191,14 +262,20 @@ class PaperSummarizer:
         except Exception:
             return None
 
-    def _resolve_versioned_pid(self, pid: str) -> str:
-        raw_pid, explicit_version = self._split_pid_version(pid)
-        if explicit_version:
-            return pid
-        version = self._get_latest_version_from_meta(raw_pid)
-        if not version:
-            return raw_pid
-        return f"{raw_pid}v{version}"
+    def _resolve_cache_pid(self, pid: str) -> str:
+        """Resolve PID to cache key format.
+
+        SIMPLIFIED: Always use raw PID (without version) for caching.
+        arXiv/ar5iv automatically return the latest version.
+
+        Args:
+            pid: Paper ID (may or may not include version)
+
+        Returns:
+            Raw PID without version suffix
+        """
+        raw_pid, _ = self._split_pid_version(pid)
+        return raw_pid
 
     def _normalize_summary_source(self, source: Optional[str]) -> str:
         src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
@@ -247,6 +324,39 @@ class PaperSummarizer:
                     return path
         return None
 
+    def _mineru_meta_path(self, paper_id: str) -> Path:
+        """Get MinerU meta.json path for a paper."""
+        return self.mineru_dir / paper_id / "meta.json"
+
+    def _read_mineru_meta(self, paper_id: str) -> dict:
+        """Read MinerU metadata from file."""
+        meta_path = self._mineru_meta_path(paper_id)
+        if not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_mineru_meta(self, paper_id: str, backend: str, cached_version: Optional[str] = None) -> None:
+        """Write MinerU metadata to file.
+
+        Args:
+            paper_id: Raw paper ID (without version suffix)
+            backend: MinerU backend used (pipeline, vlm-http-client, etc.)
+            cached_version: Version of the PDF that was actually downloaded
+        """
+        meta_path = self._mineru_meta_path(paper_id)
+        meta = {
+            "updated_at": time.time(),
+            "backend": backend,
+        }
+        if cached_version:
+            meta["cached_version"] = cached_version
+        self._atomic_write_json(meta_path, meta)
+
     def _parse_html_sources(self) -> List[str]:
         raw = (SUMMARY_HTML_SOURCES or "").strip()
         if not raw:
@@ -265,13 +375,20 @@ class PaperSummarizer:
             sources = ["ar5iv", "arxiv"]
         return sources
 
-    def _html_cache_paths(self, cache_pid: str) -> Tuple[Path, Path]:
-        md_path = self.html_md_dir / f"{cache_pid}.md"
-        meta_path = self.html_md_dir / f"{cache_pid}.meta.json"
-        return md_path, meta_path
+    def _html_cache_paths(self, cache_pid: str) -> Tuple[Path, Path, Path]:
+        """Get HTML cache paths in new folder structure.
+
+        Returns:
+            Tuple of (md_path, meta_path, images_dir)
+        """
+        paper_dir = self.html_md_dir / cache_pid
+        md_path = paper_dir / f"{cache_pid}.md"
+        meta_path = paper_dir / "meta.json"
+        images_dir = paper_dir / "images"
+        return md_path, meta_path, images_dir
 
     def _read_html_meta(self, cache_pid: str) -> dict:
-        _, meta_path = self._html_cache_paths(cache_pid)
+        _, meta_path, _ = self._html_cache_paths(cache_pid)
         if not meta_path.exists():
             return {}
         try:
@@ -282,7 +399,7 @@ class PaperSummarizer:
             return {}
 
     def _read_html_markdown_cache(self, cache_pid: str) -> Optional[str]:
-        md_path, _ = self._html_cache_paths(cache_pid)
+        md_path, _, _ = self._html_cache_paths(cache_pid)
         if not md_path.exists():
             return None
         try:
@@ -294,9 +411,34 @@ class PaperSummarizer:
             return None
 
     def _write_html_markdown_cache(self, cache_pid: str, markdown: str, source: str, url: str) -> None:
-        md_path, meta_path = self._html_cache_paths(cache_pid)
+        """Write HTML markdown cache with metadata.
+
+        Args:
+            cache_pid: Raw paper ID (without version suffix)
+            markdown: Markdown content
+            source: HTML source (ar5iv, arxiv)
+            url: Source URL (may contain version info)
+        """
+        md_path, meta_path, _ = self._html_cache_paths(cache_pid)
         self._atomic_write_text(md_path, markdown)
-        meta = {"updated_at": time.time(), "source": source, "url": url}
+
+        # Try to extract cached version from URL (e.g., .../html/2512.21789v3)
+        cached_version = None
+        if url:
+            # Extract the paper ID part from URL and check for version
+            import re
+
+            match = re.search(r"/(\d+\.\d+)(v(\d+))?", url)
+            if match and match.group(3):
+                cached_version = match.group(3)
+
+        meta = {
+            "updated_at": time.time(),
+            "source": source,  # ar5iv or arxiv
+            "url": url,
+        }
+        if cached_version:
+            meta["cached_version"] = cached_version
         self._atomic_write_json(meta_path, meta)
 
     def _html_tools(self):
@@ -307,6 +449,53 @@ class PaperSummarizer:
             logger.trace(f"HTML parsing dependencies missing: {e}")
             return None, None
         return BeautifulSoup, html_to_markdown
+
+    def _download_image(self, img_url: str, save_path: Path) -> bool:
+        """Download image from URL and save to local path.
+
+        Args:
+            img_url: Image URL
+            save_path: Local path to save image
+
+        Returns:
+            True if download successful, False otherwise
+        """
+        try:
+            # Ensure parent directory exists
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+
+            headers = {"User-Agent": "arxiv-sanity-x/summary"}
+            response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+            if response.status_code != 200:
+                logger.trace(f"Failed to download image {img_url}: {response.status_code}")
+                return False
+
+            # Write to temporary file first, then atomic rename
+            temp_fd, temp_path = tempfile.mkstemp(dir=save_path.parent, suffix=save_path.suffix)
+            try:
+                with os.fdopen(temp_fd, "wb") as f:
+                    shutil.copyfileobj(response.raw, f)
+
+                # Atomic rename
+                temp_file = Path(temp_path)
+                try:
+                    temp_file.rename(save_path)
+                except FileExistsError:
+                    temp_file.unlink()
+                    logger.trace(f"Image already exists: {save_path}")
+                    return True
+
+            except Exception:
+                if Path(temp_path).exists():
+                    Path(temp_path).unlink()
+                raise
+
+            logger.trace(f"Downloaded image: {save_path.name}")
+            return True
+
+        except Exception as e:
+            logger.trace(f"Error downloading image {img_url}: {e}")
+            return False
 
     def _replace_math_nodes(self, soup) -> None:
         # Prefer MathML LaTeX annotations when present (common in ar5iv/arXiv HTML).
@@ -334,7 +523,17 @@ class PaperSummarizer:
             else:
                 math.decompose()
 
-    def _html_to_markdown(self, html: str) -> Optional[str]:
+    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str) -> Optional[str]:
+        """Convert HTML to Markdown and download images.
+
+        Args:
+            html: HTML content
+            cache_pid: Cache paper ID for organizing images
+            base_url: Base URL for resolving relative image paths
+
+        Returns:
+            Markdown content with updated image references
+        """
         BeautifulSoup, html_to_markdown = self._html_tools()
         if not BeautifulSoup or not html_to_markdown:
             return None
@@ -349,6 +548,57 @@ class PaperSummarizer:
         if main:
             for tag in main.find_all(["nav", "aside"]):
                 tag.decompose()
+
+        # Download images and update references
+        _, _, images_dir = self._html_cache_paths(cache_pid)
+        img_counter = {}
+
+        for img_tag in (main or soup).find_all("img"):
+            src = img_tag.get("src")
+            if not src:
+                # Remove img tags without src
+                img_tag.decompose()
+                continue
+
+            # Resolve relative URLs using urljoin (handles both ar5iv and arxiv)
+            # Ensure base_url ends with / so urljoin treats it as a directory
+            from urllib.parse import urljoin
+
+            base_with_slash = base_url if base_url.endswith("/") else f"{base_url}/"
+            img_url = urljoin(base_with_slash, src)
+
+            # Generate consistent image filename
+            # Use original extension if available
+            ext = Path(img_url.split("?")[0]).suffix or ".png"
+
+            # Create a descriptive filename from alt text or use counter
+            alt_text = img_tag.get("alt", "")
+            if alt_text:
+                # Sanitize alt text for filename
+                safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", alt_text)[:50]
+                safe_name = re.sub(r"_+", "_", safe_name).strip("_")
+            else:
+                safe_name = f"image_{len(img_counter) + 1}"
+
+            # Ensure unique filename
+            base_name = safe_name
+            counter = img_counter.get(base_name, 0)
+            if counter > 0:
+                safe_name = f"{base_name}_{counter}"
+            img_counter[base_name] = counter + 1
+
+            img_filename = f"{safe_name}{ext}"
+            img_path = images_dir / img_filename
+
+            # Download image
+            if self._download_image(img_url, img_path):
+                # Update img tag src to point to local file
+                img_tag["src"] = f"images/{img_filename}"
+            else:
+                # Remove img tag if download fails to prevent LLM from referencing broken images
+                logger.trace(f"Removing image tag due to failed download: {img_url}")
+                img_tag.decompose()
+
         markdown = html_to_markdown(str(main), heading_style="ATX")
         markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
         return markdown if markdown else None
@@ -377,25 +627,39 @@ class PaperSummarizer:
             logger.trace(f"HTML fetch error ({source}) {pid}: {e}")
             return None, url
 
-    def _get_markdown_from_html(self, pid: str) -> Tuple[Optional[str], Optional[str]]:
-        cache_pid = self._resolve_versioned_pid(pid)
+    def _get_markdown_from_html(self, pid: str) -> Tuple[Optional[str], Optional[str], str]:
+        """Get markdown from HTML source with versioned caching.
+
+        Args:
+            pid: Paper ID (may or may not include version)
+
+        Returns:
+            Tuple of (markdown_content, source, cache_pid)
+            - markdown_content: The parsed markdown or None
+            - source: The HTML source used (ar5iv, arxiv) or None
+            - cache_pid: Raw PID used for storage (always unversioned)
+        """
+        # Always use raw PID for storage - arXiv returns latest version automatically
+        cache_pid = self._resolve_cache_pid(pid)
+
+        # Check cache first
         cached = self._read_html_markdown_cache(cache_pid)
         if cached:
             meta = self._read_html_meta(cache_pid)
-            return cached, meta.get("source")
+            return cached, meta.get("source"), cache_pid
 
         for source in self._parse_html_sources():
             html, url = self._fetch_html_from_source(cache_pid, source)
             if not html:
                 continue
-            markdown = self._html_to_markdown(html)
+            markdown = self._html_to_markdown(html, cache_pid, url)
             if not markdown:
                 logger.trace(f"HTML parse produced empty markdown for {pid} from {source}")
                 continue
             self._write_html_markdown_cache(cache_pid, markdown, source, url)
-            return markdown, source
+            return markdown, source, cache_pid
 
-        return None, None
+        return None, None, cache_pid
 
     def _acquire_file_lock(self, lock_path: Path, timeout: int = 60) -> Optional[int]:
         """
@@ -444,18 +708,86 @@ class PaperSummarizer:
         except Exception as e:
             logger.trace(f"Error releasing lock: {e}")
 
-    def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
+    def _acquire_gpu_slot(self, timeout: int = 600) -> Optional[int]:
+        """
+        Acquire a GPU slot for MinerU process (implements semaphore with file-based locks)
+
+        Args:
+            timeout: Maximum wait time in seconds
+
+        Returns:
+            Slot number (0 to MINERU_MAX_WORKERS-1) if acquired, None if timeout
+        """
+        slots_dir = self.mineru_dir / ".gpu_slots"
+        slots_dir.mkdir(parents=True, exist_ok=True)
+
+        start_time = time.time()
+        max_workers = max(1, MINERU_MAX_WORKERS)
+
+        try:
+            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "3600"))
+        except Exception:
+            stale_s = 3600.0
+
+        while time.time() - start_time < timeout:
+            # Try to acquire any available slot
+            for slot in range(max_workers):
+                slot_lock_path = slots_dir / f"slot_{slot}.lock"
+                try:
+                    fd = os.open(str(slot_lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+                    logger.trace(f"Acquired GPU slot {slot}/{max_workers}")
+                    # Write process info to lock file
+                    try:
+                        os.write(fd, f"{os.getpid()}\\n{time.time()}\\n".encode())
+                    except Exception:
+                        pass
+                    return slot
+                except FileExistsError:
+                    # Check if lock is stale
+                    if stale_s > 0:
+                        try:
+                            age = time.time() - slot_lock_path.stat().st_mtime
+                            if age > stale_s:
+                                slot_lock_path.unlink(missing_ok=True)
+                                logger.trace(f"Removed stale GPU slot lock: {slot_lock_path}")
+                                continue
+                        except Exception:
+                            pass
+
+            # No slot available, wait and retry
+            time.sleep(1.0)
+
+        logger.trace(f"Failed to acquire GPU slot after {timeout} seconds")
+        return None
+
+    def _release_gpu_slot(self, slot: int):
+        """Release a GPU slot"""
+        try:
+            slots_dir = self.mineru_dir / ".gpu_slots"
+            slot_lock_path = slots_dir / f"slot_{slot}.lock"
+            slot_lock_path.unlink(missing_ok=True)
+            logger.trace(f"Released GPU slot {slot}")
+        except Exception as e:
+            logger.trace(f"Error releasing GPU slot {slot}: {e}")
+
+    def parse_pdf_with_mineru(
+        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+    ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU (with multi-process lock protection)
 
         Args:
             pdf_path: PDF file path
+            cache_pid: Optional paper ID to use for output directory (should be raw PID).
+                       If not provided, uses the PDF filename (stem).
+            cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
         Returns:
             Generated Markdown file path, None if failed
         """
         try:
-            pdf_name = pdf_path.stem
+            # Use cache_pid if provided, otherwise use PDF filename
+            pdf_name = cache_pid or pdf_path.stem
             output_dir = self.mineru_dir
             backend = self._normalize_mineru_backend()
 
@@ -470,6 +802,7 @@ class PaperSummarizer:
             # Use file-based lock for multi-process synchronization
             lock_path = self.mineru_dir / f".{pdf_name}.lock"
             lock_fd = None
+            gpu_slot = None
 
             try:
                 # Acquire file lock (works across processes)
@@ -488,8 +821,22 @@ class PaperSummarizer:
                     logger.trace(f"File generated during lock wait: {existing_md_path}")
                     return existing_md_path
 
+                # Normalize device setting
+                device = (MINERU_DEVICE or "cuda").strip().lower()
+                if device not in ["cuda", "cpu"]:
+                    logger.trace(f"Invalid device '{device}', fallback to cuda")
+                    device = "cuda"
+
+                # Acquire GPU slot for pipeline backend with GPU (limit concurrent GPU processes)
+                if backend == "pipeline" and device == "cuda":
+                    logger.trace(f"Waiting for GPU slot (max workers: {MINERU_MAX_WORKERS})...")
+                    gpu_slot = self._acquire_gpu_slot(timeout=600)
+                    if gpu_slot is None:
+                        logger.trace(f"Failed to acquire GPU slot for {pdf_name}, skipping")
+                        return None
+                    logger.trace(f"Acquired GPU slot {gpu_slot} for {pdf_name}")
+
                 # Build minerU command (backend selection per MinerU CLI docs)
-                # cmd = ["mineru", "-p", str(pdf_path), "-o", str(output_dir), "-l", "en", "-d", "cuda", "--vram", "2"]
                 cmd = [
                     "mineru",
                     "-p",
@@ -501,9 +848,14 @@ class PaperSummarizer:
                     "-b",
                     backend,
                 ]
-                # pipeline 模式强制使用 CPU 运行
+
+                # Configure backend-specific parameters
                 if backend == "pipeline":
-                    cmd.extend(["-d", "cpu"])
+                    # Use configured device (cuda or cpu)
+                    cmd.extend(["-d", device])
+                    # Only set VRAM limit for GPU mode
+                    if device == "cuda" and MINERU_MAX_VRAM > 0:
+                        cmd.extend(["--vram", str(MINERU_MAX_VRAM)])
                 elif backend == "vlm-http-client":
                     cmd.extend(["-u", f"http://127.0.0.1:{MINERU_PORT}"])
 
@@ -532,6 +884,9 @@ class PaperSummarizer:
                 if existing_md_path:
                     logger.trace(f"PDF parse complete: {existing_md_path}")
 
+                    # Write meta.json for MinerU output with version info
+                    self._write_mineru_meta(pdf_name, backend, cached_version=cached_version)
+
                     # Delete PDF file after successful parsing to save space
                     try:
                         pdf_path.unlink(missing_ok=True)
@@ -554,6 +909,10 @@ class PaperSummarizer:
                     return None
 
             finally:
+                # Always release the GPU slot first (if acquired)
+                if gpu_slot is not None:
+                    self._release_gpu_slot(gpu_slot)
+
                 # Always release the file lock
                 if lock_fd is not None:
                     self._release_file_lock(lock_fd, lock_path)
@@ -761,16 +1120,18 @@ understand the key techniques, core results, and important details without readi
 Readers with foundational knowledge in the relevant field
 
 <Content Requirements>
-1. **Must Include**: Research motivation & background, core contributions (1-3 points),
-   detailed method/algorithm explanation, key experimental results, limitations or future directions
-2. **Focus on Methods**: The method/algorithm section should be explained in detail with
-   intuitive explanations, formulas with mathematical derivations where necessary,
-   or analogies for complex concepts
-3. **Source Fidelity**: All statements must be based on the original paper;
-   do not speculate on content the authors did not explicitly state
-4. **Figure/Table Handling**: Clearly describe the meaning of key figures and tables in text
-5. **Balanced Detail**: Include as many important paper details as possible
-   without significantly increasing reading burden
+1. **Must Include**: Research motivation and background, core contributions (1-3 points), detailed method/algorithm explanation, key experimental results, limitations or future directions
+2. **Focus on Expansion**: The method/algorithm section needs detailed introduction, with intuitive explanations, necessary formulas and mathematical derivations, or analogies to describe complex concepts
+3. **Information Sourcing**: All statements must be based on the original text, do not speculate on content not explicitly stated by the authors
+4. **Image Usage**: When a certain image significantly helps understanding the paper, please reference the image in the blog
+   - Only select the most critical images for understanding (typically 1-3)
+   - Generally, a paper will have one or two images that can illustrate the core method and unique contributions; if such images exist, please reference them
+   - Use numbered format: `![Figure 1: Figure title. Brief description](images/filename.png)`
+   - Reference images in the text by number, such as "As shown in Figure 1,..." , "Figure 2 shows..."
+   - Image numbers must be consecutive (Figure 1, Figure 2, Figure 3...)
+   - **Do not use blockquotes (>) to wrap images**
+   - **Do not modify image paths or filenames**
+5. **Appropriate Detail Level**: Without significantly increasing the reading burden, add as comprehensive important paper details as possible in the blog
 
 <Style Requirements>
 - Clear structure with hierarchical headings
@@ -785,7 +1146,7 @@ Readers with foundational knowledge in the relevant field
 
 <Output Format>
 ## Technical Blog
-The detailed technical blog content
+The detailed technical blog content (with key figures where appropriate)
 
 ## TL;DR
 A concise 2-3 sentence summary of the paper's core contribution and significance
@@ -796,6 +1157,7 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 2. Do not guess or fabricate data; skip quantitative analysis rather than summarize incorrect data
 3. Please write in **English**
 4. Make the content accessible yet technically rigorous
+5. Only include figures that exist in the paper content above; do not invent figure references
 </Important Notes>
 """
             else:
@@ -810,7 +1172,14 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 1. **必须包含**：研究动机与背景、核心贡献（1-3点）、方法/算法详解、关键实验结果、局限性或未来方向
 2. **重点展开**：方法/算法部分需要详细介绍，需配合直观解释，必要时配合公式和数学推导或者用类比描述复杂概念
 3. **信息溯源**：所有陈述需基于原文，不臆测作者未明确表述的内容
-4. **图表处理**：对论文核心图表用文字清晰描述其含义
+4. **图片使用**：当某张图片对理解论文有重要帮助时，请在博客中引用该图片
+   - 只选择对理解最关键的图片（通常1-3张）
+   - 一般而言一篇论文会有一到两张能诠释核心方法以及独特贡献的图片，如果这样的图片存在，请引用它们
+   - 使用编号格式：`![图1： 图标题。简要说明](images/filename.png)`
+   - 正文中通过编号引用图片，如"如图1所示，..."、"图2展示了..."
+   - 图片编号必须连续（图1、图2、图3...）
+   - **不要使用引用块（>）包裹图片**
+   - **不要修改图片路径或文件名**
 5. **详略得当**：在不显著增加阅读负担的前提下，在博客中增加尽可能全面的重要论文细节
 
 <风格要求>
@@ -826,7 +1195,7 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 
 <输出格式>
 ## 技术博客
-具体的技术博客内容
+具体的技术博客内容（在适当位置包含关键图片）
 
 ## TL;DR
 用2-3句话概括论文的核心贡献和意义
@@ -838,6 +1207,7 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 2. 不要猜测更不要臆造数据，宁可跳过定量分析，也不要总结错误数据
 3. 请一定用**中文**撰写
 4. 保持内容易读的同时确保技术严谨性
+5. 只引用论文内容中存在的图片，不要编造图片引用
 </注意事项>
 """
 
@@ -894,8 +1264,8 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
     def _parse_summary_sections(self, summary: str) -> str:
         """
         Parse summary content from LLM output and reorganize with TL;DR first.
-        Expected input format: Technical Blog section followed by TL;DR section.
-        Output format: TL;DR first, then Technical Blog.
+        Strategy: Extract TL;DR section, treat everything else as blog content.
+        Output format: TL;DR first, then blog content.
 
         Args:
             summary: Original summary content
@@ -903,40 +1273,63 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
         Returns:
             Reorganized summary content with TL;DR first
         """
-        # Extract TL;DR section (match until end of string or next ## heading)
-        tldr_match = re.search(r"##\s*TL;DR\s*\n(.*?)(?=\n##[^#]|$)", summary, re.DOTALL | re.IGNORECASE)
-        tldr_content = tldr_match.group(1).strip() if tldr_match else ""
+        # Extract TL;DR section (including heading, match any heading level #, ##, ### etc.)
+        tldr_match = re.search(r"(#{1,6}\s*TL;DR\s*\n.*?)(?=\n#{1,6}\s|$)", summary, re.DOTALL | re.IGNORECASE)
 
-        # Extract Technical Blog section (Chinese or English, match until TL;DR or end)
-        blog_match = re.search(
-            r"##\s*(技术博客|Technical Blog)\s*\n(.*?)(?=\n##\s*TL;DR|$)",
-            summary,
-            re.DOTALL | re.IGNORECASE,
-        )
-        blog_content = blog_match.group(2).strip() if blog_match else ""
+        if tldr_match:
+            tldr_section = tldr_match.group(1).strip()
+            # Remove TL;DR section from summary to get blog content
+            blog_content = summary[: tldr_match.start()] + summary[tldr_match.end() :]
+            blog_content = blog_content.strip()
 
-        if tldr_content and blog_content:
-            # Reorganize: TL;DR first, then Technical Blog
-            formatted = f"""## TL;DR
-
-{tldr_content}
-
-## Technical Blog
-
-{blog_content}"""
-            return formatted
+            if tldr_section and blog_content:
+                # Reorganize: TL;DR first, then blog
+                result = f"{tldr_section}\n\n{blog_content}"
+                result = re.sub(r"\n{3,}", "\n\n", result).strip()
+                return result
 
         # Fallback: just clean up the original content
         cleaned = re.sub(r"\n{3,}", "\n\n", summary).strip()
         return cleaned
+
+    def _postprocess_image_paths(self, summary: str, pid: str, source: str = "html") -> str:
+        """
+        Post-process image paths in summary to use correct API URLs.
+
+        Converts relative paths like `images/xxx.png` to API paths for web rendering.
+        - HTML source: `/api/paper_image/{pid}/{filename}`
+        - MinerU source: `/api/mineru_image/{pid}/{filename}`
+
+        Args:
+            summary: Summary content with image references
+            pid: Paper ID for constructing image URLs
+            source: Image source type ("html" or "mineru")
+
+        Returns:
+            Summary with corrected image paths
+        """
+        # Pattern to match markdown image syntax: ![alt](images/filename.ext)
+        pattern = r"!\[([^\]]*)\]\(images/([^)]+)\)"
+
+        # Choose API endpoint based on source
+        api_prefix = "/api/paper_image" if source == "html" else "/api/mineru_image"
+
+        def replace_path(match):
+            alt_text = match.group(1)
+            filename = match.group(2)
+            # Convert to API endpoint path
+            return f"![{alt_text}]({api_prefix}/{pid}/{filename})"
+
+        return re.sub(pattern, replace_path, summary)
 
     def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
         """
         Main entry function for generating paper summary
 
         Args:
-            pid: Paper ID
+            pid: Paper ID (may or may not include version)
             source: Markdown source override ("html" or "mineru")
+            model: LLM model name
 
         Returns:
             Dict containing paper summary markdown content and metadata
@@ -950,15 +1343,22 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
             summary_source = self._normalize_summary_source(source)
 
             if summary_source == "html":
-                markdown_content, html_source = self._get_markdown_from_html(pid)
+                markdown_content, html_source, cache_pid = self._get_markdown_from_html(pid)
                 if markdown_content:
                     main_content = self.extract_main_content(markdown_content)
-                    logger.info(f"Summarizing {pid} (html:{html_source or 'unknown'}) ...")
-                    return self.summarize_with_llm(main_content, model=model)
+                    logger.info(f"Summarizing {pid} (html:{html_source or 'unknown'}, cache:{cache_pid}) ...")
+                    summary = self.summarize_with_llm(main_content, model=model)
+                    # Post-process image paths using the actual cache_pid
+                    summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid)
+                    return summary
                 logger.info(f"HTML fetch/parse failed for {pid}, fallback to minerU.")
 
+            # Use raw PID for MinerU storage - arXiv returns latest version automatically
+            cache_pid = self._resolve_cache_pid(pid)
+            backend = self._normalize_mineru_backend()
+
             # Pre-check if parsing result already exists
-            existing_md_path = self._find_mineru_markdown(pid, backend=self._normalize_mineru_backend())
+            existing_md_path = self._find_mineru_markdown(cache_pid, backend=backend)
             if existing_md_path:
                 logger.trace(f"Found existing parse result: {existing_md_path}")
                 # Read Markdown content directly
@@ -969,21 +1369,23 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
                     # Step 3: Extract main paper content
                     main_content = self.extract_main_content(markdown_content)
                     # Step 4: Generate summary using LLM
-                    logger.info(f"Summarizing {pid}.pdf ...")
+                    logger.info(f"Summarizing {cache_pid} (mineru) ...")
                     summary = self.summarize_with_llm(main_content, model=model)
+                    # Post-process image paths for MinerU source
+                    summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid, source="mineru")
                     return summary
                 else:
                     logger.trace("Existing Markdown file content is empty, re-parsing")
 
-            # Step 1: Download paper PDF
-            logger.info(f"Downloading {pid}.pdf ...")
-            pdf_path = self.download_arxiv_paper(pid)
+            # Step 1: Download paper PDF (use cache_pid for filename)
+            logger.info(f"Downloading {cache_pid}.pdf ...")
+            pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
             if not pdf_path:
                 return self._build_summary_result("# Error\n\nUnable to download paper PDF")
 
             # Step 2: Parse PDF to Markdown using minerU
-            logger.info(f"Parsing {pid}.pdf ...")
-            md_path = self.parse_pdf_with_mineru(pdf_path)
+            logger.info(f"Parsing {cache_pid}.pdf ...")
+            md_path = self.parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
             if not md_path:
                 return self._build_summary_result("# Error\n\nUnable to parse PDF to Markdown")
 
@@ -998,8 +1400,10 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
             main_content = self.extract_main_content(markdown_content)
 
             # Step 5: Generate summary using LLM
-            logger.info(f"Summarizing {pid}.pdf ...")
+            logger.info(f"Summarizing {cache_pid} (mineru) ...")
             summary = self.summarize_with_llm(main_content, model=model)
+            # Post-process image paths for MinerU source
+            summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid, source="mineru")
 
             return summary
 
@@ -1072,33 +1476,123 @@ def split_pid_version(pid: str) -> Tuple[str, Optional[int]]:
 
 def resolve_cache_pid(pid: str, meta: Optional[dict] = None) -> Tuple[str, str, bool]:
     """
-    Resolve cache PID from paper ID and optional metadata.
+    Resolve cache PID from paper ID.
+
+    SIMPLIFIED: Always use raw PID (without version) for caching.
+    arXiv/ar5iv automatically return the latest version when accessed without version.
+    This simplifies cache management - we only keep the latest version.
 
     Args:
-        pid: Paper ID
-        meta: Optional paper metadata dict
+        pid: Paper ID (may include version suffix)
+        meta: Optional paper metadata dict (unused, kept for API compatibility)
 
     Returns:
         Tuple of (cache_pid, raw_pid, has_explicit_version)
+        - cache_pid: Always the raw PID (used for storage)
+        - raw_pid: The raw PID without version
+        - has_explicit_version: Whether the input had a version suffix
     """
     raw_pid, explicit_version = split_pid_version(pid)
-    if explicit_version:
-        return pid, raw_pid, True
+    # Always use raw_pid for caching - we only keep the latest version
+    return raw_pid, raw_pid, explicit_version is not None
 
+
+def normalize_to_versioned_pid(pid: str, meta: Optional[dict] = None, base_dir: Optional[Path] = None) -> str:
+    """
+    Normalize PID to always include a version number.
+
+    This ensures all cache directories follow the versioned format (e.g., "2511.08653v3").
+
+    Strategy:
+    1. If PID already has version → return as-is
+    2. If meta has _version → use that version
+    3. If base_dir provided → scan for highest existing version
+    4. Default to v1
+
+    Args:
+        pid: Paper ID (may or may not include version)
+        meta: Optional paper metadata dict
+        base_dir: Optional base directory to scan for existing versions
+
+    Returns:
+        Versioned PID string (always has vN suffix)
+    """
+    raw_pid, explicit_version = split_pid_version(pid)
+
+    # Strategy 1: Already has version
+    if explicit_version:
+        return pid
+
+    # Strategy 2: Get version from metadata
     if isinstance(meta, dict):
-        # Try _idv first
         idv = meta.get("_idv")
         if isinstance(idv, str) and idv.strip():
-            return idv.strip(), raw_pid, False
-        # Try _version
+            # Validate it has version
+            _, v = split_pid_version(idv.strip())
+            if v:
+                return idv.strip()
         version = meta.get("_version")
         if version is not None:
             try:
-                return f"{raw_pid}v{int(version)}", raw_pid, False
+                return f"{raw_pid}v{int(version)}"
             except Exception:
                 pass
 
-    return raw_pid, raw_pid, False
+    # Strategy 3: Scan directory for existing versions
+    if base_dir and base_dir.exists():
+        highest_version = 0
+        try:
+            for entry in base_dir.iterdir():
+                if entry.is_dir() and entry.name.startswith(raw_pid):
+                    _, v = split_pid_version(entry.name)
+                    if v and v > highest_version:
+                        highest_version = v
+        except Exception:
+            pass
+        if highest_version > 0:
+            return f"{raw_pid}v{highest_version}"
+
+    # Strategy 4: Default to v1
+    return f"{raw_pid}v1"
+
+
+def find_cache_dir(base_dir: Path, pid: str, create: bool = False) -> Tuple[Optional[Path], str]:
+    """
+    Find or create a cache directory using raw PID (no version suffix).
+
+    Simplified approach: arXiv/ar5iv automatically return latest version,
+    so we always store with raw PID only.
+
+    Args:
+        base_dir: Base directory (e.g., Path("data/html_md"))
+        pid: Paper ID (version suffix will be stripped if present)
+        create: Whether to create the directory if it doesn't exist
+
+    Returns:
+        Tuple of (cache_dir_path or None, raw_pid)
+    """
+    raw_pid, _ = split_pid_version(pid)
+    cache_dir = base_dir / raw_pid
+
+    if cache_dir.exists():
+        return cache_dir, raw_pid
+
+    if create:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir, raw_pid
+
+    return None, raw_pid
+
+
+# Keep for backward compatibility during migration
+def find_versioned_cache_dir(
+    base_dir: Path, pid: str, meta: Optional[dict] = None, create: bool = False
+) -> Tuple[Optional[Path], str]:
+    """
+    DEPRECATED: Use find_cache_dir instead.
+    This function now delegates to find_cache_dir (ignores meta parameter).
+    """
+    return find_cache_dir(base_dir, pid, create)
 
 
 def model_cache_key(model: Optional[str]) -> str:
@@ -1362,23 +1856,27 @@ def atomic_write_json(path: Path, data: dict) -> None:
         path: Target file path
         data: Dict to write as JSON
     """
-    atomic_write_text(path, json.dumps(data))
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False))
 
 
 if __name__ == "__main__":
     # Test code
+    import argparse
     import sys
 
     logger.remove()
     logger.add(sys.stderr, level="TRACE")
-    if len(sys.argv) > 1:
-        test_pid = sys.argv[1]
-        logger.trace(f"Test paper ID: {test_pid}")
-        summary = generate_paper_summary(test_pid)
-        logger.trace("\n" + "=" * 50)
-        logger.trace("Paper summary:")
-        logger.trace("=" * 50)
-        logger.trace(summary.get("content"))
-    else:
-        logger.trace("Usage: python paper_summarizer.py <paper_id>")
-        logger.trace("Example: python paper_summarizer.py 2301.00001")
+
+    parser = argparse.ArgumentParser(description="Test paper summarizer")
+    parser.add_argument("pid", help="Paper ID")
+    parser.add_argument("--model", help="Override default model")
+    args = parser.parse_args()
+
+    logger.trace(f"Test paper ID: {args.pid}")
+    if args.model:
+        logger.trace(f"Using model: {args.model}")
+    summary = generate_paper_summary(args.pid, model=args.model)
+    logger.trace("\n" + "=" * 50)
+    logger.trace("Paper summary:")
+    logger.trace("=" * 50)
+    logger.trace(summary.get("content"))

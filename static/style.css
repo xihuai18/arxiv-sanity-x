@@ -4140,6 +4140,16 @@ body {
     margin-bottom: 16px;
 }
 
+/* Paper user tags section for summary page */
+.paper-user-tags-section {
+    margin-top: 16px;
+}
+
+.paper-user-tags-section .rel_utags {
+    margin-bottom: 0;
+}
+
+
 /* Paper action buttons */
 .paper-action-buttons {
     display: flex;
@@ -4339,6 +4349,157 @@ html[data-theme="dark"] .summary-actions select {
     transform: none;
 }
 
+/* Summary button variants */
+.summary-btn-warning {
+    background: linear-gradient(135deg, var(--warning-color) 0%, #ea580c 100%) !important;
+    box-shadow: 0 2px 8px rgba(245, 158, 11, 0.3) !important;
+}
+
+.summary-btn-warning:hover {
+    background: linear-gradient(135deg, #ea580c 0%, var(--warning-color) 100%) !important;
+    box-shadow: 0 4px 12px rgba(245, 158, 11, 0.4) !important;
+}
+
+.summary-btn-danger {
+    background: linear-gradient(135deg, var(--danger-color) 0%, #dc2626 100%) !important;
+    box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3) !important;
+}
+
+.summary-btn-danger:hover {
+    background: linear-gradient(135deg, #dc2626 0%, var(--danger-color) 100%) !important;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4) !important;
+}
+
+/* Button group with confirm popup */
+.summary-btn-group {
+    position: relative;
+    display: inline-block;
+}
+
+.confirm-popup {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 1000;
+    min-width: 320px;
+    max-width: 400px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15), 0 4px 8px rgba(0, 0, 0, 0.1);
+    animation: confirmSlideIn 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.confirm-popup::before {
+    content: '';
+    position: absolute;
+    top: -8px;
+    right: 20px;
+    width: 0;
+    height: 0;
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-bottom: 8px solid var(--border-color);
+}
+
+.confirm-popup::after {
+    content: '';
+    position: absolute;
+    top: -7px;
+    right: 21px;
+    width: 0;
+    height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 7px solid var(--card-bg);
+}
+
+@keyframes confirmSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-8px) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.confirm-content {
+    padding: 20px;
+}
+
+.confirm-content strong {
+    display: block;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-color);
+    margin-bottom: 12px;
+}
+
+.confirm-content p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin: 8px 0;
+    line-height: 1.6;
+}
+
+.confirm-content ul {
+    margin: 12px 0;
+    padding-left: 24px;
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.confirm-content ul li {
+    margin: 4px 0;
+}
+
+.confirm-warning {
+    color: var(--danger-color) !important;
+    font-weight: 600;
+    font-size: 13px !important;
+    margin-top: 12px !important;
+}
+
+.confirm-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+    justify-content: flex-end;
+}
+
+.confirm-btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.confirm-yes {
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 100%);
+    color: white;
+}
+
+.confirm-yes:hover {
+    background: linear-gradient(135deg, var(--btn-hover) 0%, var(--btn-bg) 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(179, 27, 27, 0.3);
+}
+
+.confirm-no {
+    background: var(--body-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+}
+
+.confirm-no:hover {
+    background: var(--border-color);
+}
+
 .summary-meta {
     display: flex;
     align-items: center;
@@ -4505,6 +4666,123 @@ html[data-theme="dark"] .summary-actions select {
 
 .markdown-content blockquote p:last-child {
     margin-bottom: 0;
+}
+
+/* Paper figures/images in markdown content */
+.markdown-content figure {
+    margin: 32px auto;
+    text-align: center;
+    display: table; /* Keeps caption width same as image */
+    max-width: 100%;
+    background: var(--card-bg);
+    padding: 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.markdown-content figure img {
+    display: block;
+    max-width: 100%;
+    max-height: 600px; /* 限制图片最大高度 */
+    height: auto;
+    margin: 0 auto;
+    border-radius: 6px;
+    cursor: zoom-in;
+    transition: transform 0.2s ease;
+    object-fit: contain; /* 保持图片比例 */
+}
+
+.markdown-content figure img:hover {
+    transform: scale(1.01);
+}
+
+.markdown-content figcaption {
+    display: table-caption;
+    caption-side: bottom;
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.5;
+    text-align: center;
+    font-weight: 500;
+    padding: 0 8px;
+}
+
+[data-theme="dark"] .markdown-content figure {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Image load error message */
+.markdown-content .image-load-error {
+    display: block;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-style: italic;
+    margin: 16px 0;
+}
+
+/* Image zoom overlay */
+.image-zoom-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    cursor: zoom-out;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.image-zoom-container {
+    position: relative;
+    width: 95vw;
+    height: 95vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.image-zoom-container img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    cursor: default;
+}
+
+.image-zoom-close {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 40px;
+    height: 40px;
+    background: rgba(0, 0, 0, 0.6);
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s ease;
+}
+
+.image-zoom-close:hover {
+    background: rgba(255, 255, 255, 0.2);
 }
 
 /* Summary table of contents */
