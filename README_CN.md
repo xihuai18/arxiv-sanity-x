@@ -280,7 +280,52 @@ export ARXIV_SANITY_MINERU_BACKEND=vlm-http-client
 - ✅ 支持多客户端共享同一服务
 - ⚠️ 需要单独启动和维护 vLLM 服务
 
-说明：HTML 模式不依赖 minerU；VLM 模式需在 `MINERU_PORT` 启动 minerU OpenAI 兼容服务。
+#### API 后端配置（MinerU 官方 API）
+
+使用 MinerU 官方云端 API 服务进行 PDF 解析：
+```bash
+# vars.py 配置
+MINERU_BACKEND = "api"
+MINERU_API_KEY = os.environ.get("MINERU_API_KEY", "")
+MINERU_API_POLL_INTERVAL = 5    # API 轮询间隔（秒）
+MINERU_API_TIMEOUT = 600        # API 超时时间（秒）
+
+# 或使用环境变量
+export ARXIV_SANITY_MINERU_BACKEND=api
+export MINERU_API_KEY="your-api-key-here"
+```
+
+特点：
+- ✅ 无需本地 GPU 或 CPU 资源
+- ✅ 快速解析（通常 1-3 分钟）
+- ✅ 高质量 VLM 模型解析
+- ⚠️ 需要 API Key（可能有费用）
+- ⚠️ 依赖外部服务稳定性
+
+工作流程：
+1. 提交 arXiv PDF URL 到 MinerU API
+2. 轮询任务状态（pending → running → done）
+3. 下载并解压 ZIP 结果
+4. 提取 Markdown 和图片到 `data/mineru/{paper_id}/api/`
+
+错误处理：
+- API Key 未配置 → 显示 "MinerU API Configuration Error"
+- API Key 过期/认证失败 → 显示 "MinerU API Service Unavailable"
+- 其他错误 → 显示详细错误信息
+
+测试 API backend：
+```bash
+# 设置 API Key
+export MINERU_API_KEY="your-key-here"
+
+# 测试单篇论文
+python3 test_mineru_api_backend.py 2512.24873
+
+# 或直接生成摘要
+python3 paper_summarizer.py 2512.24873
+```
+
+说明：HTML 模式不依赖 minerU；VLM 模式需在 `MINERU_PORT` 启动 minerU OpenAI 兼容服务；API 模式使用 MinerU 官方云服务。
 说明：摘要与 HTML 缓存按 arXiv 版本（pidvN）区分，新版本会自动重新生成。
 
 ### 调度器环境变量

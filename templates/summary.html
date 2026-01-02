@@ -16,7 +16,7 @@ var tags = {{ tags | tojson }};
 {% raw %}
 window.MathJax = {
     loader: {
-        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics']
+        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat']
     },
     tex: {
         inlineMath: [['\\(', '\\)'], ['$', '$']],
@@ -39,6 +39,7 @@ window.MathJax = {
                 'noerrors',    // Don't show error messages inline
                 'noundefined', // Don't show undefined command errors
                 'physics',     // Physics package macros
+                'tagformat',   // Allow tags in more contexts
                 'textmacros',  // Text mode macros
                 'unicode',     // Unicode support
                 'verb'         // Verbatim
@@ -49,6 +50,13 @@ window.MathJax = {
         tagIndent: '0.8em',
         useLabelIds: true,
         multlineWidth: '85%',
+        // Allow \tag in aligned and other environments
+        tagformat: {
+            number: (n) => n.toString(),
+            tag: (tag) => '(' + tag + ')',
+            id: (tag) => 'mjx-eqn-' + tag.replace(/\s/g, '_'),
+            url: (id, base) => base + '#' + encodeURIComponent(id),
+        },
         // Define custom macros for common LaTeX commands
         macros: {
             // Bold and emphasis (fix unstable boldsymbol)

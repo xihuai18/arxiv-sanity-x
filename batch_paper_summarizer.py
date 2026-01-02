@@ -64,7 +64,7 @@ class BatchPaperSummarizer(PaperSummarizer):
         if self.processor:
             self.processor._record_failure_detail(pid, reason, message, exception)
 
-    def download_arxiv_paper(self, pid: str) -> Tuple[Optional[Path], Optional[str]]:
+    def download_arxiv_paper(self, pid: str) -> Optional[Path]:
         """
         Download arXiv paper PDF, reuse parent class method and add error recording
 
@@ -72,9 +72,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             pid: Paper ID, e.g. "2301.00001"
 
         Returns:
-            Tuple of (pdf_path, version):
-            - pdf_path: Downloaded PDF file path, None if failed
-            - version: The actual version downloaded (e.g., "3"), None if unknown
+            Downloaded PDF file path, None if failed
         """
         try:
             return super().download_arxiv_paper(pid)
@@ -83,32 +81,26 @@ class BatchPaperSummarizer(PaperSummarizer):
             logger.error(error_msg)
             # Record detailed error information
             self._record_failure_detail(pid, "download_failed", error_msg, e)
-            return None, None
+            return None
 
-    def parse_pdf_with_mineru(
-        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
-    ) -> Optional[Path]:
+    def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU
         Now completely relies on parent class implementation which already has proper file locking
 
         Args:
             pdf_path: PDF file path
-            cache_pid: Optional paper ID to use for output directory (should be raw PID).
-                       If not provided, uses the PDF filename (stem).
-            cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
         Returns:
             Generated Markdown file path, None if failed
         """
         try:
             # Directly use parent class method - it already has file-based locking
-            result = super().parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
+            result = super().parse_pdf_with_mineru(pdf_path)
             if result is None:
                 # Record failure details
-                paper_id = cache_pid or pdf_path.stem
                 self._record_failure_detail(
-                    paper_id,
+                    pdf_path.stem,
                     "parse_failed",
                     "Parent class parse_pdf_with_mineru returned None",
                     Exception("minerU parsing failed"),
@@ -119,11 +111,10 @@ class BatchPaperSummarizer(PaperSummarizer):
             error_msg = f"PDF parse failed: {e}"
             logger.trace(error_msg)
             # Record failure details
-            paper_id = cache_pid or pdf_path.stem
-            self._record_failure_detail(paper_id, "parse_failed", error_msg, e)
+            self._record_failure_detail(pdf_path.stem, "parse_failed", error_msg, e)
             return None
 
-    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
+    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> str:
         """
         Main entry function for generating paper summary, reuse parent class logic
 
@@ -133,7 +124,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             model: LLM model name
 
         Returns:
-            Dict containing paper summary markdown content and metadata
+            Paper summary in Markdown format
         """
         # Directly call parent class generate_summary method
         # Parent class method already includes vlm to auto migration logic

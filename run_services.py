@@ -57,6 +57,62 @@ def _wait_for_http(url: str, timeout_s: float, name: str) -> bool:
     return False
 
 
+def _check_mineru_api(api_key: str | None) -> bool:
+    """Check if MinerU API is available and key is valid."""
+    if not api_key or not api_key.strip():
+        print(
+            "[launcher] Error: MINERU_API_KEY is not set. API backend requires a valid API key.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+
+    api_url = "https://mineru.net/api/v4/extract/task"
+    try:
+        import requests
+
+        # Test API key validity with a lightweight request
+        headers = {"Authorization": f"Bearer {api_key.strip()}"}
+        response = requests.get(api_url, headers=headers, timeout=5)
+
+        if response.status_code == 401:
+            print(
+                "[launcher] Error: MinerU API key is invalid or expired. Please check your MINERU_API_KEY.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        elif response.status_code == 403:
+            print(
+                "[launcher] Error: MinerU API access denied. Your API key may have expired or lacks permissions.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return False
+        elif response.status_code >= 500:
+            print(
+                f"[launcher] Warning: MinerU API server error (status {response.status_code}). Service may be temporarily unavailable.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return True  # Don't block startup for temporary server issues
+
+        # 200, 400, 404 etc. are acceptable - means API is reachable
+        print(f"[launcher] MinerU API is available (endpoint: {api_url})", flush=True)
+        return True
+
+    except ImportError:
+        print(
+            "[launcher] Error: 'requests' library not found. Install with: pip install requests",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    except Exception as e:
+        print(f"[launcher] Warning: Failed to verify MinerU API availability: {e}", file=sys.stderr, flush=True)
+        return True  # Don't block startup for network issues
+
+
 def _stream_lines(prefix: str, pipe):
     try:
         for line in iter(pipe.readline, ""):
@@ -185,7 +241,9 @@ def main() -> int:
         from vars import (
             EMBED_PORT,
             LITELLM_PORT,
+            MINERU_API_KEY,
             MINERU_BACKEND,
+            MINERU_ENABLED,
             MINERU_PORT,
             SERVE_PORT,
         )
@@ -196,12 +254,36 @@ def main() -> int:
     if args.fetch_compute is not None:
         return _run_fetch_compute(repo_root=repo_root, num_papers=args.fetch_compute, max_r=1000)
 
+    # Check if MinerU is disabled globally
+    if not MINERU_ENABLED and not args.no_mineru:
+        print(
+            "[launcher] MinerU is disabled (ARXIV_SANITY_MINERU_ENABLED=false), skip starting minerU service.",
+            file=sys.stderr,
+            flush=True,
+        )
+        args.no_mineru = True
+
     mineru_backend = (os.environ.get("ARXIV_SANITY_MINERU_BACKEND") or MINERU_BACKEND or "pipeline").strip().lower()
     if mineru_backend == "pipeline" and not args.no_mineru:
         print(
             "[launcher] Warning: ARXIV_SANITY_MINERU_BACKEND=pipeline, skip starting minerU vLLM service. "
             "Set ARXIV_SANITY_MINERU_BACKEND=vlm-http-client if you need the VLM backend.",
             file=sys.stderr,
+            flush=True,
+        )
+        args.no_mineru = True
+    elif mineru_backend == "api" and not args.no_mineru:
+        # For API backend, check API availability instead of starting local service
+        api_key = os.environ.get("ARXIV_SANITY_MINERU_API_KEY") or MINERU_API_KEY
+        if not _check_mineru_api(api_key):
+            print(
+                "[launcher] Error: MinerU API backend is not available. Fix the API key issue or disable MinerU.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 3
+        print(
+            "[launcher] MinerU API backend configured, skip starting local minerU service.",
             flush=True,
         )
         args.no_mineru = True
