@@ -279,7 +279,52 @@ Features:
 - ✅ Multiple clients can share same service
 - ⚠️ Requires separate vLLM service startup and maintenance
 
-Note: HTML mode does not require minerU. VLM mode requires minerU OpenAI-compatible server on `MINERU_PORT`.
+#### API Backend Configuration (MinerU Official API)
+
+Use MinerU's official cloud API service for PDF parsing:
+```bash
+# vars.py configuration
+MINERU_BACKEND = "api"
+MINERU_API_KEY = os.environ.get("MINERU_API_KEY", "")
+MINERU_API_POLL_INTERVAL = 5    # API polling interval (seconds)
+MINERU_API_TIMEOUT = 600        # API timeout (seconds)
+
+# Or use environment variables
+export ARXIV_SANITY_MINERU_BACKEND=api
+export MINERU_API_KEY="your-api-key-here"
+```
+
+Features:
+- ✅ No local GPU or CPU resources required
+- ✅ Fast parsing (typically 1-3 minutes)
+- ✅ High-quality VLM model parsing
+- ⚠️ Requires API Key (may have costs)
+- ⚠️ Depends on external service availability
+
+Workflow:
+1. Submit arXiv PDF URL to MinerU API
+2. Poll task status (pending → running → done)
+3. Download and extract ZIP results
+4. Extract Markdown and images to `data/mineru/{paper_id}/api/`
+
+Error Handling:
+- API Key not configured → Shows "MinerU API Configuration Error"
+- API Key expired/authentication failed → Shows "MinerU API Service Unavailable"
+- Other errors → Shows detailed error message
+
+Test API backend:
+```bash
+# Set API Key
+export MINERU_API_KEY="your-key-here"
+
+# Test single paper
+python3 test_mineru_api_backend.py 2512.24873
+
+# Or generate summary directly
+python3 paper_summarizer.py 2512.24873
+```
+
+Note: HTML mode does not require minerU. VLM mode requires minerU OpenAI-compatible server on `MINERU_PORT`. API mode uses MinerU official cloud service.
 Note: Summary and HTML caches are version-aware (pidvN), so new arXiv versions regenerate automatically.
 
 ### Daemon Environment Variables

@@ -44,7 +44,12 @@ SUMMARY_MARKDOWN_SOURCE = os.environ.get("ARXIV_SANITY_SUMMARY_SOURCE", "html") 
 SUMMARY_HTML_SOURCES = os.environ.get("ARXIV_SANITY_HTML_SOURCES", "ar5iv,arxiv")  # HTML source order
 
 # MinerU configuration
-MINERU_BACKEND = os.environ.get("ARXIV_SANITY_MINERU_BACKEND", "pipeline")  # pipeline (default) or vlm-http-client
+MINERU_ENABLED = os.environ.get("ARXIV_SANITY_MINERU_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)  # Enable/disable MinerU PDF parsing
+MINERU_BACKEND = os.environ.get("ARXIV_SANITY_MINERU_BACKEND", "api")  # pipeline, vlm-http-client, or api (default)
 MINERU_DEVICE = os.environ.get("ARXIV_SANITY_MINERU_DEVICE", "cuda")  # cuda (default) or cpu (pipeline backend only)
 MINERU_MAX_WORKERS = int(
     os.environ.get("ARXIV_SANITY_MINERU_MAX_WORKERS", "2")
@@ -52,6 +57,11 @@ MINERU_MAX_WORKERS = int(
 MINERU_MAX_VRAM = int(
     os.environ.get("ARXIV_SANITY_MINERU_MAX_VRAM", "3")
 )  # Max VRAM per mineru process in GB (pipeline+cuda only)
+MINERU_API_KEY = os.environ.get("MINERU_API_KEY", "")  # MinerU API key (for api backend)
+MINERU_API_POLL_INTERVAL = int(
+    os.environ.get("MINERU_API_POLL_INTERVAL", "5")
+)  # Polling interval in seconds for API backend
+MINERU_API_TIMEOUT = int(os.environ.get("MINERU_API_TIMEOUT", "600"))  # API task timeout in seconds
 
 # paper_summarizer.py related constants
 MAIN_CONTENT_MIN_RATIO = 0.1  # Minimum content ratio after extracting main content

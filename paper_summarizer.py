@@ -7,6 +7,7 @@ Features:
 3. Summarize papers using LLM models
 """
 
+import io
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -29,8 +31,12 @@ from vars import (
     LLM_NAME,
     LLM_SUMMARY_LANG,
     MAIN_CONTENT_MIN_RATIO,
+    MINERU_API_KEY,
+    MINERU_API_POLL_INTERVAL,
+    MINERU_API_TIMEOUT,
     MINERU_BACKEND,
     MINERU_DEVICE,
+    MINERU_ENABLED,
     MINERU_MAX_VRAM,
     MINERU_MAX_WORKERS,
     MINERU_PORT,
@@ -121,8 +127,19 @@ class PaperSummarizer:
                     if mineru_meta.get("cached_version"):
                         cached_version = mineru_meta["cached_version"]
                         logger.trace(f"Using version {cached_version} from MinerU meta")
-                    # Note: Removed Strategy 3 (HEAD request) as it causes significant slowdown
-                    # in batch processing. Version info is nice-to-have, not critical.
+                    else:
+                        # Strategy 3: Make a HEAD request to get current version from redirect
+                        try:
+                            head_response = requests.head(pdf_url, allow_redirects=True, timeout=10)
+                            if head_response.ok:
+                                version_from_url = self._extract_version_from_url(head_response.url, raw_pid)
+                                if version_from_url:
+                                    cached_version = version_from_url
+                                    logger.trace(
+                                        f"Detected version {cached_version} from HEAD request: {head_response.url}"
+                                    )
+                        except Exception as e:
+                            logger.trace(f"Failed to determine version from HEAD request: {e}")
 
                 return pdf_path, cached_version
 
@@ -288,6 +305,7 @@ class PaperSummarizer:
             "vlm-vllm-engine",
             "vlm-lmdeploy-engine",
             "vlm-http-client",
+            "api",
         }
         if raw not in supported:
             logger.trace(f"Unknown minerU backend '{raw}', fallback to pipeline")
@@ -298,7 +316,10 @@ class PaperSummarizer:
         base_dir = self.mineru_dir / paper_id
         auto_md = base_dir / "auto" / f"{paper_id}.md"
         vlm_md = base_dir / "vlm" / f"{paper_id}.md"
-        if backend and backend.startswith("vlm"):
+        api_md = base_dir / "api" / f"{paper_id}.md"
+        if backend == "api":
+            return [api_md, vlm_md, auto_md]
+        elif backend and backend.startswith("vlm"):
             return [vlm_md, auto_md]
         return [auto_md, vlm_md]
 
@@ -377,60 +398,27 @@ class PaperSummarizer:
         return md_path, meta_path, images_dir
 
     def _read_html_meta(self, cache_pid: str) -> dict:
-        # Try new folder structure first
         _, meta_path, _ = self._html_cache_paths(cache_pid)
-        if meta_path.exists():
-            try:
-                with open(meta_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-
-        # Fallback to legacy flat structure
-        _, legacy_meta = self._legacy_html_cache_paths(cache_pid)
-        if legacy_meta.exists():
-            try:
-                with open(legacy_meta, encoding="utf-8") as f:
-                    data = json.load(f)
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                pass
-
-        return {}
-
-    def _legacy_html_cache_paths(self, cache_pid: str) -> Tuple[Path, Path]:
-        """Get legacy flat HTML cache paths for backward compatibility."""
-        md_path = self.html_md_dir / f"{cache_pid}.md"
-        meta_path = self.html_md_dir / f"{cache_pid}.meta.json"
-        return md_path, meta_path
+        if not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     def _read_html_markdown_cache(self, cache_pid: str) -> Optional[str]:
-        # Try new folder structure first
         md_path, _, _ = self._html_cache_paths(cache_pid)
-        if md_path.exists():
-            try:
-                with open(md_path, encoding="utf-8") as f:
-                    content = f.read()
-                if content.strip():
-                    return content
-            except Exception as e:
-                logger.trace(f"Failed to read HTML markdown cache for {cache_pid}: {e}")
-
-        # Fallback to legacy flat structure
-        legacy_md, _ = self._legacy_html_cache_paths(cache_pid)
-        if legacy_md.exists():
-            try:
-                with open(legacy_md, encoding="utf-8") as f:
-                    content = f.read()
-                if content.strip():
-                    logger.trace(f"Using legacy HTML cache for {cache_pid}")
-                    return content
-            except Exception as e:
-                logger.trace(f"Failed to read legacy HTML cache for {cache_pid}: {e}")
-
-        return None
+        if not md_path.exists():
+            return None
+        try:
+            with open(md_path, encoding="utf-8") as f:
+                content = f.read()
+            return content if content.strip() else None
+        except Exception as e:
+            logger.trace(f"Failed to read HTML markdown cache for {cache_pid}: {e}")
+            return None
 
     def _write_html_markdown_cache(self, cache_pid: str, markdown: str, source: str, url: str) -> None:
         """Write HTML markdown cache with metadata.
@@ -483,16 +471,11 @@ class PaperSummarizer:
             True if download successful, False otherwise
         """
         try:
-            # Check if image already exists (skip download)
-            if save_path.exists() and save_path.stat().st_size > 0:
-                logger.trace(f"Image already cached: {save_path.name}")
-                return True
-
             # Ensure parent directory exists
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(img_url, headers=headers, timeout=10, stream=True)
+            response = requests.get(img_url, headers=headers, timeout=30, stream=True)
             if response.status_code != 200:
                 logger.trace(f"Failed to download image {img_url}: {response.status_code}")
                 return False
@@ -550,14 +533,13 @@ class PaperSummarizer:
             else:
                 math.decompose()
 
-    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str, max_images: int = 20) -> Optional[str]:
+    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str) -> Optional[str]:
         """Convert HTML to Markdown and download images.
 
         Args:
             html: HTML content
             cache_pid: Cache paper ID for organizing images
             base_url: Base URL for resolving relative image paths
-            max_images: Maximum number of images to download (default: 20)
 
         Returns:
             Markdown content with updated image references
@@ -580,7 +562,6 @@ class PaperSummarizer:
         # Download images and update references
         _, _, images_dir = self._html_cache_paths(cache_pid)
         img_counter = {}
-        download_tasks = []  # (img_tag, img_url, img_path, img_filename)
 
         for img_tag in (main or soup).find_all("img"):
             src = img_tag.get("src")
@@ -619,34 +600,14 @@ class PaperSummarizer:
             img_filename = f"{safe_name}{ext}"
             img_path = images_dir / img_filename
 
-            # Collect download task (limit to max_images)
-            if len(download_tasks) < max_images:
-                download_tasks.append((img_tag, img_url, img_path, img_filename))
+            # Download image
+            if self._download_image(img_url, img_path):
+                # Update img tag src to point to local file
+                img_tag["src"] = f"images/{img_filename}"
             else:
-                # Too many images, remove this one
+                # Remove img tag if download fails to prevent LLM from referencing broken images
+                logger.trace(f"Removing image tag due to failed download: {img_url}")
                 img_tag.decompose()
-
-        # Download images in parallel using thread pool
-        if download_tasks:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            def download_task(task):
-                img_tag, img_url, img_path, img_filename = task
-                success = self._download_image(img_url, img_path)
-                return img_tag, img_filename, success
-
-            # Use up to 8 threads for parallel download
-            with ThreadPoolExecutor(max_workers=min(8, len(download_tasks))) as executor:
-                futures = [executor.submit(download_task, t) for t in download_tasks]
-                for future in as_completed(futures):
-                    try:
-                        img_tag, img_filename, success = future.result()
-                        if success:
-                            img_tag["src"] = f"images/{img_filename}"
-                        else:
-                            img_tag.decompose()
-                    except Exception:
-                        pass
 
         markdown = html_to_markdown(str(main), heading_style="ATX")
         markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
@@ -660,7 +621,7 @@ class PaperSummarizer:
 
         try:
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(url, headers=headers, timeout=15)
+            response = requests.get(url, headers=headers, timeout=30)
             if response.status_code != 200:
                 logger.trace(f"HTML fetch failed ({source}) {response.status_code}: {url}")
                 return None, url
@@ -725,24 +686,46 @@ class PaperSummarizer:
         start_time = time.time()
 
         try:
-            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "3600"))
+            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "600"))
         except Exception:
-            stale_s = 3600.0
+            stale_s = 600.0
 
         while time.time() - start_time < timeout:
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+                # Write PID to lock file for stale detection
+                try:
+                    os.write(fd, f"{os.getpid()}\n{time.time()}\n".encode())
+                except Exception:
+                    pass
                 return fd
             except FileExistsError:
-                if stale_s > 0:
+                # Check if lock is stale (by time or dead process)
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                    # Strategy 1: Time-based stale detection
+                    if stale_s > 0 and age > stale_s:
+                        lock_path.unlink(missing_ok=True)
+                        logger.trace(f"Removed stale minerU lock (age={age:.0f}s): {lock_path}")
+                        continue
+                    # Strategy 2: PID-based stale detection (check if owner process is dead)
                     try:
-                        age = time.time() - lock_path.stat().st_mtime
-                        if age > stale_s:
-                            lock_path.unlink(missing_ok=True)
-                            logger.trace(f"Removed stale minerU lock: {lock_path}")
-                            continue
-                    except Exception:
-                        pass
+                        lock_content = lock_path.read_text().strip()
+                        lines = lock_content.split("\n")
+                        if lines and lines[0]:
+                            owner_pid = int(lines[0])
+                            # Check if process is still running
+                            try:
+                                os.kill(owner_pid, 0)  # Signal 0 just checks if process exists
+                            except OSError:
+                                # Process doesn't exist, lock is stale
+                                lock_path.unlink(missing_ok=True)
+                                logger.trace(f"Removed orphan minerU lock (dead PID {owner_pid}): {lock_path}")
+                                continue
+                    except (ValueError, IndexError, OSError):
+                        pass  # Can't read PID, fall back to time-based only
+                except Exception:
+                    pass
                 # Lock file exists, wait and retry
                 time.sleep(0.5)
 
@@ -774,9 +757,9 @@ class PaperSummarizer:
         max_workers = max(1, MINERU_MAX_WORKERS)
 
         try:
-            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "3600"))
+            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "600"))
         except Exception:
-            stale_s = 3600.0
+            stale_s = 600.0
 
         while time.time() - start_time < timeout:
             # Try to acquire any available slot
@@ -792,16 +775,34 @@ class PaperSummarizer:
                         pass
                     return slot
                 except FileExistsError:
-                    # Check if lock is stale
-                    if stale_s > 0:
+                    # Check if lock is stale (by time or dead process)
+                    try:
+                        age = time.time() - slot_lock_path.stat().st_mtime
+                        # Strategy 1: Time-based stale detection
+                        if stale_s > 0 and age > stale_s:
+                            slot_lock_path.unlink(missing_ok=True)
+                            logger.trace(f"Removed stale GPU slot lock (age={age:.0f}s): {slot_lock_path}")
+                            continue
+                        # Strategy 2: PID-based stale detection (check if owner process is dead)
                         try:
-                            age = time.time() - slot_lock_path.stat().st_mtime
-                            if age > stale_s:
-                                slot_lock_path.unlink(missing_ok=True)
-                                logger.trace(f"Removed stale GPU slot lock: {slot_lock_path}")
-                                continue
-                        except Exception:
-                            pass
+                            lock_content = slot_lock_path.read_text().strip()
+                            lines = lock_content.split("\\n")
+                            if lines:
+                                owner_pid = int(lines[0])
+                                # Check if process is still running
+                                try:
+                                    os.kill(owner_pid, 0)  # Signal 0 just checks if process exists
+                                except OSError:
+                                    # Process doesn't exist, lock is stale
+                                    slot_lock_path.unlink(missing_ok=True)
+                                    logger.trace(
+                                        f"Removed orphan GPU slot lock (dead PID {owner_pid}): {slot_lock_path}"
+                                    )
+                                    continue
+                        except (ValueError, IndexError, OSError):
+                            pass  # Can't read PID, fall back to time-based only
+                    except Exception:
+                        pass
 
             # No slot available, wait and retry
             time.sleep(1.0)
@@ -820,15 +821,15 @@ class PaperSummarizer:
             logger.trace(f"Error releasing GPU slot {slot}: {e}")
 
     def parse_pdf_with_mineru(
-        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+        self, pdf_path: Optional[Path], cache_pid: Optional[str] = None, cached_version: Optional[str] = None
     ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU (with multi-process lock protection)
 
         Args:
-            pdf_path: PDF file path
+            pdf_path: PDF file path (can be None for API backend)
             cache_pid: Optional paper ID to use for output directory (should be raw PID).
-                       If not provided, uses the PDF filename (stem).
+                       If not provided, uses the PDF filename (stem). Required when pdf_path is None.
             cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
         Returns:
@@ -836,9 +837,16 @@ class PaperSummarizer:
         """
         try:
             # Use cache_pid if provided, otherwise use PDF filename
-            pdf_name = cache_pid or pdf_path.stem
+            pdf_name = cache_pid or (pdf_path.stem if pdf_path else None)
+            if not pdf_name:
+                logger.error("cache_pid is required when pdf_path is None")
+                return None
             output_dir = self.mineru_dir
             backend = self._normalize_mineru_backend()
+
+            # Handle API backend separately
+            if backend == "api":
+                return self._parse_pdf_with_mineru_api(pdf_path, pdf_name, cached_version)
 
             # Check if already parsed
             existing_md_path = self._find_mineru_markdown(pdf_name, backend=backend)
@@ -946,6 +954,10 @@ class PaperSummarizer:
                     # Clean up files other than images and markdown
                     self._cleanup_mineru_output(output_dir / pdf_name)
 
+                    # Normalize image filenames and references
+                    output_path = existing_md_path.parent
+                    self._normalize_mineru_images(output_path, existing_md_path)
+
                     return existing_md_path
                 else:
                     logger.trace(f"Generated Markdown file not found for {pdf_name} in minerU outputs")
@@ -979,12 +991,179 @@ class PaperSummarizer:
         except Exception as e:
             logger.trace(f"PDF parse failed: {e}")
             # Delete PDF file when parsing exception occurs
-            try:
-                pdf_path.unlink(missing_ok=True)
-                logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
-            except Exception as e:
-                logger.trace(f"Failed to delete PDF file: {e}")
+            if pdf_path:
+                try:
+                    pdf_path.unlink(missing_ok=True)
+                    logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
+                except Exception as e:
+                    logger.trace(f"Failed to delete PDF file: {e}")
             return None
+
+    def _parse_pdf_with_mineru_api(
+        self, pdf_path: Optional[Path], pdf_name: str, cached_version: Optional[str] = None
+    ) -> Optional[Path]:
+        """
+        Parse PDF using MinerU API service (following reference implementation)
+        """
+        # Check API key
+        if not MINERU_API_KEY or not MINERU_API_KEY.strip():
+            logger.error("MinerU API key not configured")
+            raise ValueError("MINERU_API_KEY_MISSING")
+
+        # Check if already parsed
+        existing_md_path = self._find_mineru_markdown(pdf_name, backend="api")
+        if existing_md_path:
+            logger.trace(f"Markdown file already exists: {existing_md_path}")
+            return existing_md_path
+
+        # Acquire file lock
+        lock_path = self.mineru_dir / f".{pdf_name}.lock"
+        lock_fd = self._acquire_file_lock(lock_path, timeout=300)
+        if lock_fd is None:
+            logger.trace(f"Failed to acquire lock for {pdf_name}, skipping")
+            return None
+
+        try:
+            # Check again after acquiring lock
+            existing_md_path = self._find_mineru_markdown(pdf_name, backend="api")
+            if existing_md_path:
+                logger.trace(f"File generated during lock wait: {existing_md_path}")
+                return existing_md_path
+
+            # === Step 1: Submit task (exactly like reference code) ===
+            url = "https://mineru.net/api/v4/extract/task"
+            header = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {MINERU_API_KEY.strip()}",
+            }
+
+            # Build arXiv PDF URL
+            arxiv_url = f"https://arxiv.org/pdf/{pdf_name}.pdf"
+            if cached_version:
+                arxiv_url = f"https://arxiv.org/pdf/{pdf_name}v{cached_version}.pdf"
+
+            data = {
+                "url": arxiv_url,
+                "model_version": "vlm",
+                "data_id": f"arxiv_{pdf_name.replace('.', '_')}",
+                "enable_formula": True,
+                "enable_table": True,
+            }
+
+            logger.trace(f"Submitting task for: {arxiv_url}")
+            res = requests.post(url, headers=header, json=data, timeout=30)
+
+            # Check HTTP status
+            if res.status_code == 401:
+                logger.error("MinerU API: login required (401)")
+                raise ValueError("MINERU_API_EXPIRED")
+
+            result = res.json()
+            logger.trace(f"Submit response: {result}")
+
+            # Check API response code (0 = success)
+            if result.get("code") != 0:
+                error_msg = result.get("msg", "unknown error")
+                logger.error(f"MinerU API error: code={result.get('code')}, msg={error_msg}")
+                raise ValueError(f"MINERU_API_ERROR: {error_msg}")
+
+            # Get task_id directly (like reference code)
+            try:
+                task_id = result["data"]["task_id"]
+            except (KeyError, TypeError):
+                logger.error(f"Failed to get task_id from response: {result}")
+                raise ValueError("MINERU_API_INVALID_RESPONSE")
+
+            logger.info(f"MinerU task created: {task_id}")
+
+            # === Step 2: Poll for completion (with timeout) ===
+            start_time = time.time()
+            while True:
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed > MINERU_API_TIMEOUT:
+                    logger.error(f"Task {task_id} timed out after {MINERU_API_TIMEOUT}s")
+                    raise ValueError("MINERU_API_TIMEOUT")
+
+                time.sleep(MINERU_API_POLL_INTERVAL)
+
+                query_url = f"https://mineru.net/api/v4/extract/task/{task_id}"
+                res = requests.get(query_url, headers=header, timeout=30)
+                result = res.json()
+
+                # Check API response code
+                if result.get("code") != 0:
+                    error_msg = result.get("msg", "unknown error")
+                    logger.error(f"MinerU query error: code={result.get('code')}, msg={error_msg}")
+                    raise ValueError(f"MINERU_API_QUERY_ERROR: {error_msg}")
+
+                # Get state directly (like reference code)
+                try:
+                    state = result["data"]["state"]
+                except (KeyError, TypeError):
+                    logger.error(f"Failed to get state from response: {result}")
+                    raise ValueError("MINERU_API_QUERY_FAILED")
+
+                logger.trace(f"Task {task_id} state: {state} (elapsed: {elapsed:.0f}s)")
+
+                if state == "done":
+                    download_url = result["data"]["full_zip_url"]
+                    logger.info(f"Task completed: {download_url}")
+                    break
+                elif state in ["running", "pending", "converting"]:
+                    # converting: 格式转换中，也需要继续等待
+                    continue
+                elif state == "failed":
+                    err_msg = result["data"].get("err_msg", "unknown error")
+                    logger.error(f"Task failed: {err_msg}")
+                    raise ValueError(f"MINERU_API_TASK_FAILED: {err_msg}")
+                else:
+                    logger.error(f"Unknown task state: {state}, response: {result}")
+                    raise ValueError(f"MINERU_API_UNKNOWN_STATE: {state}")
+
+            # === Step 3: Download and extract (exactly like reference code) ===
+            output_path = self.mineru_dir / pdf_name / "api"
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            logger.trace("Downloading ZIP...")
+            response = requests.get(download_url, timeout=120)
+
+            logger.trace(f"Extracting to {output_path}")
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                z.extractall(output_path)
+
+            # Find and rename markdown file
+            md_files = list(output_path.rglob("*.md"))
+            if not md_files:
+                logger.error("No markdown file found in result")
+                raise ValueError("MINERU_API_NO_MARKDOWN")
+
+            source_md = md_files[0]
+            target_md = output_path / f"{pdf_name}.md"
+
+            if source_md != target_md:
+                import shutil
+
+                shutil.copy2(source_md, target_md)
+                logger.trace(f"Copied: {source_md} -> {target_md}")
+
+            # Write metadata and cleanup
+            self._write_mineru_meta(pdf_name, "api", cached_version=cached_version)
+            self._cleanup_mineru_output(self.mineru_dir / pdf_name)
+            self._normalize_mineru_images(output_path, target_md)
+
+            logger.info(f"Successfully parsed: {target_md}")
+            return target_md
+
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.error(f"MinerU API parse failed: {e}")
+            return None
+        finally:
+            if lock_fd is not None:
+                self._release_file_lock(lock_fd, lock_path)
+                logger.trace(f"Released file lock for {pdf_name}")
 
     def _cleanup_mineru_output(self, output_path: Path):
         """
@@ -995,7 +1174,7 @@ class PaperSummarizer:
         """
         try:
             output_dirs = []
-            for dir_name in ("auto", "vlm"):
+            for dir_name in ("auto", "vlm", "api"):
                 dir_path = output_path / dir_name
                 if dir_path.exists():
                     output_dirs.append(dir_path)
@@ -1034,6 +1213,107 @@ class PaperSummarizer:
 
         except Exception as e:
             logger.trace(f"Failed to clean minerU output: {e}")
+
+    def _normalize_mineru_images(self, output_path: Path, markdown_path: Path):
+        """
+        Normalize image filenames and references in markdown to sequential format (image-1, image-2, ...)
+
+        Args:
+            output_path: minerU output paper directory path (e.g. data/mineru/2507.01679/auto)
+            markdown_path: Path to the markdown file
+        """
+        try:
+            if not markdown_path.exists():
+                logger.trace(f"Markdown file not found: {markdown_path}")
+                return
+
+            # Read markdown content
+            with open(markdown_path, encoding="utf-8") as f:
+                markdown_content = f.read()
+
+            images_dir = output_path / "images"
+            if not images_dir.exists() or not images_dir.is_dir():
+                logger.trace(f"Images directory not found: {images_dir}")
+                return
+
+            # Find all image references in markdown (pattern: ![alt](images/filename.ext))
+            # Use ordered dict to preserve order and avoid duplicates
+            image_pattern = re.compile(r"!\[([^\]]*)\]\(images/([^)]+)\)")
+            matches = image_pattern.findall(markdown_content)
+
+            if not matches:
+                logger.trace("No image references found in markdown")
+                return
+
+            # Track unique images in order of first appearance
+            seen = set()
+            ordered_images = []
+            for alt_text, img_filename in matches:
+                if img_filename not in seen:
+                    seen.add(img_filename)
+                    ordered_images.append(img_filename)
+
+            # Create rename mapping: old_filename -> new_filename
+            rename_map = {}
+            for idx, old_filename in enumerate(ordered_images, start=1):
+                old_path = images_dir / old_filename
+                if not old_path.exists():
+                    logger.trace(f"Image file not found: {old_path}")
+                    continue
+
+                # Preserve file extension
+                ext = old_path.suffix
+                new_filename = f"image-{idx}{ext}"
+                rename_map[old_filename] = new_filename
+
+            if not rename_map:
+                logger.trace("No images to rename")
+                return
+
+            # Rename image files
+            for old_filename, new_filename in rename_map.items():
+                old_path = images_dir / old_filename
+                new_path = images_dir / new_filename
+
+                try:
+                    # Handle case where target already exists
+                    if new_path.exists():
+                        if old_path.samefile(new_path):
+                            continue
+                        # Use temporary name to avoid conflicts
+                        temp_path = images_dir / f".tmp_{new_filename}"
+                        old_path.rename(temp_path)
+                        old_path = temp_path
+
+                    old_path.rename(new_path)
+                    logger.trace(f"Renamed image: {old_filename} -> {new_filename}")
+                except Exception as e:
+                    logger.trace(f"Failed to rename {old_filename}: {e}")
+
+            # Update markdown references
+            updated_content = markdown_content
+            for old_filename, new_filename in rename_map.items():
+                # Replace all occurrences of the old filename
+                old_ref = f"images/{old_filename}"
+                new_ref = f"images/{new_filename}"
+                updated_content = updated_content.replace(old_ref, new_ref)
+
+            # Write updated markdown
+            self._atomic_write_text(markdown_path, updated_content)
+            logger.trace(f"Updated {len(rename_map)} image references in markdown")
+
+            # Clean up unreferenced image files (e.g., hash-named files from MinerU API)
+            referenced_images = set(rename_map.values())  # New filenames that are referenced
+            for img_file in images_dir.iterdir():
+                if img_file.is_file() and img_file.name not in referenced_images:
+                    try:
+                        img_file.unlink()
+                        logger.trace(f"Deleted unreferenced image: {img_file.name}")
+                    except Exception as e:
+                        logger.trace(f"Failed to delete unreferenced image {img_file.name}: {e}")
+
+        except Exception as e:
+            logger.trace(f"Failed to normalize minerU images: {e}")
 
     def extract_main_content(self, markdown_content: str) -> str:
         """
@@ -1160,7 +1440,7 @@ class PaperSummarizer:
             # Choose language prompt based on configuration
             if LLM_SUMMARY_LANG == "en":
                 # English prompt - Technical blog style
-                prompt = f"""
+                prompt = rf"""
 You are an experienced technical blogger who excels at interpreting academic papers.
 Please transform the following paper into a technical blog post that allows readers to
 understand the key techniques, core results, and important details without reading the original paper.
@@ -1186,7 +1466,7 @@ Readers with foundational knowledge in the relevant field
 - Clear structure with hierarchical headings
 - Avoid empty platitudes; every paragraph should have substantive content
 - Briefly explain technical terms when they first appear
-- Use `$…$` (inline) or `$$…$$` (block) for all formulas. Use basic LaTeX formulas when possible
+- Distinguish between inline formulas (`$...$` and `\(...\)` ) and block-level formulas (`$$...$$` and `\[...\]` ) as appropriate, and prefer the most basic LaTeX formulas
 - Ensure LaTeX and Markdown syntax compatibility and correctness
 
 <Paper Content>
@@ -1211,7 +1491,7 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 """
             else:
                 # Chinese prompt (default) - Technical blog style
-                prompt = f"""
+                prompt = rf"""
 你是一位经验丰富的技术博主，擅长解读学术论文。请将以下论文解读为一篇技术博客，目标是让读者"无需阅读原文也能理解关键技术、核心结果与重要细节"。
 
 <目标受众>
@@ -1235,7 +1515,7 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 - 结构清晰，使用标题分层
 - 避免空洞套话，每段都有实质内容
 - 专业术语首次出现时简要解释
-- 所有公式用 `$…$`（行内）或 `$$…$$`（独立），要尽量使用最基本的 LaTeX 公式
+- 注意在合适的地方区分使用行内公式（`$...$` 和 `\(...\)`）与块级公式（`$$...$$` 和 `\[...\]`），要尽量使用最基本的 LaTeX 公式
 - 注意所使用的 LaTeX 和 Markdown 语法兼容性和正确性
 
 <论文内容>
@@ -1401,6 +1681,17 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
                     summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid)
                     return summary
                 logger.info(f"HTML fetch/parse failed for {pid}, fallback to minerU.")
+                # Check if MinerU is enabled before fallback
+                if not MINERU_ENABLED:
+                    return self._build_summary_result(
+                        "# PDF Parsing Service Unavailable\n\nThe PDF parsing service is currently disabled. Unable to generate paper summary. Please contact the administrator to enable the MinerU service or use HTML parsing."
+                    )
+
+            # MinerU is explicitly requested, check if enabled
+            if not MINERU_ENABLED:
+                return self._build_summary_result(
+                    "# PDF Parsing Service Unavailable\n\nThe PDF parsing service is currently disabled. Unable to generate paper summary. Please contact the administrator to enable the MinerU service or use HTML parsing."
+                )
 
             # Use raw PID for MinerU storage - arXiv returns latest version automatically
             cache_pid = self._resolve_cache_pid(pid)
@@ -1427,14 +1718,43 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
                     logger.trace("Existing Markdown file content is empty, re-parsing")
 
             # Step 1: Download paper PDF (use cache_pid for filename)
-            logger.info(f"Downloading {cache_pid}.pdf ...")
-            pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
-            if not pdf_path:
-                return self._build_summary_result("# Error\n\nUnable to download paper PDF")
+            # API backend doesn't need to download PDF, it uses arXiv URL directly
+            backend = self._normalize_mineru_backend()
+            if backend == "api":
+                logger.info(f"Using MinerU API backend for {cache_pid} (skipping PDF download)")
+                pdf_path = None
+                cached_version = None
+            else:
+                logger.info(f"Downloading {cache_pid}.pdf ...")
+                pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
+                if not pdf_path:
+                    return self._build_summary_result("# Error\n\nUnable to download paper PDF")
 
             # Step 2: Parse PDF to Markdown using minerU
-            logger.info(f"Parsing {cache_pid}.pdf ...")
-            md_path = self.parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
+            if backend != "api":
+                logger.info(f"Parsing {cache_pid}.pdf ...")
+            try:
+                md_path = self.parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
+            except ValueError as e:
+                error_msg = str(e)
+                if "MINERU_API_EXPIRED" in error_msg:
+                    return self._build_summary_result(
+                        "# MinerU API Service Unavailable\n\n"
+                        "The MinerU API key has expired or authentication failed. "
+                        "Please contact the administrator to update the API credentials."
+                    )
+                elif "MINERU_API_KEY_MISSING" in error_msg:
+                    return self._build_summary_result(
+                        "# MinerU API Configuration Error\n\n"
+                        "MinerU API key is not configured. Please contact the administrator."
+                    )
+                else:
+                    return self._build_summary_result(
+                        f"# MinerU API Error\n\n"
+                        f"Failed to parse PDF using MinerU API. Please try again later or contact the administrator.\n\n"
+                        f"Error details: {error_msg}"
+                    )
+
             if not md_path:
                 return self._build_summary_result("# Error\n\nUnable to parse PDF to Markdown")
 
@@ -1810,9 +2130,9 @@ def summary_quality(summary_content: str) -> Tuple[str, Optional[float]]:
 def _summary_lock_stale_seconds() -> float:
     """Get stale lock timeout from environment."""
     try:
-        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "3600"))
+        seconds = float(os.environ.get("ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC", "600"))
     except Exception:
-        seconds = 3600.0
+        seconds = 600.0
     return max(0.0, seconds)
 
 
@@ -1846,15 +2166,36 @@ def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]
     while time.time() - start_time < timeout_s:
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
+            # Write PID to lock file for stale detection
+            try:
+                os.write(fd, f"{os.getpid()}\n{time.time()}\n".encode())
+            except Exception:
+                pass
             return fd
         except FileExistsError:
+            # Strategy 1: Time-based stale detection
             if _is_lock_stale(lock_path, stale_s):
                 try:
                     lock_path.unlink(missing_ok=True)
-                    logger.warning(f"Removed stale summary lock: {lock_path}")
+                    logger.warning(f"Removed stale summary lock (time): {lock_path}")
                     continue
                 except Exception:
                     pass
+            # Strategy 2: PID-based stale detection (check if owner process is dead)
+            try:
+                lock_content = lock_path.read_text().strip()
+                lines = lock_content.split("\n")
+                if lines and lines[0]:
+                    owner_pid = int(lines[0])
+                    try:
+                        os.kill(owner_pid, 0)  # Signal 0 just checks if process exists
+                    except OSError:
+                        # Process doesn't exist, lock is stale
+                        lock_path.unlink(missing_ok=True)
+                        logger.warning(f"Removed orphan summary lock (dead PID {owner_pid}): {lock_path}")
+                        continue
+            except (ValueError, IndexError, OSError):
+                pass  # Can't read PID, fall back to time-based only
             time.sleep(0.2)
     return None
 

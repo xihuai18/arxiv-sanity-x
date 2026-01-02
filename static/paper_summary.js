@@ -253,7 +253,8 @@ function markdownItMathPlugin(md) {
     md.inline.ruler.before('escape', 'math_inline_paren', mathInlineParen);
     md.inline.ruler.before('escape', 'math_inline_bracket', mathInlineBracket);
     md.inline.ruler.after('escape', 'math_inline_dollar', mathInlineDollar);
-    md.block.ruler.after('blockquote', 'math_block', mathBlock, {
+    // Add math_block before 'code' rule to prevent indented math from being parsed as code blocks
+    md.block.ruler.before('code', 'math_block', mathBlock, {
         alt: ['paragraph', 'reference', 'blockquote', 'list']
     });
 
@@ -285,6 +286,10 @@ function getMarkdownRenderer() {
         typographer: false,
         breaks: true
     });
+
+    // Disable indented code blocks to prevent math blocks from being parsed as code
+    // Fenced code blocks (```) still work
+    md.disable('code');
 
     md.validateLink = (url) => isSafeUrl(url);
     md.use(markdownItMathPlugin);
@@ -525,6 +530,70 @@ function setupImageZoom(container) {
     });
 }
 
+/**
+ * Normalize indented display math blocks to prevent them from being parsed as code blocks.
+ * Also ensures multi-line math blocks are properly formatted for parsing.
+ */
+function normalizeIndentedDisplayMath(markdownText) {
+    const text = String(markdownText || '').replace(/\r\n/g, '\n');
+    const lines = text.split('\n');
+    let inMathBlock = false;
+    let mathOpener = '';
+    let mathCloser = '';
+
+    for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        const trimmed = String(line).trim();
+
+        if (!inMathBlock) {
+            // Check if this line starts a deeply indented math block (4+ spaces)
+            const mathStart = line.match(/^([ \t]{4,})(\\\[|\$\$)/);
+            if (mathStart) {
+                mathOpener = mathStart[2];
+                mathCloser = mathOpener === '$$' ? '$$' : '\\]';
+                inMathBlock = true;
+                // Reduce indentation to 0-2 spaces to avoid code block parsing
+                lines[i] = line.replace(/^[ \t]{4,}/, '');
+                // Check if closer is on the same line (after opener)
+                const afterOpener = trimmed.slice(mathOpener.length);
+                if (afterOpener.includes(mathCloser)) {
+                    inMathBlock = false;
+                    mathCloser = '';
+                }
+            }
+            continue;
+        }
+
+        // Inside math block - reduce indentation
+        lines[i] = line.replace(/^[ \t]{4,}/, '');
+
+        if (trimmed.includes(mathCloser)) {
+            inMathBlock = false;
+            mathCloser = '';
+        }
+    }
+
+    return lines.join('\n');
+}
+
+/**
+ * Fix \tag placement in aligned environments for MathJax compatibility.
+ * MathJax doesn't allow \tag inside aligned environment, but LaTeX does.
+ * This function moves \tag from inside aligned to after \end{aligned}.
+ */
+function fixAlignedTags(text) {
+    // Match aligned environments with \tag inside, and move \tag to after \end{aligned}
+    // Handles: \begin{aligned}...\tag{N}...\end{aligned}
+    // Converts to: \begin{aligned}...\end{aligned}\tag{N}
+    return text.replace(
+        /(\\begin\{aligned\})([\s\S]*?)(\\tag\{[^}]+\})([\s\S]*?)(\\end\{aligned\})/g,
+        (match, begin, content1, tag, content2, end) => {
+            // Remove the tag from inside and place it after \end{aligned}
+            return begin + content1 + content2 + end + ' ' + tag;
+        }
+    );
+}
+
 function renderSummaryMarkdown(text, markdownContainer, tocContainer) {
     if (!text || !markdownContainer) return;
 
@@ -539,8 +608,12 @@ function renderSummaryMarkdown(text, markdownContainer, tocContainer) {
             tocObserver.disconnect();
             tocObserver = null;
         }
+        // Preprocess: reduce indentation of deeply indented math blocks
+        let normalizedText = normalizeIndentedDisplayMath(text);
+        // Fix \tag placement in aligned environments for MathJax compatibility
+        normalizedText = fixAlignedTags(normalizedText);
         const env = {};
-        const tokens = md.parse(text, env);
+        const tokens = md.parse(normalizedText, env);
         const slugCounts = {};
         const tocItems = [];
 
@@ -1033,6 +1106,18 @@ async function fetchModels() {
     return models;
 }
 
+async function fetchAvailableSummaries(pid) {
+    const response = await fetch(`/api/check_paper_summaries?pid=${encodeURIComponent(pid)}`);
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const data = await response.json();
+    if (!data.success) {
+        throw new Error(data.error || 'Failed to check available summaries');
+    }
+    return Array.isArray(data.available_models) ? data.available_models : [];
+}
+
 // Retry function
 summaryApp.retry = function() {
     if (this.pid) {
@@ -1180,20 +1265,58 @@ summaryApp.loadSummary = async function(pid, options = {}) {
 summaryApp.loadModels = async function() {
     try {
         const models = await fetchModels();
-        let selectedModel = this.selectedModel;
-        if (!selectedModel && models.length > 0) {
-            const preferred = String(this.defaultModel || '').trim();
-            if (preferred) {
-                const matched = models.find((m) => String(m.id || '') === preferred);
-                selectedModel = matched ? matched.id || '' : '';
-            }
-            if (!selectedModel) {
-                selectedModel = models[0].id || '';
-            }
-        }
-        this.setState({ models, modelsError: null, selectedModel });
+        this.setState({ models, modelsError: null });
     } catch (error) {
         this.setState({ modelsError: error.message });
+    }
+};
+
+summaryApp.selectInitialModel = async function(pid) {
+    try {
+        // Get available summaries for this paper
+        const availableSummaries = await fetchAvailableSummaries(pid);
+
+        let selectedModel = '';
+
+        // If there are available summaries, select the first one from model list that has a summary
+        if (availableSummaries.length > 0 && this.models.length > 0) {
+            for (const model of this.models) {
+                const modelId = String(model.id || '');
+                if (availableSummaries.includes(modelId)) {
+                    selectedModel = modelId;
+                    break;
+                }
+            }
+        }
+
+        // If no available summary found, use default model
+        if (!selectedModel) {
+            const preferred = String(this.defaultModel || '').trim();
+            if (preferred) {
+                const matched = this.models.find((m) => String(m.id || '') === preferred);
+                selectedModel = matched ? matched.id || '' : '';
+            }
+            if (!selectedModel && this.models.length > 0) {
+                selectedModel = this.models[0].id || '';
+            }
+        }
+
+        this.setState({ selectedModel });
+        return selectedModel;
+    } catch (error) {
+        console.error('Failed to check available summaries:', error);
+        // Fallback to default model selection on error
+        let selectedModel = '';
+        const preferred = String(this.defaultModel || '').trim();
+        if (preferred) {
+            const matched = this.models.find((m) => String(m.id || '') === preferred);
+            selectedModel = matched ? matched.id || '' : '';
+        }
+        if (!selectedModel && this.models.length > 0) {
+            selectedModel = this.models[0].id || '';
+        }
+        this.setState({ selectedModel });
+        return selectedModel;
     }
 };
 
@@ -1236,8 +1359,10 @@ async function initSummaryApp() {
     });
 
     await summaryApp.loadModels();
-    // Start loading summary after model list is available
-    summaryApp.loadSummary(pid, { model: summaryApp.getCurrentModel() });
+    // Select initial model based on available summaries
+    const initialModel = await summaryApp.selectInitialModel(pid);
+    // Start loading summary after model selection
+    summaryApp.loadSummary(pid, { model: initialModel });
 
     // Initialize tag management if user is logged in
     if (typeof user !== 'undefined' && user) {

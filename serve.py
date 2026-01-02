@@ -95,6 +95,7 @@ from vars import (
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_NAME,
+    MINERU_ENABLED,
     MINERU_PORT,
     SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
     SUMMARY_DIR,
@@ -2866,11 +2867,11 @@ def api_mineru_image(pid: str, filename: str):
         # Use raw PID only (strip version if present)
         raw_pid, _ = split_pid_version(pid)
 
-        # Construct image path - MinerU stores images in {pid}/auto/images/ or {pid}/vlm/images/
-        # Try both backends
+        # Construct image path - MinerU stores images in {pid}/auto/images/, {pid}/vlm/images/, or {pid}/api/images/
+        # Try all backends
         mineru_base = Path("data/mineru") / raw_pid
         image_path = None
-        for backend_dir in ["auto", "vlm"]:
+        for backend_dir in ["auto", "vlm", "api"]:
             candidate = mineru_base / backend_dir / "images" / filename
             if candidate.exists():
                 image_path = candidate
@@ -2933,6 +2934,50 @@ def api_llm_models():
         logger.error(f"Failed to fetch LLM models: {e}")
         models = [{"id": LLM_NAME}] if LLM_NAME else []
         return jsonify({"success": False, "error": "Failed to load model list", "models": models})
+
+
+@app.route("/api/check_paper_summaries", methods=["GET"])
+def api_check_paper_summaries():
+    """
+    API endpoint: Check which models have existing summaries for a paper
+    Returns a list of model names that have cached summaries
+    """
+    try:
+        pid = request.args.get("pid", "").strip()
+        if not pid:
+            return jsonify({"success": False, "error": "Paper ID is required"}), 400
+
+        raw_pid, _ = split_pid_version(pid)
+        if not paper_exists(raw_pid):
+            return jsonify({"success": False, "error": "Paper not found"}), 404
+
+        # Check summary directory for this paper
+        summary_dir = Path(SUMMARY_DIR) / raw_pid
+        available_models = []
+
+        if summary_dir.exists() and summary_dir.is_dir():
+            # List all .md files in the directory (excluding legacy .md file)
+            for md_file in summary_dir.glob("*.md"):
+                # Extract model name from filename (e.g., "gpt-4.md" -> "gpt-4")
+                model_name = md_file.stem
+                # Check if corresponding meta file exists and is valid
+                meta_file = summary_dir / f"{model_name}.meta.json"
+                if meta_file.exists() and md_file.stat().st_size > 0:
+                    # Read meta to get actual model name
+                    try:
+                        meta = read_summary_meta(meta_file)
+                        actual_model = meta.get("model", "")
+                        if actual_model:
+                            available_models.append(actual_model)
+                    except Exception:
+                        # If meta read fails, skip this summary
+                        pass
+
+        return jsonify({"success": True, "available_models": available_models})
+
+    except Exception as e:
+        logger.error(f"Check paper summaries API error: {e}")
+        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
 
 
 def _summary_retry_seconds() -> float:
@@ -3109,7 +3154,12 @@ def generate_paper_summary(
             response_meta = _sanitize_summary_meta(summary_meta)
 
             # Only cache successful summaries (not error messages)
-            if not summary_content.startswith("# Error"):
+            # Check for various error message formats
+            is_error = summary_content.startswith("# Error") or summary_content.startswith(
+                "# PDF Parsing Service Unavailable"
+            )
+
+            if not is_error:
                 quality, chinese_ratio = summary_quality(summary_content)
                 if chinese_ratio is not None:
                     logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
@@ -3595,6 +3645,23 @@ def cache_status():
                 "service_name": service_name,
             }
 
+    backend_services = {
+        "embedding_service": check_http_service(
+            EMBED_PORT, "/api/version", f"Ollama Embedding Service (port {EMBED_PORT})"
+        ),
+    }
+
+    # Only check MinerU service if it's enabled
+    if MINERU_ENABLED:
+        backend_services["mineru_service"] = check_http_service(
+            MINERU_PORT, "/health", f"MinerU VLM Service (port {MINERU_PORT})"
+        )
+    else:
+        backend_services["mineru_service"] = {
+            "status": "disabled",
+            "message": "MinerU service is disabled (ARXIV_SANITY_MINERU_ENABLED=false)",
+        }
+
     status = {
         "current_time": time.time(),
         "features": {
@@ -3608,12 +3675,7 @@ def cache_status():
             "cache_time": PAPERS_DB_CACHE_TIME,
             "db_file_mtime": PAPERS_DB_FILE_MTIME,
         },
-        "backend_services": {
-            "embedding_service": check_http_service(
-                EMBED_PORT, "/api/version", f"Ollama Embedding Service (port {EMBED_PORT})"
-            ),
-            "mineru_service": check_http_service(MINERU_PORT, "/health", f"MinerU VLM Service (port {MINERU_PORT})"),
-        },
+        "backend_services": backend_services,
     }
 
     # Features details
