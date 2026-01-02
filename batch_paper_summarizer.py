@@ -64,7 +64,7 @@ class BatchPaperSummarizer(PaperSummarizer):
         if self.processor:
             self.processor._record_failure_detail(pid, reason, message, exception)
 
-    def download_arxiv_paper(self, pid: str) -> Optional[Path]:
+    def download_arxiv_paper(self, pid: str) -> Tuple[Optional[Path], Optional[str]]:
         """
         Download arXiv paper PDF, reuse parent class method and add error recording
 
@@ -72,7 +72,9 @@ class BatchPaperSummarizer(PaperSummarizer):
             pid: Paper ID, e.g. "2301.00001"
 
         Returns:
-            Downloaded PDF file path, None if failed
+            Tuple of (pdf_path, version):
+            - pdf_path: Downloaded PDF file path, None if failed
+            - version: The actual version downloaded (e.g., "3"), None if unknown
         """
         try:
             return super().download_arxiv_paper(pid)
@@ -81,26 +83,31 @@ class BatchPaperSummarizer(PaperSummarizer):
             logger.error(error_msg)
             # Record detailed error information
             self._record_failure_detail(pid, "download_failed", error_msg, e)
-            return None
+            return None, None
 
-    def parse_pdf_with_mineru(self, pdf_path: Path) -> Optional[Path]:
+    def parse_pdf_with_mineru(
+        self, pdf_path: Optional[Path], cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+    ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU
         Now completely relies on parent class implementation which already has proper file locking
 
         Args:
-            pdf_path: PDF file path
+            pdf_path: PDF file path (can be None for API backend)
+            cache_pid: Optional paper ID to use for output directory (should be raw PID)
+            cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
         Returns:
             Generated Markdown file path, None if failed
         """
         try:
             # Directly use parent class method - it already has file-based locking
-            result = super().parse_pdf_with_mineru(pdf_path)
+            result = super().parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
             if result is None:
                 # Record failure details
+                pid_for_error = cache_pid or (pdf_path.stem if pdf_path else "unknown")
                 self._record_failure_detail(
-                    pdf_path.stem,
+                    pid_for_error,
                     "parse_failed",
                     "Parent class parse_pdf_with_mineru returned None",
                     Exception("minerU parsing failed"),
@@ -111,10 +118,11 @@ class BatchPaperSummarizer(PaperSummarizer):
             error_msg = f"PDF parse failed: {e}"
             logger.trace(error_msg)
             # Record failure details
-            self._record_failure_detail(pdf_path.stem, "parse_failed", error_msg, e)
+            pid_for_error = cache_pid or (pdf_path.stem if pdf_path else "unknown")
+            self._record_failure_detail(pid_for_error, "parse_failed", error_msg, e)
             return None
 
-    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> str:
+    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
         """
         Main entry function for generating paper summary, reuse parent class logic
 
@@ -124,7 +132,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             model: LLM model name
 
         Returns:
-            Paper summary in Markdown format
+            Dict containing paper summary markdown content and metadata
         """
         # Directly call parent class generate_summary method
         # Parent class method already includes vlm to auto migration logic
@@ -450,7 +458,8 @@ class BatchProcessor:
         Returns:
             Dict: Processing result statistics
         """
-        # Get detailed paper information
+        # Get detailed paper information - batch load for efficiency
+        logger.trace("Loading paper details from database...")
         with get_papers_db() as pdb:
             papers_data = {pid: (pdb.get(pid) or {}) for pid, _meta in papers}
 
@@ -513,12 +522,15 @@ class BatchProcessor:
 
             # Use thread pool for actual concurrent processing
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                # Submit all tasks
-                future_to_paper = {}
-                for pid, meta, retry_count in current_round_papers:
-                    paper_info = papers_data.get(pid, {})
-                    future = executor.submit(self.process_single_paper, pid, paper_info, skip_cached)
-                    future_to_paper[future] = (pid, meta, retry_count)
+                # Submit all tasks in batch for efficiency
+                future_to_paper = {
+                    executor.submit(self.process_single_paper, pid, papers_data.get(pid, {}), skip_cached): (
+                        pid,
+                        meta,
+                        retry_count,
+                    )
+                    for pid, meta, retry_count in current_round_papers
+                }
 
                 # Process completed tasks
                 for future in as_completed(future_to_paper):
