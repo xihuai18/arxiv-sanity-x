@@ -1441,103 +1441,132 @@ class PaperSummarizer:
             if LLM_SUMMARY_LANG == "en":
                 # English prompt - Technical blog style
                 prompt = rf"""
-You are an experienced technical blogger who excels at interpreting academic papers.
-Please transform the following paper into a technical blog post that allows readers to
-understand the key techniques, core results, and important details without reading the original paper.
+You are an experienced technical blogger who excels at transforming academic papers into accessible technical blog posts.
 
-<Target Audience>
-Readers with foundational knowledge in the relevant field
+## Task Objective
+Transform the paper below into a technical blog post that enables readers to understand the key techniques, core results, and important details without reading the original paper.
 
-<Content Requirements>
-1. **Must Include**: Research motivation and background, core contributions (1-3 points), detailed method/algorithm explanation, key experimental results, limitations or future directions
-2. **Focus on Expansion**: The method/algorithm section needs detailed introduction, with intuitive explanations, necessary formulas and mathematical derivations, or analogies to describe complex concepts
-3. **Information Sourcing**: All statements must be based on the original text, do not speculate on content not explicitly stated by the authors
-4. **Image Usage**: When a certain image significantly helps understanding the paper, please reference the image in the blog
-   - Only select the most critical images for understanding (typically 1-3)
-   - Generally, a paper will have one or two images that can illustrate the core method and unique contributions; if such images exist, please reference them
-   - Use numbered format: `![Figure 1: Figure title. Brief description](images/filename.png)`
-   - Reference images in the text by number, such as "As shown in Figure 1,..." , "Figure 2 shows..."
-   - Image numbers must be consecutive (Figure 1, Figure 2, Figure 3...)
-   - **Do not use blockquotes (>) to wrap images**
-   - **Do not modify image paths or filenames**
-5. **Appropriate Detail Level**: Without significantly increasing the reading burden, add as comprehensive important paper details as possible in the blog
+## Target Audience
+Technical professionals with foundational knowledge in the relevant field
 
-<Style Requirements>
-- Clear structure with hierarchical headings
-- Avoid empty platitudes; every paragraph should have substantive content
+## Blog Content Requirements
+
+### Required Sections
+1. **Research Background & Motivation**: Explain what problem the research addresses and why it matters
+2. **Core Contributions**: Distill 1-3 key innovations
+3. **Method/Algorithm Details**: This is the focus section—provide detailed technical explanations with intuitive interpretations, using formula derivations or analogies when necessary
+4. **Key Experimental Results**: Summarize main findings (only use data explicitly provided in the paper)
+5. **Limitations & Future Directions**: Discuss shortcomings or future research opportunities
+
+### Image Reference Guidelines
+For images used in the original paper, first infer what the image depicts from the surrounding context; if the images help the reader's understanding, include them in the blog (typically 1-3 images).
+
+**Reference Format**:
+```
+![Figure N: Figure title. Brief description of content](images/original-filename.png)
+```
+
+**Reference Rules**:
+- Number figures starting from 1, consecutively (Figure 1, Figure 2, Figure 3...)
+- Reference figures in text by number, e.g., "As shown in Figure 1,..." or "Figure 2 demonstrates..."
+- Keep original file paths and filenames unchanged
+- Do not wrap images in Markdown blockquotes (>)
+- Only reference images that actually exist in the paper content
+
+### Writing Style
+- Use hierarchical headings to organize content (#, ##, ###, etc.)
+- Every paragraph should have substantive content; avoid empty descriptions
 - Briefly explain technical terms when they first appear
-- Distinguish between inline formulas (`$...$` and `\(...\)` ) and block-level formulas (`$$...$$` and `\[...\]` ) as appropriate, and prefer the most basic LaTeX formulas
-- Ensure LaTeX and Markdown syntax compatibility and correctness
+- Use `$...$` for inline formulas and `$$...$$` for display formulas, noting the difference between them
+- Use basic LaTeX syntax to ensure compatibility; if the paper uses complex LaTeX macros or notation, convert them to simpler/basic LaTeX where appropriate.
 
-<Paper Content>
+## Paper Content
 {markdown_content}
-</Paper Content>
 
-<Output Format>
-## Technical Blog
-The detailed technical blog content (with key figures where appropriate)
+## Output Format Requirements
+
+Please output strictly according to the following structure:
+
+```markdown
+# [Blog Title: Concise and impactful, reflecting the paper's core theme]
+
+[Main content: Organized by the sections above, with images inserted at appropriate positions]
 
 ## TL;DR
-A concise 2-3 sentence summary of the paper's core contribution and significance
-</Output Format>
 
-<Important Notes>
-1. Ensure the blog accurately reflects the paper content; **do not add information not in the paper**
-2. Do not guess or fabricate data; skip quantitative analysis rather than summarize incorrect data
-3. Please write in **English**
-4. Make the content accessible yet technically rigorous
-5. Only include figures that exist in the paper content above; do not invent figure references
-</Important Notes>
+[2-3 sentences summarizing: What problem does the paper solve, what method is used, and what results are achieved]
+```
+
+## Critical Constraints
+1. **Stay Faithful**: All content must be based on the paper; do not add information not mentioned
+2. **Data Accuracy**: Do not guess or fabricate data; omit quantitative analysis if uncertain
+3. **Language**: Write entirely in **English**
+4. **Real Images**: Only reference images that actually exist in the paper
 """
             else:
                 # Chinese prompt (default) - Technical blog style
                 prompt = rf"""
-你是一位经验丰富的技术博主，擅长解读学术论文。请将以下论文解读为一篇技术博客，目标是让读者"无需阅读原文也能理解关键技术、核心结果与重要细节"。
+你是一位经验丰富的技术博主，擅长将学术论文解读为通俗易懂的技术博客。
 
-<目标受众>
-有一定本领域基础的读者
+## 任务目标
+将下方论文转化为一篇技术博客，使读者无需阅读原文即可理解关键技术、核心结果与重要细节。
 
-<内容要求>
-1. **必须包含**：研究动机与背景、核心贡献（1-3点）、方法/算法详解、关键实验结果、局限性或未来方向
-2. **重点展开**：方法/算法部分需要详细介绍，需配合直观解释，必要时配合公式和数学推导或者用类比描述复杂概念
-3. **信息溯源**：所有陈述需基于原文，不臆测作者未明确表述的内容
-4. **图片使用**：当某张图片对理解论文有重要帮助时，请在博客中引用该图片
-   - 只选择对理解最关键的图片（通常1-3张）
-   - 一般而言一篇论文会有一到两张能诠释核心方法以及独特贡献的图片，如果这样的图片存在，请引用它们
-   - 使用编号格式：`![图1： 图标题。简要说明](images/filename.png)`
-   - 正文中通过编号引用图片，如"如图1所示，..."、"图2展示了..."
-   - 图片编号必须连续（图1、图2、图3...）
-   - **不要使用引用块（>）包裹图片**
-   - **不要修改图片路径或文件名**
-5. **详略得当**：在不显著增加阅读负担的前提下，在博客中增加尽可能全面的重要论文细节
+## 目标受众
+具有本领域基础知识的技术人员
 
-<风格要求>
-- 结构清晰，使用标题分层
-- 避免空洞套话，每段都有实质内容
-- 专业术语首次出现时简要解释
-- 注意在合适的地方区分使用行内公式（`$...$` 和 `\(...\)`）与块级公式（`$$...$$` 和 `\[...\]`），要尽量使用最基本的 LaTeX 公式
-- 注意所使用的 LaTeX 和 Markdown 语法兼容性和正确性
+## 博客内容要求
 
-<论文内容>
+### 必须包含的章节
+1. **研究背景与动机**：解释该研究要解决什么问题、为什么重要
+2. **核心贡献**：提炼 1-3 个核心创新点
+3. **方法/算法详解**：这是重点章节，需详细介绍技术方案，配合直观解释，必要时使用公式推导或类比说明
+4. **关键实验结果**：总结主要实验发现（仅使用论文中明确给出的数据）
+5. **局限性与展望**：讨论方法的不足或未来研究方向
+
+### 图片引用规范
+对于论文原文中使用的图片，请先根据上下文判断图片的内容是什么，当论文中的图片有助于理解内容时，在博客中引用（通常 1-3 张）。
+
+**引用格式**：
+```
+![图N：图片标题。简要说明图片内容](images/原始文件名.png)
+```
+
+**引用规则**：
+- 图片编号从 1 开始，必须连续递增（图1、图2、图3...）
+- 在正文中通过编号引用，如"如图1所示，..."或"图2展示了..."
+- 保持原始文件路径和文件名不变
+- 不要用 Markdown 引用块（>）包裹图片
+- 只引用论文内容中实际存在的图片
+
+### 写作风格
+- 使用层级标题组织内容（#、##、### 等）
+- 每段都应有实质性内容，避免空洞描述
+- 专业术语首次出现时附简要解释
+- 行内公式使用 `$...$`，独立公式块使用 `$$...$$`，注意二者的区别和使用场景
+- 使用基础 LaTeX 语法确保兼容性；即使论文原文用的是复杂 Latex 语法和记号，也请适度转换为基础 LaTeX 语法
+
+## 论文原文
 {markdown_content}
-</论文内容>
 
-<输出格式>
-## 技术博客
-具体的技术博客内容（在适当位置包含关键图片）
+## 输出格式要求
+
+请严格按以下结构输出：
+
+```markdown
+# [博客标题：简洁有力，体现论文核心主题]
+
+[正文内容：按上述章节组织，在适当位置插入图片]
 
 ## TL;DR
-用2-3句话概括论文的核心贡献和意义
 
-</输出格式>
+[2-3句话概括：论文解决了什么问题、用什么方法、取得了什么效果]
+```
 
-<注意事项>
-1. 请确保博客准确反映论文内容，**不要添加论文中没有的信息**
-2. 不要猜测更不要臆造数据，宁可跳过定量分析，也不要总结错误数据
-3. 请一定用**中文**撰写
-4. 保持内容易读的同时确保技术严谨性
-5. 只引用论文内容中存在的图片，不要编造图片引用
-</注意事项>
+## 重要约束
+1. **忠于原文**：所有内容必须基于论文，不添加论文未提及的信息
+2. **数据准确**：不猜测或编造数据，无法确认的数据宁可省略
+3. **语言要求**：全文使用中文撰写
+4. **图片真实**：只引用论文中确实存在的图片
 """
 
             modelid = (model or LLM_NAME or "").strip() or LLM_NAME
@@ -1592,34 +1621,102 @@ A concise 2-3 sentence summary of the paper's core contribution and significance
 
     def _parse_summary_sections(self, summary: str) -> str:
         """
-        Parse summary content from LLM output and reorganize with TL;DR first.
-        Strategy: Extract TL;DR section, treat everything else as blog content.
-        Output format: TL;DR first, then blog content.
+        Parse summary content from LLM output and reorganize with TL;DR after title.
+
+        Handles:
+        - Code block wrappers (```markdown ... ```)
+        - Various TL;DR formats (headings, bold, blockquote, plain text)
+
+        Output format: Title (if exists), then TL;DR, then remaining content.
 
         Args:
             summary: Original summary content
 
         Returns:
-            Reorganized summary content with TL;DR first
+            Reorganized summary content with TL;DR after title
         """
-        # Extract TL;DR section (including heading, match any heading level #, ##, ### etc.)
-        tldr_match = re.search(r"(#{1,6}\s*TL;DR\s*\n.*?)(?=\n#{1,6}\s|$)", summary, re.DOTALL | re.IGNORECASE)
+        summary = summary.strip()
+        if not summary:
+            return summary
 
-        if tldr_match:
-            tldr_section = tldr_match.group(1).strip()
-            # Remove TL;DR section from summary to get blog content
-            blog_content = summary[: tldr_match.start()] + summary[tldr_match.end() :]
-            blog_content = blog_content.strip()
+        # Remove code block markers if present at start or end
+        lines = summary.split("\n")
+        # Remove opening ``` (with optional language tag) if at start
+        if lines and re.match(r"^```\s*(?:markdown|md|text)?\s*$", lines[0].strip(), re.IGNORECASE):
+            lines = lines[1:]
+        # Remove closing ``` if at end
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        summary = "\n".join(lines).strip()
 
-            if tldr_section and blog_content:
-                # Reorganize: TL;DR first, then blog
-                result = f"{tldr_section}\n\n{blog_content}"
-                result = re.sub(r"\n{3,}", "\n\n", result).strip()
-                return result
+        # Extract TL;DR section using a unified approach
+        # First, find any TL;DR marker and its content
+        tldr_content = None
+        tldr_start = None
+        tldr_end = None
+        is_blockquote = False
 
-        # Fallback: just clean up the original content
-        cleaned = re.sub(r"\n{3,}", "\n\n", summary).strip()
-        return cleaned
+        # Unified pattern to find TL;DR marker (handles heading, bold, blockquote, plain)
+        # Group 1: optional blockquote prefix, Group 2: the TL;DR marker line
+        tldr_marker_pattern = r"^(>?\s*)(#{1,6}\s*TL;DR|\*{1,2}TL;DR\*{1,2}|TL;DR):?\s*$"
+
+        for i, line in enumerate(summary.split("\n")):
+            marker_match = re.match(tldr_marker_pattern, line.strip(), re.IGNORECASE)
+            if marker_match:
+                is_blockquote = line.strip().startswith(">")
+                tldr_start = summary.find(line)
+
+                # Find content after marker until next heading or end
+                remaining_lines = summary.split("\n")[i + 1 :]
+                content_lines = []
+
+                for remaining_line in remaining_lines:
+                    # Stop at next heading (not in blockquote context)
+                    if re.match(r"^#{1,6}\s+\S", remaining_line):
+                        break
+                    # For blockquote TL;DR, stop when blockquote ends
+                    if is_blockquote and remaining_line.strip() and not remaining_line.strip().startswith(">"):
+                        break
+                    content_lines.append(remaining_line)
+
+                # Calculate end position
+                content_text = "\n".join(content_lines)
+                tldr_end = tldr_start + len(line) + 1 + len(content_text)
+
+                # Clean content
+                if is_blockquote:
+                    # Remove > prefix from each line
+                    cleaned_lines = [re.sub(r"^>\s?", "", l) for l in content_lines]
+                    tldr_content = "\n".join(cleaned_lines).strip()
+                else:
+                    tldr_content = content_text.strip()
+
+                break
+
+        if tldr_content:
+            # Remove TL;DR section from original position
+            blog_content = summary[:tldr_start].strip() + "\n\n" + summary[tldr_end:].strip()
+            blog_content = re.sub(r"\n{3,}", "\n\n", blog_content).strip()
+
+            if blog_content:
+                # Check if blog content starts with a title (# Title)
+                title_match = re.match(r"^(#\s+[^\n]+)\n*", blog_content)
+                if title_match:
+                    title = title_match.group(1).strip()
+                    remaining = blog_content[title_match.end() :].strip()
+                    normalized_tldr = f"## TL;DR\n\n{tldr_content}"
+                    if remaining:
+                        return f"{title}\n\n{normalized_tldr}\n\n{remaining}"
+                    else:
+                        return f"{title}\n\n{normalized_tldr}"
+                else:
+                    normalized_tldr = f"## TL;DR\n\n{tldr_content}"
+                    return f"{normalized_tldr}\n\n{blog_content}"
+            else:
+                return f"## TL;DR\n\n{tldr_content}"
+
+        # Fallback: no TL;DR found, just clean up
+        return re.sub(r"\n{3,}", "\n\n", summary).strip()
 
     def _postprocess_image_paths(self, summary: str, pid: str, source: str = "html") -> str:
         """
