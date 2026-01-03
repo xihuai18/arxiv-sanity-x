@@ -2352,35 +2352,37 @@ def normalize_summary_source(source: Optional[str]) -> str:
 
 def summary_source_matches(meta: dict, summary_source: str) -> bool:
     """
-    Check if cached summary source matches requested source.
+    Check if cached summary source is acceptable.
 
     Args:
         meta: Summary metadata dict
         summary_source: Requested source
 
     Returns:
-        True if sources match
+        True if cached summary can be reused
     """
-    raw = meta.get("source")
-    # Strict: if source is missing/invalid, do not match.
-    if raw is None:
-        return False
+    # NOTE:
+    # - `meta.source` is still useful for debugging and for generation-time decisions
+    #   (e.g., how image links were post-processed).
+    # - But using it as a hard cache filter causes bad UX when HTML fails and MinerU
+    #   fallback generated the cached summary while SUMMARY_MARKDOWN_SOURCE remains 'html'.
+    # So we only validate that cached source kind is known; we don't require it to
+    # equal the current requested `summary_source`.
+    raw = meta.get("source") if isinstance(meta, dict) else None
     kind = None
     if isinstance(raw, str):
         cached_source = raw.strip().lower()
-        if not cached_source:
-            return False
-        kind = cached_source.split(":", 1)[0]
+        kind = cached_source.split(":", 1)[0] if cached_source else None
     elif isinstance(raw, dict):
-        # Allow future structured formats like {"kind": "html", "provider": "arxiv"}
         try:
             kind = (raw.get("kind") or raw.get("source") or "").strip().lower()
         except Exception:
             kind = None
 
-    if kind not in {"html", "mineru"}:
-        return False
-    return kind == summary_source
+    # Backward-compat: if not recorded, accept.
+    if kind is None:
+        return True
+    return kind in {"html", "mineru"}
 
 
 def read_summary_meta(meta_path: Path) -> dict:
