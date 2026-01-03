@@ -114,12 +114,57 @@ def _check_mineru_api(api_key: str | None) -> bool:
 
 
 def _stream_lines(prefix: str, pipe):
+    """Stream subprocess output into our terminal.
+
+    Important: when using text mode + universal newlines, Python treats '\r' as a
+    line terminator. tqdm uses '\r' to update progress in-place, so reading with
+    readline() would turn progress updates into many lines ("刷屏").
+
+    We therefore read bytes and handle '\r' (in-place update) separately from
+    '\n' (real new line).
+    """
+
+    buffer = ""
+    in_place = False
     try:
-        for line in iter(pipe.readline, ""):
-            if not line:
+        fd = pipe.fileno()
+        while True:
+            chunk = os.read(fd, 8192)
+            if not chunk:
                 break
-            sys.stdout.write(f"[{prefix}] {line}")
+
+            buffer += chunk.decode("utf-8", errors="replace")
+
+            while True:
+                idx_r = buffer.find("\r")
+                idx_n = buffer.find("\n")
+                if idx_r == -1 and idx_n == -1:
+                    break
+
+                use_r = idx_r != -1 and (idx_n == -1 or idx_r < idx_n)
+                if use_r:
+                    part = buffer[:idx_r]
+                    buffer = buffer[idx_r + 1 :]
+                    sys.stdout.write(f"\r[{prefix}] {part}")
+                    sys.stdout.flush()
+                    in_place = True
+                else:
+                    part = buffer[:idx_n]
+                    buffer = buffer[idx_n + 1 :]
+                    if in_place:
+                        sys.stdout.write("\n")
+                        in_place = False
+                    sys.stdout.write(f"[{prefix}] {part}\n")
+                    sys.stdout.flush()
+
+        # Flush any remaining buffered output.
+        if buffer:
+            if in_place:
+                sys.stdout.write(f"\r[{prefix}] {buffer}")
+            else:
+                sys.stdout.write(f"[{prefix}] {buffer}")
             sys.stdout.flush()
+
     finally:
         try:
             pipe.close()
@@ -135,8 +180,8 @@ def _start_service(spec: ServiceSpec) -> subprocess.Popen:
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+        text=False,
+        bufsize=0,
         preexec_fn=os.setsid if hasattr(os, "setsid") else None,
     )
     assert proc.stdout is not None

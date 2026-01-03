@@ -1439,46 +1439,122 @@ class PaperSummarizer:
         try:
             # Choose language prompt based on configuration
             if LLM_SUMMARY_LANG == "en":
-                # English prompt - Technical blog style
+                # English prompt - Academic technical blog style
                 prompt = rf"""
-You are an experienced technical blogger who excels at transforming academic papers into accessible technical blog posts.
+You are an experienced academic technical blogger who excels at transforming research papers into rigorous yet accessible technical blog posts with proper academic conventions.
 
 ## Task Objective
-Transform the paper below into a technical blog post that enables readers to understand the key techniques, core results, and important details without reading the original paper.
+Transform the paper below into an academic-style technical blog post that enables readers to understand the key techniques, core results, and important details without reading the original paper, while maintaining scholarly rigor.
 
 ## Target Audience
-Technical professionals with foundational knowledge in the relevant field
+Technical professionals and researchers with foundational knowledge in the relevant field
 
 ## Blog Content Requirements
 
 ### Required Sections
-1. **Research Background & Motivation**: Explain what problem the research addresses and why it matters
-2. **Core Contributions**: Distill 1-3 key innovations
-3. **Method/Algorithm Details**: This is the focus section—provide detailed technical explanations with intuitive interpretations, using formula derivations or analogies when necessary
-4. **Key Experimental Results**: Summarize main findings (only use data explicitly provided in the paper)
-5. **Limitations & Future Directions**: Discuss shortcomings or future research opportunities
+1. **Research Background & Motivation**: Explain what problem the research addresses and why it matters. Cite relevant context from the paper.
+2. **Core Contributions**: Distill 1-3 key innovations with precise technical claims
+3. **Method/Algorithm Details**: This is the focus section—provide detailed technical explanations with:
+   - Formal problem definitions with proper mathematical notation
+   - Key algorithmic steps or theoretical derivations
+   - Intuitive interpretations alongside formal descriptions
+4. **Theoretical Analysis** (if applicable): Present key theorems, lemmas, or complexity analysis
+5. **Experimental Results**: Summarize main findings with quantitative comparisons (only use data explicitly provided in the paper)
+6. **Limitations & Future Directions**: Discuss shortcomings or future research opportunities
 
-### Image Reference Guidelines
-For images used in the original paper, first infer what the image depicts from the surrounding context; if the images help the reader's understanding, include them in the blog (typically 1-3 images).
+### Figure Citation Guidelines
+For figures in the original paper, first infer what the figure depicts from the surrounding context. Include figures that significantly aid understanding (typically 2-4 figures).
 
-**Reference Format**:
+**Figure Insertion Format**:
 ```
-![Figure N: Figure title. Brief description of content](images/original-filename.png)
+![Figure N: Descriptive caption explaining the figure content and its significance](images/original-filename.png)
 ```
 
-**Reference Rules**:
-- Number figures starting from 1, consecutively (Figure 1, Figure 2, Figure 3...)
-- Reference figures in text by number, e.g., "As shown in Figure 1,..." or "Figure 2 demonstrates..."
+**Cross-Reference Rules**:
+- Number figures consecutively starting from 1 (Figure 1, Figure 2, Figure 3...)
+- **Always cross-reference figures in the text before or near their appearance**, using academic phrasing:
+  - "As illustrated in Figure 1, the proposed architecture consists of..."
+  - "Figure 2 presents the comparative results, showing that..."
+  - "The attention mechanism (Figure 3) enables..."
 - Keep original file paths and filenames unchanged
-- Do not wrap images in Markdown blockquotes (>)
-- Only reference images that actually exist in the paper content
+- Do not wrap figures in Markdown blockquotes (>)
+- Only include figures that actually exist in the paper content
+- Place figures near their first textual reference
+
+### Mathematical Notation Guidelines
+**Inline vs. Display Math**:
+- Use `$...$` for inline math: variables ($x$, $\theta$), short expressions ($O(n \log n)$), or references to equations
+- Use `$$...$$` for display math: important equations, definitions, or derivations that deserve emphasis
+
+**Equation Formatting**:
+- For key equations, add descriptive context before and after:
+  ```
+  The loss function is defined as:
+  $$\mathcal{{L}} = \mathbb{{E}}_{{x \sim p_{{data}}}} \left[ \log D(x) \right] + \mathbb{{E}}_{{z \sim p_z}} \left[ \log(1 - D(G(z))) \right]$$
+  where $D$ denotes the discriminator and $G$ denotes the generator.
+  ```
+- Use aligned environments for multi-line derivations:
+  ```
+  $$\begin{{aligned}}
+  \nabla_\theta J(\theta) &= \mathbb{{E}}_\tau \left[ \sum_t \nabla_\theta \log \pi_\theta(a_t|s_t) R(\tau) \right] \\
+  &\approx \frac{{1}}{{N}} \sum_{{i=1}}^N \sum_t \nabla_\theta \log \pi_\theta(a_t^i|s_t^i) R(\tau^i)
+  \end{{aligned}}$$
+  ```
+
+**Theorem/Definition Formatting**:
+Use blockquotes (`>`) to visually distinguish theorems, definitions, and lemmas from regular text:
+
+```
+> **Definition 1** (Markov Decision Process). *A Markov Decision Process (MDP) is a tuple $(\mathcal{{S}}, \mathcal{{A}}, P, R, \gamma)$ where $\mathcal{{S}}$ is the state space, $\mathcal{{A}}$ is the action space, $P$ is the transition probability, $R$ is the reward function, and $\gamma \in [0,1)$ is the discount factor.*
+```
+
+```
+> **Theorem 1** (Convergence Guarantee). *Under Assumptions 1-3, Algorithm 1 converges to a stationary point at rate $O(1/\sqrt{{T}})$.*
+>
+> *Proof sketch.* The key insight is that... (brief outline of the proof approach)
+```
+
+- Use consistent formatting: **bold** for theorem/definition label, *italics* for the statement
+- Include proof sketches when they provide insight, indented within the same blockquote
+- Number theorems, definitions, and lemmas consecutively within each category
+
+**LaTeX Best Practices**:
+- Use `\mathbb` for number sets ($\mathbb{{R}}$, $\mathbb{{E}}$), `\mathcal` for calligraphic letters ($\mathcal{{L}}$, $\mathcal{{D}}$)
+- Use `\text` for text within math: $P(\text{{success}})$
+- Prefer `\cdot` over `*` for multiplication, `\times` for cross product
+- Convert complex custom macros to standard LaTeX for compatibility
+
+### Table Usage Guidelines
+Use Markdown tables to present structured information clearly. Tables are especially effective for:
+
+**When to Use Tables**:
+- Comparing experimental results across methods/datasets
+- Summarizing hyperparameters or model configurations
+- Listing notation definitions
+- Comparing related work or method characteristics
+
+**Table Formatting**:
+```
+| Method | Accuracy | F1 Score | Latency (ms) |
+|--------|----------|----------|-------------|
+| Baseline | 85.2 | 83.1 | 12.3 |
+| Proposed | **91.4** | **89.7** | 15.1 |
+```
+
+**Best Practices**:
+- Add a brief caption or description before the table
+- Use **bold** to highlight best results
+- Keep tables concise; avoid overly wide tables
+- Align numerical data for easy comparison
+- Only include tables when they genuinely improve clarity over prose
 
 ### Writing Style
 - Use hierarchical headings to organize content (#, ##, ###, etc.)
 - Every paragraph should have substantive content; avoid empty descriptions
-- Briefly explain technical terms when they first appear
-- Use `$...$` for inline formulas and `$$...$$` for display formulas, noting the difference between them
-- Use basic LaTeX syntax to ensure compatibility; if the paper uses complex LaTeX macros or notation, convert them to simpler/basic LaTeX where appropriate.
+- Define technical terms and notation precisely when first introduced
+- Maintain formal academic tone while remaining accessible
+- Use precise language: "achieves", "demonstrates", "outperforms" rather than "is good at"
+- Connect sections with logical transitions
 
 ## Paper Content
 {markdown_content}
@@ -1488,62 +1564,139 @@ For images used in the original paper, first infer what the image depicts from t
 Please output strictly according to the following structure:
 
 ```markdown
-# [Blog Title: Concise and impactful, reflecting the paper's core theme]
+# [Blog Title: Concise and impactful, reflecting the paper's core contribution]
 
-[Main content: Organized by the sections above, with images inserted at appropriate positions]
+[Main content: Organized by the sections above, with figures and equations properly integrated]
 
 ## TL;DR
 
-[2-3 sentences summarizing: What problem does the paper solve, what method is used, and what results are achieved]
+[2-3 sentences summarizing: What problem does the paper solve, what method is proposed, and what are the key results]
 ```
 
 ## Critical Constraints
-1. **Stay Faithful**: All content must be based on the paper; do not add information not mentioned
-2. **Data Accuracy**: Do not guess or fabricate data; omit quantitative analysis if uncertain
-3. **Language**: Write entirely in **English**
-4. **Real Images**: Only reference images that actually exist in the paper
+1. **Academic Rigor**: All content must be based on the paper; maintain scholarly precision
+2. **Data Accuracy**: Quote exact numbers from the paper; never guess or fabricate data
+3. **Language**: Write entirely in **English** with formal academic style
+4. **Figure Integrity**: Only include figures that exist in the paper; always cross-reference them in text
+5. **Mathematical Precision**: Ensure all equations are syntactically correct and properly contextualized
 """
             else:
-                # Chinese prompt (default) - Technical blog style
+                # Chinese prompt (default) - Academic technical blog style
                 prompt = rf"""
-你是一位经验丰富的技术博主，擅长将学术论文解读为通俗易懂的技术博客。
+你是一位经验丰富的学术技术博主，擅长将研究论文解读为既严谨又通俗易懂的技术博客，同时保持学术规范，专业但不晦涩。
 
 ## 任务目标
-将下方论文转化为一篇技术博客，使读者无需阅读原文即可理解关键技术、核心结果与重要细节。
+将下方论文转化为一篇学术风格的技术博客，使读者无需阅读原文即可理解关键技术、核心结果与重要细节，同时保持学术严谨性。
 
 ## 目标受众
-具有本领域基础知识的技术人员
+具有本领域基础知识的技术人员和研究者
 
 ## 博客内容要求
 
 ### 必须包含的章节
-1. **研究背景与动机**：解释该研究要解决什么问题、为什么重要
-2. **核心贡献**：提炼 1-3 个核心创新点
-3. **方法/算法详解**：这是重点章节，需详细介绍技术方案，配合直观解释，必要时使用公式推导或类比说明
-4. **关键实验结果**：总结主要实验发现（仅使用论文中明确给出的数据）
-5. **局限性与展望**：讨论方法的不足或未来研究方向
+1. **研究背景与动机**：解释该研究要解决什么问题、为什么重要，引用论文中的相关背景
+2. **核心贡献**：提炼 1-3 个核心创新点，使用精确的技术表述
+3. **方法/算法详解**：这是重点章节，需详细介绍技术方案，包括：
+   - 使用规范数学符号的形式化问题定义
+   - 关键算法步骤或理论推导
+   - 在形式化描述旁配合直观解释
+4. **理论分析**（如适用）：呈现关键定理、引理或复杂度分析
+5. **实验结果**：总结主要发现并进行定量比较（仅使用论文中明确给出的数据）
+6. **局限性与展望**：讨论方法的不足或未来研究方向
 
 ### 图片引用规范
-对于论文原文中使用的图片，请先根据上下文判断图片的内容是什么，当论文中的图片有助于理解内容时，在博客中引用（通常 1-3 张）。
+对于论文原文中的图片，请先根据上下文判断图片内容。选择对理解内容有重要帮助的图片纳入博客（通常 2-4 张）。
 
-**引用格式**：
+**图片插入格式**：
 ```
-![图N：图片标题。简要说明图片内容](images/原始文件名.png)
+![图N：描述性标题，说明图片内容及其意义](images/原始文件名.png)
 ```
 
-**引用规则**：
+**交叉引用规则**：
 - 图片编号从 1 开始，必须连续递增（图1、图2、图3...）
-- 在正文中通过编号引用，如"如图1所示，..."或"图2展示了..."
+- **必须在图片出现前或附近的正文中引用该图片**，使用学术化表述：
+  - "如图1所示，所提出的架构由...组成"
+  - "图2展示了对比实验结果，表明..."
+  - "注意力机制（图3）使得模型能够..."
 - 保持原始文件路径和文件名不变
 - 不要用 Markdown 引用块（>）包裹图片
 - 只引用论文内容中实际存在的图片
+- 图片应放置在其首次文字引用的附近
+
+### 数学公式规范
+**行内公式 vs 独立公式**：
+- 使用 `$...$` 表示行内公式：变量（$x$、$\theta$）、简短表达式（$O(n \log n)$）或对公式的引用
+- 使用 `$$...$$` 表示独立公式：重要方程式、定义或需要强调的推导
+
+**公式格式化**：
+- 对于关键公式，在前后添加描述性上下文：
+  ```
+  损失函数定义为：
+  $$\mathcal{{L}} = \mathbb{{E}}_{{x \sim p_{{data}}}} \left[ \log D(x) \right] + \mathbb{{E}}_{{z \sim p_z}} \left[ \log(1 - D(G(z))) \right]$$
+  其中 $D$ 表示判别器，$G$ 表示生成器。
+  ```
+- 使用 aligned 环境处理多行推导：
+  ```
+  $$\begin{{aligned}}
+  \nabla_\theta J(\theta) &= \mathbb{{E}}_\tau \left[ \sum_t \nabla_\theta \log \pi_\theta(a_t|s_t) R(\tau) \right] \\
+  &\approx \frac{{1}}{{N}} \sum_{{i=1}}^N \sum_t \nabla_\theta \log \pi_\theta(a_t^i|s_t^i) R(\tau^i)
+  \end{{aligned}}$$
+  ```
+
+**定理/定义格式**：
+使用引用块（`>`）将定理、定义和引理与正文在视觉上区分开来：
+
+```
+> **定义 1**（马尔可夫决策过程）。*马尔可夫决策过程（MDP）是一个五元组 $(\mathcal{{S}}, \mathcal{{A}}, P, R, \gamma)$，其中 $\mathcal{{S}}$ 是状态空间，$\mathcal{{A}}$ 是动作空间，$P$ 是转移概率，$R$ 是奖励函数，$\gamma \in [0,1)$ 是折扣因子。*
+```
+
+```
+> **定理 1**（收敛性保证）。*在假设 1-3 成立的条件下，算法 1 以 $O(1/\sqrt{{T}})$ 的速率收敛到驻点。*
+>
+> *证明概要。* 核心思路是...（简要说明证明方法）
+```
+
+- 使用统一格式：**粗体**标注定理/定义标签，*斜体*表示陈述内容
+- 当证明思路有助于理解时，在同一引用块内缩进添加证明概要
+- 定理、定义和引理在各自类别内连续编号
+
+**LaTeX 最佳实践**：
+- 使用 `\mathbb` 表示数集（$\mathbb{{R}}$、$\mathbb{{E}}$），`\mathcal` 表示花体字母（$\mathcal{{L}}$、$\mathcal{{D}}$）
+- 在数学环境中使用 `\text` 插入文本：$P(\text{{成功}})$
+- 乘法优先使用 `\cdot` 而非 `*`，叉积使用 `\times`
+- 将复杂的自定义宏转换为标准 LaTeX 以确保兼容性
+
+### 表格使用规范
+适当使用 Markdown 表格来清晰呈现结构化信息，提高可读性。
+
+**适用场景**：
+- 对比不同方法/数据集上的实验结果
+- 汇总超参数或模型配置
+- 列出符号定义说明
+- 比较相关工作或方法特性
+
+**表格格式**：
+```
+| 方法 | 准确率 | F1 分数 | 延迟 (ms) |
+|------|--------|---------|----------|
+| 基线方法 | 85.2 | 83.1 | 12.3 |
+| 本文方法 | **91.4** | **89.7** | 15.1 |
+```
+
+**最佳实践**：
+- 在表格前添加简要说明或标题
+- 使用**粗体**突出最佳结果
+- 保持表格简洁，避免过宽的表格
+- 数值数据对齐以便于比较
+- 仅在表格确实比文字描述更清晰时使用
 
 ### 写作风格
 - 使用层级标题组织内容（#、##、### 等）
 - 每段都应有实质性内容，避免空洞描述
-- 专业术语首次出现时附简要解释
-- 行内公式使用 `$...$`，独立公式块使用 `$$...$$`，注意二者的区别和使用场景
-- 使用基础 LaTeX 语法确保兼容性；即使论文原文用的是复杂 Latex 语法和记号，也请适度转换为基础 LaTeX 语法
+- 专业术语和符号在首次出现时给出精确定义
+- 保持正式的学术语调，同时确保可读性
+- 使用精确的表述："实现了"、"证明了"、"优于"，而非"表现不错"
+- 各章节之间使用逻辑性过渡衔接
 
 ## 论文原文
 {markdown_content}
@@ -1553,20 +1706,21 @@ Please output strictly according to the following structure:
 请严格按以下结构输出：
 
 ```markdown
-# [博客标题：简洁有力，体现论文核心主题]
+# [博客标题：简洁有力，体现论文核心贡献]
 
-[正文内容：按上述章节组织，在适当位置插入图片]
+[正文内容：按上述章节组织，图片和公式应恰当融入行文]
 
 ## TL;DR
 
-[2-3句话概括：论文解决了什么问题、用什么方法、取得了什么效果]
+[2-3句话概括：论文解决了什么问题、提出了什么方法、取得了哪些关键成果]
 ```
 
 ## 重要约束
-1. **忠于原文**：所有内容必须基于论文，不添加论文未提及的信息
-2. **数据准确**：不猜测或编造数据，无法确认的数据宁可省略
-3. **语言要求**：全文使用中文撰写
-4. **图片真实**：只引用论文中确实存在的图片
+1. **学术严谨**：所有内容必须基于论文，保持学术精确性
+2. **数据准确**：引用论文中的确切数字，不得猜测或编造数据
+3. **语言要求**：全文使用中文撰写，保持正式学术风格
+4. **图片规范**：只引用论文中实际存在的图片，必须在正文中交叉引用
+5. **公式精确**：确保所有公式语法正确，并有恰当的上下文说明
 """
 
             modelid = (model or LLM_NAME or "").strip() or LLM_NAME
@@ -1580,8 +1734,8 @@ Please output strictly according to the following structure:
             response = self.client.chat.completions.create(
                 model=modelid,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=32768,
-                extra_body={"reasoning": {"effort": "low"}},  # Use low reasoning effort
+                temperature=0.6,
+                top_p=0.95,
             )
 
             # Validate response structure
