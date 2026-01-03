@@ -1436,6 +1436,38 @@ class PaperSummarizer:
         """
         summary_meta = {}
 
+        def _safe_dump(obj):
+            if obj is None:
+                return None
+            # OpenAI python SDK objects are often pydantic models
+            try:
+                return obj.model_dump()
+            except Exception:
+                pass
+            # Some providers may return dict-like usage
+            try:
+                return dict(obj)
+            except Exception:
+                pass
+            # Fallback: try attribute extraction for common fields
+            out = {}
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "cached_tokens",
+            ):
+                try:
+                    val = getattr(obj, key)
+                except Exception:
+                    val = None
+                if val is not None:
+                    out[key] = val
+            return out or None
+
         try:
             # Choose language prompt based on configuration
             if LLM_SUMMARY_LANG == "en":
@@ -1725,7 +1757,6 @@ Please output strictly according to the following structure:
 
             modelid = (model or LLM_NAME or "").strip() or LLM_NAME
             summary_meta = {
-                "model": modelid,
                 "prompt": prompt,
                 "generated_at": time.time(),
             }
@@ -1738,6 +1769,26 @@ Please output strictly according to the following structure:
                 top_p=0.95,
             )
 
+            # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
+            try:
+                usage = getattr(response, "usage", None)
+            except Exception:
+                usage = None
+
+            finish_reason = None
+            try:
+                if getattr(response, "choices", None):
+                    finish_reason = getattr(response.choices[0], "finish_reason", None)
+            except Exception:
+                finish_reason = None
+
+            llm_info = {}
+            usage_dump = _safe_dump(usage)
+            if usage_dump is not None:
+                llm_info["usage"] = usage_dump
+            if finish_reason is not None:
+                llm_info["finish_reason"] = finish_reason
+
             # Validate response structure
             if not response.choices:
                 logger.trace("LLM returned empty choices")
@@ -1745,6 +1796,22 @@ Please output strictly according to the following structure:
 
             message = response.choices[0].message
             summary = message.content if message else None
+
+            # Attach reasoning to meta if provider returns it (can be large)
+            reasoning = None
+            try:
+                if hasattr(message, "reasoning") and message.reasoning:
+                    reasoning = message.reasoning
+                elif hasattr(message, "reasoning_content") and message.reasoning_content:
+                    reasoning = message.reasoning_content
+            except Exception:
+                reasoning = None
+
+            if reasoning:
+                llm_info["reasoning"] = str(reasoning)
+
+            if llm_info:
+                summary_meta["llm"] = llm_info
 
             if not summary:
                 logger.trace("LLM returned empty content")
@@ -1928,6 +1995,9 @@ Please output strictly according to the following structure:
                     main_content = self.extract_main_content(markdown_content)
                     logger.info(f"Summarizing {pid} (html:{html_source or 'unknown'}, cache:{cache_pid}) ...")
                     summary = self.summarize_with_llm(main_content, model=model)
+                    # Attach detailed source info for caching/meta.json
+                    if isinstance(summary.get("meta"), dict):
+                        summary["meta"]["source"] = f"html:{(html_source or 'unknown').strip().lower()}"
                     # Post-process image paths using the actual cache_pid
                     summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid)
                     return summary
@@ -1962,6 +2032,8 @@ Please output strictly according to the following structure:
                     # Step 4: Generate summary using LLM
                     logger.info(f"Summarizing {cache_pid} (mineru) ...")
                     summary = self.summarize_with_llm(main_content, model=model)
+                    if isinstance(summary.get("meta"), dict):
+                        summary["meta"]["source"] = f"mineru:{backend}"
                     # Post-process image paths for MinerU source
                     summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid, source="mineru")
                     return summary
@@ -2022,6 +2094,8 @@ Please output strictly according to the following structure:
             # Step 5: Generate summary using LLM
             logger.info(f"Summarizing {cache_pid} (mineru) ...")
             summary = self.summarize_with_llm(main_content, model=model)
+            if isinstance(summary.get("meta"), dict):
+                summary["meta"]["source"] = f"mineru:{backend}"
             # Post-process image paths for MinerU source
             summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid, source="mineru")
 
@@ -2287,10 +2361,26 @@ def summary_source_matches(meta: dict, summary_source: str) -> bool:
     Returns:
         True if sources match
     """
-    cached_source = (meta.get("source") or "mineru").strip().lower()
-    if cached_source not in {"html", "mineru"}:
-        cached_source = "mineru"
-    return cached_source == summary_source
+    raw = meta.get("source")
+    # Strict: if source is missing/invalid, do not match.
+    if raw is None:
+        return False
+    kind = None
+    if isinstance(raw, str):
+        cached_source = raw.strip().lower()
+        if not cached_source:
+            return False
+        kind = cached_source.split(":", 1)[0]
+    elif isinstance(raw, dict):
+        # Allow future structured formats like {"kind": "html", "provider": "arxiv"}
+        try:
+            kind = (raw.get("kind") or raw.get("source") or "").strip().lower()
+        except Exception:
+            kind = None
+
+    if kind not in {"html", "mineru"}:
+        return False
+    return kind == summary_source
 
 
 def read_summary_meta(meta_path: Path) -> dict:
