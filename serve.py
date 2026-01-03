@@ -86,7 +86,6 @@ from paper_summarizer import (
     resolve_cache_pid,
     split_pid_version,
     summary_cache_paths,
-    summary_quality,
     summary_source_matches,
 )
 from vars import (
@@ -100,7 +99,6 @@ from vars import (
     SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
     SUMMARY_DIR,
     SUMMARY_MARKDOWN_SOURCE,
-    SUMMARY_MIN_CHINESE_RATIO,
     SVM_C,
     SVM_MAX_ITER,
     SVM_TOL,
@@ -2973,29 +2971,13 @@ def api_check_paper_summaries():
                 # Check if corresponding meta file exists and is valid
                 meta_file = summary_dir / f"{model_name}.meta.json"
                 if meta_file.exists() and md_file.stat().st_size > 0:
-                    # Read meta to get actual model name
-                    try:
-                        meta = read_summary_meta(meta_file)
-                        actual_model = meta.get("model", "")
-                        if actual_model:
-                            available_models.append(actual_model)
-                    except Exception:
-                        # If meta read fails, skip this summary
-                        pass
+                    available_models.append(model_name)
 
         return jsonify({"success": True, "available_models": available_models})
 
     except Exception as e:
         logger.error(f"Check paper summaries API error: {e}")
         return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
-
-
-def _summary_retry_seconds() -> float:
-    try:
-        hours = float(os.environ.get("ARXIV_SANITY_SUMMARY_RETRY_HOURS", "24"))
-    except Exception:
-        hours = 24.0
-    return max(0.0, hours) * 3600.0
 
 
 def _write_summary_meta(meta_path: Path, data: dict) -> None:
@@ -3009,7 +2991,7 @@ def _public_summary_meta(meta: dict) -> dict:
     """Filter summary metadata for client responses."""
     if not isinstance(meta, dict):
         return {}
-    allowed = ("updated_at", "generated_at", "quality", "source", "chinese_ratio", "model")
+    allowed = ("generated_at", "source", "llm")
     return {key: meta.get(key) for key in allowed if meta.get(key) is not None}
 
 
@@ -3018,6 +3000,10 @@ def _sanitize_summary_meta(meta: dict) -> dict:
         return {}
     clean = dict(meta)
     clean.pop("prompt", None)
+    clean.pop("updated_at", None)
+    clean.pop("quality", None)
+    clean.pop("chinese_ratio", None)
+    clean.pop("model", None)
     return clean
 
 
@@ -3047,7 +3033,7 @@ def generate_paper_summary(
         cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
         if legacy_cache.exists() and not cache_file.exists():
             lock_file = legacy_lock
-        retry_seconds = _summary_retry_seconds()
+        # Quality/chinese_ratio based retry removed; always reuse cache when available.
 
         # Ensure cache directory exists
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -3060,12 +3046,22 @@ def generate_paper_summary(
                     cached = f.read()
                 cached = cached if cached.strip() else None
                 meta = read_summary_meta(meta_path)
-                if "generated_at" not in meta and "updated_at" in meta:
-                    meta["generated_at"] = meta.get("updated_at")
-                if meta and "source" not in meta:
+                # Backfill generated_at for old caches without mutating meaning.
+                if "generated_at" not in meta:
+                    # Prefer legacy updated_at if present
+                    ga = meta.get("updated_at")
+                    if ga is None:
+                        try:
+                            ga = meta_path.stat().st_mtime
+                        except Exception:
+                            try:
+                                ga = body_path.stat().st_mtime
+                            except Exception:
+                                ga = None
+                    if ga is not None:
+                        meta["generated_at"] = ga
+                if "source" not in meta:
                     meta["source"] = summary_source
-                if meta and "model" not in meta and model and inject_model:
-                    meta["model"] = model
                 if not cached:
                     return None, {}
                 return cached, meta
@@ -3087,45 +3083,34 @@ def generate_paper_summary(
                 return None, {}
             return legacy_cached, legacy_meta_data
 
-        def _should_retry_low_quality(meta: dict) -> bool:
-            if retry_seconds <= 0:
-                return False
-            try:
-                updated_at = float(meta.get("updated_at", 0.0))
-            except Exception:
-                updated_at = 0.0
-            return (time.time() - updated_at) >= retry_seconds
-
-        def _matches_requested_model(meta: dict) -> bool:
-            if not model:
-                return False
-            cached_model = (meta.get("model") or "").strip()
-            return cached_model == model
-
         # Check if cached summary exists (must match current markdown source)
         cached_summary, cached_meta = _read_cached_summary()
         if cached_summary and not force_refresh:
             if not summary_source_matches(cached_meta, summary_source):
                 cached_summary = None
-            elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
+            else:
                 logger.info(f"Using cached paper summary: {pid}")
-                if model:
-                    cached_meta.setdefault("model", model)
-                return cached_summary, _sanitize_summary_meta(cached_meta)
-        elif cached_summary and force_refresh and summary_source_matches(cached_meta, summary_source):
-            if _matches_requested_model(cached_meta):
-                logger.info(f"Using cached paper summary (model match): {pid}")
-                cached_meta.setdefault("model", model)
                 return cached_summary, _sanitize_summary_meta(cached_meta)
 
         if cache_only:
+            # If another request is generating the same cache (lock held), tell client.
+            # This lets the UI show a non-blocking "generating" state when switching models.
+            probe_fd = None
+            try:
+                probe_fd = acquire_summary_lock(lock_file, timeout_s=1)
+            except Exception:
+                probe_fd = None
+            if probe_fd is None:
+                return "# Error\n\nSummary is being generated, please retry shortly.", {}
+            try:
+                release_summary_lock(probe_fd, lock_file)
+            except Exception:
+                pass
             raise SummaryCacheMiss("Summary cache not found")
 
         lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
         if lock_fd is None:
             if cached_summary and not force_refresh:
-                if model:
-                    cached_meta.setdefault("model", model)
                 return cached_summary, _sanitize_summary_meta(cached_meta)
             return "# Error\n\nSummary is being generated, please retry shortly.", {}
 
@@ -3134,16 +3119,8 @@ def generate_paper_summary(
             if cached_summary and not force_refresh:
                 if not summary_source_matches(cached_meta, summary_source):
                     cached_summary = None
-                elif cached_meta.get("quality") != "low_chinese" or not _should_retry_low_quality(cached_meta):
+                else:
                     logger.info(f"Using cached paper summary after lock: {pid}")
-                    if model:
-                        cached_meta.setdefault("model", model)
-                    return cached_summary, _sanitize_summary_meta(cached_meta)
-            elif cached_summary and force_refresh and summary_source_matches(cached_meta, summary_source):
-                if _matches_requested_model(cached_meta):
-                    logger.info(f"Using cached paper summary after lock (model match): {pid}")
-                    if model:
-                        cached_meta.setdefault("model", model)
                     return cached_summary, _sanitize_summary_meta(cached_meta)
 
             if cache_only:
@@ -3159,8 +3136,6 @@ def generate_paper_summary(
             summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
             summary_content, summary_meta = normalize_summary_result(summary_result)
             summary_meta = summary_meta if isinstance(summary_meta, dict) else {}
-            if model and "model" not in summary_meta:
-                summary_meta["model"] = model
             response_meta = _sanitize_summary_meta(summary_meta)
 
             # Only cache successful summaries (not error messages)
@@ -3170,31 +3145,15 @@ def generate_paper_summary(
             )
 
             if not is_error:
-                quality, chinese_ratio = summary_quality(summary_content)
-                if chinese_ratio is not None:
-                    logger.trace(f"Paper {pid} summary Chinese ratio: {chinese_ratio:.2%}")
-
                 try:
                     atomic_write_text(cache_file, summary_content)
-                    meta = {
-                        "updated_at": time.time(),
-                        "quality": quality,
-                        "source": summary_source,
-                    }
+                    meta = {}
                     meta.update(summary_meta)
-                    if model:
-                        meta.setdefault("model", model)
-                    if chinese_ratio is not None:
-                        meta["chinese_ratio"] = chinese_ratio
-                    if "generated_at" not in meta:
-                        meta["generated_at"] = meta.get("updated_at")
+                    # Ensure source exists for cache checks; keep detailed value if provided
+                    meta.setdefault("source", summary_source)
+                    meta.setdefault("generated_at", time.time())
                     _write_summary_meta(meta_file, meta)
-                    if quality == "ok":
-                        logger.info(f"Paper summary cached to: {cache_file}")
-                    else:
-                        logger.warning(
-                            f"Summary Chinese ratio too low ({chinese_ratio:.2%} < {SUMMARY_MIN_CHINESE_RATIO:.0%}); cached with retry"
-                        )
+                    logger.info(f"Paper summary cached to: {cache_file}")
                     response_meta = _sanitize_summary_meta(meta)
                 except Exception as e:
                     logger.error(f"Failed to cache paper summary: {e}")

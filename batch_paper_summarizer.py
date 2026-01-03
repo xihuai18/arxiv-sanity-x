@@ -33,7 +33,6 @@ from paper_summarizer import (
     release_summary_lock,
     resolve_cache_pid,
     summary_cache_paths,
-    summary_quality,
     summary_source_matches,
 )
 from vars import LLM_NAME, SUMMARY_DIR
@@ -165,7 +164,6 @@ class BatchProcessor:
             "failed": 0,
             "cached": 0,
             "skipped": 0,
-            "low_chinese": 0,
             # Detailed failure reason statistics
             "failure_reasons": {
                 "download_failed": 0,  # PDF download failed
@@ -292,7 +290,7 @@ class BatchProcessor:
             summary_meta: Optional metadata from summarizer
 
         Returns:
-            Tuple[bool, Optional[str]]: (cached, quality)
+            Tuple[bool, Optional[str]]: (cached, None)
         """
         try:
             # Use layered cache structure: SUMMARY_DIR/{cache_pid}/{model}.md
@@ -301,34 +299,17 @@ class BatchProcessor:
 
             # Only cache successful summaries (not error messages)
             if not summary_content.startswith("# Error"):
-                quality, chinese_ratio = summary_quality(summary_content)
-                if chinese_ratio is not None:
-                    logger.trace(f"Paper {cache_pid} summary Chinese ratio: {chinese_ratio:.2%}")
-
                 atomic_write_text(cache_file, summary_content)
-                meta = {
-                    "updated_at": time.time(),
-                    "quality": quality,
-                    "source": summary_source,
-                    "model": self.model,
-                }
+                meta = {}
                 if isinstance(summary_meta, dict):
                     meta.update(summary_meta)
-                # Ensure model is set correctly
-                meta["model"] = self.model
-                if chinese_ratio is not None:
-                    meta["chinese_ratio"] = chinese_ratio
-                if "generated_at" not in meta and "updated_at" in meta:
-                    meta["generated_at"] = meta.get("updated_at")
+                # Ensure source exists for cache checks; keep detailed value if provided
+                meta.setdefault("source", summary_source)
+                meta.setdefault("generated_at", time.time())
                 atomic_write_json(meta_file, meta)
 
-                if quality == "ok":
-                    logger.debug(f"Summary cached to: {cache_file}")
-                else:
-                    logger.warning(
-                        f"Chinese ratio too low in summary ({chinese_ratio:.2%}), cached with retry: {cache_pid}"
-                    )
-                return True, quality
+                logger.debug(f"Summary cached to: {cache_file}")
+                return True, None
             else:
                 logger.warning(f"Summary generation failed, not caching: {cache_pid}")
                 return False, None
@@ -413,7 +394,7 @@ class BatchProcessor:
                     return pid, False, summary_content
 
                 # Cache summary
-                cache_success, cache_quality = self.cache_summary(
+                cache_success, _ = self.cache_summary(
                     cache_pid, summary_content, source=summary_source, summary_meta=summary_meta
                 )
 
@@ -421,8 +402,6 @@ class BatchProcessor:
                     logger.success(f"Paper processed successfully: {pid} (elapsed: {end_time - start_time:.2f}s)")
                     with self.stats_lock:
                         self.stats["success"] += 1
-                        if cache_quality == "low_chinese":
-                            self.stats["low_chinese"] += 1
                     return pid, True, summary_content
                 else:
                     logger.error(f"Summary cache failed: {pid}")
@@ -604,7 +583,6 @@ class BatchProcessor:
         logger.success(f"Successfully processed: {self.stats['success']}")
         logger.success(f"Failed: {self.stats['failed']}")
         logger.success(f"Skipped cached: {self.stats['cached']}")
-        logger.success(f"Low Chinese ratio: {self.stats['low_chinese']}")
         logger.success(f"Total time: {total_time:.2f} s")
 
         processed_count = self.stats["success"] + self.stats["failed"]
