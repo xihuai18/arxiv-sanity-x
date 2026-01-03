@@ -409,12 +409,22 @@ def get_data_cached():
                 try:
                     if CACHE_PAPERS_IN_MEMORY:
                         with get_papers_db() as papers_db:
-                            PAPERS_CACHE = {k: v for k, v in tqdm(papers_db.items(), desc="loading papers db")}
+                            PAPERS_CACHE = {
+                                k: v
+                                for k, v in tqdm(
+                                    papers_db.items(), desc="loading papers db", ncols=100, leave=True, file=sys.stderr
+                                )
+                            }
                     else:
                         PAPERS_CACHE = None
 
                     with get_metas_db() as metas_db:
-                        METAS_CACHE = {k: v for k, v in tqdm(metas_db.items(), desc="loading metas db")}
+                        METAS_CACHE = {
+                            k: v
+                            for k, v in tqdm(
+                                metas_db.items(), desc="loading metas db", ncols=100, leave=True, file=sys.stderr
+                            )
+                        }
                         PIDS_CACHE = list(METAS_CACHE.keys())
 
                     PAPERS_DB_FILE_MTIME = current_file_mtime

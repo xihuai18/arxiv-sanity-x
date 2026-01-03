@@ -227,7 +227,7 @@ class BatchProcessor:
         # Get top-n paper metadata without loading everything into memory
         with get_metas_db() as metas_db:
             heap = []
-            with tqdm(desc="Loading paper data", unit="papers", leave=False) as pbar:
+            with tqdm(desc="Loading paper data", unit="papers", leave=False, ncols=100, file=sys.stderr) as pbar:
                 for k, v in metas_db.items():
                     t = v.get("_time", 0)
                     if len(heap) < n:
@@ -469,7 +469,7 @@ class BatchProcessor:
             logger.info("=== Dry run mode - only displaying paper info ===")
 
             # Use progress bar to display paper information
-            with tqdm(papers, desc="Checking papers", unit="paper", leave=True) as pbar:
+            with tqdm(papers, desc="Checking papers", unit="paper", leave=True, ncols=100, file=sys.stderr) as pbar:
                 for pid, meta in pbar:
                     paper_info = papers_data.get(pid, {})
                     title = paper_info.get("title", "Unknown Title")

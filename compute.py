@@ -383,7 +383,7 @@ def generate_embeddings_incremental(
         # Prepare corpus only for papers that need updates
         logger.info(f"Preparing embedding corpus for {len(new_pids)} new papers...")
         new_texts = []
-        for pid in tqdm(new_pids, desc="Preparing new paper embedding corpus"):
+        for pid in tqdm(new_pids, desc="Preparing new paper embedding corpus", ncols=100, file=sys.stderr):
             d = pdb[pid]
             # Build text for embedding
             text = f"Title: {d['title']}\n"
@@ -398,7 +398,7 @@ def generate_embeddings_incremental(
         # Prepare corpus for all papers
         logger.info(f"Preparing embedding corpus for all {len(all_pids)} papers...")
         new_texts = []
-        for pid in tqdm(all_pids, desc="Preparing embedding corpus"):
+        for pid in tqdm(all_pids, desc="Preparing embedding corpus", ncols=100, file=sys.stderr):
             d = pdb[pid]
             # Build text for embedding
             text = f"Title: {d['title']}\n"
@@ -418,7 +418,12 @@ def generate_embeddings_incremental(
             # Batch generate new embeddings
             new_embeddings_list = []
 
-            for i in tqdm(range(0, len(new_texts), batch_size), desc="Generating new embedding vectors"):
+            for i in tqdm(
+                range(0, len(new_texts), batch_size),
+                desc="Generating new embedding vectors",
+                ncols=100,
+                file=sys.stderr,
+            ):
                 batch_texts = new_texts[i : i + batch_size]
 
                 try:
@@ -568,7 +573,7 @@ if __name__ == "__main__":
             keys = pdb.keys()
 
         # yield the abstracts of the papers
-        for p in tqdm(keys, desc="loading db"):
+        for p in tqdm(keys, desc="loading db", ncols=100, file=sys.stderr):
             d = pdb[p]
             author_str = " ".join([a["name"] for a in d["authors"]])
             yield " ".join([d["title"], d["summary"], author_str])

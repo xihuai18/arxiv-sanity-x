@@ -164,7 +164,7 @@ if __name__ == "__main__":
 
                 # process the batch of retrieved papers
                 nhad, nnew, nreplace = 0, 0, 0
-                for p in tqdm.tqdm(papers, "Updating database"):
+                for p in tqdm.tqdm(papers, "Updating database", ncols=100, file=sys.stderr):
                     pid = p["_id"]
                     if pid in pdb:
                         if p["_time"] > pdb[pid]["_time"]:
