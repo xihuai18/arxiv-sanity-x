@@ -5,6 +5,7 @@ Now also supports generating embedding features and concatenating with TF-IDF.
 
 # Multi-core optimization configuration - Ubuntu system
 import os
+import sys
 from multiprocessing import cpu_count
 
 from loguru import logger

@@ -48,9 +48,15 @@ var user = {{ user | tojson }};
 
     <!-- Right navigation area -->
     <div class="nav-right">
-        <a href="/profile" id="login-link">{{ '👤 profile' if user else '🔑 login' }}</a>
-        <a href="/stats" class="nav-link">📊 stats</a>
-        <a href="/about" class="nav-link">ℹ️ about</a>
+        <a href="/profile" id="login-link">
+            {% if user %}
+                <span class="nav-icon">👤</span><span class="nav-text">profile</span>
+            {% else %}
+                <span class="nav-icon">🔑</span><span class="nav-text">login</span>
+            {% endif %}
+        </a>
+        <a href="/stats" class="nav-link"><span class="nav-icon">📊</span><span class="nav-text">stats</span></a>
+        <a href="/about" class="nav-link"><span class="nav-icon">ℹ️</span><span class="nav-text">about</span></a>
         <button id="theme-toggle" aria-label="Toggle theme" aria-pressed="false">
             <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="5"></circle>

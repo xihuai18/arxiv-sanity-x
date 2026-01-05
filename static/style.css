@@ -1412,9 +1412,11 @@ html[data-theme="dark"] .filter-item select {
         margin-left: 0;
     }
 
+    /* Optimized Filter Group for Mobile */
     .filter-group {
-        flex-direction: column;
-        align-items: stretch;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-start;
         gap: 8px;
     }
 
@@ -1422,6 +1424,8 @@ html[data-theme="dark"] .filter-item select {
         flex-direction: column;
         align-items: flex-start;
         gap: 4px;
+        flex: 1 1 calc(50% - 8px); /* Two items per row */
+        min-width: 120px;
     }
 
     .filter-item input[type="text"],
@@ -1430,14 +1434,19 @@ html[data-theme="dark"] .filter-item select {
         min-width: auto;
     }
 
+    /* Optimized Shortcuts for Mobile */
     .shortcut-buttons {
-        flex-direction: column;
-        gap: 6px;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
     }
 
     .shortcut-btn {
-        width: 100%;
+        width: auto;
+        flex: 1 1 auto;
         text-align: center;
+        padding: 8px 12px;
     }
 }
 
@@ -6352,16 +6361,58 @@ html {
 /* Responsive optimizations */
 @media (max-width: 768px) {
     #header {
-        padding: 0 12px;
+        padding: 0 10px;
         height: 52px;
+        justify-content: space-between;
     }
 
     #home-link {
         font-size: 18px;
     }
+    
+    #hint {
+        display: none; /* Hide hint on mobile to save space */
+    }
+
+    .nav-right {
+        gap: 4px;
+    }
+
+    /* Mobile Header Optimization: Hide text, show icons only */
+    #header a {
+        padding: 8px;
+        margin: 0 2px;
+    }
+
+    .nav-text {
+        display: none;
+    }
+
+    .nav-icon {
+        font-size: 1.4em;
+    }
+
+    /* Mobile Header Optimization: Hide text, show icons only */
+    #header a {
+        padding: 8px;
+        margin: 0 2px;
+    }
+
+    .nav-text {
+        display: none;
+    }
+
+    .nav-icon {
+        font-size: 1.4em;
+    }
+
+    .nav-link {
+        padding: 6px 8px;
+        font-size: 13px;
+    }
 
     #controls {
-        margin: 12px;
+        margin: 12px 0;
         padding: 14px;
     }
 
@@ -6374,14 +6425,7 @@ html {
     }
 
     .filter-group {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .filter-item {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 4px;
+        /* Already handled in previous media query block, but ensuring overrides if necessary */
     }
 
     .filter-item input[type="text"],
@@ -6390,25 +6434,48 @@ html {
     }
 
     .shortcut-buttons {
-        flex-direction: column;
+        /* Already handled */
     }
 
     .shortcut-btn {
-        width: 100%;
-        justify-content: center;
+        /* Already handled */
     }
 
     #cbox_fast {
         flex-direction: column;
         align-items: stretch;
     }
+    
+    /* Paper Actions Mobile Optimization */
+    .paper-actions-footer {
+        flex-direction: row; /* 强制行布局 */
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-start;
+        align-items: center;
+    }
+    
+    .rel_more, .rel_inspect, .rel_summary, .rel_alphaxiv, .rel_cool {
+        flex: 0 0 auto; /* 禁止伸缩，保持内容宽度 */
+        width: auto; /* 强制自动宽度 */
+        display: inline-block; /* 确保不是块级元素 */
+        margin: 0;
+    }
+    
+    .rel_more a, .rel_inspect a, .rel_summary a, .rel_alphaxiv a, .rel_cool a {
+        width: auto; /* 按钮本身也自动宽度 */
+        display: inline-flex;
+        padding: 6px 12px;
+        font-size: 13px;
+        white-space: nowrap; /* 防止文字换行 */
+    }
+    
+    .rel_alphaxiv {
+        margin-left: auto; /* 恢复右对齐，将 alphaXiv 和 Cool 推到右侧 */
+    }
 
     .rel_paper {
         padding: 14px;
-    }
-
-    .paper-actions-footer {
-        flex-wrap: wrap;
     }
 }
 
