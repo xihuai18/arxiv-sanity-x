@@ -1,5 +1,56 @@
 {% extends "base.html" %}
 
+{% block head_extra %}
+<!-- Markdown + Math rendering for TL;DR in paper list -->
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
+<script>
+{% raw %}
+window.MathJax = {
+    loader: {
+        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat']
+    },
+    tex: {
+        inlineMath: [['\\(', '\\)'], ['$', '$']],
+        displayMath: [['\\[', '\\]'], ['$$', '$$']],
+        processEscapes: true,
+        processEnvironments: true,
+        processRefs: true,
+        packages: {
+            '[+]': [
+                'base', 'ams', 'boldsymbol', 'braket', 'cancel', 'color',
+                'enclose', 'mathtools', 'newcommand', 'noerrors', 'noundefined',
+                'physics', 'tagformat', 'textmacros', 'unicode', 'verb'
+            ]
+        },
+        tags: 'ams',
+        macros: {
+            bm: ['\\mathbf{#1}', 1],
+            boldsymbol: ['\\mathbf{#1}', 1],
+            RR: '\\mathbb{R}',
+            NN: '\\mathbb{N}',
+            ZZ: '\\mathbb{Z}',
+            EE: '\\mathbb{E}',
+            abs: ['\\left|#1\\right|', 1],
+            norm: ['\\left\\|#1\\right\\|', 1],
+            argmax: '\\operatorname*{arg\\,max}',
+            argmin: '\\operatorname*{arg\\,min}'
+        }
+    },
+    options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+        ignoreHtmlClass: 'tex2jax_ignore',
+        processHtmlClass: 'tex2jax_process'
+    },
+    chtml: {
+        scale: 1.0,
+        displayAlign: 'center'
+    }
+};
+{% endraw %}
+</script>
+<script id="MathJax-script" defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"></script>
+{% endblock %}
+
 {% block variables %}
 <script>
 var tags = {{ tags | tojson }};

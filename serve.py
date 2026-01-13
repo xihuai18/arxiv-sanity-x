@@ -698,9 +698,39 @@ def _get_thumb_url(pid: str) -> str:
     return thumb_url
 
 
+# TL;DR cache to avoid repeated file reads (TTL allows new summaries to be picked up)
+TLDR_CACHE = _LRUCacheTTL(maxsize=2000, ttl_s=600.0)  # 10 minutes TTL
+
+
+def _extract_tldr_from_summary(pid: str) -> str:
+    """
+    Extract TL;DR from cached summary file if it exists.
+
+    Args:
+        pid: Paper ID
+
+    Returns:
+        TL;DR content string, or empty string if not found
+    """
+    from summary_utils import read_tldr_from_summary_file
+
+    cached = TLDR_CACHE.get(pid)
+    if cached is not None:
+        return cached
+
+    tldr = read_tldr_from_summary_file(pid)
+
+    # Only cache positive results to allow new summaries to be picked up
+    if tldr:
+        TLDR_CACHE.set(pid, tldr)
+
+    return tldr
+
+
 def render_pid(pid, pid_to_utags=None, paper=None):
     # render a single paper with just the information we need for the UI
     thumb_url = _get_thumb_url(pid)
+    tldr = _extract_tldr_from_summary(pid)
     d = paper if paper is not None else get_paper(pid)
     if d is None:
         # Extremely defensive: return a minimal stub instead of crashing the request.
@@ -713,6 +743,7 @@ def render_pid(pid, pid_to_utags=None, paper=None):
             tags="",
             utags=pid_to_utags.get(pid, []) if pid_to_utags else [],
             summary="",
+            tldr="",
             thumb_url=thumb_url,
         )
     if pid_to_utags is not None:
@@ -729,6 +760,7 @@ def render_pid(pid, pid_to_utags=None, paper=None):
         tags=", ".join(t["term"] for t in d["tags"]),
         utags=utags,
         summary=d["summary"],
+        tldr=tldr,
         thumb_url=thumb_url,
     )
 

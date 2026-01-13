@@ -302,6 +302,31 @@ template = """
             padding-left: 2px;
         }
 
+        .paper-tldr {
+            background-color: #fef2f2;
+            background-image: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+            border-left: 3px solid #b31b1b;
+            padding: 10px 12px;
+            margin: 12px 0 0 0;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #374151;
+        }
+
+        .paper-tldr .tldr-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: #b31b1b;
+            margin-bottom: 4px;
+        }
+
+        .paper-tldr .tldr-text {
+            margin: 0;
+        }
+
         .paper-summary {
             font-size: 13px;
             color: #475569;
@@ -424,17 +449,33 @@ def _crop_summary(text: str, limit: int = 500) -> str:
     return text
 
 
+from summary_utils import markdown_to_email_html
+from summary_utils import read_tldr_from_summary_file as _extract_tldr_from_summary
+
+
 def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "paper-source"):
     title = _h(paper.get("title", ""))
     authors = _h(", ".join(a.get("name", "") for a in paper.get("authors", [])))
     summary = _h(_crop_summary(paper.get("summary", "")))
     time_str = _h(paper.get("_time_str", ""))
+    tldr_raw = _extract_tldr_from_summary(pid)
+    tldr = markdown_to_email_html(tldr_raw) if tldr_raw else ""
 
     url = _h(f"{HOST}/?rank=pid&pid={pid}")
     summary_url = _h(f"{HOST}/summary?pid={pid}")
     arxiv_url = _h(f"https://arxiv.org/abs/{pid}")
     alphaxiv_url = _h(f"https://www.alphaxiv.org/overview/{pid}")
     cool_url = _h(f"https://papers.cool/arxiv/{pid}")
+
+    # Render TL;DR section if available (tldr is already HTML from markdown_to_email_html)
+    tldr_html = ""
+    if tldr:
+        tldr_html = f"""
+        <div class="paper-tldr">
+            <div class="tldr-label">💡 TL;DR</div>
+            <div class="tldr-text">{tldr}</div>
+        </div>
+        """
 
     return f"""
     <div class="paper-item">
@@ -453,7 +494,7 @@ def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, s
             </div>
         </div>
         <div class="paper-authors">{authors}</div>
-        <div class="paper-date">📅 {time_str}</div>
+        <div class="paper-date">📅 {time_str}</div>{tldr_html}
         <div class="paper-summary">{summary}</div>
     </div>
     """

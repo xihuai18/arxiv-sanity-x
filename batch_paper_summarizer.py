@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from tqdm import tqdm
 
-from aslite.db import get_metas_db, get_papers_db
+from aslite.db import get_metas_db, get_papers_db, get_tags_db
 from paper_summarizer import (
     PaperSummarizer,
     acquire_summary_lock,
@@ -35,7 +35,7 @@ from paper_summarizer import (
     summary_cache_paths,
     summary_source_matches,
 )
-from vars import LLM_NAME, SUMMARY_DIR
+from vars import LLM_NAME, SUMMARY_DIR, SUMMARY_MARKDOWN_SOURCE
 
 
 class BatchPaperSummarizer(PaperSummarizer):
@@ -241,6 +241,150 @@ class BatchProcessor:
         logger.info(f"Successfully fetched {len(latest_papers)} latest papers")
 
         return latest_papers
+
+    def get_priority_papers(self, time_delta_days: float = 7.0, limit: int = 50) -> List[Tuple[str, Dict]]:
+        """
+        Get high-priority papers that will be recommended in emails but don't have summaries yet.
+
+        Priority papers are those that:
+        1. Will appear in email recommendations (SVM recommended for each user's tags)
+        2. Are within the time_delta_days window
+        3. Don't have a cached summary yet
+
+        Args:
+            time_delta_days: Only consider papers from the last N days (matches email time_delta)
+            limit: Maximum number of priority papers to return
+
+        Returns:
+            List[Tuple[str, Dict]]: List of paper IDs and metadata, sorted by recommendation frequency
+        """
+        import requests
+
+        from vars import SERVE_PORT
+
+        API_BASE_URL = f"http://localhost:{SERVE_PORT}"
+        API_TIMEOUT = 60
+
+        logger.info(f"Finding priority papers (email recommendations, no summary, last {time_delta_days} days)...")
+
+        # Collect all user tags
+        user_tags_map = {}  # user -> {tag: [pids]}
+        with get_tags_db() as tags_db:
+            for user, user_tags in tags_db.items():
+                if isinstance(user_tags, dict) and user_tags:
+                    user_tags_map[user] = user_tags
+
+        if not user_tags_map:
+            logger.info("No user tags found")
+            return []
+
+        logger.info(f"Found {len(user_tags_map)} users with tags")
+
+        # Get SVM recommendations for each user's each tag via API
+        # Track recommendation frequency (papers recommended more often are higher priority)
+        recommendation_count = {}  # pid -> count
+
+        for user, tags in user_tags_map.items():
+            for tag_name, tag_pids in tags.items():
+                if not tag_pids:
+                    continue
+
+                try:
+                    payload = {
+                        "tag_name": tag_name,
+                        "user": user,
+                        "time_delta": time_delta_days,
+                        "limit": 50,  # Top 50 recommendations per tag
+                        "C": 0.1,
+                    }
+                    resp = requests.post(
+                        f"{API_BASE_URL}/api/tag_search",
+                        json=payload,
+                        timeout=API_TIMEOUT,
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for pid in data.get("pids", []):
+                            recommendation_count[pid] = recommendation_count.get(pid, 0) + 1
+                except Exception as e:
+                    logger.debug(f"Failed to get recommendations for {user}/{tag_name}: {e}")
+                    continue
+
+        if not recommendation_count:
+            logger.info("No recommendations found from API")
+            return []
+
+        logger.info(f"Found {len(recommendation_count)} unique recommended papers")
+
+        # Filter: no summary yet
+        summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+        priority_papers = []
+
+        with get_metas_db() as metas_db:
+            for pid, count in recommendation_count.items():
+                # Check if summary already cached
+                raw_pid = pid.split("v")[0] if "v" in pid else pid
+                if self.is_summary_cached(raw_pid, summary_source):
+                    continue
+
+                meta = metas_db.get(pid)
+                if not meta:
+                    continue
+
+                priority_papers.append((pid, meta, count))
+
+        # Sort by recommendation count (higher = more users will see it), then by time
+        priority_papers.sort(key=lambda x: (-x[2], -x[1].get("_time", 0)))
+        priority_papers = [(pid, meta) for pid, meta, _count in priority_papers[:limit]]
+
+        logger.info(f"Found {len(priority_papers)} priority papers needing summaries")
+
+        return priority_papers
+
+    def get_papers_with_priority(
+        self, num_papers: int, priority_time_delta: float = 7.0, priority_limit: int = 50
+    ) -> List[Tuple[str, Dict]]:
+        """
+        Get papers for processing with priority papers first.
+
+        Order:
+        1. Priority papers (tagged by users, no summary, recent)
+        2. Latest papers (fill remaining slots)
+
+        Args:
+            num_papers: Total number of papers to return
+            priority_time_delta: Time window for priority papers (days)
+            priority_limit: Max number of priority papers
+
+        Returns:
+            List of (pid, meta) tuples with priority papers first
+        """
+        # Get priority papers first
+        priority_papers = self.get_priority_papers(
+            time_delta_days=priority_time_delta, limit=min(priority_limit, num_papers)
+        )
+
+        priority_count = len(priority_papers)
+        remaining_slots = num_papers - priority_count
+
+        if remaining_slots <= 0:
+            logger.info(f"Using {priority_count} priority papers (limit reached)")
+            return priority_papers[:num_papers]
+
+        # Get latest papers to fill remaining slots
+        latest_papers = self.get_latest_papers(remaining_slots + priority_count)
+
+        # Remove duplicates (priority papers already included)
+        priority_pids = {pid for pid, _ in priority_papers}
+        latest_papers = [(pid, meta) for pid, meta in latest_papers if pid not in priority_pids]
+        latest_papers = latest_papers[:remaining_slots]
+
+        # Combine: priority first, then latest
+        combined = priority_papers + latest_papers
+
+        logger.info(f"Combined queue: {priority_count} priority + {len(latest_papers)} latest = {len(combined)} total")
+
+        return combined
 
     def is_summary_cached(self, cache_pid: str, summary_source: str) -> bool:
         """
@@ -621,6 +765,25 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed logs")
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum retry count for failed papers (default: 3)")
 
+    # Priority queue arguments
+    parser.add_argument(
+        "--priority",
+        action="store_true",
+        help="Enable priority queue: process papers that will appear in email recommendations first",
+    )
+    parser.add_argument(
+        "--priority-days",
+        type=float,
+        default=2.0,
+        help="Time window for priority papers in days (default: 2, matches email time_delta)",
+    )
+    parser.add_argument(
+        "--priority-limit",
+        type=int,
+        default=50,
+        help="Maximum number of priority papers to process (default: 50)",
+    )
+
     args = parser.parse_args()
 
     # Set log level
@@ -652,17 +815,25 @@ def main():
         processor = BatchProcessor(max_workers=args.workers, model=args.model)
         logger.info(f"Using model: {processor.model}")
 
-        # Get latest papers
-        latest_papers = processor.get_latest_papers(args.num_papers)
+        # Get papers - with priority queue if enabled
+        if args.priority:
+            logger.info("Priority queue enabled: processing tagged papers first")
+            papers_to_process = processor.get_papers_with_priority(
+                num_papers=args.num_papers,
+                priority_time_delta=args.priority_days,
+                priority_limit=args.priority_limit,
+            )
+        else:
+            papers_to_process = processor.get_latest_papers(args.num_papers)
 
-        if not latest_papers:
+        if not papers_to_process:
             logger.warning("No papers found")
             return
 
         # Batch processing
         skip_cached = not args.no_skip_cached
         results = processor.batch_process(
-            latest_papers, skip_cached=skip_cached, dry_run=args.dry_run, max_retries=args.max_retries
+            papers_to_process, skip_cached=skip_cached, dry_run=args.dry_run, max_retries=args.max_retries
         )
 
         # Return appropriate exit code
