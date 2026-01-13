@@ -96,6 +96,60 @@ function unregisterDropdown(id) {
     dropdownRegistry.delete(id);
 }
 
+// Markdown renderer for TL;DR with MathJax support
+let tldrMarkdownRenderer = null;
+
+function getTldrMarkdownRenderer() {
+    if (tldrMarkdownRenderer) return tldrMarkdownRenderer;
+    if (typeof markdownit === 'undefined') return null;
+
+    const md = markdownit({
+        html: false,
+        breaks: true,
+        linkify: true
+    });
+
+    // Custom rule to protect LaTeX math from markdown processing
+    const defaultTextRenderer = md.renderer.rules.text || function(tokens, idx) {
+        return tokens[idx].content;
+    };
+
+    md.renderer.rules.text = function(tokens, idx, options, env, self) {
+        let content = tokens[idx].content;
+        // Escape HTML but preserve LaTeX delimiters
+        content = content
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+        return content;
+    };
+
+    tldrMarkdownRenderer = md;
+    return md;
+}
+
+function renderTldrMarkdown(text) {
+    if (!text) return '';
+    const md = getTldrMarkdownRenderer();
+    if (!md) {
+        // Fallback: escape HTML but preserve content
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\n/g, '<br>');
+    }
+    return md.render(text);
+}
+
+function triggerMathJax(element) {
+    if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+        MathJax.typesetPromise(element ? [element] : undefined).catch(function(err) {
+            console.warn('MathJax typeset error:', err);
+        });
+    }
+}
+
 const UTag = props => {
     const tag_name = props.tag;
     const turl = buildTagUrl(tag_name);
@@ -239,6 +293,14 @@ const Paper = props => {
         )
     }
 
+    // Render TL;DR if available (with markdown and LaTeX support)
+    const tldr_section = p.tldr ? (
+        <div class='rel_tldr'>
+            <div class='tldr_label'>💡 TL;DR</div>
+            <div class='tldr_text' dangerouslySetInnerHTML={{__html: renderTldrMarkdown(p.tldr)}}></div>
+        </div>
+    ) : null;
+
     return (
         <div class='rel_paper'>
             <div class="rel_score">
@@ -253,6 +315,7 @@ const Paper = props => {
             <div class='rel_authors'>{p.authors}</div>
             <div class="rel_time">{p.time}</div>
             <div class='rel_tags'>{p.tags}</div>
+            {tldr_section}
             {thumb_img}
             <div class='rel_abs'>{p.summary}</div>
             {utag_controls}
@@ -314,6 +377,10 @@ class PaperComponent extends React.Component {
                 this.setState({ dropdownOpen: false });
             }
         });
+        // Trigger MathJax rendering for TL;DR content
+        if (this.state.paper.tldr) {
+            triggerMathJax();
+        }
     }
 
     componentWillUnmount() {

@@ -769,6 +769,31 @@ button.link-button:hover {
     font-weight: 500;
 }
 
+.rel_tldr {
+    background-color: #fef2f2;
+    background-image: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
+    border-left: 3px solid #b31b1b;
+    padding: 10px 12px;
+    margin: 12px 0 0 0;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #374151;
+}
+
+.rel_tldr .tldr_label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #b31b1b;
+    margin-bottom: 4px;
+}
+
+.rel_tldr .tldr_text {
+    margin: 0;
+}
+
 .rel_tag_sub {
     /* deletes a whole tag */
     position: absolute;
@@ -6369,7 +6394,7 @@ html {
     #home-link {
         font-size: 18px;
     }
-    
+
     #hint {
         display: none; /* Hide hint on mobile to save space */
     }
@@ -6445,7 +6470,7 @@ html {
         flex-direction: column;
         align-items: stretch;
     }
-    
+
     /* Paper Actions Mobile Optimization */
     .paper-actions-footer {
         flex-direction: row; /* 强制行布局 */
@@ -6454,14 +6479,14 @@ html {
         justify-content: flex-start;
         align-items: center;
     }
-    
+
     .rel_more, .rel_inspect, .rel_summary, .rel_alphaxiv, .rel_cool {
         flex: 0 0 auto; /* 禁止伸缩，保持内容宽度 */
         width: auto; /* 强制自动宽度 */
         display: inline-block; /* 确保不是块级元素 */
         margin: 0;
     }
-    
+
     .rel_more a, .rel_inspect a, .rel_summary a, .rel_alphaxiv a, .rel_cool a {
         width: auto; /* 按钮本身也自动宽度 */
         display: inline-flex;
@@ -6469,7 +6494,7 @@ html {
         font-size: 13px;
         white-space: nowrap; /* 防止文字换行 */
     }
-    
+
     .rel_alphaxiv {
         margin-left: auto; /* 恢复右对齐，将 alphaXiv 和 Cool 推到右侧 */
     }
