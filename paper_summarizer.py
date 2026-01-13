@@ -323,14 +323,30 @@ class PaperSummarizer:
             return [vlm_md, auto_md]
         return [auto_md, vlm_md]
 
+    # Minimum size for a valid MinerU markdown (4KB) to detect truncated/corrupted files
+    _MINERU_MD_MIN_SIZE = 4096
+
     def _find_mineru_markdown(self, paper_id: str, backend: Optional[str] = None) -> Optional[Path]:
+        def _is_valid_md(path: Path) -> bool:
+            """Check if markdown file is valid (exists and has reasonable size)."""
+            if not path.exists() or not path.is_file():
+                return False
+            try:
+                size = path.stat().st_size
+                if size < self._MINERU_MD_MIN_SIZE:
+                    logger.trace(f"Markdown file too small ({size} bytes), treating as invalid: {path}")
+                    return False
+                return True
+            except Exception:
+                return False
+
         for path in self._mineru_md_candidates(paper_id, backend=backend):
-            if path.exists():
+            if _is_valid_md(path):
                 return path
         base_dir = self.mineru_dir / paper_id
         if base_dir.exists():
             for path in base_dir.glob(f"*/{paper_id}.md"):
-                if path.is_file():
+                if _is_valid_md(path):
                     return path
         return None
 
@@ -686,7 +702,7 @@ class PaperSummarizer:
         start_time = time.time()
 
         try:
-            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "600"))
+            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "3600"))
         except Exception:
             stale_s = 600.0
 
@@ -757,7 +773,7 @@ class PaperSummarizer:
         max_workers = max(1, MINERU_MAX_WORKERS)
 
         try:
-            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "600"))
+            stale_s = float(os.environ.get("ARXIV_SANITY_MINERU_LOCK_STALE_SEC", "3600"))
         except Exception:
             stale_s = 600.0
 
@@ -768,11 +784,13 @@ class PaperSummarizer:
                 try:
                     fd = os.open(str(slot_lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
                     logger.trace(f"Acquired GPU slot {slot}/{max_workers}")
-                    # Write process info to lock file
+                    # Write process info to lock file and close fd to avoid leak
                     try:
                         os.write(fd, f"{os.getpid()}\\n{time.time()}\\n".encode())
                     except Exception:
                         pass
+                    finally:
+                        os.close(fd)
                     return slot
                 except FileExistsError:
                     # Check if lock is stale (by time or dead process)
@@ -821,15 +839,15 @@ class PaperSummarizer:
             logger.trace(f"Error releasing GPU slot {slot}: {e}")
 
     def parse_pdf_with_mineru(
-        self, pdf_path: Optional[Path], cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
     ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU (with multi-process lock protection)
 
         Args:
-            pdf_path: PDF file path (can be None for API backend)
+            pdf_path: PDF file path (required for all backends including API)
             cache_pid: Optional paper ID to use for output directory (should be raw PID).
-                       If not provided, uses the PDF filename (stem). Required when pdf_path is None.
+                       If not provided, uses the PDF filename (stem).
             cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
         Returns:
@@ -837,9 +855,9 @@ class PaperSummarizer:
         """
         try:
             # Use cache_pid if provided, otherwise use PDF filename
-            pdf_name = cache_pid or (pdf_path.stem if pdf_path else None)
-            if not pdf_name:
-                logger.error("cache_pid is required when pdf_path is None")
+            pdf_name = cache_pid or pdf_path.stem
+            if not pdf_path.exists():
+                logger.error(f"PDF file does not exist: {pdf_path}")
                 return None
             output_dir = self.mineru_dir
             backend = self._normalize_mineru_backend()
@@ -1000,15 +1018,23 @@ class PaperSummarizer:
             return None
 
     def _parse_pdf_with_mineru_api(
-        self, pdf_path: Optional[Path], pdf_name: str, cached_version: Optional[str] = None
+        self, pdf_path: Path, pdf_name: str, cached_version: Optional[str] = None
     ) -> Optional[Path]:
         """
-        Parse PDF using MinerU API service (following reference implementation)
+        Parse PDF using MinerU API service with file upload mode.
+
+        Uses the batch file upload API to upload local PDF and trigger parsing,
+        which is more stable than URL mode (avoids MinerU server accessing foreign URLs).
         """
         # Check API key
         if not MINERU_API_KEY or not MINERU_API_KEY.strip():
             logger.error("MinerU API key not configured")
             raise ValueError("MINERU_API_KEY_MISSING")
+
+        # Check PDF file exists
+        if not pdf_path.exists():
+            logger.error(f"PDF file does not exist: {pdf_path}")
+            raise ValueError("MINERU_API_PDF_MISSING")
 
         # Check if already parsed
         existing_md_path = self._find_mineru_markdown(pdf_name, backend="api")
@@ -1030,28 +1056,22 @@ class PaperSummarizer:
                 logger.trace(f"File generated during lock wait: {existing_md_path}")
                 return existing_md_path
 
-            # === Step 1: Submit task (exactly like reference code) ===
-            url = "https://mineru.net/api/v4/extract/task"
             header = {
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {MINERU_API_KEY.strip()}",
             }
 
-            # Build arXiv PDF URL
-            arxiv_url = f"https://arxiv.org/pdf/{pdf_name}.pdf"
-            if cached_version:
-                arxiv_url = f"https://arxiv.org/pdf/{pdf_name}v{cached_version}.pdf"
-
+            # === Step 1: Request upload URL ===
+            batch_url = "https://mineru.net/api/v4/file-urls/batch"
             data = {
-                "url": arxiv_url,
+                "files": [{"name": f"{pdf_name}.pdf", "data_id": f"arxiv_{pdf_name.replace('.', '_')}"}],
                 "model_version": "vlm",
-                "data_id": f"arxiv_{pdf_name.replace('.', '_')}",
                 "enable_formula": True,
                 "enable_table": True,
             }
 
-            logger.trace(f"Submitting task for: {arxiv_url}")
-            res = requests.post(url, headers=header, json=data, timeout=30)
+            logger.trace(f"Requesting upload URL for: {pdf_name}.pdf")
+            res = requests.post(batch_url, headers=header, json=data, timeout=30)
 
             # Check HTTP status
             if res.status_code == 401:
@@ -1059,7 +1079,7 @@ class PaperSummarizer:
                 raise ValueError("MINERU_API_EXPIRED")
 
             result = res.json()
-            logger.trace(f"Submit response: {result}")
+            logger.trace(f"Batch response: {result}")
 
             # Check API response code (0 = success)
             if result.get("code") != 0:
@@ -1067,27 +1087,40 @@ class PaperSummarizer:
                 logger.error(f"MinerU API error: code={result.get('code')}, msg={error_msg}")
                 raise ValueError(f"MINERU_API_ERROR: {error_msg}")
 
-            # Get task_id directly (like reference code)
+            # Get batch_id and upload URL
             try:
-                task_id = result["data"]["task_id"]
-            except (KeyError, TypeError):
-                logger.error(f"Failed to get task_id from response: {result}")
+                batch_id = result["data"]["batch_id"]
+                upload_url = result["data"]["file_urls"][0]
+            except (KeyError, TypeError, IndexError):
+                logger.error(f"Failed to get batch_id/file_urls from response: {result}")
                 raise ValueError("MINERU_API_INVALID_RESPONSE")
 
-            logger.info(f"MinerU task created: {task_id}")
+            logger.info(f"MinerU batch created: {batch_id}")
 
-            # === Step 2: Poll for completion (with timeout) ===
+            # === Step 2: Upload PDF file ===
+            logger.trace(f"Uploading PDF to: {upload_url[:80]}...")
+            with open(pdf_path, "rb") as f:
+                upload_res = requests.put(upload_url, data=f, timeout=120)
+
+            if upload_res.status_code != 200:
+                logger.error(f"Failed to upload PDF: HTTP {upload_res.status_code}")
+                raise ValueError(f"MINERU_API_UPLOAD_FAILED: HTTP {upload_res.status_code}")
+
+            logger.info(f"PDF uploaded successfully for {pdf_name}")
+
+            # === Step 3: Poll for completion (with timeout) ===
             start_time = time.time()
+            query_url = f"https://mineru.net/api/v4/extract-results/batch/{batch_id}"
+
             while True:
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed > MINERU_API_TIMEOUT:
-                    logger.error(f"Task {task_id} timed out after {MINERU_API_TIMEOUT}s")
+                    logger.error(f"Batch {batch_id} timed out after {MINERU_API_TIMEOUT}s")
                     raise ValueError("MINERU_API_TIMEOUT")
 
                 time.sleep(MINERU_API_POLL_INTERVAL)
 
-                query_url = f"https://mineru.net/api/v4/extract/task/{task_id}"
                 res = requests.get(query_url, headers=header, timeout=30)
                 result = res.json()
 
@@ -1097,24 +1130,24 @@ class PaperSummarizer:
                     logger.error(f"MinerU query error: code={result.get('code')}, msg={error_msg}")
                     raise ValueError(f"MINERU_API_QUERY_ERROR: {error_msg}")
 
-                # Get state directly (like reference code)
+                # Get state from extract_result
                 try:
-                    state = result["data"]["state"]
-                except (KeyError, TypeError):
+                    extract_result = result["data"]["extract_result"][0]
+                    state = extract_result["state"]
+                except (KeyError, TypeError, IndexError):
                     logger.error(f"Failed to get state from response: {result}")
                     raise ValueError("MINERU_API_QUERY_FAILED")
 
-                logger.trace(f"Task {task_id} state: {state} (elapsed: {elapsed:.0f}s)")
+                logger.trace(f"Batch {batch_id} state: {state} (elapsed: {elapsed:.0f}s)")
 
                 if state == "done":
-                    download_url = result["data"]["full_zip_url"]
+                    download_url = extract_result["full_zip_url"]
                     logger.info(f"Task completed: {download_url}")
                     break
-                elif state in ["running", "pending", "converting"]:
-                    # converting: 格式转换中，也需要继续等待
+                elif state in ["running", "pending", "converting", "waiting-file"]:
                     continue
                 elif state == "failed":
-                    err_msg = result["data"].get("err_msg", "unknown error")
+                    err_msg = extract_result.get("err_msg", "unknown error")
                     logger.error(f"Task failed: {err_msg}")
                     raise ValueError(f"MINERU_API_TASK_FAILED: {err_msg}")
                 else:
@@ -1152,13 +1185,34 @@ class PaperSummarizer:
             self._cleanup_mineru_output(self.mineru_dir / pdf_name)
             self._normalize_mineru_images(output_path, target_md)
 
+            # Delete PDF file after successful parsing to save space
+            try:
+                pdf_path.unlink(missing_ok=True)
+                logger.trace(f"Deleted PDF source file: {pdf_path}")
+            except Exception as e:
+                logger.trace(f"Failed to delete PDF file: {e}")
+
             logger.info(f"Successfully parsed: {target_md}")
             return target_md
 
-        except ValueError:
+        except ValueError as e:
+            # Only delete PDF for parsing errors, not for config/auth errors
+            error_msg = str(e)
+            if "MINERU_API_KEY_MISSING" not in error_msg and "MINERU_API_EXPIRED" not in error_msg:
+                try:
+                    pdf_path.unlink(missing_ok=True)
+                    logger.trace(f"API error, deleted PDF source file: {pdf_path}")
+                except Exception as e2:
+                    logger.trace(f"Failed to delete PDF file: {e2}")
             raise
         except Exception as e:
             logger.error(f"MinerU API parse failed: {e}")
+            # Delete PDF file when parsing exception occurs
+            try:
+                pdf_path.unlink(missing_ok=True)
+                logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
+            except Exception as e2:
+                logger.trace(f"Failed to delete PDF file: {e2}")
             return None
         finally:
             if lock_fd is not None:
@@ -1615,29 +1669,29 @@ Please output strictly according to the following structure:
             else:
                 # Chinese prompt (default) - Academic technical blog style
                 prompt = rf"""
-你是一位经验丰富的学术技术博主，擅长将研究论文解读为既严谨又通俗易懂的技术博客，同时保持学术规范，专业但不晦涩。
+你是一位经验丰富的学术技术博主，擅长将研究论文转化为既严谨又易懂的技术博客，同时恪守学术规范，保持专业但不晦涩。
 
 ## 任务目标
-将下方论文转化为一篇学术风格的技术博客，使读者无需阅读原文即可理解关键技术、核心结果与重要细节，同时保持学术严谨性。
+将下方论文转化为一篇学术风格的技术博客，使读者无需阅读原文即可理解其关键技术、核心结果与重要细节，同时保持学术严谨性。
 
 ## 目标受众
-具有本领域基础知识的技术人员和研究者
+具备本领域基础知识的技术人员与研究者
 
-## 博客内容要求
+## 博客内容规范
 
 ### 必须包含的章节
-1. **研究背景与动机**：解释该研究要解决什么问题、为什么重要，引用论文中的相关背景
-2. **核心贡献**：提炼 1-3 个核心创新点，使用精确的技术表述
-3. **方法/算法详解**：这是重点章节，需详细介绍技术方案，包括：
-   - 使用规范数学符号的形式化问题定义
+1. **研究背景与动机**：阐明该研究拟解决的核心问题及其重要性，并引用论文中的相关背景
+2. **核心贡献**：提炼 1-3 个核心创新点，并采用精确的技术表述
+3. **方法/算法详解**：本章为重点，需详细阐释技术方案，包括：
+   - 采用规范数学符号的形式化问题定义
    - 关键算法步骤或理论推导
-   - 在形式化描述旁配合直观解释
-4. **理论分析**（如适用）：呈现关键定理、引理或复杂度分析
-5. **实验结果**：总结主要发现并进行定量比较（仅使用论文中明确给出的数据）
-6. **局限性与展望**：讨论方法的不足或未来研究方向
+   - 在形式化描述旁辅以直观解释
+4. **理论分析**（如适用）：呈现关键定理、引理或复杂度分析结果
+5. **实验结果**：总结主要发现并进行定量比较（仅使用论文中明确提供的数据）
+6. **局限性与展望**：讨论方法的局限性或未来研究方向
 
 ### 图片引用规范
-对于论文原文中的图片，请先根据上下文判断图片内容。选择对理解内容有重要帮助的图片纳入博客（通常 2-4 张）。
+对于论文原文中的图片，请先根据上下文判断其内容。选取对理解内容有重要帮助的图片纳入博客（通常 2-4 张）。
 
 **图片插入格式**：
 ```
@@ -1646,28 +1700,28 @@ Please output strictly according to the following structure:
 
 **交叉引用规则**：
 - 图片编号从 1 开始，必须连续递增（图1、图2、图3...）
-- **必须在图片出现前或附近的正文中引用该图片**，使用学术化表述：
+- **必须在图片出现前或附近的正文中引用该图片**，采用学术化表述：
   - "如图1所示，所提出的架构由...组成"
   - "图2展示了对比实验结果，表明..."
   - "注意力机制（图3）使得模型能够..."
-- 保持原始文件路径和文件名不变
-- 不要用 Markdown 引用块（>）包裹图片
-- 只引用论文内容中实际存在的图片
-- 图片应放置在其首次文字引用的附近
+- 保持原始文件路径与文件名不变
+- 避免使用 Markdown 引用块（>）包裹图片
+- 仅引用论文内容中实际存在的图片
+- 图片应置于其首次文字引用的附近
 
 ### 数学公式规范
-**行内公式 vs 独立公式**：
-- 使用 `$...$` 表示行内公式：变量（$x$、$\theta$）、简短表达式（$O(n \log n)$）或对公式的引用
-- 使用 `$$...$$` 表示独立公式：重要方程式、定义或需要强调的推导
+**行内公式与独立公式**：
+- 采用 `$...$` 表示行内公式：变量（$x$、$\theta$）、简短表达式（$O(n \log n)$）或对公式的引用
+- 采用 `$$...$$` 表示独立公式：重要方程式、定义或需要强调的推导
 
-**公式格式化**：
-- 对于关键公式，在前后添加描述性上下文：
+**公式格式规范**：
+- 对于关键公式，须在其前后添加描述性上下文：
   ```
   损失函数定义为：
   $$\mathcal{{L}} = \mathbb{{E}}_{{x \sim p_{{data}}}} \left[ \log D(x) \right] + \mathbb{{E}}_{{z \sim p_z}} \left[ \log(1 - D(G(z))) \right]$$
   其中 $D$ 表示判别器，$G$ 表示生成器。
   ```
-- 使用 aligned 环境处理多行推导：
+- 可采用 aligned 环境处理多行推导：
   ```
   $$\begin{{aligned}}
   \nabla_\theta J(\theta) &= \mathbb{{E}}_\tau \left[ \sum_t \nabla_\theta \log \pi_\theta(a_t|s_t) R(\tau) \right] \\
@@ -1676,7 +1730,7 @@ Please output strictly according to the following structure:
   ```
 
 **定理/定义格式**：
-使用引用块（`>`）将定理、定义和引理与正文在视觉上区分开来：
+采用引用块（`>`）将定理、定义和引理与正文在视觉上加以区分：
 
 ```
 > **定义 1**（马尔可夫决策过程）。*马尔可夫决策过程（MDP）是一个五元组 $(\mathcal{{S}}, \mathcal{{A}}, P, R, \gamma)$，其中 $\mathcal{{S}}$ 是状态空间，$\mathcal{{A}}$ 是动作空间，$P$ 是转移概率，$R$ 是奖励函数，$\gamma \in [0,1)$ 是折扣因子。*
@@ -1688,24 +1742,24 @@ Please output strictly according to the following structure:
 > *证明概要。* 核心思路是...（简要说明证明方法）
 ```
 
-- 使用统一格式：**粗体**标注定理/定义标签，*斜体*表示陈述内容
-- 当证明思路有助于理解时，在同一引用块内缩进添加证明概要
+- 采用统一格式：**粗体**标注定理/定义标签，*斜体*表示陈述内容
+- 若证明思路有助于理解，可在同一引用块内缩进添加证明概要
 - 定理、定义和引理在各自类别内连续编号
 
 **LaTeX 最佳实践**：
-- 使用 `\mathbb` 表示数集（$\mathbb{{R}}$、$\mathbb{{E}}$），`\mathcal` 表示花体字母（$\mathcal{{L}}$、$\mathcal{{D}}$）
-- 在数学环境中使用 `\text` 插入文本：$P(\text{{成功}})$
-- 乘法优先使用 `\cdot` 而非 `*`，叉积使用 `\times`
-- 将复杂的自定义宏转换为标准 LaTeX 以确保兼容性
+- 采用 `\mathbb` 表示数集（$\mathbb{{R}}$、$\mathbb{{E}}$），`\mathcal` 表示花体字母（$\mathcal{{L}}$、$\mathcal{{D}}$）
+- 在数学环境中可使用 `\text` 插入文本：$P(\text{{成功}})$
+- 乘法运算宜优先使用 `\cdot` 而非 `*`，叉积运算使用 `\times`
+- 应将复杂的自定义宏转换为标准 LaTeX 以确保兼容性
 
 ### 表格使用规范
-适当使用 Markdown 表格来清晰呈现结构化信息，提高可读性。
+可适当使用 Markdown 表格以清晰呈现结构化信息，提升可读性。
 
 **适用场景**：
-- 对比不同方法/数据集上的实验结果
-- 汇总超参数或模型配置
-- 列出符号定义说明
-- 比较相关工作或方法特性
+- 对比不同方法或数据集上的实验结果
+- 汇总超参数或模型配置信息
+- 列出符号定义及其说明
+- 比较相关工作或方法的特性
 
 **表格格式**：
 ```
@@ -1717,30 +1771,30 @@ Please output strictly according to the following structure:
 
 **最佳实践**：
 - 在表格前添加简要说明或标题
-- 使用**粗体**突出最佳结果
-- 保持表格简洁，避免过宽的表格
-- 数值数据对齐以便于比较
-- 仅在表格确实比文字描述更清晰时使用
+- 采用**粗体**突出最佳结果
+- 保持表格简洁，避免宽度过大
+- 数值数据宜对齐以便比较
+- 仅在表格确实比文字描述更清晰时方予使用
 
 ### 写作风格
-- 使用层级标题组织内容（#、##、### 等）
-- 每段都应有实质性内容，避免空洞描述
-- 专业术语和符号在首次出现时给出精确定义
-- 保持正式的学术语调，同时确保可读性
-- 使用精确的表述："实现了"、"证明了"、"优于"，而非"表现不错"
-- 各章节之间使用逻辑性过渡衔接
+- 采用层级标题组织内容（#、##、### 等）
+- 每段均应包含实质性内容，避免空洞描述
+- 专业术语和符号在首次出现时须给出精确定义
+- 保持正式的学术语调，同时确保内容可读
+- 采用精确的表述："实现了"、"证明了"、"优于"，而非"表现不错"
+- 各章节之间应采用逻辑性过渡予以衔接
 
 ## 论文原文
 {markdown_content}
 
 ## 输出格式要求
 
-请严格按以下结构输出：
+请严格遵循以下结构输出：
 
 ```markdown
 # [博客标题：简洁有力，体现论文核心贡献]
 
-[正文内容：按上述章节组织，图片和公式应恰当融入行文]
+[正文内容：按上述章节组织，图片与公式应恰当融入行文]
 
 ## TL;DR
 
@@ -1748,11 +1802,11 @@ Please output strictly according to the following structure:
 ```
 
 ## 重要约束
-1. **学术严谨**：所有内容必须基于论文，保持学术精确性
-2. **数据准确**：引用论文中的确切数字，不得猜测或编造数据
-3. **语言要求**：全文使用中文撰写，保持正式学术风格
-4. **图片规范**：只引用论文中实际存在的图片，必须在正文中交叉引用
-5. **公式精确**：确保所有公式语法正确，并有恰当的上下文说明
+1. **学术严谨性**：所有内容必须基于论文，保持学术精确性
+2. **数据准确性**：引用论文中的确切数字，不得猜测或编造数据
+3. **语言规范**：全文使用中文撰写，保持正式学术风格
+4. **图片引用规范**：仅引用论文中实际存在的图片，必须在正文中交叉引用
+5. **公式准确性**：确保所有公式语法正确，并有恰当的上下文说明
 """
 
             modelid = (model or LLM_NAME or "").strip() or LLM_NAME
@@ -2041,21 +2095,14 @@ Please output strictly according to the following structure:
                     logger.trace("Existing Markdown file content is empty, re-parsing")
 
             # Step 1: Download paper PDF (use cache_pid for filename)
-            # API backend doesn't need to download PDF, it uses arXiv URL directly
             backend = self._normalize_mineru_backend()
-            if backend == "api":
-                logger.info(f"Using MinerU API backend for {cache_pid} (skipping PDF download)")
-                pdf_path = None
-                cached_version = None
-            else:
-                logger.info(f"Downloading {cache_pid}.pdf ...")
-                pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
-                if not pdf_path:
-                    return self._build_summary_result("# Error\n\nUnable to download paper PDF")
+            logger.info(f"Downloading {cache_pid}.pdf ...")
+            pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
+            if not pdf_path:
+                return self._build_summary_result("# Error\n\nUnable to download paper PDF")
 
             # Step 2: Parse PDF to Markdown using minerU
-            if backend != "api":
-                logger.info(f"Parsing {cache_pid}.pdf ...")
+            logger.info(f"Parsing {cache_pid}.pdf ...")
             try:
                 md_path = self.parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
             except ValueError as e:
@@ -2608,8 +2655,53 @@ if __name__ == "__main__":
     logger.trace(f"Test paper ID: {args.pid}")
     if args.model:
         logger.trace(f"Using model: {args.model}")
+
+    # Start timing
+    start_time = time.time()
     summary = generate_paper_summary(args.pid, model=args.model)
+    end_time = time.time()
+
+    # Calculate speed metrics
+    elapsed_time = end_time - start_time
     logger.trace("\n" + "=" * 50)
     logger.trace("Paper summary:")
     logger.trace("=" * 50)
     logger.trace(summary.get("content"))
+
+    # Display performance metrics
+    logger.trace("\n" + "=" * 50)
+    logger.trace("Performance Metrics:")
+    logger.trace("=" * 50)
+    logger.trace(f"Total time: {elapsed_time:.2f} seconds")
+
+    meta = summary.get("meta", {})
+    # The key is "llm", not "llm_info"
+    llm_info = meta.get("llm", {})
+    usage = llm_info.get("usage", {})
+
+    if usage:
+        # Try different token count field names (different providers use different names)
+        input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+        total_tokens = usage.get("total_tokens") or (input_tokens + output_tokens)
+
+        logger.trace(f"Input tokens: {input_tokens}")
+        logger.trace(f"Output tokens: {output_tokens}")
+        logger.trace(f"Total tokens: {total_tokens}")
+
+        if elapsed_time > 0:
+            if output_tokens > 0:
+                output_speed = output_tokens / elapsed_time
+                logger.trace(f"Output speed: {output_speed:.2f} tokens/second")
+            if total_tokens > 0:
+                total_speed = total_tokens / elapsed_time
+                logger.trace(f"Total speed: {total_speed:.2f} tokens/second")
+
+        # Display reasoning tokens if available
+        reasoning_tokens = usage.get("reasoning_tokens") or usage.get("cached_tokens")
+        if reasoning_tokens:
+            logger.trace(f"Reasoning tokens: {reasoning_tokens}")
+    else:
+        logger.trace("No token usage information available")
+        logger.trace(f"Available meta keys: {list(meta.keys())}")
+        logger.trace(f"LLM info: {llm_info}")

@@ -302,10 +302,12 @@ Features:
 - ⚠️ Depends on external service availability
 
 Workflow:
-1. Submit arXiv PDF URL to MinerU API
-2. Poll task status (pending → running → done)
-3. Download and extract ZIP results
-4. Extract Markdown and images to `data/mineru/{paper_id}/api/`
+1. Download PDF from arXiv to local `data/pdfs/`
+2. Request upload URL from MinerU batch API
+3. Upload local PDF file to MinerU
+4. Poll task status (waiting-file → pending → running → done)
+5. Download and extract ZIP results
+6. Extract Markdown and images to `data/mineru/{paper_id}/api/`
 
 Error Handling:
 - API Key not configured → Shows "MinerU API Configuration Error"
