@@ -85,14 +85,14 @@ class BatchPaperSummarizer(PaperSummarizer):
             return None, None
 
     def parse_pdf_with_mineru(
-        self, pdf_path: Optional[Path], cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
     ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU
         Now completely relies on parent class implementation which already has proper file locking
 
         Args:
-            pdf_path: PDF file path (can be None for API backend)
+            pdf_path: PDF file path (required for all backends, including API backend)
             cache_pid: Optional paper ID to use for output directory (should be raw PID)
             cached_version: Version of the PDF that was actually downloaded (e.g., "3")
 
@@ -104,7 +104,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             result = super().parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
             if result is None:
                 # Record failure details
-                pid_for_error = cache_pid or (pdf_path.stem if pdf_path else "unknown")
+                pid_for_error = cache_pid or pdf_path.stem
                 self._record_failure_detail(
                     pid_for_error,
                     "parse_failed",
@@ -117,7 +117,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             error_msg = f"PDF parse failed: {e}"
             logger.trace(error_msg)
             # Record failure details
-            pid_for_error = cache_pid or (pdf_path.stem if pdf_path else "unknown")
+            pid_for_error = cache_pid or pdf_path.stem
             self._record_failure_detail(pid_for_error, "parse_failed", error_msg, e)
             return None
 
