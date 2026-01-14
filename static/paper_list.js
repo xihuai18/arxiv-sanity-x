@@ -130,6 +130,13 @@ function getTldrMarkdownRenderer() {
 
 function renderTldrMarkdown(text) {
     if (!text) return '';
+    // List page TL;DR should be text-only.
+    // Some model outputs may include markdown images like:
+    // ![caption](/api/paper_image/xxxx/yyyy.png)
+    // That ends up rendering huge images in the list. Strip them here.
+    text = text.replace(/^\s*!\[[^\]]*\]\([^)]*\)\s*$/gm, '');
+    // Also strip any HTML <img> tags in case they slip through.
+    text = text.replace(/<img\b[^>]*>/gi, '');
     const md = getTldrMarkdownRenderer();
     if (!md) {
         // Fallback: escape HTML but preserve content

@@ -1798,7 +1798,7 @@ Please output strictly according to the following structure:
 
 ## TL;DR
 
-[2-3句话概括：论文解决了什么问题、提出了什么方法、取得了哪些关键成果]
+[2-3句话概括：论文解决了什么问题、提出了什么方法、取得了哪些关键成果；TL;DR 中不要插入图片]
 ```
 
 ## 重要约束

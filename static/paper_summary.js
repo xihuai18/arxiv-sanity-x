@@ -1367,8 +1367,17 @@ summaryApp.selectInitialModel = async function(pid) {
 
         let selectedModel = '';
 
+        // Prefer default model if it already has a cached summary.
+        const preferred = String(this.defaultModel || '').trim();
+        if (preferred && availableSummaries.length > 0) {
+            const preferredKey = modelCacheKey(preferred);
+            if (preferredKey && availableSummaries.includes(preferredKey)) {
+                selectedModel = preferred;
+            }
+        }
+
         // If there are available summaries, select the first one from model list that has a summary
-        if (availableSummaries.length > 0 && this.models.length > 0) {
+        if (!selectedModel && availableSummaries.length > 0 && this.models.length > 0) {
             for (const model of this.models) {
                 const modelId = String(model.id || '');
                 const key = modelCacheKey(modelId);
@@ -1381,7 +1390,6 @@ summaryApp.selectInitialModel = async function(pid) {
 
         // If no available summary found, use default model
         if (!selectedModel) {
-            const preferred = String(this.defaultModel || '').trim();
             if (preferred) {
                 const matched = this.models.find((m) => String(m.id || '') === preferred);
                 selectedModel = matched ? matched.id || '' : '';
