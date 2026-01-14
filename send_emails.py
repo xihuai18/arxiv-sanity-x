@@ -77,16 +77,16 @@ template = """
         }
 
         .container {
-            max-width: 700px;
+            max-width: 680px;
             margin: 0 auto;
             background-color: #ffffff;
             border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            border: 1px solid #e5e7eb;
             overflow: hidden;
         }
 
         .header {
-            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
+            background-color: #b91c1c;
             color: white;
             padding: 30px 20px;
             text-align: center;
@@ -94,10 +94,8 @@ template = """
 
         .header h1 {
             margin: 0;
-            font-size: 28px;
+            font-size: 26px;
             font-weight: 700;
-            letter-spacing: 1px;
-            text-shadow: 0 2px 4px rgba(0,0,0,0.15);
         }
 
         .header .subtitle {
@@ -107,301 +105,228 @@ template = """
         }
 
         .content {
-            padding: 20px;
+            padding: 24px;
         }
 
         .greeting {
             font-size: 16px;
-            margin-bottom: 20px;
-            color: #2c3e50;
+            margin-bottom: 24px;
+            color: #1f2937;
         }
 
         .section {
-            margin-bottom: 25px;
+            margin-bottom: 30px;
         }
 
         .section-title {
             font-size: 18px;
             font-weight: 700;
-            color: #1e293b;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 3px solid #b31b1b;
+            color: #111827;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e5e7eb;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
         .section-stats {
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-            padding: 12px 18px;
-            border-radius: 8px;
+            background-color: #f9fafb;
+            padding: 12px 16px;
+            border-radius: 6px;
             margin-bottom: 20px;
             font-size: 13px;
-            color: #6c757d;
-            border-left: 4px solid #b31b1b;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            color: #4b5563;
+            border: 1px solid #e5e7eb;
         }
 
         .paper-item {
-            border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            margin-bottom: 18px;
-            padding: 18px;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            padding: 20px;
             background-color: #ffffff;
-            transition: all 0.3s ease;
-            position: relative;
-            overflow: hidden;
-        }
-
-        .paper-item::before {
-            content: "";
-            position: absolute;
-            left: 0;
-            top: 0;
-            height: 100%;
-            width: 4px;
-            background: linear-gradient(180deg, #b31b1b 0%, #8b1515 100%);
-            opacity: 0;
-            transition: opacity 0.3s ease;
-        }
-
-        .paper-item:hover {
-            box-shadow: 0 4px 12px rgba(179, 27, 27, 0.15);
-            transform: translateY(-2px);
-        }
-
-        .paper-item:hover::before {
-            opacity: 1;
-        }
-
-        .paper-header {
-            display: flex;
-            align-items: center;
-            margin-bottom: 10px;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
-
-        .score {
-            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
-            color: #ffffff;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-weight: 600;
-            font-size: 11px;
-            display: inline-block;
-            margin-right: 6px;
-            box-shadow: 0 2px 4px rgba(179, 27, 27, 0.3);
-        }
-
-        .paper-source {
-            display: inline-block;
-            background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%);
-            color: #0369a1;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-            margin-right: 6px;
-            border: none;
-        }
-
-        .paper-source.keyword-source {
-            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-            color: #b45309;
-            border: none;
-        }
-
-        .paper-source.ctag-source {
-            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-            color: #047857;
-            border: none;
         }
 
         .paper-title {
-            font-size: 16px;
-            font-weight: 600;
-            color: #1e293b;
-            margin: 10px 0;
+            font-size: 18px;
+            font-weight: 700;
+            color: #111827;
+            margin: 0 0 10px 0;
             line-height: 1.4;
         }
 
-        .paper-links {
-            margin-bottom: 12px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
+        .paper-title a {
+            color: #111827;
+            text-decoration: none;
         }
 
-        .paper-links a {
+        .paper-title a:hover {
+            color: #b91c1c;
+            text-decoration: underline;
+        }
+
+        .paper-meta {
+            margin-bottom: 12px;
+        }
+
+        .badge {
             display: inline-block;
-            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
-            color: white;
-            text-decoration: none;
-            padding: 6px 12px;
-            border-radius: 16px;
+            padding: 3px 8px;
+            border-radius: 4px;
             font-size: 11px;
             font-weight: 600;
-            transition: all 0.2s ease;
-            box-shadow: 0 2px 4px rgba(179, 27, 27, 0.3);
+            margin-right: 8px;
+            margin-bottom: 4px;
         }
 
-        .paper-links a:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(179, 27, 27, 0.4);
+        .badge-score {
+            background-color: #fee2e2;
+            color: #991b1b;
         }
 
-        .paper-links a.arxiv-link {
-            background: linear-gradient(135deg, #1e40af 0%, #1e3a8a 100%);
-            box-shadow: 0 2px 4px rgba(30, 64, 175, 0.3);
+        .badge-source {
+            background-color: #e0f2fe;
+            color: #075985;
         }
 
-        .paper-links a.arxiv-link:hover {
-            box-shadow: 0 4px 8px rgba(30, 64, 175, 0.4);
+        .badge-keyword {
+            background-color: #fef3c7;
+            color: #92400e;
         }
 
-        .paper-links a.alphaxiv-link,
-        .paper-links a.cool-link {
-            background: linear-gradient(135deg, #64748b 0%, #475569 100%);
-            color: white;
-            padding: 6px 12px;
-            box-shadow: 0 2px 4px rgba(100, 116, 139, 0.3);
+        .badge-ctag {
+            background-color: #d1fae5;
+            color: #065f46;
         }
 
-        .paper-links a.alphaxiv-link:hover,
-        .paper-links a.cool-link:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(100, 116, 139, 0.4);
-        }
-
-        .paper-links .right-links {
-            margin-left: auto;
-            display: flex;
-            gap: 12px;
+        .badge-date {
+            background-color: #f3f4f6;
+            color: #4b5563;
         }
 
         .paper-authors {
             font-size: 13px;
-            color: #64748b;
-            margin-bottom: 8px;
-            font-style: italic;
-            padding-left: 2px;
+            color: #4b5563;
+            margin-bottom: 16px;
+            line-height: 1.5;
         }
 
-        .paper-authors::before {
-            content: "👤 ";
+        .paper-actions {
+            margin-bottom: 16px;
         }
 
-        .paper-date {
+        .btn {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 4px;
             font-size: 12px;
-            color: #059669;
             font-weight: 600;
-            margin-bottom: 10px;
-            padding-left: 2px;
+            text-decoration: none;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+
+        .btn-sanity {
+            background-color: #b91c1c;
+            color: white;
+        }
+        .btn-sanity:hover {
+            background-color: #991b1b;
+        }
+
+        .btn-summary {
+            background-color: #d97706;
+            color: white;
+        }
+        .btn-summary:hover {
+            background-color: #b45309;
+        }
+
+        .btn-arxiv {
+            background-color: #be123c;
+            color: white;
+        }
+        .btn-arxiv:hover {
+            background-color: #9f1239;
+        }
+
+        .btn-alphaxiv {
+            background-color: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+        }
+        .btn-alphaxiv:hover {
+            background-color: #fecaca;
+        }
+
+        .btn-cool {
+            background-color: #059669;
+            color: white;
+        }
+        .btn-cool:hover {
+            background-color: #047857;
         }
 
         .paper-tldr {
-            background-color: #fef2f2;
-            background-image: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%);
-            border-left: 3px solid #b31b1b;
-            padding: 10px 12px;
-            margin: 12px 0 0 0;
-            border-radius: 8px;
-            font-size: 13px;
-            line-height: 1.5;
-            color: #374151;
+            background-color: #fff1f2;
+            border-left: 3px solid #be123c;
+            padding: 12px 16px;
+            margin-bottom: 12px;
+            border-radius: 4px;
         }
 
         .paper-tldr .tldr-label {
             font-size: 11px;
-            font-weight: 600;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: #b31b1b;
+            color: #be123c;
             margin-bottom: 4px;
         }
 
         .paper-tldr .tldr-text {
+            font-size: 13px;
+            color: #881337;
+            line-height: 1.5;
             margin: 0;
         }
 
         .paper-summary {
             font-size: 13px;
-            color: #475569;
+            color: #6b7280;
             line-height: 1.6;
-            text-align: justify;
-            background: #f8fafc;
-            padding: 12px;
-            border-radius: 8px;
-            border-left: 3px solid #e2e8f0;
         }
 
         .footer {
-            background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            background-color: #f9fafb;
             padding: 30px;
             text-align: center;
-            border-top: 1px solid #e2e8f0;
+            border-top: 1px solid #e5e7eb;
         }
 
         .footer p {
             margin: 0 0 12px 0;
             font-size: 14px;
-            color: #64748b;
+            color: #6b7280;
         }
 
         .footer a {
-            color: #b31b1b;
+            color: #b91c1c;
             text-decoration: none;
             font-weight: 500;
         }
 
-        .footer a:hover {
-            text-decoration: underline;
-        }
-
         .footer .brand {
             font-weight: 700;
-            color: #1e293b;
+            color: #1f2937;
             font-size: 18px;
             margin-top: 15px;
-            background: linear-gradient(135deg, #b31b1b 0%, #8b1515 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
         }
 
         @media (max-width: 600px) {
-            body {
-                padding: 10px;
-            }
-
-            .container {
-                border-radius: 12px;
-            }
-
-            .header, .content, .footer {
-                padding: 20px;
-            }
-
-            .header h1 {
-                font-size: 22px;
-            }
-
-            .paper-item {
-                padding: 14px;
-                margin-bottom: 14px;
-            }
-
-            .paper-links {
-                gap: 6px;
-            }
-
-            .paper-links a {
-                padding: 5px 10px;
-                font-size: 10px;
-            }
+            body { padding: 10px; }
+            .header, .content, .footer { padding: 20px; }
+            .paper-item { padding: 16px; }
         }
     </style>
 </head>
@@ -449,14 +374,43 @@ def _crop_summary(text: str, limit: int = 500) -> str:
     return text
 
 
+def _abbr_author_middle(name: str) -> str:
+    """Abbreviate an author name by removing middle names.
+
+    Examples:
+      - "Huilin Deng" -> "Huilin Deng"
+      - "John Ronald Reuel Tolkien" -> "John Tolkien"
+      - "Jean-Pierre Vincent" -> "Jean-Pierre Vincent" (kept)
+    """
+
+    if not name:
+        return ""
+
+    parts = [p for p in str(name).strip().split() if p]
+    if len(parts) <= 2:
+        return " ".join(parts)
+
+    return f"{parts[0]} {parts[-1]}"
+
+
 from summary_utils import markdown_to_email_html
 from summary_utils import read_tldr_from_summary_file as _extract_tldr_from_summary
 
 
-def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "paper-source"):
+def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "badge-source"):
     title = _h(paper.get("title", ""))
-    authors = _h(", ".join(a.get("name", "") for a in paper.get("authors", [])))
-    summary = _h(_crop_summary(paper.get("summary", "")))
+
+    # Truncate authors
+    author_list = paper.get("authors", [])
+    if len(author_list) > 10:
+        authors_str = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list[:10]) + (
+            f", and {len(author_list) - 10} others"
+        )
+    else:
+        authors_str = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list)
+    authors = _h(authors_str)
+
+    full_summary = _h(paper.get("summary", ""))
     time_str = _h(paper.get("_time_str", ""))
     tldr_raw = _extract_tldr_from_summary(pid)
     tldr = markdown_to_email_html(tldr_raw) if tldr_raw else ""
@@ -468,34 +422,38 @@ def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, s
     cool_url = _h(f"https://papers.cool/arxiv/{pid}")
 
     # Render TL;DR section if available (tldr is already HTML from markdown_to_email_html)
-    tldr_html = ""
+    content_html = ""
     if tldr:
-        tldr_html = f"""
+        content_html = f"""
         <div class="paper-tldr">
             <div class="tldr-label">💡 TL;DR</div>
             <div class="tldr-text">{tldr}</div>
         </div>
         """
+    else:
+        content_html = f'<div class="paper-summary">{full_summary}</div>'
 
     return f"""
     <div class="paper-item">
-        <div class="paper-header">
-            <div class="score">⭐ {float(score):.2f}</div>
-            <div class="{source_class}">🏷️ {_h(source_label)}</div>
+        <div class="paper-title"><a href="{url}">{title}</a></div>
+
+        <div class="paper-meta">
+            <span class="badge badge-score">⭐ {float(score):.2f}</span>
+            <span class="badge {source_class}">🏷️ {_h(source_label)}</span>
+            <span class="badge badge-date">📅 {time_str}</span>
         </div>
-        <div class="paper-title">📄 {title}</div>
-        <div class="paper-links">
-            <a href="{url}">🔍 Sanity</a>
-            <a href="{summary_url}">📝 Summary</a>
-            <a href="{arxiv_url}" class="arxiv-link">📚 arXiv</a>
-            <div class="right-links">
-                <a href="{alphaxiv_url}" class="alphaxiv-link">αXiv</a>
-                <a href="{cool_url}" class="cool-link">Cool</a>
-            </div>
-        </div>
+
         <div class="paper-authors">{authors}</div>
-        <div class="paper-date">📅 {time_str}</div>{tldr_html}
-        <div class="paper-summary">{summary}</div>
+
+        <div class="paper-actions">
+            <a href="{url}" class="btn btn-sanity">🔍 Sanity</a>
+            <a href="{summary_url}" class="btn btn-summary">📝 Summary</a>
+            <a href="{arxiv_url}" class="btn btn-arxiv">📚 arXiv</a>
+            <a href="{alphaxiv_url}" class="btn btn-alphaxiv">αXiv</a>
+            <a href="{cool_url}" class="btn btn-cool">Cool</a>
+        </div>
+
+        {content_html}
     </div>
     """
 
@@ -860,9 +818,7 @@ def render_recommendations(
             if p is None:
                 logger.warning(f"Missing paper in db for ctag recommendation: {pid}")
                 continue
-            parts.append(
-                _render_paper_html(p, pid, score, max_source_ctag.get(pid, ""), source_class="paper-source ctag-source")
-            )
+            parts.append(_render_paper_html(p, pid, score, max_source_ctag.get(pid, ""), source_class="badge-ctag"))
 
         # render the recommendations
         final = "".join(parts)
@@ -921,9 +877,7 @@ def render_recommendations(
                 logger.warning(f"Missing paper in db for keyword recommendation: {pid}")
                 continue
             parts.append(
-                _render_paper_html(
-                    p, pid, score, max_source_keyword.get(pid, ""), source_class="paper-source keyword-source"
-                )
+                _render_paper_html(p, pid, score, max_source_keyword.get(pid, ""), source_class="badge-keyword")
             )
 
         # render the recommendations

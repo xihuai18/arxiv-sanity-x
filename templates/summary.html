@@ -11,7 +11,7 @@ var tags = {{ tags | tojson }};
 
 {% block head_extra %}
 <!-- Markdown + Math rendering (summary page only) -->
-<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"></script>
+<script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
 <script>
 {% raw %}
 window.MathJax = {
@@ -195,7 +195,7 @@ window.MathJax = {
 };
 {% endraw %}
 </script>
-<script id="MathJax-script" defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js"></script>
+<script id="MathJax-script" defer src="{{ url_for('static', filename='lib/es5/tex-chtml-full.js') }}"></script>
 {% endblock %}
 
 {% block content %}

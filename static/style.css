@@ -512,11 +512,11 @@ button.link-button:hover {
 }
 
 .rel_paper {
-    margin-bottom: 20px;
+    margin-bottom: 24px;
     padding: 24px;
     background-color: var(--card-bg);
-    border-radius: 16px;
-    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
     box-shadow: var(--shadow-sm);
     transition: all var(--transition-normal);
     position: relative;
@@ -3757,10 +3757,10 @@ details.advanced-filters[open] > .filter-item select {
 
 /* 改善字体和间距 */
 body {
-    font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     font-size: 16px; /* 提升基础字号 */
     line-height: 1.6; /* 更好的行间距 */
-    letter-spacing: 0.02em; /* 轻微字符间距 */
+    letter-spacing: 0.01em; /* 轻微字符间距 */
 }
 
 /* 标题字体优化 */
@@ -3781,32 +3781,38 @@ body {
 }
 
 .rel_paper {
-    margin-bottom: 16px; /* 文章间距稍大 */
-    padding: 16px; /* 更舒适的内边距 */
+    margin-bottom: 24px; /* 文章间距稍大 */
+    /* padding 由主要样式定义 (24px) */
 }
 
 /* 文本内容优化 */
 .rel_abs {
     font-size: 16px; /* 摘要字号与正文一致 */
     line-height: 1.6; /* 更好的摘要行高 */
-    margin: 12px 0 14px 0; /* 稍大的上下间距 */
+    margin: 12px 0 16px 0; /* 稍大的上下间距 */
+    color: var(--text-color);
 }
 
 .rel_authors {
     font-size: 15px; /* 稍大的作者字号 */
-    margin: 4px 0 6px 0; /* 稍大的间距 */
+    margin: 4px 0 8px 0; /* 稍大的间距 */
+    color: var(--text-muted);
 }
 
 .rel_time {
-    font-size: 15px; /* 统一时间字号 */
-    margin-bottom: 6px;
+    font-size: 14px; /* 统一时间字号 */
+    margin-bottom: 8px;
+    color: var(--success-color); /* 使用绿色表示时间，与 arxiv 风格类似 */
+    font-weight: 500;
 }
 
 /* 标签间距优化 */
 .rel_utag, .rel_ukey {
     margin-right: 6px; /* 稍大的标签间距 */
     margin-bottom: 6px;
-    padding: 4px 10px; /* 更舒适的标签内边距 */
+    padding: 4px 12px; /* 更舒适的标签内边距 */
+    border-radius: 9999px; /* 胶囊样式 */
+    font-weight: 500;
 }
 
 /* 控制面板优化 */
@@ -3865,113 +3871,16 @@ body {
     gap: 1px;
 }
 
-/* ===== 方块紧凑化微调 ===== */
 
-/* 卡片整体更紧凑 */
-.rel_paper {
-    margin-bottom: 8px !important;
-    padding: 10px !important;
-    border-radius: 3px !important;
-}
 
-/* 标签更小更紧凑 */
-.rel_utag, .rel_ukey, .rel_utag_all, .rel_ukey_all {
-    font-size: 14px !important;
-    padding: 2px 7px !important;
-    margin-right: 4px !important;
-    margin-bottom: 4px !important;
-    border-radius: 3px !important;
-}
 
-/* 关键词标签更紧凑 */
-.rel_ukey, .rel_ukey_all {
-    font-size: 13.5px !important;
-    padding: 2px 7px !important;
-}
 
-/* 头部高度还原 */
-#header {
-    height: 48px !important;
-    padding: 0 14px !important;
-}
 
-/* 控制面板更紧凑 */
-#controls {
-    margin: 8px 0 8px 0 !important;
-    padding: 7px 8px !important;
-    border-radius: 4px !important;
-}
 
-/* 快捷按钮更小 */
-.shortcut-btn {
-    padding: 5px 10px !important;
-    font-size: 14px !important;
-    border-radius: 3px !important;
-}
 
-/* 输入框更紧凑 */
-#qfield, .search-input {
-    font-size: 15px !important;
-    height: 40px !important;
-    line-height: 38px !important;
-    padding: 0 38px 0 38px !important;
-}
 
-/* 过滤器组更紧凑 */
-.filter-group {
-    gap: 4px 6px !important;
-    margin-bottom: 6px !important;
-}
 
-.filter-item input[type="text"],
-.filter-item select {
-    height: 26px !important;
-    font-size: 13.5px !important;
-    padding: 0 5px !important;
-}
 
-/* 摘要和正文字号微调 */
-.rel_abs {
-    font-size: 15px !important;
-    line-height: 1.5 !important;
-    margin: 8px 0 10px 0 !important;
-}
-
-/* 作者、时间字号微调 */
-.rel_authors, .rel_time, .rel_score {
-    font-size: 13.5px !important;
-    margin-bottom: 2px !important;
-}
-
-/* ===== 控件间距极致紧凑化（针对高级筛选按钮与快捷区） ===== */
-
-/* 高级筛选按钮与下方快捷区之间的间距极小化 */
-#controls {
-    margin-bottom: 20px !important;
-    padding-bottom: 6px !important;
-}
-
-/* 快捷区上方间距极小化 */
-#cbox_fast {
-    margin-top: 2px !important;
-    padding-top: 0 !important;
-}
-
-/* 快捷区与上方的label、按钮组间距极小化 */
-.shortcut-label {
-    margin-bottom: 0 !important;
-    padding-bottom: 0 !important;
-}
-.shortcut-buttons {
-    margin-top: 0 !important;
-    padding-top: 0 !important;
-    gap: 4px !important;
-}
-
-/* 进一步压缩搜索栏与controls之间的间距 */
-#wrap {
-    margin-top: 4px !important;
-}
 
 /* ===== Summary Page Styles ===== */
 

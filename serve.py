@@ -181,7 +181,16 @@ def add_security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    # COOP requires a potentially trustworthy origin (https:// or localhost).
+    # When served over plain HTTP on a LAN IP, browsers will ignore COOP and log noise.
+    # Keep COOP for https/localhost, skip it otherwise.
+    try:
+        host = (request.host or "").split(":", 1)[0].lower()
+        is_localhost = host in ("localhost", "127.0.0.1", "::1")
+        if request.is_secure or is_localhost:
+            resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    except Exception:
+        pass
     resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     resp.headers.setdefault(
         "Permissions-Policy",
