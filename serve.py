@@ -89,8 +89,11 @@ from paper_summarizer import (
     summary_source_matches,
 )
 from vars import (
+    EMBED_API_BASE,
+    EMBED_API_KEY,
     EMBED_MODEL_NAME,
     EMBED_PORT,
+    EMBED_USE_LLM_API,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_NAME,
@@ -2044,11 +2047,22 @@ def get_semantic_model():
     global _semantic_model
     if _semantic_model is None:
         try:
-            logger.info("Initializing semantic model API client for query encoding...")
+            # Determine API base URL based on configuration
+            if EMBED_USE_LLM_API:
+                api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
+                api_key = EMBED_API_KEY if EMBED_API_KEY else LLM_API_KEY
+            else:
+                api_base = f"http://localhost:{EMBED_PORT}"
+                api_key = None
+            
+            api_type = "OpenAI-compatible" if EMBED_USE_LLM_API else "Ollama"
+            logger.info(f"Initializing semantic model {api_type} API client for query encoding...")
             _semantic_model = Qwen3EmbeddingVllm(
                 model_name_or_path=EMBED_MODEL_NAME,
                 instruction="Extract key concepts from this query to search computer science and AI paper",
-                api_base=f"http://localhost:{EMBED_PORT}",
+                api_base=api_base,
+                api_key=api_key,
+                use_openai_api=EMBED_USE_LLM_API,
             )
             if not _semantic_model.initialize():
                 logger.error("Failed to initialize semantic model API client")
