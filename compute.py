@@ -10,7 +10,15 @@ from multiprocessing import cpu_count
 
 from loguru import logger
 
-from vars import EMBED_MODEL_NAME, EMBED_PORT
+from vars import (
+    EMBED_MODEL_NAME,
+    EMBED_PORT,
+    EMBED_USE_LLM_API,
+    EMBED_API_BASE,
+    EMBED_API_KEY,
+    LLM_BASE_URL,
+    LLM_API_KEY,
+)
 
 # Set multi-threading environment variables
 num_threads = min(cpu_count(), 192)  # Reasonable thread limit
@@ -125,11 +133,30 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 
 
 class Qwen3EmbeddingVllm:
-    """Embedding model API client via Ollama `/api/embed`."""
+    """Embedding model API client via Ollama `/api/embed` or OpenAI-compatible `/v1/embeddings`."""
 
-    def __init__(self, model_name_or_path, instruction=None, api_base=None):
+    def __init__(self, model_name_or_path, instruction=None, api_base=None, api_key=None, use_openai_api=None):
+        # Determine whether to use OpenAI-compatible API or Ollama API
+        if use_openai_api is None:
+            use_openai_api = EMBED_USE_LLM_API
+        self.use_openai_api = use_openai_api
+        
+        # Determine API base URL
         if api_base is None:
-            api_base = f"http://localhost:{EMBED_PORT}"
+            if self.use_openai_api:
+                # Use EMBED_API_BASE if set, otherwise fallback to LLM_BASE_URL
+                api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
+            else:
+                api_base = f"http://localhost:{EMBED_PORT}"
+        
+        # Determine API key (only needed for OpenAI-compatible API)
+        if api_key is None:
+            if self.use_openai_api:
+                api_key = EMBED_API_KEY if EMBED_API_KEY else LLM_API_KEY
+            else:
+                api_key = None
+        self.api_key = api_key
+        
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
@@ -163,25 +190,43 @@ class Qwen3EmbeddingVllm:
         try:
             import requests
 
-            logger.info(f"Connecting to Ollama API server: {self.api_base}")
+            api_type = "OpenAI-compatible" if self.use_openai_api else "Ollama"
+            logger.info(f"Connecting to {api_type} API server: {self.api_base}")
             self.session = requests.Session()
             # Local service calls should not be routed via HTTP(S)_PROXY.
             self.session.trust_env = False
+            
+            # Add authorization header for OpenAI-compatible API
+            if self.use_openai_api and self.api_key:
+                self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 
-            # Basic readiness probe (Ollama)
-            try:
-                version_url = f"{self.api_base}/api/version"
-                resp = self.session.get(version_url, timeout=(2, 5))
-                if resp.status_code == 200:
-                    version = (resp.json() or {}).get("version")
-                    logger.info(f"Ollama server version: {version}")
-                else:
-                    logger.error(f"Ollama version check failed: HTTP {resp.status_code} ({version_url})")
+            if self.use_openai_api:
+                # OpenAI-compatible API: check /v1/models endpoint
+                try:
+                    models_url = f"{self.api_base}/v1/models"
+                    resp = self.session.get(models_url, timeout=(5, 30))
+                    if resp.status_code == 200:
+                        logger.info(f"OpenAI-compatible API server connected successfully")
+                    else:
+                        logger.warning(f"OpenAI-compatible API models check: HTTP {resp.status_code}")
+                        # Don't fail, some servers may not support /v1/models
+                except Exception as e:
+                    logger.warning(f"OpenAI-compatible API probe failed (may still work): {e}")
+            else:
+                # Ollama: Basic readiness probe
+                try:
+                    version_url = f"{self.api_base}/api/version"
+                    resp = self.session.get(version_url, timeout=(2, 5))
+                    if resp.status_code == 200:
+                        version = (resp.json() or {}).get("version")
+                        logger.info(f"Ollama server version: {version}")
+                    else:
+                        logger.error(f"Ollama version check failed: HTTP {resp.status_code} ({version_url})")
+                        return False
+                except Exception as e:
+                    logger.error(f"Failed to connect to Ollama server: {e}")
+                    logger.error(f"API address: {self.api_base}")
                     return False
-            except Exception as e:
-                logger.error(f"Failed to connect to Ollama server: {e}")
-                logger.error(f"API address: {self.api_base}")
-                return False
 
             self.model_name = self._normalize_model_name(self.model_path)
             if not self.model_name:
@@ -189,7 +234,7 @@ class Qwen3EmbeddingVllm:
                 return False
 
             logger.info(f"Using embedding model: {self.model_name}")
-            logger.info("Embedding API client initialized successfully")
+            logger.info(f"{api_type} embedding API client initialized successfully")
             return True
         except Exception as e:
             logger.error(f"Error occurred while initializing API client: {e}")
@@ -224,35 +269,70 @@ class Qwen3EmbeddingVllm:
 
             # Call API to generate embeddings
             try:
-                embed_url = f"{self.api_base}/api/embed"
-                payload = {
-                    "model": self.model_name,
-                    "input": instructed_sentences,
-                    "truncate": True,
-                    "dimensions": int(dim) if dim is not None else None,
-                    # Extra guardrail: request CPU-only when supported (server-side env still recommended).
-                    "options": {"num_gpu": 0},
-                }
-                if payload["dimensions"] is None:
-                    payload.pop("dimensions", None)
+                if self.use_openai_api:
+                    # OpenAI-compatible API: POST /v1/embeddings
+                    embed_url = f"{self.api_base}/v1/embeddings"
+                    payload = {
+                        "model": self.model_name,
+                        "input": instructed_sentences,
+                    }
+                    # Add dimensions if supported (OpenAI text-embedding-3 models support this)
+                    if dim is not None:
+                        payload["dimensions"] = int(dim)
 
-                resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
-                if resp.status_code != 200:
-                    logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
-                    try:
-                        logger.error(f"Response: {resp.text[:500]}")
-                    except Exception:
-                        pass
-                    return None
+                    resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    if resp.status_code != 200:
+                        logger.error(f"OpenAI embed API call failed: HTTP {resp.status_code} ({embed_url})")
+                        try:
+                            logger.error(f"Response: {resp.text[:500]}")
+                        except Exception:
+                            pass
+                        return None
 
-                data = resp.json() or {}
-                vectors = data.get("embeddings")
-                if vectors is None and "embedding" in data:
-                    # Backward compatibility with older Ollama embedding response
-                    vectors = [data.get("embedding")]
-                if not vectors:
-                    logger.error(f"Ollama embed API returned empty embeddings (keys={list(data.keys())})")
-                    return None
+                    data = resp.json() or {}
+                    # OpenAI response format: {"data": [{"embedding": [...], "index": 0}, ...]}
+                    data_list = data.get("data", [])
+                    if not data_list:
+                        logger.error(f"OpenAI embed API returned empty data (keys={list(data.keys())})")
+                        return None
+                    
+                    # Sort by index to ensure correct order
+                    data_list = sorted(data_list, key=lambda x: x.get("index", 0))
+                    vectors = [item.get("embedding") for item in data_list]
+                    if not vectors or not vectors[0]:
+                        logger.error("OpenAI embed API returned empty embeddings")
+                        return None
+                else:
+                    # Ollama API: POST /api/embed
+                    embed_url = f"{self.api_base}/api/embed"
+                    payload = {
+                        "model": self.model_name,
+                        "input": instructed_sentences,
+                        "truncate": True,
+                        "dimensions": int(dim) if dim is not None else None,
+                        # Extra guardrail: request CPU-only when supported (server-side env still recommended).
+                        "options": {"num_gpu": 0},
+                    }
+                    if payload["dimensions"] is None:
+                        payload.pop("dimensions", None)
+
+                    resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    if resp.status_code != 200:
+                        logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
+                        try:
+                            logger.error(f"Response: {resp.text[:500]}")
+                        except Exception:
+                            pass
+                        return None
+
+                    data = resp.json() or {}
+                    vectors = data.get("embeddings")
+                    if vectors is None and "embedding" in data:
+                        # Backward compatibility with older Ollama embedding response
+                        vectors = [data.get("embedding")]
+                    if not vectors:
+                        logger.error(f"Ollama embed API returned empty embeddings (keys={list(data.keys())})")
+                        return None
 
                 embeddings = np.asarray(vectors, dtype=np.float32)
                 if embeddings.ndim == 1:
@@ -333,8 +413,6 @@ def generate_embeddings_incremental(
     batch_size=512,
     api_base=None,
 ):
-    if api_base is None:
-        api_base = f"http://localhost:{EMBED_PORT}"
     """
     Generate embedding vectors incrementally, optimize corpus preparation order
 
@@ -528,8 +606,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--embed_api_base",
         type=str,
-        default=f"http://localhost:{EMBED_PORT}",
-        help="Ollama embedding server base URL (e.g. http://localhost:11434)",
+        default=None,  # Use vars.py config by default
+        help="Embedding server base URL (default: use EMBED_API_BASE or LLM_BASE_URL from vars.py)",
     )
 
     args = parser.parse_args()

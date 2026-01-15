@@ -89,8 +89,11 @@ from paper_summarizer import (
     summary_source_matches,
 )
 from vars import (
+    EMBED_API_BASE,
+    EMBED_API_KEY,
     EMBED_MODEL_NAME,
     EMBED_PORT,
+    EMBED_USE_LLM_API,
     LLM_API_KEY,
     LLM_BASE_URL,
     LLM_NAME,
@@ -2044,11 +2047,22 @@ def get_semantic_model():
     global _semantic_model
     if _semantic_model is None:
         try:
-            logger.info("Initializing semantic model API client for query encoding...")
+            # Determine API base URL based on configuration
+            if EMBED_USE_LLM_API:
+                api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
+                api_key = EMBED_API_KEY if EMBED_API_KEY else LLM_API_KEY
+            else:
+                api_base = f"http://localhost:{EMBED_PORT}"
+                api_key = None
+            
+            api_type = "OpenAI-compatible" if EMBED_USE_LLM_API else "Ollama"
+            logger.info(f"Initializing semantic model {api_type} API client for query encoding...")
             _semantic_model = Qwen3EmbeddingVllm(
                 model_name_or_path=EMBED_MODEL_NAME,
                 instruction="Extract key concepts from this query to search computer science and AI paper",
-                api_base=f"http://localhost:{EMBED_PORT}",
+                api_base=api_base,
+                api_key=api_key,
+                use_openai_api=EMBED_USE_LLM_API,
             )
             if not _semantic_model.initialize():
                 logger.error("Failed to initialize semantic model API client")
@@ -2363,6 +2377,8 @@ def main():
     allowed_search_modes = {"keyword", "semantic", "hybrid"}
     allowed_skip_have = {"yes", "no"}
 
+    # Check if rank was explicitly provided in the request
+    rank_explicitly_set = "rank" in request.args
     opt_rank = _normalize_name(request.args.get("rank", default_rank)).lower()
     opt_q = _normalize_name(request.args.get("q", ""))
     opt_tags = _normalize_name(request.args.get("tags", default_tags))
@@ -2388,9 +2404,10 @@ def main():
         form_errors.append("Search mode must be keyword, semantic, or hybrid; using hybrid.")
         opt_search_mode = "hybrid"
 
-    # if a query is given, override rank to be of type "search"
+    # if a query is given and rank was not explicitly set, override rank to be of type "search"
     # this allows the user to simply hit ENTER in the search field and have the correct thing happen
-    if opt_q:
+    # but respects explicit rank choices (e.g., user wants to search within time-sorted results)
+    if opt_q and not rank_explicitly_set:
         opt_rank = "search"
 
     # Parse time filter (days)
@@ -2506,8 +2523,27 @@ def main():
         )
     elif opt_rank == "time":
         t_s = time.time()
-        pids, scores = time_rank(limit=dynamic_limit)
-        logger.info(f"User {g.user} time rank, time {time.time() - t_s:.3f}s")
+        if opt_q:
+            # If there's a search query, first search then sort by time
+            search_result = enhanced_search_rank(
+                q=opt_q, limit=dynamic_limit * 2, search_mode=opt_search_mode, semantic_weight=semantic_weight
+            )
+            # Handle both 2 and 3 return values (hybrid mode returns 3)
+            if len(search_result) == 3:
+                search_pids, _, _ = search_result
+            else:
+                search_pids, _ = search_result
+            # Re-sort by time
+            mdb = get_metas()
+            tnow = time.time()
+            pids_with_time = [(pid, (mdb.get(pid) or {}).get("_time", 0)) for pid in search_pids if pid in mdb]
+            pids_with_time.sort(key=lambda x: x[1], reverse=True)
+            pids = [p[0] for p in pids_with_time][:dynamic_limit]
+            scores = [(tnow - (mdb.get(pid) or {}).get("_time", tnow)) / 60 / 60 / 24 for pid in pids]
+            logger.info(f"User {g.user} time rank with search '{opt_q}', time {time.time() - t_s:.3f}s")
+        else:
+            pids, scores = time_rank(limit=dynamic_limit)
+            logger.info(f"User {g.user} time rank, time {time.time() - t_s:.3f}s")
     elif opt_rank == "random":
         t_s = time.time()
         pids, scores = random_rank(limit=dynamic_limit)
