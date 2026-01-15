@@ -195,13 +195,26 @@ var SearchBoxController = {
         var semanticWeightContainer = document.getElementById('semantic_weight_container');
         var semanticWeightSlider = document.getElementById('semantic_weight_slider');
 
-        // Auto open advanced filter panel when rank is tags/pid
+        // Auto open advanced filter panel when rank is tags/pid, and auto-submit on rank change
         if (rankSelect) {
             rankSelect.addEventListener('change', function() {
                 if (this.value === 'tags' || this.value === 'pid') {
                     SearchBoxController.setAdvancedFiltersOpen(true, true);
                 }
                 try { localStorage.setItem('arxiv_sanity_pref.rank', this.value); } catch (e) {}
+                
+                // Auto-submit form when rank changes to time or random (no query needed)
+                if (this.value === 'time' || this.value === 'random') {
+                    var form = document.querySelector('#cbox form');
+                    if (form) {
+                        document.body.classList.add('search-loading');
+                        if (form.requestSubmit) {
+                            form.requestSubmit();
+                        } else {
+                            form.submit();
+                        }
+                    }
+                }
             });
         }
 
