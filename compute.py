@@ -129,7 +129,6 @@ class Qwen3EmbeddingVllm:
         if use_openai_api is None:
             use_openai_api = EMBED_USE_LLM_API
         self.use_openai_api = use_openai_api
-
         # Determine API base URL
         if api_base is None:
             if self.use_openai_api:
@@ -137,7 +136,6 @@ class Qwen3EmbeddingVllm:
                 api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
             else:
                 api_base = f"http://localhost:{EMBED_PORT}"
-
         # Determine API key (only needed for OpenAI-compatible API)
         if api_key is None:
             if self.use_openai_api:
@@ -145,7 +143,6 @@ class Qwen3EmbeddingVllm:
             else:
                 api_key = None
         self.api_key = api_key
-
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
@@ -184,6 +181,10 @@ class Qwen3EmbeddingVllm:
             self.session = requests.Session()
             # Local service calls should not be routed via HTTP(S)_PROXY.
             self.session.trust_env = False
+            
+            # Add authorization header for OpenAI-compatible API
+            if self.use_openai_api and self.api_key:
+                self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
 
             # Add authorization header for OpenAI-compatible API
             if self.use_openai_api and self.api_key:
@@ -284,7 +285,6 @@ class Qwen3EmbeddingVllm:
                     if not data_list:
                         logger.error(f"OpenAI embed API returned empty data (keys={list(data.keys())})")
                         return None
-
                     # Sort by index to ensure correct order
                     data_list = sorted(data_list, key=lambda x: x.get("index", 0))
                     vectors = [item.get("embedding") for item in data_list]

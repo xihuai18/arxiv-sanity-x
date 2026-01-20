@@ -206,7 +206,6 @@ var SearchBoxController = {
                     SearchBoxController.setAdvancedFiltersOpen(true, true);
                 }
                 try { localStorage.setItem('arxiv_sanity_pref.rank', this.value); } catch (e) {}
-
                 // Auto-submit form when rank changes to time or random (no query needed)
                 if (this.value === 'time' || this.value === 'random') {
                     var form = document.querySelector('#cbox form');
