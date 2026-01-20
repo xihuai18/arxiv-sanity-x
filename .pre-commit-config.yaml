@@ -43,3 +43,12 @@ repos:
     hooks:
       - id: pyupgrade
         args: ["--py38-plus"]
+  - repo: local
+    hooks:
+      - id: check-dist-sync
+        name: Check static/dist sync
+        entry: bash scripts/check-dist-sync.sh
+        language: system
+        files: ^static/.*\.js$
+        exclude: ^static/dist/
+        pass_filenames: false

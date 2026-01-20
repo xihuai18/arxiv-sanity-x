@@ -27,21 +27,18 @@ var statsData = {
     <!-- Overview Cards -->
     <div class="stats-overview">
         <div class="stats-card stats-card-primary">
-            <div class="stats-card-icon">📚</div>
             <div class="stats-card-content">
                 <span class="stats-card-value">{{ num_papers }}</span>
                 <span class="stats-card-label">Total Papers</span>
             </div>
         </div>
         <div class="stats-card">
-            <div class="stats-card-icon">📅</div>
             <div class="stats-card-content">
                 <span class="stats-card-value stats-card-value-small">{{ earliest_paper }}</span>
                 <span class="stats-card-label">Earliest Paper</span>
             </div>
         </div>
         <div class="stats-card">
-            <div class="stats-card-icon">🆕</div>
             <div class="stats-card-content">
                 <span class="stats-card-value stats-card-value-small">{{ latest_paper }}</span>
                 <span class="stats-card-label">Latest Paper</span>
@@ -51,10 +48,7 @@ var statsData = {
 
     <!-- Paper Flow Section -->
     <div class="stats-section">
-        <h2 class="stats-section-title">
-            <span class="section-icon">📈</span>
-            Paper Flow
-        </h2>
+        <h2 class="stats-section-title">Paper Flow</h2>
         <p class="stats-section-desc">Number of new papers indexed over different time periods</p>
 
         <!-- Visual Bar Chart -->
@@ -65,7 +59,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">1 Hour</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_1 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #ef4444, #f97316);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_1 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #94a3b8;">
                             <span class="stats-bar-value">{{ thr_1 }}</span>
                         </div>
                     </div>
@@ -73,7 +67,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">6 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_6 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #f97316, #eab308);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_6 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #8ca0b6;">
                             <span class="stats-bar-value">{{ thr_6 }}</span>
                         </div>
                     </div>
@@ -81,7 +75,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">12 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_12 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #eab308, #84cc16);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_12 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #8197ad;">
                             <span class="stats-bar-value">{{ thr_12 }}</span>
                         </div>
                     </div>
@@ -89,7 +83,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">24 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_24 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #84cc16, #22c55e);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_24 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #778da3;">
                             <span class="stats-bar-value">{{ thr_24 }}</span>
                         </div>
                     </div>
@@ -97,7 +91,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">48 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_48 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #22c55e, #14b8a6);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_48 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #6f8499;">
                             <span class="stats-bar-value">{{ thr_48 }}</span>
                         </div>
                     </div>
@@ -105,7 +99,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">72 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_72 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #14b8a6, #06b6d4);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_72 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #677b90;">
                             <span class="stats-bar-value">{{ thr_72 }}</span>
                         </div>
                     </div>
@@ -113,7 +107,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">96 Hours</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_96 / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #06b6d4, #3b82f6);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_96 / max_val * 100) if max_val > 0 else 0 }}%; background-color: #5f7286;">
                             <span class="stats-bar-value">{{ thr_96 }}</span>
                         </div>
                     </div>
@@ -121,7 +115,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">1 Week</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_week / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #3b82f6, #6366f1);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_week / max_val * 100) if max_val > 0 else 0 }}%; background-color: #586a7d;">
                             <span class="stats-bar-value">{{ thr_week }}</span>
                         </div>
                     </div>
@@ -129,7 +123,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">1 Month</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_month / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #6366f1, #8b5cf6);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_month / max_val * 100) if max_val > 0 else 0 }}%; background-color: #506174;">
                             <span class="stats-bar-value">{{ thr_month }}</span>
                         </div>
                     </div>
@@ -137,7 +131,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">3 Months</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_quarter / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #8b5cf6, #a855f7);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_quarter / max_val * 100) if max_val > 0 else 0 }}%; background-color: #48586b;">
                             <span class="stats-bar-value">{{ thr_quarter }}</span>
                         </div>
                     </div>
@@ -145,7 +139,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">6 Months</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_semiannual / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #a855f7, #ec4899);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_semiannual / max_val * 100) if max_val > 0 else 0 }}%; background-color: #414f62;">
                             <span class="stats-bar-value">{{ thr_semiannual }}</span>
                         </div>
                     </div>
@@ -153,7 +147,7 @@ var statsData = {
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">1 Year</div>
                     <div class="stats-bar-track">
-                        <div class="stats-bar-fill" style="width: {{ (thr_year / max_val * 100) if max_val > 0 else 0 }}%; background: linear-gradient(90deg, #ec4899, #f43f5e);">
+                        <div class="stats-bar-fill" style="width: {{ (thr_year / max_val * 100) if max_val > 0 else 0 }}%; background-color: #3a4659;">
                             <span class="stats-bar-value">{{ thr_year }}</span>
                         </div>
                     </div>

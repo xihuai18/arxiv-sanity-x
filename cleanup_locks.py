@@ -172,10 +172,10 @@ class LockCleaner:
         self.stats["total"] = len(locks)
 
         if not locks:
-            logger.info("No lock files found")
+            logger.debug("No lock files found")
             return
 
-        logger.info(f"Found {len(locks)} lock file(s)")
+        logger.debug(f"Found {len(locks)} lock file(s)")
 
         for lock_path in locks:
             relative_path = lock_path.relative_to(Path.cwd()) if lock_path.is_relative_to(Path.cwd()) else lock_path
@@ -228,11 +228,11 @@ class LockCleaner:
             logger.debug(f"Active lock: {relative_path} ({orphan_reason})")
 
         # Print summary
-        logger.info("=" * 60)
-        logger.info(f"Total locks: {self.stats['total']}")
-        logger.info(f"Orphan locks (dead process): {self.stats['orphan']}")
-        logger.info(f"Stale locks (too old): {self.stats['stale']}")
-        logger.info(f"Active locks: {self.stats['alive']}")
+        logger.debug("=" * 60)
+        logger.debug(f"Total locks: {self.stats['total']}")
+        logger.debug(f"Orphan locks (dead process): {self.stats['orphan']}")
+        logger.debug(f"Stale locks (too old): {self.stats['stale']}")
+        logger.debug(f"Active locks: {self.stats['alive']}")
         if force:
             logger.success(f"Removed locks: {self.stats['removed']}")
         else:
@@ -273,14 +273,15 @@ def main():
 
     # Configure logger
     logger.remove()
-    log_level = "DEBUG" if args.verbose else "INFO"
+    base_level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper()
+    log_level = "DEBUG" if args.verbose else base_level
     logger.add(sys.stderr, level=log_level)
 
     if args.all:
         logger.warning("⚠️  --all flag will delete ALL locks, including active ones!")
         response = input("Are you sure? Type 'yes' to confirm: ")
         if response.lower() != "yes":
-            logger.info("Aborted")
+            logger.debug("Aborted")
             return
 
     cleaner = LockCleaner()

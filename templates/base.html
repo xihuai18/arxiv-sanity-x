@@ -24,6 +24,8 @@
 
 <!-- CSS -->
 <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
+<!-- Common utilities (CSRF, events, dropdown registry) - Deferred for better performance -->
+<script defer src="{{ url_for('static', filename='dist/common_utils.js') }}"></script>
 <!-- Google Fonts - Inter -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -55,6 +57,9 @@ var user = {{ user | tojson }};
                 <span class="nav-icon">🔑</span><span class="nav-text">login</span>
             {% endif %}
         </a>
+        {% if user %}
+        <a href="/readinglist" class="nav-link"><span class="nav-icon">📖</span><span class="nav-text">reading list</span></a>
+        {% endif %}
         <a href="/stats" class="nav-link"><span class="nav-icon">📊</span><span class="nav-text">stats</span></a>
         <a href="/about" class="nav-link"><span class="nav-icon">ℹ️</span><span class="nav-text">about</span></a>
         <button id="theme-toggle" aria-label="Toggle theme" aria-pressed="false">

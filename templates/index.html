@@ -3,6 +3,10 @@
 {% block head_extra %}
 <!-- Markdown + Math rendering for TL;DR in paper list -->
 <script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_sanitizer_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_renderer_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_core_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/tldr_utils.js') }}"></script>
 <script>
 {% raw %}
 window.MathJax = {
@@ -195,13 +199,26 @@ var SearchBoxController = {
         var semanticWeightContainer = document.getElementById('semantic_weight_container');
         var semanticWeightSlider = document.getElementById('semantic_weight_slider');
 
-        // Auto open advanced filter panel when rank is tags/pid
+        // Auto open advanced filter panel when rank is tags/pid, and auto-submit on rank change
         if (rankSelect) {
             rankSelect.addEventListener('change', function() {
                 if (this.value === 'tags' || this.value === 'pid') {
                     SearchBoxController.setAdvancedFiltersOpen(true, true);
                 }
                 try { localStorage.setItem('arxiv_sanity_pref.rank', this.value); } catch (e) {}
+
+                // Auto-submit form when rank changes to time or random (no query needed)
+                if (this.value === 'time' || this.value === 'random') {
+                    var form = document.querySelector('#cbox form');
+                    if (form) {
+                        document.body.classList.add('search-loading');
+                        if (form.requestSubmit) {
+                            form.requestSubmit();
+                        } else {
+                            form.submit();
+                        }
+                    }
+                }
             });
         }
 
@@ -764,6 +781,8 @@ document.addEventListener('DOMContentLoaded', function() {
 <!-- React (only needed on pages with JSX/React components) -->
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/tag_dropdown_shared.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/author_utils.js') }}"></script>
 <script defer src="{{ url_for('static', filename='dist/paper_list.js') }}"></script>
 <script defer src="{{ url_for('static', filename='dist/word_list.js') }}"></script>
 {% endblock %}

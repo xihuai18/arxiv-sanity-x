@@ -37,16 +37,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
 os.environ["MKL_NUM_THREADS"] = str(num_threads)
 os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
 
-# Try to use Intel extensions (if available)
-try:
-    from sklearnex import patch_sklearn
-
-    patch_sklearn()
-    logger.info(f"Intel scikit-learn extension enabled with {num_threads} threads")
-    USE_INTEL_EXT = True
-except ImportError:
-    logger.info(f"Using standard sklearn with {num_threads} threads")
-    USE_INTEL_EXT = False
+USE_INTEL_EXT = False
 
 # API call configuration
 API_BASE_URL = f"http://localhost:{SERVE_PORT}"  # serve.py default port
@@ -375,11 +366,11 @@ def _crop_summary(text: str, limit: int = 500) -> str:
 
 
 def _abbr_author_middle(name: str) -> str:
-    """Abbreviate an author name by removing middle names.
+    """Abbreviate an author name by keeping first and last names, abbreviating middle names.
 
     Examples:
       - "Huilin Deng" -> "Huilin Deng"
-      - "John Ronald Reuel Tolkien" -> "John Tolkien"
+      - "John Ronald Reuel Tolkien" -> "John R. R. Tolkien"
       - "Jean-Pierre Vincent" -> "Jean-Pierre Vincent" (kept)
     """
 
@@ -390,7 +381,12 @@ def _abbr_author_middle(name: str) -> str:
     if len(parts) <= 2:
         return " ".join(parts)
 
-    return f"{parts[0]} {parts[-1]}"
+    # Keep first and last name, abbreviate middle names
+    first = parts[0]
+    last = parts[-1]
+    middle_abbr = " ".join(f"{m[0]}." for m in parts[1:-1] if m)
+
+    return f"{first} {middle_abbr} {last}"
 
 
 from summary_utils import markdown_to_email_html
@@ -400,12 +396,13 @@ from summary_utils import read_tldr_from_summary_file as _extract_tldr_from_summ
 def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "badge-source"):
     title = _h(paper.get("title", ""))
 
-    # Truncate authors
+    # Truncate authors - keep first 15 and last 5, omit middle ones if > 20
     author_list = paper.get("authors", [])
-    if len(author_list) > 10:
-        authors_str = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list[:10]) + (
-            f", and {len(author_list) - 10} others"
-        )
+    if len(author_list) > 20:
+        first_authors = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list[:15])
+        last_authors = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list[-5:])
+        omitted_count = len(author_list) - 20
+        authors_str = f"{first_authors}, ... ({omitted_count} authors omitted) ..., {last_authors}"
     else:
         authors_str = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list)
     authors = _h(authors_str)
@@ -748,8 +745,10 @@ def render_recommendations(
         max_source_tag = {}
         for tag in filtered_tag_pids:
             for pid, score in zip(filtered_tag_pids[tag], filtered_tag_scores[tag]):
-                max_score[pid] = max(max_score.get(pid, -99999), score)  # lol
-                if max_score[pid] == score:
+                cur = max_score.get(pid, -99999)
+                # Prefer higher score; on ties pick lexicographically smaller tag for determinism
+                if score > cur or (score == cur and tag < max_source_tag.get(pid, "~")):
+                    max_score[pid] = score
                     max_source_tag[pid] = tag
 
         # now we have a dict of pid -> max score. sort by score
@@ -768,7 +767,10 @@ def render_recommendations(
             if p is None:
                 logger.warning(f"Missing paper in db for tag recommendation: {pid}")
                 continue
-            parts.append(_render_paper_html(p, pid, score, max_source_tag.get(pid, "")))
+            # Show only the max-score tag (truncate long tag for email layout)
+            t = max_source_tag.get(pid, "")
+            source_label = (t[:20] + "…") if len(t) > 20 else t
+            parts.append(_render_paper_html(p, pid, score, source_label))
 
         # render the recommendations
         final = "".join(parts)
@@ -981,12 +983,23 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     logger.remove()
+    log_level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper()
     if args.dry_run:
-        logger.add(sys.stdout, level="DEBUG")
-    else:
-        # logger.add(sys.stdout, level="DEBUG")
-        logger.add(sys.stdout, level="INFO")
-    logger.info(args)
+        log_level = "DEBUG"
+    logger.add(sys.stdout, level=log_level)
+
+    # Try to use Intel extensions (if available)
+    try:
+        from sklearnex import patch_sklearn
+
+        patch_sklearn()
+        logger.debug(f"Intel scikit-learn extension enabled with {num_threads} threads")
+        USE_INTEL_EXT = True
+    except ImportError:
+        logger.debug(f"Using standard sklearn with {num_threads} threads")
+        USE_INTEL_EXT = False
+
+    logger.debug(args)
 
     tnow = time.time()
     tnow_str = time.strftime("%b %d", time.localtime(tnow))  # e.g. "Nov 27"
@@ -1057,10 +1070,10 @@ if __name__ == "__main__":
             has_keyword_recs = any(len(lst) > 0 for key, lst in kpids.items())
 
             if not (has_tag_recs or has_ctag_recs or has_keyword_recs):
-                logger.info(f"skipping user {user}, no recommendations were produced")
+                logger.debug(f"skipping user {user}, no recommendations were produced")
                 continue
             # render the html
-            logger.info(
+            logger.debug(
                 "rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user)
             )
             email_html = render_recommendations(
@@ -1071,7 +1084,7 @@ if __name__ == "__main__":
                 with open(f"recco/{user}.html", "w") as f:
                     f.write(email_html)
             # actually send the email
-            logger.info("sending email...")
+            logger.debug("sending email...")
             n_send_try = 0
             while n_send_try < 3:
                 try:

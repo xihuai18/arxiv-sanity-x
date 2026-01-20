@@ -7,45 +7,35 @@
 <div id="aboutwrap" class="about-container">
     <!-- Hero Section -->
     <div class="about-hero">
-        <div class="about-hero-icon">🔬</div>
         <h1>arxiv-sanity-X</h1>
         <p class="about-tagline">Your personal research assistant for staying on top of the latest arXiv papers</p>
     </div>
 
     <!-- Features Section -->
     <div class="about-section">
-        <h2 class="about-section-title">
-            <span class="section-icon">✨</span>
-            Features
-        </h2>
+        <h2 class="about-section-title">Features</h2>
         <div class="features-grid">
             <div class="feature-card">
-                <div class="feature-icon">🏷️</div>
                 <h3>Smart Tagging</h3>
                 <p>Organize papers with custom tags and get personalized recommendations based on your interests</p>
             </div>
             <div class="feature-card">
-                <div class="feature-icon">🔍</div>
                 <h3>Semantic Search</h3>
                 <p>Find relevant papers using keyword, semantic, or hybrid search modes</p>
             </div>
             <div class="feature-card">
-                <div class="feature-icon">🤖</div>
                 <h3>AI Summaries</h3>
                 <p>Get AI-generated summaries to quickly understand paper contributions</p>
             </div>
             <div class="feature-card">
-                <div class="feature-icon">📧</div>
                 <h3>Email Alerts</h3>
                 <p>Receive daily recommendations for new papers matching your interests</p>
             </div>
             <div class="feature-card">
-                <div class="feature-icon">📊</div>
                 <h3>SVM Recommendations</h3>
                 <p>TF-IDF powered recommendations learn from your tagged papers</p>
             </div>
             <div class="feature-card">
-                <div class="feature-icon">🌙</div>
                 <h3>Dark Mode</h3>
                 <p>Easy on your eyes with automatic light/dark theme switching</p>
             </div>
@@ -54,31 +44,18 @@
 
     <!-- Indexed Categories -->
     <div class="about-section">
-        <h2 class="about-section-title">
-            <span class="section-icon">📁</span>
-            Indexed Categories
-        </h2>
+        <h2 class="about-section-title">Indexed Categories</h2>
         <p class="about-description">This instance indexes recent papers from the following arXiv categories:</p>
         <div class="category-tags">
-            <span class="category-tag">cs.CV</span>
-            <span class="category-tag">cs.CL</span>
-            <span class="category-tag">cs.LG</span>
-            <span class="category-tag">cs.AI</span>
-            <span class="category-tag">cs.NE</span>
-            <span class="category-tag">cs.RO</span>
-            <span class="category-tag">stat.ML</span>
-            <span class="category-tag">cs.GT</span>
-            <span class="category-tag">cs.HC</span>
-            <span class="category-tag">cs.MA</span>
+            {% for cat in indexed_categories %}
+            <span class="category-tag">{{ cat }}</span>
+            {% endfor %}
         </div>
     </div>
 
     <!-- Open Source Section -->
     <div class="about-section">
-        <h2 class="about-section-title">
-            <span class="section-icon">💻</span>
-            Open Source
-        </h2>
+        <h2 class="about-section-title">Open Source</h2>
         <div class="opensource-card">
             <p>This project is open source and available on GitHub.</p>
             <a href="https://github.com/xihuai18/arxiv-sanity-x" class="github-link" target="_blank" rel="noopener noreferrer">
@@ -92,10 +69,7 @@
 
     <!-- Credits Section -->
     <div class="about-section">
-        <h2 class="about-section-title">
-            <span class="section-icon">❤️</span>
-            Credits
-        </h2>
+        <h2 class="about-section-title">Credits</h2>
         <div class="credits-card">
             <p>
                 Developed with ❤️ by <a href="https://github.com/xihuai18" target="_blank" rel="noopener noreferrer">@xihuai18</a>

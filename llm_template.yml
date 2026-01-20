@@ -9,18 +9,6 @@
 model_list:
   # OpenRouter - Recommended for free models
   # Get your API key at: https://openrouter.ai/keys
-  - model_name: or-deepseek-r1t2
-    litellm_params:
-      model: openrouter/tngtech/deepseek-r1t2-chimera:free
-      api_base: https://openrouter.ai/api/v1
-      api_key: YOUR_OPENROUTER_API_KEY  # Replace with your key
-      max_tokens: 32768
-      extra_body:
-        reasoning:
-          effort: "medium"
-    model_info:
-      supports_reasoning: True
-
   - model_name: or-mimo
     litellm_params:
       model: openrouter/xiaomi/mimo-v2-flash:free

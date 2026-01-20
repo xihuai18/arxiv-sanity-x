@@ -1,275 +1,174 @@
 'use strict';
 
-function getCsrfToken() {
-    const meta = document.querySelector('meta[name="csrf-token"]');
-    return meta ? (meta.getAttribute('content') || '') : '';
-}
+// Use shared utilities from common_utils.js
+var CommonUtils = window.ArxivSanityCommon;
+var csrfFetch = CommonUtils.csrfFetch;
+var _setupUserEventStream = CommonUtils.setupUserEventStream;
+var _registerEventHandler = CommonUtils.registerEventHandler;
+var renderTldrMarkdown = CommonUtils.renderTldrMarkdown;
+var formatAuthorsText = CommonUtils.formatAuthorsText;
+var triggerMathJax = CommonUtils.triggerMathJax;
+var buildTagUrl = CommonUtils.buildTagUrl;
+var buildKeywordUrl = CommonUtils.buildKeywordUrl;
+var registerDropdown = CommonUtils.registerDropdown;
+var unregisterDropdown = CommonUtils.unregisterDropdown;
 
-function csrfFetch(url, options) {
-    const opts = options || {};
-    const method = (opts.method || 'POST').toUpperCase();
-    const headers = new Headers(opts.headers || {});
-    const tok = getCsrfToken();
-    if (tok) headers.set('X-CSRF-Token', tok);
-    return fetch(url, { ...opts, method, headers, credentials: 'same-origin' });
-}
-
-function appendParam(params, key, value) {
-    if (value === undefined || value === null) return;
-    const str = String(value).trim();
-    if (!str) return;
-    params.set(key, str);
-}
-
-function appendCommonFilters(params, options = {}) {
-    if (typeof gvars === 'undefined' || !gvars) return;
-    appendParam(params, 'time_filter', gvars.time_filter);
-    if (gvars.skip_have) {
-        params.set('skip_have', gvars.skip_have);
+function applyUserState(state) {
+    if (!state || !state.success) return;
+    if (state.tags) {
+        setGlobalTags(state.tags, { renderCombined: false });
     }
-    if (options.includeLogic && gvars.logic) {
-        params.set('logic', gvars.logic);
+    if (state.combined_tags) {
+        setGlobalCombinedTags(state.combined_tags);
     }
-    if (options.includeSvmC) {
-        appendParam(params, 'svm_c', gvars.svm_c);
-    }
-    if (options.includeSearchMode && gvars.search_mode) {
-        params.set('search_mode', gvars.search_mode);
-    }
-    if (options.includeSemanticWeight) {
-        appendParam(params, 'semantic_weight', gvars.semantic_weight);
+    if (state.keys) {
+        setGlobalKeys(state.keys);
     }
 }
 
-function buildTagUrl(tagName, options = {}) {
-    const params = new URLSearchParams();
-    params.set('rank', 'tags');
-    appendParam(params, 'tags', tagName);
-    appendCommonFilters(params, { includeLogic: true, includeSvmC: true });
-    if (options.logic) {
-        params.set('logic', options.logic);
-    }
-    return '/?' + params.toString();
+function fetchUserStateAndApply() {
+    return CommonUtils.fetchUserState().then(applyUserState);
 }
 
-function buildKeywordUrl(keyword) {
-    const params = new URLSearchParams();
-    params.set('rank', 'search');
-    appendParam(params, 'q', keyword);
-    appendCommonFilters(params, { includeSearchMode: true, includeSemanticWeight: true });
-    return '/?' + params.toString();
+// Common helpers are centralized in common_utils.js
+
+function updatePaperSummaryStatus(pid, status, error) {
+    if (!pid || !Array.isArray(papers)) return;
+    const p = papers.find(item => item && item.id === pid);
+    if (!p) return;
+    p.summary_status = status || '';
+    p.summary_last_error = error || '';
+    renderPaperList();
 }
 
-const dropdownRegistry = new Map();
-let dropdownListenersBound = false;
-
-function bindDropdownListeners() {
-    if (dropdownListenersBound) return;
-    dropdownListenersBound = true;
-
-    document.addEventListener('mousedown', (event) => {
-        dropdownRegistry.forEach((api, id) => {
-            if (!api.isOpen()) return;
-            const dropdown = document.getElementById(id);
-            if (dropdown && !dropdown.contains(event.target)) {
-                api.close();
+function updatePaperTagsForRename(fromTag, toTag) {
+    if (!fromTag || !toTag || !Array.isArray(papers)) return;
+    let changed = false;
+    papers.forEach((p) => {
+        if (!p) return;
+        if (Array.isArray(p.utags)) {
+            const next = p.utags.map(t => (t === fromTag ? toTag : t));
+            if (next.join('|') !== p.utags.join('|')) {
+                p.utags = next;
+                changed = true;
             }
-        });
-    });
-
-    document.addEventListener('keydown', (event) => {
-        if (event.key !== 'Escape') return;
-        dropdownRegistry.forEach((api) => {
-            if (api.isOpen()) {
-                api.close();
+        }
+        if (Array.isArray(p.ntags)) {
+            const next = p.ntags.map(t => (t === fromTag ? toTag : t));
+            if (next.join('|') !== p.ntags.join('|')) {
+                p.ntags = next;
+                changed = true;
             }
-        });
+        }
     });
+    if (changed) renderPaperList();
 }
 
-function registerDropdown(id, api) {
-    dropdownRegistry.set(id, api);
-    bindDropdownListeners();
-}
-
-function unregisterDropdown(id) {
-    dropdownRegistry.delete(id);
-}
-
-// Markdown renderer for TL;DR with MathJax support
-let tldrMarkdownRenderer = null;
-
-function getTldrMarkdownRenderer() {
-    if (tldrMarkdownRenderer) return tldrMarkdownRenderer;
-    if (typeof markdownit === 'undefined') return null;
-
-    const md = markdownit({
-        html: false,
-        breaks: true,
-        linkify: true
+function updatePaperTagsForDelete(tagName) {
+    if (!tagName || !Array.isArray(papers)) return;
+    let changed = false;
+    papers.forEach((p) => {
+        if (!p) return;
+        if (Array.isArray(p.utags)) {
+            const next = p.utags.filter(t => t !== tagName);
+            if (next.length !== p.utags.length) {
+                p.utags = next;
+                changed = true;
+            }
+        }
+        if (Array.isArray(p.ntags)) {
+            const next = p.ntags.filter(t => t !== tagName);
+            if (next.length !== p.ntags.length) {
+                p.ntags = next;
+                changed = true;
+            }
+        }
     });
-
-    // Custom rule to protect LaTeX math from markdown processing
-    const defaultTextRenderer = md.renderer.rules.text || function(tokens, idx) {
-        return tokens[idx].content;
-    };
-
-    md.renderer.rules.text = function(tokens, idx, options, env, self) {
-        let content = tokens[idx].content;
-        // Escape HTML but preserve LaTeX delimiters
-        content = content
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-        return content;
-    };
-
-    tldrMarkdownRenderer = md;
-    return md;
+    if (changed) renderPaperList();
 }
 
-function renderTldrMarkdown(text) {
-    if (!text) return '';
-    // List page TL;DR should be text-only.
-    // Some model outputs may include markdown images like:
-    // ![caption](/api/paper_image/xxxx/yyyy.png)
-    // That ends up rendering huge images in the list. Strip them here.
-    text = text.replace(/^\s*!\[[^\]]*\]\([^)]*\)\s*$/gm, '');
-    // Also strip any HTML <img> tags in case they slip through.
-    text = text.replace(/<img\b[^>]*>/gi, '');
-    const md = getTldrMarkdownRenderer();
-    if (!md) {
-        // Fallback: escape HTML but preserve content
-        return text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/\n/g, '<br>');
+function applyTagFeedbackToPaper(pid, tagName, label) {
+    if (!pid || !tagName || !Array.isArray(papers)) return;
+    const p = papers.find(item => item && item.id === pid);
+    if (!p) return;
+    const pos = new Set(p.utags || []);
+    const neg = new Set(p.ntags || []);
+    if (label === 1) {
+        pos.add(tagName);
+        neg.delete(tagName);
+    } else if (label === -1) {
+        pos.delete(tagName);
+        neg.add(tagName);
+    } else {
+        pos.delete(tagName);
+        neg.delete(tagName);
     }
-    return md.render(text);
+    p.utags = Array.from(pos);
+    p.ntags = Array.from(neg);
+    renderPaperList();
 }
 
-function triggerMathJax(element) {
-    if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
-        MathJax.typesetPromise(element ? [element] : undefined).catch(function(err) {
-            console.warn('MathJax typeset error:', err);
-        });
+function handleReadingListEvent(event) {
+    if (!event || !event.pid) return;
+    if (event.action === 'add') {
+        addToReadingListCache(event.pid);
+        renderPaperList();
+    } else if (event.action === 'remove') {
+        removeFromReadingListCache(event.pid);
+        renderPaperList();
     }
 }
 
-const UTag = props => {
-    const tag_name = props.tag;
-    const turl = buildTagUrl(tag_name);
-    return (
-        <div class='rel_utag'>
-            <a href={turl}>
-                {tag_name}
-            </a>
-        </div>
-    )
+function handleUserEvent(event, options = {}) {
+    if (!event || typeof event !== 'object') return;
+    if (event.type === 'user_state_changed') {
+        if (event.reason === 'rename_tag') {
+            updatePaperTagsForRename(event.from, event.to);
+        } else if (event.reason === 'delete_tag') {
+            updatePaperTagsForDelete(event.tag);
+        } else if (event.reason === 'tag_feedback' && event.pid && event.tag && event.label !== undefined) {
+            applyTagFeedbackToPaper(event.pid, event.tag, event.label);
+        }
+        fetchUserStateAndApply();
+    } else if (event.type === 'summary_status') {
+        updatePaperSummaryStatus(event.pid, event.status, event.error);
+    } else if (event.type === 'readinglist_changed') {
+        handleReadingListEvent(event);
+    }
 }
 
-// Multi-select dropdown component
-const MultiSelectDropdown = props => {
-    const {
-        selectedTags,
-        availableTags,
-        isOpen,
-        onToggle,
-        onTagToggle,
-        onRemoveTag,
-        newTagValue,
-        onNewTagChange,
-        onAddNewTag,
-        dropdownId,
-        searchValue,
-        onSearchChange,
-        showNewTagInput = true
-    } = props;
+function setupUserEventStream() {
+    _registerEventHandler(handleUserEvent);
+    _setupUserEventStream(user, applyUserState);
+}
 
-    const selectedTagElements = selectedTags.map((tag, ix) => (
-        <div key={ix} class="multi-select-selected-tag">
-            <span>{tag}</span>
-            <span class="remove-tag" onClick={() => onRemoveTag(tag)}>×</span>
-        </div>
-    ));
+// Shared helpers are centralized in common_utils.js
 
-    const triggerContent = selectedTags.length > 0 ? (
-        <div class="multi-select-selected-tags">
-            {selectedTagElements}
-        </div>
-    ) : (
-        <div class="multi-select-placeholder">Select tags...</div>
-    );
+function formatSummaryStatus(status) {
+    if (!status) return '';
+    if (status === 'queued') return 'Summary Queued';
+    if (status === 'running') return 'Summary Generating';
+    if (status === 'ok') return 'Summary Ready';
+    if (status === 'failed') return 'Summary Failed';
+    return 'Summary ' + status.charAt(0).toUpperCase() + status.slice(1);
+}
 
-    // Filter tags by search value
-    const filteredTags = availableTags.filter(tag =>
-        tag.toLowerCase().includes(searchValue.toLowerCase())
-    );
+function canTriggerSummary(status) {
+    return !(status === 'ok' || status === 'running' || status === 'queued');
+}
 
-    const optionElements = filteredTags.map((tag, ix) => {
-        const isSelected = selectedTags.includes(tag);
-        return (
-            <div key={ix} class="multi-select-option" onClick={() => onTagToggle(tag)}>
-                <input
-                    type="checkbox"
-                    class="multi-select-checkbox"
-                    checked={isSelected}
-                    onChange={() => {}} // Handled by parent onClick
-                />
-                <span class="multi-select-option-text">{tag}</span>
-            </div>
-        );
-    });
-
-    return (
-        <div class={`multi-select-dropdown ${isOpen ? 'open' : ''}`} id={dropdownId}>
-            <div class={`multi-select-trigger ${isOpen ? 'active' : ''}`} onClick={onToggle}>
-                <div class="multi-select-content">
-                    {triggerContent}
-                </div>
-                <span class="multi-select-arrow">{isOpen ? '▲' : '▼'}</span>
-            </div>
-            {isOpen && (
-                <div class="multi-select-dropdown-menu">
-                    <div class="multi-select-search">
-                        <input
-                            type="text"
-                            placeholder="Search tags..."
-                            value={searchValue}
-                            onChange={onSearchChange}
-                            onClick={(e) => e.stopPropagation()}
-                        />
-                    </div>
-                    {optionElements}
-                    {showNewTagInput && (
-                        <div class="multi-select-new-tag">
-                            <input
-                                type="text"
-                                placeholder="Enter new tag..."
-                                value={newTagValue}
-                                onChange={onNewTagChange}
-                                onKeyPress={(e) => e.key === 'Enter' && onAddNewTag()}
-                                onClick={(e) => e.stopPropagation()}
-                            />
-                            <button
-                                onClick={onAddNewTag}
-                                disabled={!newTagValue.trim()}
-                            >
-                                Add
-                            </button>
-                        </div>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-};
+// Multi-select dropdown component (shared implementation)
+const MultiSelectDropdown = (typeof window !== 'undefined' && window.ArxivSanityTagDropdown && window.ArxivSanityTagDropdown.MultiSelectDropdown)
+    ? window.ArxivSanityTagDropdown.MultiSelectDropdown
+    : (props) => {
+        // Fallback: should not happen when tag_dropdown_shared.js is loaded.
+        return React.createElement('div', null, 'Tag dropdown unavailable');
+    };
 
 const Paper = props => {
     const p = props.paper;
     const lst = props.tags;
-    const tlst = lst.map((jtag, ix) => jtag.name);
+    const tlst = lst.map((jtag) => jtag.name);
     const ulst = p.utags;
 
     const similar_url = "/?rank=pid&pid=" + encodeURIComponent(p.id);
@@ -284,11 +183,12 @@ const Paper = props => {
             <div class='rel_utags'>
                 <MultiSelectDropdown
                     selectedTags={ulst}
+                    negativeTags={props.negativeTags}
                     availableTags={tlst}
                     isOpen={props.dropdownOpen}
                     onToggle={props.onToggleDropdown}
-                    onTagToggle={props.onTagToggle}
-                    onRemoveTag={props.onRemoveTag}
+                    onTagCycle={props.onTagCycle}
+                    onClearTag={props.onClearTag}
                     newTagValue={props.newTagValue}
                     onNewTagChange={props.onNewTagChange}
                     onAddNewTag={props.onAddNewTag}
@@ -308,6 +208,46 @@ const Paper = props => {
         </div>
     ) : null;
 
+    const statusText = formatSummaryStatus(props.summaryStatus);
+    const statusClass = props.summaryStatus === 'ok'
+        ? 'summary-status-badge ok'
+        : props.summaryStatus === 'failed'
+            ? 'summary-status-badge failed'
+            : props.summaryStatus
+                ? 'summary-status-badge'
+                : '';
+    const statusBadge = statusText ? (
+        <div class={statusClass} title={props.summaryLastError || ''}>
+            {statusText}
+        </div>
+    ) : null;
+
+    // Reading list button (only for logged in users)
+    let readinglist_btn = null;
+    if (user) {
+        const isInReadingList = props.inReadingList;
+        const btnClass = isInReadingList ? 'readinglist-btn active' : 'readinglist-btn';
+        const btnTitle = isInReadingList ? 'In reading list' : 'Add to reading list';
+        const btnIcon = isInReadingList ? '📖' : '🔖';
+        readinglist_btn = (
+            <div class={btnClass} onClick={props.onToggleReadingList} title={btnTitle}>
+                {btnIcon}
+            </div>
+        );
+    }
+
+    const triggerDisabled = !canTriggerSummary(props.summaryStatus);
+    const triggerBtn = (
+        <button
+            class='summary-trigger-btn'
+            onClick={props.onTriggerSummary}
+            disabled={triggerDisabled}
+            title={triggerDisabled ? 'Summary already available or generating' : 'Generate summary'}
+        >
+            ✨ Generate Summary
+        </button>
+    );
+
     return (
         <div class='rel_paper'>
             <div class="rel_score">
@@ -318,15 +258,18 @@ const Paper = props => {
                     </div>
                 )}
             </div>
+            {readinglist_btn}
             <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id} target="_blank" rel="noopener noreferrer">{p.title}</a></div>
-            <div class='rel_authors'>{p.authors}</div>
+            <div class='rel_authors' title={p.authors || ''}>{formatAuthorsText(p.authors, { maxAuthors: 10, head: 5, tail: 3 })}</div>
             <div class="rel_time">{p.time}</div>
             <div class='rel_tags'>{p.tags}</div>
+            {statusBadge}
             {tldr_section}
             {thumb_img}
             <div class='rel_abs'>{p.summary}</div>
             {utag_controls}
             <div class='paper-actions-footer'>
+                <div class='rel_summary'>{triggerBtn}</div>
                 <div class='rel_more'><a href={similar_url} target="_blank" rel="noopener noreferrer">Similar</a></div>
                 <div class='rel_inspect'><a href={inspect_url} target="_blank" rel="noopener noreferrer">Inspect</a></div>
                 <div class='rel_summary'><a href={summary_url} target="_blank" rel="noopener noreferrer">Summary</a></div>
@@ -353,20 +296,31 @@ const PaperList = props => {
 class PaperComponent extends React.Component {
     constructor(props) {
         super(props);
+        if (!Array.isArray(props.paper.utags)) {
+            props.paper.utags = [];
+        }
+        if (!Array.isArray(props.paper.ntags)) {
+            props.paper.ntags = [];
+        }
         this.state = {
             paper: props.paper,
             tags: props.tags,
             dropdownOpen: false,
             newTagValue: '',
-            searchValue: ''
+            searchValue: '',
+            inReadingList: isInReadingList(props.paper.id),
+            summaryStatus: props.paper.summary_status || '',
+            summaryLastError: props.paper.summary_last_error || ''
         };
         this.dropdownId = 'dropdown-' + props.paper.id;
         this.handleToggleDropdown = this.handleToggleDropdown.bind(this);
-        this.handleTagToggle = this.handleTagToggle.bind(this);
-        this.handleRemoveTag = this.handleRemoveTag.bind(this);
+        this.handleTagCycle = this.handleTagCycle.bind(this);
+        this.handleClearTag = this.handleClearTag.bind(this);
         this.handleNewTagChange = this.handleNewTagChange.bind(this);
         this.handleAddNewTag = this.handleAddNewTag.bind(this);
         this.handleSearchChange = this.handleSearchChange.bind(this);
+        this.handleToggleReadingList = this.handleToggleReadingList.bind(this);
+        this.handleTriggerSummary = this.handleTriggerSummary.bind(this);
     }
 
     componentDidMount() {
@@ -386,7 +340,13 @@ class PaperComponent extends React.Component {
         });
         // Trigger MathJax rendering for TL;DR content
         if (this.state.paper.tldr) {
-            triggerMathJax();
+            triggerMathJax(document.getElementById('paperList'));
+        }
+    }
+
+    componentDidUpdate(prevProps) {
+        if (prevProps.tags !== this.props.tags) {
+            this.setState({ tags: this.props.tags });
         }
     }
 
@@ -422,77 +382,84 @@ class PaperComponent extends React.Component {
         });
     }
 
-    handleTagToggle(tagName) {
+    applyTagFeedback(tagName, label) {
         const { paper } = this.state;
-        const isSelected = paper.utags.includes(tagName);
+        return csrfFetch('/api/tag_feedback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid: paper.id, tag: tagName, label: label })
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (!data || !data.success) {
+                    const err = data && data.error ? data.error : 'Unknown error';
+                    throw new Error(err);
+                }
+                const nextPos = new Set(paper.utags || []);
+                const nextNeg = new Set(paper.ntags || []);
+                const wasPos = nextPos.has(tagName);
+                const wasNeg = nextNeg.has(tagName);
+                let posDelta = 0;
+                let negDelta = 0;
 
-        if (isSelected) {
-            // Remove tag
-            csrfFetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
-                .then(response => response.text())
-                .then(text => {
-                    if (text.startsWith('ok')) {
-                        paper.utags = paper.utags.filter(tag => tag !== tagName);
-                        this.setState({
-                            paper: paper
-                        });
-                        adjustTagCount(tagName, -1);
-                        console.log(`Removed tag: ${tagName}`);
-                    } else {
-                        console.error('Server error removing tag:', text);
-                        alert('Failed to remove tag: ' + text);
+                if (label === 1) {
+                    if (!wasPos) {
+                        nextPos.add(tagName);
+                        posDelta += 1;
                     }
-                })
-                .catch(error => {
-                    console.error('Error removing tag:', error);
-                    alert('Network error, failed to remove tag');
-                });
-        } else {
-            // Add tag
-            csrfFetch("/add/" + paper.id + "/" + encodeURIComponent(tagName))
-                .then(response => response.text())
-                .then(text => {
-                    if (text.startsWith('ok')) {
-                        if (!paper.utags.includes(tagName)) {
-                            paper.utags = [...paper.utags, tagName];
-                        }
-                        this.setState({
-                            paper: paper
-                        });
-                        adjustTagCount(tagName, 1);
-                        console.log(`Added tag: ${tagName}`);
-                    } else {
-                        console.error('Server error adding tag:', text);
-                        alert('Failed to add tag: ' + text);
+                    if (wasNeg) {
+                        nextNeg.delete(tagName);
+                        negDelta -= 1;
                     }
-                })
-                .catch(error => {
-                    console.error('Error adding tag:', error);
-                    alert('Network error, failed to add tag');
-                });
-        }
+                } else if (label === -1) {
+                    if (wasPos) {
+                        nextPos.delete(tagName);
+                        posDelta -= 1;
+                    }
+                    if (!wasNeg) {
+                        nextNeg.add(tagName);
+                        negDelta += 1;
+                    }
+                } else {
+                    if (wasPos) {
+                        nextPos.delete(tagName);
+                        posDelta -= 1;
+                    }
+                    if (wasNeg) {
+                        nextNeg.delete(tagName);
+                        negDelta -= 1;
+                    }
+                }
+
+                if (posDelta || negDelta) {
+                    adjustTagStats(tagName, posDelta, negDelta);
+                }
+
+                paper.utags = Array.from(nextPos);
+                paper.ntags = Array.from(nextNeg);
+                this.setState({ paper: paper });
+                return true;
+            });
     }
 
-    handleRemoveTag(tagName) {
+    handleTagCycle(tagName) {
         const { paper } = this.state;
-        csrfFetch("/sub/" + paper.id + "/" + encodeURIComponent(tagName))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
-                    paper.utags = paper.utags.filter(tag => tag !== tagName);
-                    this.setState({
-                        paper: paper
-                    });
-                    adjustTagCount(tagName, -1);
-                    console.log(`Removed tag: ${tagName}`);
-                } else {
-                    console.error('Server error removing tag:', text);
-                    alert('Failed to remove tag: ' + text);
-                }
-            })
+        const isPositive = (paper.utags || []).includes(tagName);
+        const isNegative = (paper.ntags || []).includes(tagName);
+        const nextLabel = isPositive ? -1 : isNegative ? 0 : 1;
+
+        this.applyTagFeedback(tagName, nextLabel)
             .catch(error => {
-                console.error('Error removing tag:', error);
-                alert('Network error, failed to remove tag');
+                console.error('Error updating tag feedback:', error);
+                alert('Failed to update tag feedback: ' + error.message);
+            });
+    }
+
+    handleClearTag(tagName) {
+        this.applyTagFeedback(tagName, 0)
+            .catch(error => {
+                console.error('Error clearing tag feedback:', error);
+                alert('Failed to clear tag feedback: ' + error.message);
             });
     }
 
@@ -514,25 +481,94 @@ class PaperComponent extends React.Component {
             return;
         }
 
-        csrfFetch("/add/" + paper.id + "/" + encodeURIComponent(trimmedTag))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
-                    paper.utags = [...paper.utags, trimmedTag];
-                    this.setState({
-                        paper: paper,
-                        newTagValue: ''
-                    });
-                    adjustTagCount(trimmedTag, 1);
-                    console.log(`Added new tag: ${trimmedTag}`);
-                } else {
-                    console.error('Server error adding new tag:', text);
-                    alert('Failed to add new tag: ' + text);
-                }
+        this.applyTagFeedback(trimmedTag, 1)
+            .then(() => {
+                this.setState({
+                    paper: paper,
+                    newTagValue: ''
+                });
+                console.log(`Added new tag: ${trimmedTag}`);
             })
             .catch(error => {
                 console.error('Error adding new tag:', error);
-                alert('Network error, failed to add new tag');
+                alert('Failed to add new tag: ' + error.message);
+            });
+    }
+
+    handleToggleReadingList() {
+        const { paper, inReadingList } = this.state;
+
+        if (inReadingList) {
+            // Remove from reading list
+            csrfFetch("/api/readinglist/remove", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pid: paper.id })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        removeFromReadingListCache(paper.id);
+                        this.setState({ inReadingList: false });
+                        console.log(`Removed ${paper.id} from reading list`);
+                    } else {
+                        console.error('Failed to remove from reading list:', data.error);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error removing from reading list:', error);
+                });
+        } else {
+            // Add to reading list
+            csrfFetch("/api/readinglist/add", {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pid: paper.id })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        addToReadingListCache(paper.id);
+                        this.setState({ inReadingList: true, summaryStatus: 'queued', summaryLastError: '' });
+                        console.log(`Added ${paper.id} to reading list, top_tags:`, data.top_tags);
+                    } else {
+                        console.error('Failed to add to reading list:', data.error);
+                        alert('Failed to add to reading list: ' + data.error);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error adding to reading list:', error);
+                    alert('Network error, failed to add to reading list');
+                });
+        }
+    }
+
+    handleTriggerSummary() {
+        const { paper, summaryStatus } = this.state;
+        if (!canTriggerSummary(summaryStatus)) return;
+
+        this.setState({ summaryStatus: 'queued', summaryLastError: '' });
+        csrfFetch('/api/trigger_paper_summary', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid: paper.id })
+        })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    this.setState({
+                        summaryStatus: data.status || 'queued',
+                        summaryLastError: data.last_error || ''
+                    });
+                } else {
+                    this.setState({ summaryStatus: 'failed', summaryLastError: data.error || '' });
+                    alert('Failed to trigger summary: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error triggering summary:', error);
+                this.setState({ summaryStatus: 'failed', summaryLastError: String(error) });
+                alert('Network error, failed to trigger summary');
             });
     }
 
@@ -541,16 +577,22 @@ class PaperComponent extends React.Component {
             <Paper
                 paper={this.state.paper}
                 tags={this.state.tags}
+                negativeTags={this.state.paper.ntags || []}
                 dropdownOpen={this.state.dropdownOpen}
                 onToggleDropdown={this.handleToggleDropdown}
-                onTagToggle={this.handleTagToggle}
-                onRemoveTag={this.handleRemoveTag}
+                onTagCycle={this.handleTagCycle}
+                onClearTag={this.handleClearTag}
                 newTagValue={this.state.newTagValue}
                 onNewTagChange={this.handleNewTagChange}
                 onAddNewTag={this.handleAddNewTag}
                 dropdownId={this.dropdownId}
                 searchValue={this.state.searchValue}
                 onSearchChange={this.handleSearchChange}
+                inReadingList={this.state.inReadingList}
+                onToggleReadingList={this.handleToggleReadingList}
+                summaryStatus={this.state.summaryStatus}
+                summaryLastError={this.state.summaryLastError}
+                onTriggerSummary={this.handleTriggerSummary}
             />
         );
     }
@@ -559,16 +601,48 @@ class PaperComponent extends React.Component {
 const Tag = props => {
     const t = props.tag;
     const turl = buildTagUrl(t.name);
-    const tag_class = 'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '');
+    const isNegOnly = t.neg_only === true;
+    const tag_class = 'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '') + (isNegOnly ? ' tag-negative' : '');
     const isEditable = t.name !== 'all';
+    const tooltip = t.name === 'all'
+        ? '包含所有标签'
+        : `Positive: ${t.pos_n || 0} · Negative: ${t.neg_n || 0}`;
+
+    const posCount = Number(t.pos_n || 0);
+    const negCount = Number(t.neg_n || 0);
+
+    const handleOpenManage = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (props.onManage) props.onManage(t);
+    };
+
+    const handleOpenReco = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (isNegOnly) {
+            alert('This tag only has negative examples and cannot be used for recommendations.');
+            return;
+        }
+        window.location.href = turl;
+    };
 
     return (
-        <div class={tag_class + ' enhanced-tag'}>
-            <a href={turl} class="tag-link">
-                {t.n} {t.name}
-            </a>
+        <div class={tag_class + ' enhanced-tag'} title={tooltip}>
+            <span
+                class={isNegOnly ? 'tag-link tag-link-disabled' : 'tag-link'}
+                title={tooltip}
+                onClick={handleOpenManage}
+            >
+                <span class="tag-counts">
+                    <span class="tag-count tag-count-pos" title="Positive count">+{posCount}</span>
+                    <span class="tag-count tag-count-neg" title="Negative count">−{negCount}</span>
+                </span>
+                <span class="tag-name">{t.name}</span>
+            </span>
             {isEditable && (
                 <div class="tag-actions">
+                    <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">↗</span>
                     <span class="tag-edit" onClick={() => props.onEdit(t)} title="Edit tag">✎</span>
                     <span class="tag-delete" onClick={() => props.onDelete(t)} title="Delete tag">×</span>
                 </div>
@@ -585,6 +659,7 @@ const TagList = props => {
             tag={jtag}
             onEdit={props.onEditTag}
             onDelete={props.onDeleteTag}
+            onManage={props.onManageTag}
         />
     );
 
@@ -687,6 +762,146 @@ const TagList = props => {
                     </div>
                 </div>
             )}
+
+            {/* Tag Manage Modal */}
+            {props.showManageModal && (
+                <div class="modal-overlay" onClick={props.onCloseManageModal}>
+                    <div class="modal-content wide tag-manage-modal" onClick={(e) => e.stopPropagation()}>
+                        <div class="modal-header">
+                            <h3>Manage Tag: {props.managingTagName}</h3>
+                            <span class="modal-close" onClick={props.onCloseManageModal}>×</span>
+                        </div>
+                        <div class="modal-body">
+                            <div class="tag-manage-toolbar">
+                                <div class="tag-manage-filters">
+                                    <label>View:</label>
+                                    <select value={props.manageLabelFilter} onChange={props.onManageLabelFilterChange}>
+                                        <option value="all">All</option>
+                                        <option value="pos">Positive</option>
+                                        <option value="neg">Negative</option>
+                                    </select>
+                                    <input
+                                        type="text"
+                                        class="form-input"
+                                        placeholder="Search title / author..."
+                                        value={props.manageSearchValue}
+                                        onChange={props.onManageSearchChange}
+                                    />
+                                </div>
+                                <div class="tag-manage-stats">
+                                    <span class="tag-manage-stat">pos: {props.managePosTotal}</span>
+                                    <span class="tag-manage-stat">neg: {props.manageNegTotal}</span>
+                                    <span class="tag-manage-stat">total: {props.manageTotalCount}</span>
+                                </div>
+                            </div>
+
+                            <div class="tag-manage-add">
+                                <div class="tag-manage-add-row">
+                                    <input
+                                        type="text"
+                                        class="form-input tag-manage-add-input"
+                                        placeholder="Enter PID(s), e.g. 2501.01234"
+                                        value={props.manageAddPidsValue}
+                                        onChange={props.onManageAddPidsChange}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && props.manageAddPidsValue.trim()) {
+                                                e.preventDefault();
+                                                props.onManageAddPids(1);
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        class="btn btn-primary tag-manage-add-btn"
+                                        onClick={() => props.onManageAddPids(1)}
+                                        disabled={!props.manageAddPidsValue.trim()}
+                                        title="Add as positive (Enter)"
+                                    >
+                                        +
+                                    </button>
+                                    <button
+                                        class="btn btn-danger tag-manage-add-btn"
+                                        onClick={() => props.onManageAddPids(-1)}
+                                        disabled={!props.manageAddPidsValue.trim()}
+                                        title="Add as negative"
+                                    >
+                                        −
+                                    </button>
+                                </div>
+                                <div class="tag-manage-help">
+                                    <small>
+                                        Multiple PIDs: separate by comma / space / newline. Enter to add as +. Use buttons for + / −.
+                                    </small>
+                                </div>
+
+                                {(props.managePidPreviewLoading || (props.managePidPreviewItems && props.managePidPreviewItems.length) || props.managePidPreviewError) ? (
+                                    <div class="tag-manage-pid-preview">
+                                        {props.managePidPreviewLoading ? (
+                                            <div class="tag-manage-pid-preview-loading">Previewing…</div>
+                                        ) : null}
+                                        {props.managePidPreviewError ? (
+                                            <div class="tag-manage-pid-preview-error">{props.managePidPreviewError}</div>
+                                        ) : null}
+                                        {(props.managePidPreviewItems || []).slice(0, 8).map((it, ix) => (
+                                            <div key={it.pid + '-' + ix} class={'tag-manage-pid-preview-item' + (it.title ? '' : ' not-found')}>
+                                                <span class="tag-manage-pid-preview-pid">{it.pid}</span>
+                                                <span class={'tag-manage-pid-preview-title' + (it.title ? '' : ' not-found')}>{it.title || 'Not found in database'}</span>
+                                            </div>
+                                        ))}
+                                        {(props.managePidPreviewItems || []).length > 8 ? (
+                                            <div class="tag-manage-pid-preview-more">…and {(props.managePidPreviewItems || []).length - 8} more</div>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+                            </div>
+
+                            <div class="tag-manage-list">
+                                {props.manageLoading ? (
+                                    <div class="tag-manage-loading">Loading…</div>
+                                ) : (
+                                    (props.manageItems || []).length === 0 ? (
+                                        <div class="tag-manage-empty">No papers in this tag.</div>
+                                    ) : (
+                                        <div class="tag-manage-rows">
+                                            {(props.manageItems || []).map((it, ix) => (
+                                                <div key={it.pid + '-' + ix} class="tag-manage-row">
+                                                    <button
+                                                        class={"tag-manage-label " + (it.label === 1 ? 'pos' : it.label === -1 ? 'neg' : 'none')}
+                                                        onClick={() => props.onManageCyclePid(it.pid, it.label)}
+                                                        title="Cycle label"
+                                                    >
+                                                        {it.label === 1 ? '+' : it.label === -1 ? '−' : '·'}
+                                                    </button>
+                                                    <div class="tag-manage-main">
+                                                        <div class="tag-manage-title">
+                                                            <a href={'/summary?pid=' + encodeURIComponent(it.pid)} target="_blank" rel="noreferrer">
+                                                                {it.title || it.pid}
+                                                            </a>
+                                                        </div>
+                                                        <div class="tag-manage-meta">
+                                                            <span class="tag-manage-time">{it.time || ''}</span>
+                                                            <span class="tag-manage-authors" title={it.authors || ''}>{formatAuthorsText(it.authors, { maxAuthors: 10, head: 5, tail: 3 })}</span>
+                                                        </div>
+                                                    </div>
+                                                    <button class="btn btn-cancel tag-manage-remove" onClick={() => props.onManageSetPid(it.pid, 0)}>
+                                                        Remove
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )
+                                )}
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <div class="tag-manage-pagination">
+                                <button class="btn btn-cancel" onClick={props.onManagePrevPage} disabled={props.managePageNumber <= 1 || props.manageLoading}>Prev</button>
+                                <span class="tag-manage-page">Page {props.managePageNumber}</span>
+                                <button class="btn btn-primary" onClick={props.onManageNextPage} disabled={props.manageLoading || !props.manageHasMore}>Next</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }
@@ -700,10 +915,27 @@ class TagListComponent extends React.Component {
             showEditModal: false,
             showDeleteModal: false,
             showAddModal: false,
+            showManageModal: false,
             editingTag: null,
             editingTagName: '',
             deletingTag: null,
-            newTagName: ''
+            newTagName: '',
+
+            managingTag: null,
+            manageLabelFilter: 'all',
+            manageSearchValue: '',
+            manageItems: [],
+            manageLoading: false,
+            managePageNumber: 1,
+            managePageSize: 20,
+            manageTotalCount: 0,
+            managePosTotal: 0,
+            manageNegTotal: 0,
+            manageHasMore: false,
+            manageAddPidsValue: '',
+            managePidPreviewLoading: false,
+            managePidPreviewItems: [],
+            managePidPreviewError: ''
         };
         this.handleEditTag = this.handleEditTag.bind(this);
         this.handleDeleteTag = this.handleDeleteTag.bind(this);
@@ -717,10 +949,29 @@ class TagListComponent extends React.Component {
         this.handleSaveNewTag = this.handleSaveNewTag.bind(this);
         this.handleConfirmDelete = this.handleConfirmDelete.bind(this);
         this.handleKeyDown = this.handleKeyDown.bind(this);
+
+        this.handleManageTag = this.handleManageTag.bind(this);
+        this.handleCloseManageModal = this.handleCloseManageModal.bind(this);
+        this.handleManageLabelFilterChange = this.handleManageLabelFilterChange.bind(this);
+        this.handleManageSearchChange = this.handleManageSearchChange.bind(this);
+        this.handleManagePrevPage = this.handleManagePrevPage.bind(this);
+        this.handleManageNextPage = this.handleManageNextPage.bind(this);
+        this.handleManageCyclePid = this.handleManageCyclePid.bind(this);
+        this.handleManageSetPid = this.handleManageSetPid.bind(this);
+        this.handleManageAddPidsChange = this.handleManageAddPidsChange.bind(this);
+        this.handleManageAddPids = this.handleManageAddPids.bind(this);
+
+        this._pidPreviewTimeout = null;
     }
 
     componentDidMount() {
         document.addEventListener('keydown', this.handleKeyDown);
+    }
+
+    componentDidUpdate(prevProps) {
+        if (prevProps.tags !== this.props.tags) {
+            this.setState({ tags: this.props.tags });
+        }
     }
 
     componentWillUnmount() {
@@ -836,6 +1087,227 @@ class TagListComponent extends React.Component {
         });
     }
 
+    handleCloseManageModal() {
+        this.setState({
+            showManageModal: false,
+            managingTag: null,
+            manageItems: [],
+            manageSearchValue: '',
+            manageLabelFilter: 'all',
+            managePageNumber: 1,
+            manageTotalCount: 0,
+            managePosTotal: 0,
+            manageNegTotal: 0,
+            manageHasMore: false,
+            manageAddPidsValue: '',
+            managePidPreviewLoading: false,
+            managePidPreviewItems: [],
+            managePidPreviewError: ''
+        });
+    }
+
+    parsePidInput(raw) {
+        const parts = String(raw || '')
+            .trim()
+            .split(/[\s,\n\r\t;\uFF0C\u3001]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        const seen = new Set();
+        const out = [];
+        for (const p of parts) {
+            if (seen.has(p)) continue;
+            seen.add(p);
+            out.push(p);
+            if (out.length >= 50) break;
+        }
+        return out;
+    }
+
+    async fetchPidPreview(pids) {
+        const list = Array.isArray(pids) ? pids : [];
+        if (list.length === 0) {
+            this.setState({ managePidPreviewLoading: false, managePidPreviewItems: [], managePidPreviewError: '' });
+            return;
+        }
+        this.setState({ managePidPreviewLoading: true, managePidPreviewError: '' });
+        try {
+            const resp = await csrfFetch('/api/paper_titles', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pids: list })
+            });
+            const data = await resp.json().catch(() => null);
+            if (!data || !data.success) {
+                throw new Error((data && data.error) ? data.error : 'Failed to preview PIDs');
+            }
+            const items = Array.isArray(data.items) ? data.items : [];
+            this.setState({ managePidPreviewItems: items, managePidPreviewLoading: false });
+        } catch (e) {
+            const friendlyMsg = CommonUtils.handleApiError(e, 'Preview PIDs');
+            this.setState({
+                managePidPreviewLoading: false,
+                managePidPreviewItems: [],
+                managePidPreviewError: friendlyMsg
+            });
+        }
+    }
+
+    async fetchManageMembers(overrides = {}) {
+        const managingTag = overrides.managingTag !== undefined ? overrides.managingTag : this.state.managingTag;
+        if (!managingTag || !managingTag.name) return;
+        const page_number = overrides.managePageNumber !== undefined ? overrides.managePageNumber : this.state.managePageNumber;
+        const label = overrides.manageLabelFilter !== undefined ? overrides.manageLabelFilter : this.state.manageLabelFilter;
+        const page_size = overrides.managePageSize !== undefined ? overrides.managePageSize : this.state.managePageSize;
+        const search = overrides.manageSearchValue !== undefined ? overrides.manageSearchValue : this.state.manageSearchValue;
+
+        this.setState({ manageLoading: true });
+        try {
+            const params = new URLSearchParams();
+            params.set('tag', managingTag.name);
+            params.set('label', label);
+            params.set('page_number', String(page_number));
+            params.set('page_size', String(page_size));
+            if (search && search.trim()) {
+                params.set('search', search.trim());
+            }
+            const resp = await fetch('/api/tag_members?' + params.toString(), { credentials: 'same-origin' });
+            const data = await resp.json();
+            if (!data || !data.success) {
+                throw new Error((data && data.error) ? data.error : 'Failed to load tag members');
+            }
+            const items = Array.isArray(data.items) ? data.items : [];
+            this.setState({
+                manageItems: items,
+                manageTotalCount: data.total_count || 0,
+                managePosTotal: data.pos_total || 0,
+                manageNegTotal: data.neg_total || 0,
+                manageHasMore: (page_number * page_size) < (data.total_count || 0)
+            });
+        } catch (e) {
+            const friendlyMsg = CommonUtils.handleApiError(e, 'Fetch Tag Members');
+            console.error('Failed to fetch tag members:', e);
+            alert('Failed to load tag members: ' + friendlyMsg);
+        } finally {
+            this.setState({ manageLoading: false });
+        }
+    }
+
+    handleManageTag(tag) {
+        if (!tag || !tag.name || tag.name === 'all') return;
+        this.setState(
+            {
+                showManageModal: true,
+                managingTag: tag,
+                manageLabelFilter: 'all',
+                manageSearchValue: '',
+                manageItems: [],
+                managePageNumber: 1,
+                manageTotalCount: 0,
+                managePosTotal: 0,
+                manageNegTotal: 0,
+                manageHasMore: false,
+                manageAddPidsValue: ''
+            },
+            () => this.fetchManageMembers({ managingTag: tag, managePageNumber: 1, manageLabelFilter: 'all', manageSearchValue: '' })
+        );
+    }
+
+    handleManageLabelFilterChange(event) {
+        const next = event.target.value;
+        this.setState({ manageLabelFilter: next, managePageNumber: 1 }, () => {
+            this.fetchManageMembers({ manageLabelFilter: next, managePageNumber: 1 });
+        });
+    }
+
+    handleManageSearchChange(event) {
+        const val = event.target.value;
+        this.setState({ manageSearchValue: val });
+        // Debounce search
+        if (this._searchTimeout) clearTimeout(this._searchTimeout);
+        this._searchTimeout = setTimeout(() => {
+            this.setState({ managePageNumber: 1 }, () => {
+                this.fetchManageMembers({ manageSearchValue: val, managePageNumber: 1 });
+            });
+        }, 300);
+    }
+
+    handleManagePrevPage() {
+        if (this.state.manageLoading) return;
+        const nextPage = Math.max(1, (this.state.managePageNumber || 1) - 1);
+        if (nextPage === this.state.managePageNumber) return;
+        this.setState({ managePageNumber: nextPage }, () => this.fetchManageMembers({ managePageNumber: nextPage }));
+    }
+
+    handleManageNextPage() {
+        if (this.state.manageLoading || !this.state.manageHasMore) return;
+        const nextPage = (this.state.managePageNumber || 1) + 1;
+        this.setState({ managePageNumber: nextPage }, () => this.fetchManageMembers({ managePageNumber: nextPage }));
+    }
+
+    async handleManageSetPid(pid, label) {
+        const managingTag = this.state.managingTag;
+        if (!managingTag || !managingTag.name) return;
+        try {
+            const resp = await csrfFetch('/api/tag_feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pid, tag: managingTag.name, label })
+            });
+            const data = await resp.json();
+            if (!data || !data.success) {
+                throw new Error((data && data.error) ? data.error : 'Update failed');
+            }
+            await this.fetchManageMembers();
+        } catch (e) {
+            const friendlyMsg = CommonUtils.handleApiError(e, 'Update Tag Feedback');
+            console.error('Failed to update tag feedback:', e);
+            alert('Failed to update tag: ' + friendlyMsg);
+        }
+    }
+
+    handleManageCyclePid(pid, currentLabel) {
+        const cur = Number(currentLabel || 0);
+        const next = cur === 1 ? -1 : cur === -1 ? 0 : 1;
+        this.handleManageSetPid(pid, next);
+    }
+
+    handleManageAddPidsChange(event) {
+        const val = event.target.value;
+        this.setState({ manageAddPidsValue: val });
+
+        if (this._pidPreviewTimeout) clearTimeout(this._pidPreviewTimeout);
+        this._pidPreviewTimeout = setTimeout(() => {
+            const pids = this.parsePidInput(val);
+            this.fetchPidPreview(pids);
+        }, 250);
+    }
+
+    async handleManageAddPids(label) {
+        const managingTag = this.state.managingTag;
+        if (!managingTag || !managingTag.name) return;
+        const raw = (this.state.manageAddPidsValue || '').trim();
+        if (!raw) return;
+        const pids = this.parsePidInput(raw).slice(0, 200);
+        if (pids.length === 0) return;
+        this.setState({ manageLoading: true });
+        try {
+            const tasks = pids.map(pid => csrfFetch('/api/tag_feedback', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pid, tag: managingTag.name, label })
+            }).then(r => r.json()).catch(() => null));
+            const results = await Promise.all(tasks);
+            const failed = results.filter(r => !r || !r.success).length;
+            if (failed) {
+                alert(`Added with ${failed} failures (check PIDs).`);
+            }
+            this.setState({ manageAddPidsValue: '', managePidPreviewItems: [], managePidPreviewError: '' });
+            await this.fetchManageMembers();
+        } finally {
+            this.setState({ manageLoading: false });
+        }
+    }
+
     handleEditingTagNameChange(event) {
         this.setState({ editingTagName: event.target.value });
     }
@@ -918,12 +1390,14 @@ class TagListComponent extends React.Component {
     }
 
     render() {
+        const managingTagName = (this.state.managingTag && this.state.managingTag.name) ? this.state.managingTag.name : '';
         return (
             <TagList
                 tags={this.state.tags}
                 onEditTag={this.handleEditTag}
                 onDeleteTag={this.handleDeleteTag}
                 onAddTag={this.handleAddTag}
+                onManageTag={this.handleManageTag}
                 showEditModal={this.state.showEditModal}
                 showDeleteModal={this.state.showDeleteModal}
                 showAddModal={this.state.showAddModal}
@@ -938,6 +1412,31 @@ class TagListComponent extends React.Component {
                 onSaveTagEdit={this.handleSaveTagEdit}
                 onSaveNewTag={this.handleSaveNewTag}
                 onConfirmDelete={this.handleConfirmDelete}
+
+                showManageModal={this.state.showManageModal}
+                managingTagName={managingTagName}
+                manageLabelFilter={this.state.manageLabelFilter}
+                manageSearchValue={this.state.manageSearchValue}
+                manageItems={this.state.manageItems}
+                manageLoading={this.state.manageLoading}
+                managePageNumber={this.state.managePageNumber}
+                manageTotalCount={this.state.manageTotalCount}
+                managePosTotal={this.state.managePosTotal}
+                manageNegTotal={this.state.manageNegTotal}
+                manageHasMore={this.state.manageHasMore}
+                manageAddPidsValue={this.state.manageAddPidsValue}
+                managePidPreviewLoading={this.state.managePidPreviewLoading}
+                managePidPreviewItems={this.state.managePidPreviewItems}
+                managePidPreviewError={this.state.managePidPreviewError}
+                onCloseManageModal={this.handleCloseManageModal}
+                onManageLabelFilterChange={this.handleManageLabelFilterChange}
+                onManageSearchChange={this.handleManageSearchChange}
+                onManagePrevPage={this.handleManagePrevPage}
+                onManageNextPage={this.handleManageNextPage}
+                onManageCyclePid={this.handleManageCyclePid}
+                onManageSetPid={this.handleManageSetPid}
+                onManageAddPidsChange={this.handleManageAddPidsChange}
+                onManageAddPids={this.handleManageAddPids}
             />
         );
     }
@@ -997,11 +1496,12 @@ const CombinedTagList = props => {
                                 <label>Select tags to combine:</label>
                                 <MultiSelectDropdown
                                     selectedTags={props.selectedTagsForCombination}
+                                    negativeTags={[]}
                                     availableTags={props.availableTagsForCombination}
                                     isOpen={props.combinationDropdownOpen}
                                     onToggle={props.onToggleCombinationDropdown}
-                                    onTagToggle={props.onCombinationTagToggle}
-                                    onRemoveTag={props.onRemoveCombinationTag}
+                                    onTagCycle={props.onCombinationTagToggle}
+                                    onClearTag={props.onRemoveCombinationTag}
                                     newTagValue=""
                                     onNewTagChange={() => {}}
                                     onAddNewTag={() => {}}
@@ -1094,6 +1594,17 @@ class CombinedTagListComponent extends React.Component {
     componentDidMount() {
         document.addEventListener('mousedown', this.handleClickOutside);
         document.addEventListener('keydown', this.handleKeyDown);
+    }
+
+    componentDidUpdate(prevProps) {
+        const tagsChanged = prevProps.tags !== this.props.tags;
+        const combinedChanged = prevProps.combined_tags !== this.props.combined_tags;
+        if (tagsChanged || combinedChanged) {
+            this.setState({
+                tags: this.props.tags,
+                combined_tags: this.props.combined_tags
+            });
+        }
     }
 
     componentWillUnmount() {
@@ -1311,7 +1822,7 @@ class CombinedTagListComponent extends React.Component {
 
     render() {
         const availableTagsForCombination = this.state.tags
-            .filter(tag => tag.name !== 'all')
+            .filter(tag => tag.name !== 'all' && !tag.neg_only)
             .map(tag => tag.name);
 
         return (
@@ -1494,6 +2005,12 @@ class KeyComponent extends React.Component {
 
     componentDidMount() {
         document.addEventListener('keydown', this.handleKeyDown);
+    }
+
+    componentDidUpdate(prevProps) {
+        if (prevProps.keys !== this.props.keys) {
+            this.setState({ keys: this.props.keys });
+        }
     }
 
     componentWillUnmount() {
@@ -1710,10 +2227,25 @@ class KeyComponent extends React.Component {
 
 
 
-
 function normalizeTags(list) {
     const base = (list || []).filter(tag => tag && tag.name && tag.name !== 'all');
-    const normalized = base.map(tag => ({ name: tag.name, n: tag.n }));
+    const normalized = base.map(tag => {
+        const pos_n = (tag.pos_n !== undefined) ? Number(tag.pos_n || 0) : undefined;
+        const neg_n = (tag.neg_n !== undefined) ? Number(tag.neg_n || 0) : undefined;
+        const n = (pos_n !== undefined && neg_n !== undefined)
+            ? (pos_n + neg_n)
+            : Number(tag.n || 0);
+        const neg_only = (tag.neg_only !== undefined)
+            ? Boolean(tag.neg_only)
+            : (pos_n !== undefined && neg_n !== undefined ? (pos_n === 0 && neg_n > 0) : false);
+        return {
+            name: tag.name,
+            n: n,
+            pos_n: pos_n !== undefined ? pos_n : (tag.pos_n || 0),
+            neg_n: neg_n !== undefined ? neg_n : (tag.neg_n || 0),
+            neg_only: neg_only
+        };
+    });
     if (normalized.length > 0) {
         normalized.push({ name: 'all' });
     }
@@ -1806,8 +2338,11 @@ function setGlobalKeys(nextKeys, options) {
     }
 }
 
-function adjustTagCount(tagName, delta) {
-    if (!tagName || tagName === 'all' || !delta) return;
+function adjustTagStats(tagName, posDelta, negDelta) {
+    if (!tagName || tagName === 'all') return;
+    const posD = posDelta || 0;
+    const negD = negDelta || 0;
+    if (!posD && !negD) return;
     const baseTags = (tags || []).filter(tag => tag && tag.name && tag.name !== 'all');
     let found = false;
     let tagAdded = false;
@@ -1816,20 +2351,66 @@ function adjustTagCount(tagName, delta) {
         .map((tag) => {
             if (tag.name !== tagName) return tag;
             found = true;
-            const prevCount = tag.n || 0;
-            const nextCount = Math.max(0, prevCount + delta);
-            if (prevCount > 0 && nextCount === 0) {
+            const prevPos = tag.pos_n || 0;
+            const prevNeg = tag.neg_n || 0;
+            const nextPos = Math.max(0, prevPos + posD);
+            const nextNeg = Math.max(0, prevNeg + negD);
+            const nextCount = nextPos + nextNeg;
+            if ((prevPos + prevNeg) > 0 && nextCount === 0) {
                 tagRemoved = true;
             }
-            return { ...tag, n: nextCount };
+            return {
+                ...tag,
+                n: nextCount,
+                pos_n: nextPos,
+                neg_n: nextNeg,
+                neg_only: nextPos === 0 && nextNeg > 0
+            };
         });
-    if (!found && delta > 0) {
-        updated.push({ name: tagName, n: delta });
+    if (!found && (posD > 0 || negD > 0)) {
+        const nextPos = Math.max(0, posD);
+        const nextNeg = Math.max(0, negD);
+        updated.push({
+            name: tagName,
+            n: nextPos + nextNeg,
+            pos_n: nextPos,
+            neg_n: nextNeg,
+            neg_only: nextPos === 0 && nextNeg > 0
+        });
         tagAdded = true;
     }
     setGlobalTags(updated, { renderPaper: tagAdded || tagRemoved });
 }
 
+// Global reading list state
+let readingListPids = new Set();
+
+function fetchReadingList() {
+    if (!user) return Promise.resolve();
+
+    return fetch('/api/readinglist/list', { credentials: 'same-origin' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success && data.items) {
+                readingListPids = new Set(data.items.map(item => item.pid));
+            }
+        })
+        .catch(err => {
+            console.warn('Failed to fetch reading list:', err);
+        });
+}
+
+function isInReadingList(pid) {
+    return readingListPids.has(pid);
+}
+
+function addToReadingListCache(pid) {
+    readingListPids.add(pid);
+}
+
+function removeFromReadingListCache(pid) {
+    readingListPids.delete(pid);
+}
 
 // render papers into #wrap
 // ReactDOM.render(<PaperList papers={papers} tags={tags} />, document.getElementById('wrap'));
@@ -1862,12 +2443,17 @@ function renderCombinedTagList() {
     }
 }
 
-renderPaperList();
+// Fetch reading list first, then render all components
+fetchReadingList().then(() => {
+    renderPaperList();
 
-// render tags into #tagwrap, if it exists
-renderTagList();
+    // render tags into #tagwrap, if it exists
+    renderTagList();
 
-// render keys into #keywrap, if it exists
-renderKeyList();
+    // render keys into #keywrap, if it exists
+    renderKeyList();
 
-renderCombinedTagList();
+    renderCombinedTagList();
+
+    setupUserEventStream();
+});

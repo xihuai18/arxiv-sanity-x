@@ -1,0 +1,38 @@
+name: Check dist sync
+
+on:
+  pull_request:
+    paths:
+      - 'static/*.js'
+      - '!static/dist/**'
+      - 'package.json'
+
+jobs:
+  check-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build static files
+        run: npm run build:static
+
+      - name: Check for uncommitted changes
+        run: |
+          if [ -n "$(git status --porcelain static/dist/)" ]; then
+            echo "::error::static/dist/ is out of sync with source files"
+            echo "The following files have changed after rebuild:"
+            git diff --name-only static/dist/
+            echo ""
+            echo "Please run 'npm run build:static' and commit the dist files."
+            exit 1
+          fi
+          echo "dist files are in sync"

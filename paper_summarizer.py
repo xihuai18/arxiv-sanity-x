@@ -1095,7 +1095,7 @@ class PaperSummarizer:
                 logger.error(f"Failed to get batch_id/file_urls from response: {result}")
                 raise ValueError("MINERU_API_INVALID_RESPONSE")
 
-            logger.info(f"MinerU batch created: {batch_id}")
+            logger.debug(f"MinerU batch created: {batch_id}")
 
             # === Step 2: Upload PDF file ===
             logger.trace(f"Uploading PDF to: {upload_url[:80]}...")
@@ -1106,7 +1106,7 @@ class PaperSummarizer:
                 logger.error(f"Failed to upload PDF: HTTP {upload_res.status_code}")
                 raise ValueError(f"MINERU_API_UPLOAD_FAILED: HTTP {upload_res.status_code}")
 
-            logger.info(f"PDF uploaded successfully for {pdf_name}")
+            logger.debug(f"PDF uploaded successfully for {pdf_name}")
 
             # === Step 3: Poll for completion (with timeout) ===
             start_time = time.time()
@@ -1142,7 +1142,7 @@ class PaperSummarizer:
 
                 if state == "done":
                     download_url = extract_result["full_zip_url"]
-                    logger.info(f"Task completed: {download_url}")
+                    logger.debug(f"Task completed: {download_url}")
                     break
                 elif state in ["running", "pending", "converting", "waiting-file"]:
                     continue
@@ -1192,7 +1192,7 @@ class PaperSummarizer:
             except Exception as e:
                 logger.trace(f"Failed to delete PDF file: {e}")
 
-            logger.info(f"Successfully parsed: {target_md}")
+            logger.debug(f"Successfully parsed: {target_md}")
             return target_md
 
         except ValueError as e:
@@ -1819,7 +1819,7 @@ Please output strictly according to the following structure:
             response = self.client.chat.completions.create(
                 model=modelid,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
+                temperature=0.3,
                 top_p=0.95,
             )
 
@@ -2047,7 +2047,7 @@ Please output strictly according to the following structure:
                 markdown_content, html_source, cache_pid = self._get_markdown_from_html(pid)
                 if markdown_content:
                     main_content = self.extract_main_content(markdown_content)
-                    logger.info(f"Summarizing {pid} (html:{html_source or 'unknown'}, cache:{cache_pid}) ...")
+                    logger.debug(f"Summarizing {pid} (html:{html_source or 'unknown'}, cache:{cache_pid}) ...")
                     summary = self.summarize_with_llm(main_content, model=model)
                     # Attach detailed source info for caching/meta.json
                     if isinstance(summary.get("meta"), dict):
@@ -2055,7 +2055,7 @@ Please output strictly according to the following structure:
                     # Post-process image paths using the actual cache_pid
                     summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid)
                     return summary
-                logger.info(f"HTML fetch/parse failed for {pid}, fallback to minerU.")
+                logger.debug(f"HTML fetch/parse failed for {pid}, fallback to minerU.")
                 # Check if MinerU is enabled before fallback
                 if not MINERU_ENABLED:
                     return self._build_summary_result(
@@ -2084,7 +2084,7 @@ Please output strictly according to the following structure:
                     # Step 3: Extract main paper content
                     main_content = self.extract_main_content(markdown_content)
                     # Step 4: Generate summary using LLM
-                    logger.info(f"Summarizing {cache_pid} (mineru) ...")
+                    logger.debug(f"Summarizing {cache_pid} (mineru) ...")
                     summary = self.summarize_with_llm(main_content, model=model)
                     if isinstance(summary.get("meta"), dict):
                         summary["meta"]["source"] = f"mineru:{backend}"
@@ -2096,13 +2096,13 @@ Please output strictly according to the following structure:
 
             # Step 1: Download paper PDF (use cache_pid for filename)
             backend = self._normalize_mineru_backend()
-            logger.info(f"Downloading {cache_pid}.pdf ...")
+            logger.debug(f"Downloading {cache_pid}.pdf ...")
             pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
             if not pdf_path:
                 return self._build_summary_result("# Error\n\nUnable to download paper PDF")
 
             # Step 2: Parse PDF to Markdown using minerU
-            logger.info(f"Parsing {cache_pid}.pdf ...")
+            logger.debug(f"Parsing {cache_pid}.pdf ...")
             try:
                 md_path = self.parse_pdf_with_mineru(pdf_path, cache_pid=cache_pid, cached_version=cached_version)
             except ValueError as e:
@@ -2139,7 +2139,7 @@ Please output strictly according to the following structure:
             main_content = self.extract_main_content(markdown_content)
 
             # Step 5: Generate summary using LLM
-            logger.info(f"Summarizing {cache_pid} (mineru) ...")
+            logger.debug(f"Summarizing {cache_pid} (mineru) ...")
             summary = self.summarize_with_llm(main_content, model=model)
             if isinstance(summary.get("meta"), dict):
                 summary["meta"]["source"] = f"mineru:{backend}"
@@ -2645,7 +2645,8 @@ if __name__ == "__main__":
     import sys
 
     logger.remove()
-    logger.add(sys.stderr, level="TRACE")
+    log_level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper()
+    logger.add(sys.stderr, level=log_level)
 
     parser = argparse.ArgumentParser(description="Test paper summarizer")
     parser.add_argument("pid", help="Paper ID")
