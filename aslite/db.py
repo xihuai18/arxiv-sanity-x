@@ -122,34 +122,87 @@ def get_metas_db(flag="r", autocommit=True):
     return mdb
 
 
-def get_tags_db(flag="r", autocommit=True):
+def _safe_open_db(db_class, db_file, tablename, flag="r", autocommit=True):
+    """
+    Safely open a database table. If flag='r' and table doesn't exist,
+    automatically create it first with flag='c', then reopen with flag='r'.
+    """
     assert flag in ["r", "c"]
-    tdb = CompressedSqliteDict(DICT_DB_FILE, tablename="tags", flag=flag, autocommit=autocommit)
-    return tdb
+    try:
+        return db_class(db_file, tablename=tablename, flag=flag, autocommit=autocommit)
+    except RuntimeError as e:
+        if "read-only" in str(e) and flag == "r":
+            # Table doesn't exist, create it first
+            db_class(db_file, tablename=tablename, flag="c", autocommit=True).close()
+            return db_class(db_file, tablename=tablename, flag=flag, autocommit=autocommit)
+        raise
+
+
+def get_tags_db(flag="r", autocommit=True):
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "tags", flag, autocommit)
+
+
+def get_neg_tags_db(flag="r", autocommit=True):
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "neg_tags", flag, autocommit)
 
 
 def get_combined_tags_db(flag="r", autocommit=True):
-    assert flag in ["r", "c"]
-    tdb = CompressedSqliteDict(DICT_DB_FILE, tablename="combined_tags", flag=flag, autocommit=autocommit)
-    return tdb
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "combined_tags", flag, autocommit)
 
 
 def get_keywords_db(flag="r", autocommit=True):
-    assert flag in ["r", "c"]
-    kdb = CompressedSqliteDict(DICT_DB_FILE, tablename="keywords", flag=flag, autocommit=autocommit)
-    return kdb
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "keywords", flag, autocommit)
 
 
 def get_last_active_db(flag="r", autocommit=True):
-    assert flag in ["r", "c"]
-    ladb = SqliteDict(DICT_DB_FILE, tablename="last_active", flag=flag, autocommit=autocommit)
-    return ladb
+    return _safe_open_db(SqliteDict, DICT_DB_FILE, "last_active", flag, autocommit)
 
 
 def get_email_db(flag="r", autocommit=True):
-    assert flag in ["r", "c"]
-    edb = SqliteDict(DICT_DB_FILE, tablename="email", flag=flag, autocommit=autocommit)
-    return edb
+    return _safe_open_db(SqliteDict, DICT_DB_FILE, "email", flag, autocommit)
+
+
+def get_readinglist_db(flag="r", autocommit=True):
+    """
+    Reading list database with atomic per-entry storage.
+    Key format: "user::pid" (e.g., "alice::2301.00001")
+    Value: {added_time, top_tags, summary_triggered}
+
+    This design avoids lost updates under concurrent writes by making each
+    (user, pid) pair an independent key rather than nesting all pids under user.
+    """
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "readinglist", flag, autocommit)
+
+
+def get_readinglist_index_db(flag="r", autocommit=True):
+    """Per-user reading list index to avoid full scans.
+
+    Key: "user::pid"
+    Value: 1
+    """
+    return _safe_open_db(CompressedSqliteDict, DICT_DB_FILE, "readinglist_index", flag, autocommit)
+
+
+def get_summary_status_db(flag="r", autocommit=True):
+    """Summary status store.
+
+    Key: "pid::model"
+    Value: {status, last_error, updated_time}
+    """
+    return _safe_open_db(SqliteDict, DICT_DB_FILE, "summary_status", flag, autocommit)
+
+
+def readinglist_key(user: str, pid: str) -> str:
+    """Generate a reading list key from user and pid."""
+    return f"{user}::{pid}"
+
+
+def parse_readinglist_key(key: str) -> tuple:
+    """Parse a reading list key into (user, pid). Returns (None, None) if invalid."""
+    if "::" not in key:
+        return None, None
+    parts = key.split("::", 1)
+    return parts[0], parts[1]
 
 
 # -----------------------------------------------------------------------------

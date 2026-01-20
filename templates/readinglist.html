@@ -1,0 +1,767 @@
+{% extends "base.html" %}
+
+{% block head_extra %}
+<!-- React + shared tag dropdown (for consistent 3-state tag UI across pages) -->
+<script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/tag_dropdown_shared.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/author_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_sanitizer_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_renderer_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/markdown_core_utils.js') }}"></script>
+<script defer src="{{ url_for('static', filename='dist/tldr_utils.js') }}"></script>
+<script>
+{% raw %}
+window.MathJax = {
+    loader: { load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat'] },
+    tex: {
+        inlineMath: [['\\(', '\\)'], ['$', '$']],
+        displayMath: [['\\[', '\\]'], ['$$', '$$']],
+        processEscapes: true,
+        processEnvironments: true,
+        packages: { '[+]': ['base', 'ams', 'boldsymbol', 'braket', 'cancel', 'color', 'enclose', 'mathtools', 'newcommand', 'noerrors', 'noundefined', 'physics', 'tagformat', 'textmacros', 'unicode', 'verb'] },
+        tags: 'ams',
+        macros: { bm: ['\\mathbf{#1}', 1], boldsymbol: ['\\mathbf{#1}', 1], RR: '\\mathbb{R}', NN: '\\mathbb{N}', ZZ: '\\mathbb{Z}', EE: '\\mathbb{E}', abs: ['\\left|#1\\right|', 1], norm: ['\\left\\|#1\\right\\|', 1], argmax: '\\operatorname*{arg\\,max}', argmin: '\\operatorname*{arg\\,min}' }
+    },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'], ignoreHtmlClass: 'tex2jax_ignore', processHtmlClass: 'tex2jax_process' },
+    chtml: { scale: 1.0, displayAlign: 'center' }
+};
+{% endraw %}
+</script>
+<script id="MathJax-script" defer src="{{ url_for('static', filename='lib/es5/tex-chtml-full.js') }}"></script>
+{% endblock %}
+
+{% block variables %}
+<script>
+var papers = {{ papers | tojson }};
+var tags = {{ tags | tojson }};
+
+// Use shared utilities directly
+var CommonUtils = window.ArxivSanityCommon;
+var getCsrfToken = CommonUtils.getCsrfToken;
+var csrfFetch = CommonUtils.csrfFetch;
+var fetchUserState = CommonUtils.fetchUserState;
+
+let pendingRemove = null;
+const readinglistDropdowns = new Map();
+const readinglistSummaryUI = new Map();
+
+function applyUserState(state) {
+    if (!state || !state.success) return;
+    if (Array.isArray(state.tags)) {
+        tags = state.tags;
+    }
+    const available = getAvailableTags();
+    readinglistDropdowns.forEach((dropdownApi) => {
+        if (dropdownApi && typeof dropdownApi.updateAvailableTags === 'function') {
+            dropdownApi.updateAvailableTags(available);
+        }
+    });
+}
+
+function fetchUserStateAndApply() {
+    return fetchUserState().then(applyUserState);
+}
+
+function updateSummaryStatusFromEvent(pid, status, error) {
+    const ui = readinglistSummaryUI.get(pid);
+    if (!ui) return;
+    ui.state.status = status || '';
+    ui.state.lastError = error || '';
+    updateSummaryBadge(ui.badge, ui.state.status, ui.state.lastError);
+    ui.syncTriggerState();
+}
+
+function handleReadingListEvent(event) {
+    if (!event || !event.pid) return;
+    if (event.action === 'add') {
+        const existing = document.querySelector(`.rl-paper-card[data-pid="${event.pid}"]`);
+        if (!existing) {
+            window.location.reload();
+        }
+        return;
+    }
+    if (event.action === 'remove') {
+        const ui = readinglistSummaryUI.get(event.pid);
+        if (ui && ui.card) {
+            ui.card.remove();
+            updateEmptyState();
+        }
+        readinglistSummaryUI.delete(event.pid);
+        const dropdownApi = readinglistDropdowns.get(event.pid);
+        if (dropdownApi && typeof dropdownApi.unregister === 'function') {
+            dropdownApi.unregister();
+        }
+        readinglistDropdowns.delete(event.pid);
+    }
+}
+
+function handleUserEvent(event, options = {}) {
+    if (!event || typeof event !== 'object') return;
+    if (event.type === 'user_state_changed') {
+        if (event.reason === 'rename_tag') {
+            readinglistDropdowns.forEach((api) => {
+                if (api && typeof api.applyTagRename === 'function') {
+                    api.applyTagRename(event.from, event.to);
+                }
+            });
+        } else if (event.reason === 'delete_tag') {
+            readinglistDropdowns.forEach((api) => {
+                if (api && typeof api.applyTagDelete === 'function') {
+                    api.applyTagDelete(event.tag);
+                }
+            });
+        } else if (event.reason === 'tag_feedback' && event.pid && event.tag && event.label !== undefined) {
+            const api = readinglistDropdowns.get(event.pid);
+            if (api && typeof api.applyTagFeedback === 'function') {
+                api.applyTagFeedback(event.tag, event.label);
+            }
+        }
+        fetchUserStateAndApply();
+    } else if (event.type === 'summary_status') {
+        updateSummaryStatusFromEvent(event.pid, event.status, event.error);
+    } else if (event.type === 'readinglist_changed') {
+        handleReadingListEvent(event);
+    }
+}
+
+function setupUserEventStream() {
+    CommonUtils.registerEventHandler(handleUserEvent);
+    CommonUtils.setupUserEventStream(user, applyUserState);
+}
+
+function closeRemoveConfirm() {
+    if (!pendingRemove) return;
+    const { popup } = pendingRemove;
+    if (popup && popup.parentNode) {
+        popup.parentNode.removeChild(popup);
+    }
+    pendingRemove = null;
+}
+
+function confirmRemoveFromReadingList() {
+    if (!pendingRemove) return;
+    const { pid, element } = pendingRemove;
+    closeRemoveConfirm();
+    performRemoveFromReadingList(pid, element);
+}
+
+function openRemoveConfirm(pid, element) {
+    if (!element) return;
+    closeRemoveConfirm();
+
+    const wrap = element.closest('.rl-remove-wrap') || element.parentElement;
+    const card = element.closest('.rl-paper-card');
+    const paperTitle = card ? (card.querySelector('.rel_title a')?.textContent || '').trim() : '';
+    const desc = paperTitle
+        ? `Remove “${paperTitle}” from your reading list?`
+        : 'Remove this paper from your reading list?';
+
+    const popup = document.createElement('div');
+    popup.className = 'confirm-popup';
+    popup.setAttribute('role', 'dialog');
+    popup.innerHTML = `
+        <div class="confirm-content">
+            <strong>Remove from reading list?</strong>
+            <p>${desc}</p>
+            <p>You can add it back anytime.</p>
+            <div class="confirm-actions">
+                <button class="confirm-btn confirm-yes" type="button">Remove</button>
+                <button class="confirm-btn confirm-no" type="button">Cancel</button>
+            </div>
+        </div>
+    `;
+
+    const yesBtn = popup.querySelector('.confirm-yes');
+    const noBtn = popup.querySelector('.confirm-no');
+    if (yesBtn) yesBtn.addEventListener('click', confirmRemoveFromReadingList);
+    if (noBtn) noBtn.addEventListener('click', closeRemoveConfirm);
+
+    if (wrap) {
+        wrap.appendChild(popup);
+    }
+    pendingRemove = { pid, element, popup, wrap };
+}
+
+document.addEventListener('mousedown', (event) => {
+    if (!pendingRemove) return;
+    const { wrap } = pendingRemove;
+    if (wrap && wrap.contains(event.target)) return;
+    closeRemoveConfirm();
+});
+
+document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+        closeRemoveConfirm();
+    }
+});
+
+function performRemoveFromReadingList(pid, element) {
+    csrfFetch('/api/readinglist/remove', {
+        method: 'POST',
+        body: JSON.stringify({ pid: pid })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const card = element.closest('.rl-paper-card');
+            if (card) {
+                readinglistDropdowns.delete(pid);
+                readinglistSummaryUI.delete(pid);
+                card.style.transition = 'opacity 0.3s, transform 0.3s';
+                card.style.opacity = '0';
+                card.style.transform = 'translateX(-20px)';
+                setTimeout(() => {
+                    card.remove();
+                    updateEmptyState();
+                }, 300);
+            }
+        } else {
+            alert('Failed to remove: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(err => {
+        console.error('Error removing from reading list:', err);
+        alert('Failed to remove paper');
+    });
+}
+
+function updateEmptyState() {
+    const container = document.getElementById('rl-papers');
+    const emptyState = document.getElementById('rl-empty-state');
+    const cards = container ? container.querySelectorAll('.rl-paper-card') : [];
+
+    if (emptyState) {
+        emptyState.style.display = cards.length === 0 ? 'block' : 'none';
+    }
+}
+
+function formatDate(timestamp) {
+    if (!timestamp) return '';
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+}
+
+function formatSummaryStatus(status) {
+    if (!status) return '';
+    if (status === 'queued') return 'Summary queued';
+    if (status === 'running') return 'Summary generating';
+    if (status === 'ok') return 'Summary ready';
+    if (status === 'failed') return 'Summary failed';
+    return 'Summary ' + status;
+}
+
+function canTriggerSummary(status) {
+    return !(status === 'ok' || status === 'running' || status === 'queued');
+}
+
+// TL;DR rendering helpers are shared in static/tldr_utils.js
+function renderTldrMarkdown(text) {
+    return CommonUtils.renderTldrMarkdown(text);
+}
+
+function triggerMathJax(element) {
+    return CommonUtils.triggerMathJax(element);
+}
+
+function buildTagUrl(tagName) {
+    return CommonUtils.buildTagUrl(tagName);
+}
+
+function createTextElement(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    el.textContent = text;
+    return el;
+}
+
+function createLinkElement(href, className, text, target) {
+    const el = document.createElement('a');
+    el.href = href;
+    if (className) el.className = className;
+    el.textContent = text;
+    if (target) el.target = target;
+    return el;
+}
+
+// Dropdown outside-click/Escape handling is provided by static/tag_dropdown_shared.js
+
+function getAvailableTags() {
+    if (!Array.isArray(tags)) return [];
+    return tags.map(tag => tag.name).filter(name => name && name !== 'all');
+}
+
+function updateSummaryBadge(badgeEl, status, lastError) {
+    if (!badgeEl) return;
+    const text = formatSummaryStatus(status);
+    if (!text) {
+        badgeEl.style.display = 'none';
+        return;
+    }
+    badgeEl.style.display = 'inline-flex';
+    badgeEl.textContent = text;
+    badgeEl.className = 'summary-status-badge';
+    if (status === 'ok') {
+        badgeEl.classList.add('ok');
+    } else if (status === 'failed') {
+        badgeEl.classList.add('failed');
+    }
+    if (lastError) {
+        badgeEl.title = lastError;
+    } else {
+        badgeEl.removeAttribute('title');
+    }
+}
+
+function buildAddedTimeLine(addedTime) {
+    const line = document.createElement('div');
+    line.className = 'rl-added-time-line';
+
+    const label = createTextElement('span', 'rl-meta-label', 'Added at:');
+    line.appendChild(label);
+
+    const timeText = addedTime ? formatDate(addedTime) : '-';
+    line.appendChild(createTextElement('span', 'rl-added-time-pill', timeText));
+
+    return line;
+}
+
+function buildRelatedTagsLine(topTags) {
+    const line = document.createElement('div');
+    line.className = 'rl-related-tags';
+    const label = createTextElement('span', 'rl-meta-label', 'Related Tags:');
+    line.appendChild(label);
+
+    const tagsList = Array.isArray(topTags) ? topTags.slice(0, 3) : [];
+    const tagsWrap = document.createElement('div');
+    tagsWrap.className = 'rel_utags rl-related-tags-list';
+
+    if (tagsList.length === 0) {
+        tagsWrap.appendChild(createTextElement('span', 'rl-meta-empty', '-'));
+        line.appendChild(tagsWrap);
+        return line;
+    }
+
+    tagsList.forEach((tag) => {
+        const tagWrap = document.createElement('div');
+        tagWrap.className = 'rel_utag rl-related-tag-pill';
+        tagWrap.appendChild(createLinkElement(buildTagUrl(tag), null, tag));
+        tagsWrap.appendChild(tagWrap);
+    });
+
+    line.appendChild(tagsWrap);
+    return line;
+}
+
+function createTagDropdown(paper) {
+    const container = document.createElement('div');
+    container.className = 'rl-tag-dropdown-root';
+    const api = window.ArxivSanityTagDropdown && window.ArxivSanityTagDropdown.mount
+        ? window.ArxivSanityTagDropdown.mount(container, {
+            pid: paper.id,
+            selectedTags: Array.isArray(paper.utags) ? paper.utags.slice() : [],
+            negativeTags: Array.isArray(paper.ntags) ? paper.ntags.slice() : [],
+            availableTags: getAvailableTags(),
+            onStateChange: (st) => {
+                paper.utags = Array.isArray(st.selectedTags) ? st.selectedTags.slice() : [];
+                paper.ntags = Array.isArray(st.negativeTags) ? st.negativeTags.slice() : [];
+            }
+        })
+        : null;
+
+    if (api) {
+        readinglistDropdowns.set(paper.id, {
+            updateAvailableTags: (nextTags) => api.updateAvailableTags(nextTags),
+            unregister: () => api.unmount(),
+            applyTagFeedback: (tagName, label) => api.applyTagFeedback(tagName, label),
+            applyTagRename: (fromTag, toTag) => api.applyTagRename(fromTag, toTag),
+            applyTagDelete: (tagName) => api.applyTagDelete(tagName)
+        });
+    }
+
+    return container;
+}
+
+function createReadingListCard(p, container) {
+    if (!container || !p) return;
+
+    const card = document.createElement('div');
+    card.className = 'rel_paper rl-paper-card';
+    card.dataset.pid = p.id;
+
+    const removeWrap = document.createElement('div');
+    removeWrap.className = 'rl-remove-wrap summary-btn-group';
+
+    const removeBtn = document.createElement('div');
+    removeBtn.className = 'readinglist-btn active rl-remove-btn';
+    removeBtn.title = 'Remove from reading list';
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', function(event) {
+        event.stopPropagation();
+        openRemoveConfirm(p.id, this);
+    });
+
+    removeWrap.appendChild(removeBtn);
+    card.appendChild(removeWrap);
+
+    // Title
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'rel_title';
+    titleDiv.appendChild(createLinkElement('http://arxiv.org/abs/' + encodeURIComponent(p.id), null, p.title || p.id, '_blank'));
+    card.appendChild(titleDiv);
+
+    // Authors (unified truncation)
+    var authorsFull = String(p.authors || '');
+    var authorsText = authorsFull;
+    try {
+        if (window.ArxivSanityAuthors && window.ArxivSanityAuthors.format) {
+            authorsText = window.ArxivSanityAuthors.format(authorsFull, { maxAuthors: 10, head: 5, tail: 3 }).text;
+        }
+    } catch (e) {}
+    var authorsEl = createTextElement('div', 'rel_authors', authorsText);
+    if (authorsFull) authorsEl.title = authorsFull;
+    card.appendChild(authorsEl);
+
+    if (p.time) {
+        card.appendChild(createTextElement('div', 'rel_time rl-paper-time', p.time));
+    }
+    card.appendChild(createTextElement('div', 'rel_tags', p.tags || ''));
+
+    const statusBadge = document.createElement('div');
+    updateSummaryBadge(statusBadge, p.summary_status || '', p.summary_last_error || '');
+    card.appendChild(statusBadge);
+
+    // TL;DR section (prioritize over abstract)
+    if (p.tldr) {
+        const tldrDiv = document.createElement('div');
+        tldrDiv.className = 'rel_tldr';
+        const tldrLabel = document.createElement('div');
+        tldrLabel.className = 'tldr_label';
+        tldrLabel.textContent = '💡 TL;DR';
+        const tldrText = document.createElement('div');
+        tldrText.className = 'tldr_text';
+        tldrText.innerHTML = renderTldrMarkdown(p.tldr);
+        tldrDiv.appendChild(tldrLabel);
+        tldrDiv.appendChild(tldrText);
+        card.appendChild(tldrDiv);
+        triggerMathJax(tldrDiv);
+    } else if (p.summary) {
+        // Abstract (only show if no TL;DR)
+        card.appendChild(createTextElement('div', 'rel_abs', p.summary));
+    }
+
+    card.appendChild(buildAddedTimeLine(p.added_time));
+    card.appendChild(buildRelatedTagsLine(p.top_tags));
+
+    if (typeof user !== 'undefined' && user) {
+        const utagsWrap = document.createElement('div');
+        utagsWrap.className = 'rel_utags';
+        utagsWrap.appendChild(createTagDropdown(p));
+        card.appendChild(utagsWrap);
+    }
+
+    // Actions
+    const actions = document.createElement('div');
+    actions.className = 'paper-actions-footer';
+
+    const triggerWrap = document.createElement('div');
+    triggerWrap.className = 'rel_summary';
+    const triggerBtn = document.createElement('button');
+    triggerBtn.className = 'summary-trigger-btn';
+    triggerBtn.textContent = '✨ Generate Summary';
+    triggerBtn.title = 'Generate summary';
+    triggerWrap.appendChild(triggerBtn);
+
+    const similarWrap = document.createElement('div');
+    similarWrap.className = 'rel_more';
+    similarWrap.appendChild(createLinkElement('/?rank=pid&pid=' + encodeURIComponent(p.id), null, 'Similar', '_blank'));
+
+    const inspectWrap = document.createElement('div');
+    inspectWrap.className = 'rel_inspect';
+    inspectWrap.appendChild(createLinkElement('/inspect?pid=' + encodeURIComponent(p.id), null, 'Inspect', '_blank'));
+
+    const summaryWrap = document.createElement('div');
+    summaryWrap.className = 'rel_summary';
+    summaryWrap.appendChild(createLinkElement('/summary?pid=' + encodeURIComponent(p.id), null, 'Summary', '_blank'));
+
+    const alphaWrap = document.createElement('div');
+    alphaWrap.className = 'rel_alphaxiv';
+    alphaWrap.appendChild(createLinkElement('https://www.alphaxiv.org/overview/' + encodeURIComponent(p.id), null, 'alphaXiv', '_blank'));
+
+    const coolWrap = document.createElement('div');
+    coolWrap.className = 'rel_cool';
+    coolWrap.appendChild(createLinkElement('https://papers.cool/arxiv/' + encodeURIComponent(p.id), null, 'Cool', '_blank'));
+
+    const summaryState = {
+        status: p.summary_status || '',
+        lastError: p.summary_last_error || ''
+    };
+
+    const syncTriggerState = () => {
+        triggerBtn.disabled = !canTriggerSummary(summaryState.status);
+        triggerBtn.title = triggerBtn.disabled
+            ? 'Summary already available or generating'
+            : 'Generate summary';
+    };
+
+    triggerBtn.addEventListener('click', function() {
+        if (!canTriggerSummary(summaryState.status)) return;
+        summaryState.status = 'queued';
+        summaryState.lastError = '';
+        updateSummaryBadge(statusBadge, summaryState.status, summaryState.lastError);
+        syncTriggerState();
+
+        csrfFetch('/api/trigger_paper_summary', {
+            method: 'POST',
+            body: JSON.stringify({ pid: p.id })
+        })
+        .then(resp => resp.json())
+        .then(data => {
+            if (data && data.success) {
+                summaryState.status = data.status || 'queued';
+                summaryState.lastError = data.last_error || '';
+            } else {
+                summaryState.status = 'failed';
+                summaryState.lastError = (data && data.error) || 'Unknown error';
+                alert('Failed to trigger summary: ' + summaryState.lastError);
+            }
+            updateSummaryBadge(statusBadge, summaryState.status, summaryState.lastError);
+            syncTriggerState();
+        })
+        .catch(err => {
+            console.error('Error triggering summary:', err);
+            summaryState.status = 'failed';
+            summaryState.lastError = String(err);
+            updateSummaryBadge(statusBadge, summaryState.status, summaryState.lastError);
+            syncTriggerState();
+            alert('Network error, failed to trigger summary');
+        });
+    });
+
+    syncTriggerState();
+
+    readinglistSummaryUI.set(p.id, {
+        badge: statusBadge,
+        state: summaryState,
+        syncTriggerState,
+        card: card
+    });
+
+    actions.appendChild(triggerWrap);
+    actions.appendChild(similarWrap);
+    actions.appendChild(inspectWrap);
+    actions.appendChild(summaryWrap);
+    actions.appendChild(alphaWrap);
+    actions.appendChild(coolWrap);
+    card.appendChild(actions);
+
+    container.appendChild(card);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const container = document.getElementById('rl-papers');
+    if (!container || !papers) {
+        setupUserEventStream();
+        return;
+    }
+
+    papers.forEach(function(p) {
+        createReadingListCard(p, container);
+    });
+
+    updateEmptyState();
+
+    setupUserEventStream();
+});
+</script>
+
+
+<style>
+.rl-container {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: 20px 0 24px 0;
+    width: 100%;
+}
+
+.rl-header {
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 20px;
+}
+
+.rl-header h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    letter-spacing: -0.02em;
+}
+
+.rl-header p {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin: 0;
+}
+
+/* Card Refinement */
+.rl-paper-card {
+    /* Refine inherited rel_paper */
+    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+    overflow: hidden;
+    position: relative;
+    padding: 24px !important; /* Ensure comfortable padding */
+}
+
+.rl-paper-card.dropdown-open {
+    overflow: visible;
+}
+
+/* Adjust the left colored strip to be INSIDE the card so it isn't clipped by overflow:hidden */
+.rl-paper-card::before {
+    left: 0 !important;
+    width: 4px !important;
+    border-radius: 0 !important;
+}
+
+.rl-paper-card:hover {
+    transform: translateY(-4px);
+    border-color: var(--link-color);
+}
+
+.rl-added-time-line {
+    margin-top: 8px;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 13px;
+}
+
+.rl-added-time-pill {
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--text-color);
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--tag-bg-light);
+    border: 1px solid var(--tag-border-light);
+    width: fit-content;
+}
+
+[data-theme="dark"] .rl-added-time-pill {
+    background: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+}
+
+.rl-related-tags {
+    margin-top: 10px;
+    margin-bottom: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    font-size: 13px;
+}
+
+.rl-meta-label {
+    font-weight: 700;
+    color: var(--text-color);
+    font-size: 13px;
+}
+
+.rl-related-tags-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.rl-meta-empty {
+    color: var(--text-muted);
+}
+
+.rl-related-tag-pill a {
+    color: var(--link-color);
+    text-decoration: none;
+}
+
+.rl-remove-btn {
+    font-size: 1rem;
+}
+
+.rl-remove-wrap {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 50;
+    display: inline-block;
+}
+
+.rl-remove-wrap .readinglist-btn {
+    position: static;
+}
+
+.rl-remove-wrap .confirm-popup {
+    right: 0;
+    z-index: 2000;
+}
+
+#rl-empty-state {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-muted);
+    background: var(--card-bg);
+    border-radius: 16px;
+    border: 2px dashed var(--border-color);
+    margin-top: 40px;
+}
+
+#rl-empty-state h3 {
+    margin: 0 0 8px 0;
+    font-size: 1.2rem;
+    color: var(--text-color);
+}
+
+.rl-login-message {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--text-muted);
+    background: var(--card-bg);
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    margin-top: 40px;
+}
+</style>
+
+{% endblock %}
+
+{% block content %}
+<div class="rl-container">
+    <div class="rl-header">
+        <h1>📖 Reading List</h1>
+        <p>Papers you want to read later.</p>
+    </div>
+
+    {% if message %}
+    <div class="rl-login-message">
+        <p>{{ message }}</p>
+        <p><a href="/profile">Log in</a> to start using reading list.</p>
+    </div>
+    {% else %}
+    <div id="rl-papers"></div>
+
+    <div id="rl-empty-state" style="display: none;">
+        <h3>No papers in reading list</h3>
+        <p>Add papers from the main page by clicking the bookmark icon.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

@@ -9,6 +9,9 @@ from loguru import logger
 
 PYTHON = sys.executable
 
+logger.remove()
+logger.add(sys.stdout, level=os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper())
+
 
 def _truthy_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).lower() in ("1", "true", "yes", "y", "on")
@@ -33,7 +36,7 @@ PRIORITY_LIMIT = _env_int("ARXIV_SANITY_PRIORITY_LIMIT", 100)
 
 
 def _run_cmd(cmd, name: str) -> bool:
-    logger.info(f"{name}: {' '.join(cmd)}")
+    logger.debug(f"{name}: {' '.join(cmd)}")
     try:
         subprocess.run(cmd, check=True)
         return True
@@ -77,7 +80,7 @@ def _get_email_time_delta() -> float:
 
 def gen_summary():
     if not ENABLE_SUMMARY:
-        logger.info("Summary generation disabled (ARXIV_SANITY_DAEMON_SUMMARY=0)")
+        logger.debug("Summary generation disabled (ARXIV_SANITY_DAEMON_SUMMARY=0)")
         return True
 
     cmd = [PYTHON, "batch_paper_summarizer.py", "-n", str(SUMMARY_NUM), "-w", str(SUMMARY_WORKERS)]
@@ -92,7 +95,7 @@ def gen_summary():
 
 
 def fetch_compute():
-    logger.info("Fetch and compute")
+    logger.debug("Fetch and compute")
     _run_cmd([PYTHON, "arxiv_daemon.py", "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)], "fetch")
 
     compute_cmd = [PYTHON, "compute.py"]
@@ -124,7 +127,7 @@ def send_email():
 
     now = datetime.datetime.now()
     weekday_int = now.weekday() + 1
-    logger.info("Send emails")
+    logger.debug("Send emails")
 
     time_param = "2" if weekday_int not in [1, 2] else "4"
     if is_post_holiday(now):
@@ -142,11 +145,11 @@ def send_email():
 
 
 def backup_user_data():
-    logger.info("Backup user data")
+    logger.debug("Backup user data")
 
     enable_git = os.environ.get("ARXIV_SANITY_ENABLE_GIT_BACKUP", "1").lower() in ("1", "true", "yes")
     if not enable_git:
-        logger.info("Git backup disabled; set ARXIV_SANITY_ENABLE_GIT_BACKUP=1 to enable")
+        logger.debug("Git backup disabled; set ARXIV_SANITY_ENABLE_GIT_BACKUP=1 to enable")
         return
 
     try:
@@ -166,7 +169,7 @@ def backup_user_data():
 
     diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", DICT_DB_FILE])
     if diff_result.returncode == 0:
-        logger.info("No changes to back up")
+        logger.debug("No changes to back up")
         return
     if diff_result.returncode not in (0, 1):
         logger.warning("git diff failed while checking staged changes")

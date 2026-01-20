@@ -11,6 +11,7 @@ Features:
 
 import argparse
 import heapq
+import os
 import sys
 import threading
 import time
@@ -217,7 +218,7 @@ class BatchProcessor:
         Returns:
             List[Tuple[str, Dict]]: List of paper IDs and metadata, sorted by time in descending order
         """
-        logger.info(f"Fetching the latest {n} papers...")
+        logger.debug(f"Fetching the latest {n} papers...")
 
         if n <= 0:
             return []
@@ -235,10 +236,10 @@ class BatchProcessor:
                     pbar.update(1)
 
         # Sort by time in descending order (newest first)
-        logger.info("Sorting papers...")
+        logger.debug("Sorting papers...")
         latest_papers = sorted([(pid, meta) for _t, pid, meta in heap], key=lambda kv: kv[1]["_time"], reverse=True)
 
-        logger.info(f"Successfully fetched {len(latest_papers)} latest papers")
+        logger.debug(f"Successfully fetched {len(latest_papers)} latest papers")
 
         return latest_papers
 
@@ -265,7 +266,7 @@ class BatchProcessor:
         API_BASE_URL = f"http://localhost:{SERVE_PORT}"
         API_TIMEOUT = 60
 
-        logger.info(f"Finding priority papers (email recommendations, no summary, last {time_delta_days} days)...")
+        logger.debug(f"Finding priority papers (email recommendations, no summary, last {time_delta_days} days)...")
 
         # Collect all user tags
         user_tags_map = {}  # user -> {tag: [pids]}
@@ -275,10 +276,10 @@ class BatchProcessor:
                     user_tags_map[user] = user_tags
 
         if not user_tags_map:
-            logger.info("No user tags found")
+            logger.debug("No user tags found")
             return []
 
-        logger.info(f"Found {len(user_tags_map)} users with tags")
+        logger.debug(f"Found {len(user_tags_map)} users with tags")
 
         # Get SVM recommendations for each user's each tag via API
         # Track recommendation frequency (papers recommended more often are higher priority)
@@ -311,10 +312,10 @@ class BatchProcessor:
                     continue
 
         if not recommendation_count:
-            logger.info("No recommendations found from API")
+            logger.debug("No recommendations found from API")
             return []
 
-        logger.info(f"Found {len(recommendation_count)} unique recommended papers")
+        logger.debug(f"Found {len(recommendation_count)} unique recommended papers")
 
         # Filter: no summary yet
         summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
@@ -337,7 +338,7 @@ class BatchProcessor:
         priority_papers.sort(key=lambda x: (-x[2], -x[1].get("_time", 0)))
         priority_papers = [(pid, meta) for pid, meta, _count in priority_papers[:limit]]
 
-        logger.info(f"Found {len(priority_papers)} priority papers needing summaries")
+        logger.debug(f"Found {len(priority_papers)} priority papers needing summaries")
 
         return priority_papers
 
@@ -368,7 +369,7 @@ class BatchProcessor:
         remaining_slots = num_papers - priority_count
 
         if remaining_slots <= 0:
-            logger.info(f"Using {priority_count} priority papers (limit reached)")
+            logger.debug(f"Using {priority_count} priority papers (limit reached)")
             return priority_papers[:num_papers]
 
         # Get latest papers to fill remaining slots
@@ -382,7 +383,7 @@ class BatchProcessor:
         # Combine: priority first, then latest
         combined = priority_papers + latest_papers
 
-        logger.info(f"Combined queue: {priority_count} priority + {len(latest_papers)} latest = {len(combined)} total")
+        logger.debug(f"Combined queue: {priority_count} priority + {len(latest_papers)} latest = {len(combined)} total")
 
         return combined
 
@@ -589,7 +590,7 @@ class BatchProcessor:
         self.stats["total"] = len(papers)
 
         if dry_run:
-            logger.info("=== Dry run mode - only displaying paper info ===")
+            logger.debug("=== Dry run mode - only displaying paper info ===")
 
             # Use progress bar to display paper information
             with tqdm(papers, desc="Checking papers", unit="paper", leave=True, ncols=100, file=sys.stderr) as pbar:
@@ -630,10 +631,10 @@ class BatchProcessor:
             processing_queue = []
 
             if round_num > 1:
-                logger.info(f"=== Round {round_num} processing (retry) ===")
-                logger.info(f"Number of papers to retry: {len(current_round_papers)}")
+                logger.debug(f"=== Round {round_num} processing (retry) ===")
+                logger.debug(f"Number of papers to retry: {len(current_round_papers)}")
             else:
-                logger.info(f"=== Starting round {round_num} processing ===")
+                logger.debug(f"=== Starting round {round_num} processing ===")
 
             # Create progress bar
             desc = f"Round {round_num} processing" if round_num > 1 else "Processing papers"
@@ -788,10 +789,9 @@ def main():
 
     # Set log level
     logger.remove()
-    if args.verbose:
-        logger.add(sys.stdout, level="DEBUG", format="\n{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}")
-    else:
-        logger.add(sys.stdout, level="INFO", format="\n{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}")
+    base_level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper()
+    level = "DEBUG" if args.verbose else base_level
+    logger.add(sys.stdout, level=level, format="\n{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}")
 
     # Parameter validation
     if args.workers > 8:
@@ -813,11 +813,11 @@ def main():
     try:
         # Create batch processor with model
         processor = BatchProcessor(max_workers=args.workers, model=args.model)
-        logger.info(f"Using model: {processor.model}")
+        logger.debug(f"Using model: {processor.model}")
 
         # Get papers - with priority queue if enabled
         if args.priority:
-            logger.info("Priority queue enabled: processing tagged papers first")
+            logger.debug("Priority queue enabled: processing tagged papers first")
             papers_to_process = processor.get_papers_with_priority(
                 num_papers=args.num_papers,
                 priority_time_delta=args.priority_days,

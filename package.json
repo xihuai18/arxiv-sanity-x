@@ -6,6 +6,6 @@
     "markdown-it": "^14.1.0"
   },
   "scripts": {
-    "build:static": "esbuild static/paper_list.js static/word_list.js static/paper_detail.js --outdir=static/dist --loader:.js=jsx --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2017 --format=iife --minify"
+    "build:static": "esbuild static/paper_list.js static/word_list.js static/paper_detail.js static/paper_summary.js static/tag_dropdown_shared.js static/author_utils.js static/tldr_utils.js static/common_utils.js static/markdown_summary_utils.js static/markdown_core_utils.js static/markdown_sanitizer_utils.js static/markdown_renderer_utils.js static/markdown_summary_dom_utils.js --outdir=static/dist --loader:.js=jsx --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2017 --format=iife --minify"
   }
 }

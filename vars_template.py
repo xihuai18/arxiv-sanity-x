@@ -34,8 +34,14 @@ MINERU_PORT = 52000  # MinerU VLM service port (vLLM)
 VLLM_EMBED_PORT = EMBED_PORT
 VLLM_MINERU_PORT = MINERU_PORT
 
-# Ollama embedding model name (pulled via `ollama pull <name>`)
+# Embedding API Configuration
+# Set EMBED_USE_LLM_API=True to use LLM_BASE_URL for embeddings (OpenAI-compatible API)
+# Set EMBED_USE_LLM_API=False to use local Ollama service at EMBED_PORT
+EMBED_USE_LLM_API = os.environ.get("ARXIV_SANITY_EMBED_USE_LLM_API", "true").lower() in ("true", "1", "yes")
 EMBED_MODEL_NAME = "qwen3-embedding:0.6b"
+# Optional: Override embedding API base URL (defaults to LLM_BASE_URL when EMBED_USE_LLM_API=True)
+EMBED_API_BASE = os.environ.get("ARXIV_SANITY_EMBED_API_BASE", "")  # Empty means use LLM_BASE_URL
+EMBED_API_KEY = os.environ.get("ARXIV_SANITY_EMBED_API_KEY", "")  # Empty means use LLM_API_KEY
 
 # Paper summary related configuration
 SUMMARY_MIN_CHINESE_RATIO = 0.25  # Minimum Chinese character ratio threshold for summary cache
@@ -71,3 +77,4 @@ SERVE_PORT = 55555  # Default port for serve.py application
 SVM_C = 0.02  # C parameter for SVM classifier
 SVM_MAX_ITER = 5000  # Maximum iterations for SVM
 SVM_TOL = 1e-3  # SVM tolerance
+SVM_NEG_WEIGHT = 5.0  # Weight for explicit negative feedback samples

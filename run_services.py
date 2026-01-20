@@ -46,18 +46,19 @@ def _http_ok(url: str, timeout_s: float = 1.0) -> bool:
         return False
 
 
-def _wait_for_http(url: str, timeout_s: float, name: str) -> bool:
+def _wait_for_http(url: str, timeout_s: float, name: str, verbose: bool = False) -> bool:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         if _http_ok(url, timeout_s=1.0):
-            print(f"[launcher] {name} ready: {url}", flush=True)
+            if verbose:
+                print(f"[launcher] {name} ready: {url}", flush=True)
             return True
         time.sleep(0.4)
     print(f"[launcher] {name} not ready after {timeout_s:.1f}s: {url}", flush=True)
     return False
 
 
-def _check_mineru_api(api_key: str | None) -> bool:
+def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
     """Check if MinerU API is available and key is valid."""
     if not api_key or not api_key.strip():
         print(
@@ -98,7 +99,8 @@ def _check_mineru_api(api_key: str | None) -> bool:
             return True  # Don't block startup for temporary server issues
 
         # 200, 400, 404 etc. are acceptable - means API is reachable
-        print(f"[launcher] MinerU API is available (endpoint: {api_url})", flush=True)
+        if verbose:
+            print(f"[launcher] MinerU API is available (endpoint: {api_url})", flush=True)
         return True
 
     except ImportError:
@@ -182,7 +184,7 @@ def _start_service(spec: ServiceSpec) -> subprocess.Popen:
         stderr=subprocess.STDOUT,
         text=False,
         bufsize=0,
-        preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+        start_new_session=hasattr(os, "setsid"),
     )
     assert proc.stdout is not None
     t = threading.Thread(target=_stream_lines, args=(spec.name, proc.stdout), daemon=True)
@@ -190,9 +192,10 @@ def _start_service(spec: ServiceSpec) -> subprocess.Popen:
     return proc
 
 
-def _stop_process(proc: subprocess.Popen, name: str, timeout_s: float = 10.0):
+def _stop_process(proc: subprocess.Popen, _name: str, timeout_s: float = 10.0):
     if proc.poll() is not None:
         return
+    _ = _name
     try:
         if hasattr(os, "killpg"):
             os.killpg(proc.pid, signal.SIGTERM)
@@ -248,14 +251,15 @@ def _run_fetch_compute(repo_root: Path, num_papers: int, max_r: int) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run arxiv-sanity-X services in one terminal.")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose launcher logs.")
     parser.add_argument("--no-embed", action="store_true", help="Do not start Ollama embedding service.")
     parser.add_argument("--no-mineru", action="store_true", help="Do not start minerU service.")
     parser.add_argument("--no-litellm", action="store_true", help="Do not start LiteLLM gateway.")
     parser.add_argument(
         "--web",
         choices=["python", "gunicorn", "none"],
-        default="python",
-        help="How to start the web server (default: python).",
+        default="gunicorn",
+        help="How to start the web server (default: gunicorn).",
     )
     parser.add_argument("--with-daemon", action="store_true", help="Also start scheduler daemon.py.")
     parser.add_argument("--no-wait", action="store_true", help="Skip health-check waits.")
@@ -275,6 +279,8 @@ def main() -> int:
         help="Markdown source for paper summaries (default: html).",
     )
     args = parser.parse_args()
+
+    verbose = args.verbose or os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper() in ("DEBUG", "INFO")
 
     repo_root = Path(__file__).resolve().parent
 
@@ -320,17 +326,18 @@ def main() -> int:
     elif mineru_backend == "api" and not args.no_mineru:
         # For API backend, check API availability instead of starting local service
         api_key = os.environ.get("ARXIV_SANITY_MINERU_API_KEY") or MINERU_API_KEY
-        if not _check_mineru_api(api_key):
+        if not _check_mineru_api(api_key, verbose=verbose):
             print(
                 "[launcher] Error: MinerU API backend is not available. Fix the API key issue or disable MinerU.",
                 file=sys.stderr,
                 flush=True,
             )
             return 3
-        print(
-            "[launcher] MinerU API backend configured, skip starting local minerU service.",
-            flush=True,
-        )
+        if verbose:
+            print(
+                "[launcher] MinerU API backend configured, skip starting local minerU service.",
+                flush=True,
+            )
         args.no_mineru = True
 
     services: list[ServiceSpec] = []
@@ -395,8 +402,9 @@ def main() -> int:
     procs: list[tuple[ServiceSpec, subprocess.Popen]] = []
 
     print("[launcher] Starting services:", flush=True)
-    for spec in services:
-        print(f"[launcher] - {spec.name}: {' '.join(spec.cmd)}", flush=True)
+    if verbose:
+        for spec in services:
+            print(f"[launcher] - {spec.name}: {' '.join(spec.cmd)}", flush=True)
 
     try:
         for spec in services:
@@ -405,7 +413,7 @@ def main() -> int:
         if not args.no_wait:
             for spec, proc in procs:
                 if spec.health_url:
-                    _wait_for_http(spec.health_url, timeout_s=args.wait_timeout, name=spec.name)
+                    _wait_for_http(spec.health_url, timeout_s=args.wait_timeout, name=spec.name, verbose=verbose)
 
         # main loop
         while True:

@@ -3,40 +3,17 @@ Extracts tfidf features from all paper abstracts and saves them to disk.
 Now also supports generating embedding features and concatenating with TF-IDF.
 """
 
-# Multi-core optimization configuration - Ubuntu system
-import os
-import sys
-from multiprocessing import cpu_count
-
-from loguru import logger
-
-from vars import EMBED_MODEL_NAME, EMBED_PORT
-
-# Set multi-threading environment variables
-num_threads = min(cpu_count(), 192)  # Reasonable thread limit
-os.environ["OMP_NUM_THREADS"] = str(num_threads)
-os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
-os.environ["MKL_NUM_THREADS"] = str(num_threads)
-os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
-
-# Try to use Intel extensions (if available)
-try:
-    from sklearnex import patch_sklearn
-
-    patch_sklearn()
-    logger.info(f"Intel scikit-learn extension enabled with {num_threads} threads")
-    USE_INTEL_EXT = True
-except ImportError:
-    logger.info(f"Using standard sklearn with {num_threads} threads")
-    USE_INTEL_EXT = False
-
 import argparse
+import os
 import shutil
+import sys
 import time
+from multiprocessing import cpu_count
 from random import shuffle
 
 import numpy as np
 import scipy.sparse as sp
+from loguru import logger
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import normalize
 from tqdm import tqdm
@@ -48,6 +25,26 @@ from aslite.db import (
     load_features,
     save_features,
 )
+from vars import (
+    EMBED_API_BASE,
+    EMBED_API_KEY,
+    EMBED_MODEL_NAME,
+    EMBED_PORT,
+    EMBED_USE_LLM_API,
+    LLM_API_KEY,
+    LLM_BASE_URL,
+)
+
+# Multi-core optimization configuration - Ubuntu system
+
+# Set multi-threading environment variables
+num_threads = min(cpu_count(), 192)  # Reasonable thread limit
+os.environ["OMP_NUM_THREADS"] = str(num_threads)
+os.environ["OPENBLAS_NUM_THREADS"] = str(num_threads)
+os.environ["MKL_NUM_THREADS"] = str(num_threads)
+os.environ["NUMEXPR_NUM_THREADS"] = str(num_threads)
+
+USE_INTEL_EXT = False
 
 
 def log_csr_nnz_stats(name: str, mat):
@@ -65,7 +62,7 @@ def log_csr_nnz_stats(name: str, mat):
         total = mat_csr.nnz
 
         if rows == 0 or cols == 0:
-            logger.info(f"{name}: shape={mat_csr.shape}, nnz={total}")
+            logger.debug(f"{name}: shape={mat_csr.shape}, nnz={total}")
             return
 
         row_nnz = np.diff(mat_csr.indptr)
@@ -78,7 +75,7 @@ def log_csr_nnz_stats(name: str, mat):
         density = float(total) / denom if denom > 0 else 0.0
         sparsity = 1.0 - density
 
-        logger.info(
+        logger.debug(
             f"{name}: shape={mat_csr.shape}, nnz={total}, density={density:.6g}, sparsity={sparsity:.6g}, "
             f"row_nnz(mean/median/p95/max)={mean_nnz:.2f}/{median_nnz:.0f}/{p95_nnz:.0f}/{max_nnz}"
         )
@@ -114,10 +111,10 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
     # 4. Use scipy sparse matrix concatenation
     concatenated_sparse = sp.hstack([tfidf_sparse, embedding_sparse], format="csr")
 
-    logger.info(
+    logger.debug(
         f"Sparse-dense concatenation complete: TF-IDF {tfidf_sparse.shape} + Embedding {embedding_norm.shape} = {concatenated_sparse.shape}"
     )
-    logger.info(
+    logger.debug(
         f"Sparsity after concatenation: {1 - concatenated_sparse.nnz / (concatenated_sparse.shape[0] * concatenated_sparse.shape[1]):.4f}"
     )
 
@@ -125,11 +122,30 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 
 
 class Qwen3EmbeddingVllm:
-    """Embedding model API client via Ollama `/api/embed`."""
+    """Embedding model API client via Ollama `/api/embed` or OpenAI-compatible `/v1/embeddings`."""
 
-    def __init__(self, model_name_or_path, instruction=None, api_base=None):
+    def __init__(self, model_name_or_path, instruction=None, api_base=None, api_key=None, use_openai_api=None):
+        # Determine whether to use OpenAI-compatible API or Ollama API
+        if use_openai_api is None:
+            use_openai_api = EMBED_USE_LLM_API
+        self.use_openai_api = use_openai_api
+
+        # Determine API base URL
         if api_base is None:
-            api_base = f"http://localhost:{EMBED_PORT}"
+            if self.use_openai_api:
+                # Use EMBED_API_BASE if set, otherwise fallback to LLM_BASE_URL
+                api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
+            else:
+                api_base = f"http://localhost:{EMBED_PORT}"
+
+        # Determine API key (only needed for OpenAI-compatible API)
+        if api_key is None:
+            if self.use_openai_api:
+                api_key = EMBED_API_KEY if EMBED_API_KEY else LLM_API_KEY
+            else:
+                api_key = None
+        self.api_key = api_key
+
         if instruction is None:
             instruction = "Extract key concepts from this computer science and AI paper: algorithmic contributions, theoretical insights, implementation techniques, empirical validations, and potential research impacts"
         self.instruction = instruction
@@ -163,33 +179,51 @@ class Qwen3EmbeddingVllm:
         try:
             import requests
 
-            logger.info(f"Connecting to Ollama API server: {self.api_base}")
+            api_type = "OpenAI-compatible" if self.use_openai_api else "Ollama"
+            logger.debug(f"Connecting to {api_type} API server: {self.api_base}")
             self.session = requests.Session()
             # Local service calls should not be routed via HTTP(S)_PROXY.
             self.session.trust_env = False
 
-            # Basic readiness probe (Ollama)
-            try:
-                version_url = f"{self.api_base}/api/version"
-                resp = self.session.get(version_url, timeout=(2, 5))
-                if resp.status_code == 200:
-                    version = (resp.json() or {}).get("version")
-                    logger.info(f"Ollama server version: {version}")
-                else:
-                    logger.error(f"Ollama version check failed: HTTP {resp.status_code} ({version_url})")
+            # Add authorization header for OpenAI-compatible API
+            if self.use_openai_api and self.api_key:
+                self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
+
+            if self.use_openai_api:
+                # OpenAI-compatible API: check /v1/models endpoint
+                try:
+                    models_url = f"{self.api_base}/v1/models"
+                    resp = self.session.get(models_url, timeout=(5, 30))
+                    if resp.status_code == 200:
+                        logger.debug("OpenAI-compatible API server connected successfully")
+                    else:
+                        logger.warning(f"OpenAI-compatible API models check: HTTP {resp.status_code}")
+                        # Don't fail, some servers may not support /v1/models
+                except Exception as e:
+                    logger.warning(f"OpenAI-compatible API probe failed (may still work): {e}")
+            else:
+                # Ollama: Basic readiness probe
+                try:
+                    version_url = f"{self.api_base}/api/version"
+                    resp = self.session.get(version_url, timeout=(2, 5))
+                    if resp.status_code == 200:
+                        version = (resp.json() or {}).get("version")
+                        logger.debug(f"Ollama server version: {version}")
+                    else:
+                        logger.error(f"Ollama version check failed: HTTP {resp.status_code} ({version_url})")
+                        return False
+                except Exception as e:
+                    logger.error(f"Failed to connect to Ollama server: {e}")
+                    logger.error(f"API address: {self.api_base}")
                     return False
-            except Exception as e:
-                logger.error(f"Failed to connect to Ollama server: {e}")
-                logger.error(f"API address: {self.api_base}")
-                return False
 
             self.model_name = self._normalize_model_name(self.model_path)
             if not self.model_name:
                 logger.error("Embedding model name is empty")
                 return False
 
-            logger.info(f"Using embedding model: {self.model_name}")
-            logger.info("Embedding API client initialized successfully")
+            logger.debug(f"Using embedding model: {self.model_name}")
+            logger.debug(f"{api_type} embedding API client initialized successfully")
             return True
         except Exception as e:
             logger.error(f"Error occurred while initializing API client: {e}")
@@ -224,44 +258,79 @@ class Qwen3EmbeddingVllm:
 
             # Call API to generate embeddings
             try:
-                embed_url = f"{self.api_base}/api/embed"
-                payload = {
-                    "model": self.model_name,
-                    "input": instructed_sentences,
-                    "truncate": True,
-                    "dimensions": int(dim) if dim is not None else None,
-                    # Extra guardrail: request CPU-only when supported (server-side env still recommended).
-                    "options": {"num_gpu": 0},
-                }
-                if payload["dimensions"] is None:
-                    payload.pop("dimensions", None)
+                if self.use_openai_api:
+                    # OpenAI-compatible API: POST /v1/embeddings
+                    embed_url = f"{self.api_base}/v1/embeddings"
+                    payload = {
+                        "model": self.model_name,
+                        "input": instructed_sentences,
+                    }
+                    # Add dimensions if supported (OpenAI text-embedding-3 models support this)
+                    if dim is not None:
+                        payload["dimensions"] = int(dim)
 
-                resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
-                if resp.status_code != 200:
-                    logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
-                    try:
-                        logger.error(f"Response: {resp.text[:500]}")
-                    except Exception:
-                        pass
-                    return None
+                    resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    if resp.status_code != 200:
+                        logger.error(f"OpenAI embed API call failed: HTTP {resp.status_code} ({embed_url})")
+                        try:
+                            logger.error(f"Response: {resp.text[:500]}")
+                        except Exception:
+                            pass
+                        return None
 
-                data = resp.json() or {}
-                vectors = data.get("embeddings")
-                if vectors is None and "embedding" in data:
-                    # Backward compatibility with older Ollama embedding response
-                    vectors = [data.get("embedding")]
-                if not vectors:
-                    logger.error(f"Ollama embed API returned empty embeddings (keys={list(data.keys())})")
-                    return None
+                    data = resp.json() or {}
+                    # OpenAI response format: {"data": [{"embedding": [...], "index": 0}, ...]}
+                    data_list = data.get("data", [])
+                    if not data_list:
+                        logger.error(f"OpenAI embed API returned empty data (keys={list(data.keys())})")
+                        return None
 
-                embeddings = np.asarray(vectors, dtype=np.float32)
-                if embeddings.ndim == 1:
-                    embeddings = embeddings.reshape(1, -1)
+                    # Sort by index to ensure correct order
+                    data_list = sorted(data_list, key=lambda x: x.get("index", 0))
+                    vectors = [item.get("embedding") for item in data_list]
+                    if not vectors or not vectors[0]:
+                        logger.error("OpenAI embed API returned empty embeddings")
+                        return None
+                else:
+                    # Ollama API: POST /api/embed
+                    embed_url = f"{self.api_base}/api/embed"
+                    payload = {
+                        "model": self.model_name,
+                        "input": instructed_sentences,
+                        "truncate": True,
+                        "dimensions": int(dim) if dim is not None else None,
+                        # Extra guardrail: request CPU-only when supported (server-side env still recommended).
+                        "options": {"num_gpu": 0},
+                    }
+                    if payload["dimensions"] is None:
+                        payload.pop("dimensions", None)
+
+                    resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    if resp.status_code != 200:
+                        logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
+                        try:
+                            logger.error(f"Response: {resp.text[:500]}")
+                        except Exception:
+                            pass
+                        return None
+
+                    data = resp.json() or {}
+                    vectors = data.get("embeddings")
+                    if vectors is None and "embedding" in data:
+                        # Backward compatibility with older Ollama embedding response
+                        vectors = [data.get("embedding")]
+                    if not vectors:
+                        logger.error(f"Ollama embed API returned empty embeddings (keys={list(data.keys())})")
+                        return None
+
+                embeddings_arr = np.asarray(vectors, dtype=np.float32)
+                if embeddings_arr.ndim == 1:
+                    embeddings_arr = embeddings_arr.reshape(1, -1)
 
                 # Convert to torch tensor to maintain compatibility with original interface
                 import torch
 
-                return torch.from_numpy(embeddings)
+                return torch.from_numpy(embeddings_arr)
 
             except Exception as e:
                 logger.error(f"API call failed: {e}")
@@ -299,14 +368,18 @@ def load_existing_embeddings(embed_dim=512):
     """
     try:
         # Try to load existing feature file (with numpy pickle compatibility)
-        features = load_features()
+        features_data = load_features()
 
-        if features.get("feature_type") == "hybrid_sparse_dense":
+        if features_data.get("feature_type") == "hybrid_sparse_dense":
             # Check if embedding parameters match
-            embed_params = features.get("embedding_params", {})
+            embed_params = features_data.get("embedding_params", {})
             if embed_params.get("embed_dim") == embed_dim:
-                logger.info(f"Loaded existing embedding features: {features['x_embeddings'].shape}")
-                return {"pids": features["pids"], "embeddings": features["x_embeddings"], "params": embed_params}
+                logger.debug(f"Loaded existing embedding features: {features_data['x_embeddings'].shape}")
+                return {
+                    "pids": features_data["pids"],
+                    "embeddings": features_data["x_embeddings"],
+                    "params": embed_params,
+                }
             else:
                 logger.warning(
                     f"Embedding dimension mismatch: existing {embed_params.get('embed_dim')} vs target {embed_dim}"
@@ -314,7 +387,7 @@ def load_existing_embeddings(embed_dim=512):
                 logger.warning("Will regenerate all embeddings")
 
     except FileNotFoundError:
-        logger.info("No existing feature file found")
+        logger.debug("No existing feature file found")
     except Exception as e:
         logger.error(f"Error occurred while loading existing embeddings: {e}")
         logger.error(f"File path: {FEATURES_FILE}")
@@ -327,14 +400,12 @@ def load_existing_embeddings(embed_dim=512):
 
 def generate_embeddings_incremental(
     all_pids,
-    pdb,
+    papers_db,
     model_path="./qwen3-embed-0.6B",
     embed_dim=512,
     batch_size=512,
     api_base=None,
 ):
-    if api_base is None:
-        api_base = f"http://localhost:{EMBED_PORT}"
     """
     Generate embedding vectors incrementally, optimize corpus preparation order
 
@@ -349,12 +420,14 @@ def generate_embeddings_incremental(
     Returns:
         embeddings: numpy array (n_samples, embed_dim)
     """
-    logger.info("Checking for existing embeddings...")
+    if api_base is None:
+        api_base = f"http://localhost:{EMBED_PORT}"
+    logger.debug("Checking for existing embeddings...")
     existing = load_existing_embeddings(embed_dim)
 
     if existing is not None:
         existing_pids_set = set(existing["pids"])
-        logger.info(f"Found {len(existing_pids_set)} existing embeddings")
+        logger.debug(f"Found {len(existing_pids_set)} existing embeddings")
 
         # Find paper IDs that need new generation
         new_pids = []
@@ -364,10 +437,10 @@ def generate_embeddings_incremental(
                 new_pids.append(pid)
                 new_indices.append(i)
 
-        logger.info(f"Need to generate {len(new_pids)} new embeddings")
+        logger.debug(f"Need to generate {len(new_pids)} new embeddings")
 
         if len(new_pids) == 0:
-            logger.info("All papers already have embeddings, returning existing embeddings")
+            logger.debug("All papers already have embeddings, returning existing embeddings")
             # Reorder to match current pids order
             ordered_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
             pid_to_idx = {pid: i for i, pid in enumerate(existing["pids"])}
@@ -382,25 +455,25 @@ def generate_embeddings_incremental(
             return ordered_embeddings
 
         # Prepare corpus only for papers that need updates
-        logger.info(f"Preparing embedding corpus for {len(new_pids)} new papers...")
+        logger.debug(f"Preparing embedding corpus for {len(new_pids)} new papers...")
         new_texts = []
         for pid in tqdm(new_pids, desc="Preparing new paper embedding corpus", ncols=100, file=sys.stderr):
-            d = pdb[pid]
+            d = papers_db[pid]
             # Build text for embedding
             text = f"Title: {d['title']}\n"
             text += f"Abstract: {d['summary']}"
             new_texts.append(text)
     else:
-        logger.info("No existing embeddings found, will generate all embeddings")
+        logger.debug("No existing embeddings found, will generate all embeddings")
         existing_pids_set = set()
         new_pids = all_pids
         new_indices = list(range(len(all_pids)))
 
         # Prepare corpus for all papers
-        logger.info(f"Preparing embedding corpus for all {len(all_pids)} papers...")
+        logger.debug(f"Preparing embedding corpus for all {len(all_pids)} papers...")
         new_texts = []
         for pid in tqdm(all_pids, desc="Preparing embedding corpus", ncols=100, file=sys.stderr):
-            d = pdb[pid]
+            d = papers_db[pid]
             # Build text for embedding
             text = f"Title: {d['title']}\n"
             text += f"Abstract: {d['summary']}"
@@ -409,7 +482,7 @@ def generate_embeddings_incremental(
     # Generate new embeddings
     new_embeddings = None
     if len(new_texts) > 0:
-        logger.info(f"Initializing embedding API client: {api_base}")
+        logger.debug(f"Initializing embedding API client: {api_base}")
         model = Qwen3EmbeddingVllm(model_name_or_path=model_path, api_base=api_base)
 
         if not model.initialize():
@@ -444,7 +517,7 @@ def generate_embeddings_incremental(
 
             # Merge new embeddings
             new_embeddings = np.vstack(new_embeddings_list).astype(np.float32)
-            logger.info(f"New embeddings generated: {new_embeddings.shape}")
+            logger.debug(f"New embeddings generated: {new_embeddings.shape}")
 
     # Assemble final embedding matrix
     final_embeddings = np.zeros((len(all_pids), embed_dim), dtype=np.float32)
@@ -463,13 +536,28 @@ def generate_embeddings_incremental(
             final_embeddings[i] = new_embeddings[new_embed_idx]
             new_embed_idx += 1
 
-    logger.info(f"Incremental embedding generation complete: total {final_embeddings.shape}")
+    logger.debug(f"Incremental embedding generation complete: total {final_embeddings.shape}")
     return final_embeddings
 
 
 # -----------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    logger.remove()
+    log_level = os.environ.get("ARXIV_SANITY_LOG_LEVEL", "WARNING").upper()
+    logger.add(sys.stdout, level=log_level)
+
+    # Try to use Intel extensions (if available)
+    try:
+        from sklearnex import patch_sklearn
+
+        patch_sklearn()
+        logger.debug(f"Intel scikit-learn extension enabled with {num_threads} threads")
+        USE_INTEL_EXT = True
+    except ImportError:
+        logger.debug(f"Using standard sklearn with {num_threads} threads")
+        USE_INTEL_EXT = False
+
     parser = argparse.ArgumentParser(description="Arxiv Computor - Optimized for 400k papers with hybrid features")
     parser.add_argument(
         "-n",
@@ -528,12 +616,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--embed_api_base",
         type=str,
-        default=f"http://localhost:{EMBED_PORT}",
-        help="Ollama embedding server base URL (e.g. http://localhost:11434)",
+        default=None,  # Use vars.py config by default
+        help="Embedding server base URL (default: use EMBED_API_BASE or LLM_BASE_URL from vars.py)",
     )
 
     args = parser.parse_args()
-    print(args)
+    logger.debug(args)
 
     start_time = time.time()
 
@@ -559,51 +647,51 @@ if __name__ == "__main__":
         dtype=np.float32,  # Use float32 to save space
     )
 
-    pdb = get_papers_db(flag="r")
+    papers_db_local = get_papers_db(flag="r")
 
     def make_corpus(training: bool):
         assert isinstance(training, bool)
 
         # determine which papers we will use to build tfidf
-        if training and args.max_docs > 0 and args.max_docs < len(pdb):
+        if training and args.max_docs > 0 and args.max_docs < len(papers_db_local):
             # crop to a random subset of papers
-            keys = list(pdb.keys())
+            keys = list(papers_db_local.keys())
             shuffle(keys)
             keys = keys[: args.max_docs]
         else:
-            keys = pdb.keys()
+            keys = papers_db_local.keys()
 
         # yield the abstracts of the papers
         for p in tqdm(keys, desc="loading db", ncols=100, file=sys.stderr):
-            d = pdb[p]
+            d = papers_db_local[p]
             author_str = " ".join([a["name"] for a in d["authors"]])
             yield " ".join([d["title"], d["summary"], author_str])
 
-    logger.info("Training TF-IDF vectors...")
+    logger.debug("Training TF-IDF vectors...")
     t0 = time.time()
     v.fit(make_corpus(training=True))
-    logger.info(f"TF-IDF training completed in {time.time() - t0:.1f}s")
-    logger.info(f"Vocabulary size: {len(v.vocabulary_)}")
+    logger.debug(f"TF-IDF training completed in {time.time() - t0:.1f}s")
+    logger.debug(f"Vocabulary size: {len(v.vocabulary_)}")
 
-    logger.info("Transforming all documents...")
+    logger.debug("Transforming all documents...")
     t0 = time.time()
     x = v.transform(make_corpus(training=False)).astype(np.float32)
-    logger.info(f"Transform completed in {time.time() - t0:.1f}s")
-    logger.info(f"Original TF-IDF feature matrix shape: {x.shape}")
-    logger.info(f"TF-IDF sparsity: {1 - x.nnz / (x.shape[0] * x.shape[1]):.4f}")
+    logger.debug(f"Transform completed in {time.time() - t0:.1f}s")
+    logger.debug(f"Original TF-IDF feature matrix shape: {x.shape}")
+    logger.debug(f"TF-IDF sparsity: {1 - x.nnz / (x.shape[0] * x.shape[1]):.4f}")
     log_csr_nnz_stats("TF-IDF", x)
 
     # Get all paper IDs
-    pids = list(pdb.keys())
+    pids = list(papers_db_local.keys())
 
     # Decide final features to use
     if args.use_embeddings:
-        logger.info("Generating embedding features...")
+        logger.debug("Generating embedding features...")
 
         # Generate embedding vectors incrementally (corpus preparation done inside function)
         embeddings = generate_embeddings_incremental(
             pids,
-            pdb,
+            papers_db_local,
             model_path=args.embed_model,
             embed_dim=args.embed_dim,
             batch_size=args.embed_batch_size,
@@ -612,7 +700,7 @@ if __name__ == "__main__":
 
         if embeddings is not None:
             # Perform sparse-dense concatenation
-            logger.info("Performing sparse-dense matrix concatenation...")
+            logger.debug("Performing sparse-dense matrix concatenation...")
             x_final = sparse_dense_concatenation(x, embeddings)
             log_csr_nnz_stats("Hybrid(TF-IDF+Emb)", x_final)
 
@@ -667,7 +755,7 @@ if __name__ == "__main__":
             }
     else:
         # Use only TF-IDF features
-        logger.info("Using only TF-IDF features (embeddings not enabled)")
+        logger.debug("Using only TF-IDF features (embeddings not enabled)")
         x_final = x
         log_csr_nnz_stats("TF-IDF(final)", x_final)
         features = {
@@ -687,21 +775,21 @@ if __name__ == "__main__":
             },
         }
 
-    logger.info("Saving features to disk...")
+    logger.debug("Saving features to disk...")
     save_features(features)
 
-    logger.info("Copying to production file...")
+    logger.debug("Copying to production file...")
     shutil.copyfile(FEATURES_FILE_NEW, FEATURES_FILE)
 
     total_time = time.time() - start_time
-    logger.info(f"Feature extraction complete, total time: {total_time:.1f}s")
-    logger.info(f"Final feature shape: {x_final.shape}")
-    logger.info(f"Final feature type: {features.get('feature_type', 'unknown')}")
+    logger.debug(f"Feature extraction complete, total time: {total_time:.1f}s")
+    logger.debug(f"Final feature shape: {x_final.shape}")
+    logger.debug(f"Final feature type: {features.get('feature_type', 'unknown')}")
 
     if "feature_config" in features:
-        logger.info("Feature configuration details:")
+        logger.debug("Feature configuration details:")
         for key, value in features["feature_config"].items():
-            logger.info(f"  {key}: {value}")
+            logger.debug(f"  {key}: {value}")
 
     # Ensure distributed resources are cleaned up
     try:
@@ -709,6 +797,6 @@ if __name__ == "__main__":
 
         if dist.is_initialized():
             dist.destroy_process_group()
-            logger.info("Distributed resources cleaned up before program exit")
+            logger.debug("Distributed resources cleaned up before program exit")
     except Exception as e:
         logger.warning(f"Failed to clean up distributed resources before program exit: {e}")

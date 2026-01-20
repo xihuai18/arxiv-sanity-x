@@ -1,671 +1,66 @@
 'use strict';
 
-function getCsrfToken() {
-    const meta = document.querySelector('meta[name="csrf-token"]');
-    return meta ? (meta.getAttribute('content') || '') : '';
-}
+// Use shared utilities from common_utils.js
+var CommonUtils = window.ArxivSanityCommon;
+var getCsrfToken = CommonUtils.getCsrfToken;
+var csrfFetch = CommonUtils.csrfFetch;
+var formatAuthorsText = CommonUtils.formatAuthorsText;
+var escapeHtml = CommonUtils.escapeHtml;
+var SummaryMarkdown = window.ArxivSanitySummaryMarkdown;
+var renderSummaryMarkdown = SummaryMarkdown.renderSummaryMarkdown;
 
-function csrfFetch(url, options) {
-    const opts = options || {};
-    const method = (opts.method || 'POST').toUpperCase();
-    const headers = new Headers(opts.headers || {});
-    const tok = getCsrfToken();
-    if (tok) headers.set('X-CSRF-Token', tok);
-    return fetch(url, { ...opts, method, headers, credentials: 'same-origin' });
-}
+// Shared event stream from common_utils
+var _setupUserEventStream = CommonUtils.setupUserEventStream;
+var _registerEventHandler = CommonUtils.registerEventHandler;
 
-function escapeHtml(text) {
-    return String(text || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
-}
-
-function isSafeUrl(href) {
-    try {
-        const u = new URL(String(href || ''), window.location.href);
-        return u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:';
-    } catch (e) {
-        return false;
+function applyUserState(state) {
+    if (!state || !state.success) return;
+    if (Array.isArray(state.tags)) {
+        summaryApp.availableTags = state.tags
+            .filter(t => t && t.name && t.name !== 'all')
+            .map(t => t.name)
+            .sort();
+        renderTagDropdown();
     }
 }
 
-function markdownItMathPlugin(md) {
-    function isValidDelim(state, pos) {
-        const max = state.posMax;
-        const prevChar = pos > 0 ? state.src.charCodeAt(pos - 1) : -1;
-        const nextChar = pos + 1 <= max ? state.src.charCodeAt(pos + 1) : -1;
-        let canOpen = true;
-        let canClose = true;
-
-        if (prevChar === 0x20 || prevChar === 0x09 || (nextChar >= 0x30 && nextChar <= 0x39)) {
-            canClose = false;
-        }
-        if (nextChar === 0x20 || nextChar === 0x09) {
-            canOpen = false;
-        }
-
-        return { can_open: canOpen, can_close: canClose };
-    }
-
-    function htmlLineBreak(state, silent) {
-        if (state.src[state.pos] !== '<') return false;
-        const slice = state.src.slice(state.pos);
-        const match = slice.match(/^<br\s*\/?>/i);
-        if (!match) return false;
-
-        if (!silent) {
-            const token = state.push('hardbreak', 'br', 0);
-            token.markup = match[0];
-        }
-        state.pos += match[0].length;
-        return true;
-    }
-
-    function mathInlineDollar(state, silent) {
-        if (state.src[state.pos] !== '$') return false;
-
-        const res = isValidDelim(state, state.pos);
-        if (!res.can_open) {
-            if (!silent) {
-                state.pending += '$';
-            }
-            state.pos += 1;
-            return true;
-        }
-
-        const start = state.pos + 1;
-        let match = start;
-        let pos;
-
-        while ((match = state.src.indexOf('$', match)) !== -1) {
-            pos = match - 1;
-            while (state.src[pos] === '\\') {
-                pos -= 1;
-            }
-            if ((match - pos) % 2 === 1) {
-                break;
-            }
-            match += 1;
-        }
-
-        if (match === -1) {
-            if (!silent) {
-                state.pending += '$';
-            }
-            state.pos = start;
-            return true;
-        }
-
-        if (match - start === 0) {
-            if (!silent) {
-                state.pending += '$$';
-            }
-            state.pos = start + 1;
-            return true;
-        }
-
-        const resClose = isValidDelim(state, match);
-        if (!resClose.can_close) {
-            if (!silent) {
-                state.pending += '$';
-            }
-            state.pos = start;
-            return true;
-        }
-
-        if (!silent) {
-            const token = state.push('math_inline', 'math', 0);
-            token.content = state.src.slice(start, match);
-            token.markup = '$';
-        }
-
-        state.pos = match + 1;
-        return true;
-    }
-
-    function mathInlineParen(state, silent) {
-        if (state.src.slice(state.pos, state.pos + 2) !== '\\(') return false;
-
-        const start = state.pos + 2;
-        let match = start;
-        let pos;
-
-        while ((match = state.src.indexOf('\\)', match)) !== -1) {
-            pos = match - 1;
-            while (pos >= 0 && state.src[pos] === '\\') {
-                pos -= 1;
-            }
-            if ((match - pos) % 2 === 1) {
-                break;
-            }
-            match += 2;
-        }
-
-        if (match === -1) {
-            return false;
-        }
-
-        if (!silent) {
-            const token = state.push('math_inline', 'math', 0);
-            token.content = state.src.slice(start, match);
-            token.markup = '\\(';
-        }
-
-        state.pos = match + 2;
-        return true;
-    }
-
-    function mathInlineBracket(state, silent) {
-        if (state.src.slice(state.pos, state.pos + 2) !== '\\[') return false;
-
-        const start = state.pos + 2;
-        let match = start;
-        let pos;
-
-        while ((match = state.src.indexOf('\\]', match)) !== -1) {
-            pos = match - 1;
-            while (pos >= 0 && state.src[pos] === '\\') {
-                pos -= 1;
-            }
-            if ((match - pos) % 2 === 1) {
-                break;
-            }
-            match += 2;
-        }
-
-        if (match === -1) {
-            return false;
-        }
-
-        if (!silent) {
-            const token = state.push('math_inline', 'math', 0);
-            token.content = state.src.slice(start, match);
-            token.markup = '\\[';
-            token.displayMode = true;
-        }
-
-        state.pos = match + 2;
-        return true;
-    }
-
-    function mathBlock(state, startLine, endLine, silent) {
-        let pos = state.bMarks[startLine] + state.tShift[startLine];
-        let max = state.eMarks[startLine];
-
-        if (pos + 2 > max) return false;
-
-        const opener = state.src.slice(pos, pos + 2);
-        if (opener !== '$$' && opener !== '\\[') return false;
-
-        const closer = opener === '$$' ? '$$' : '\\]';
-        pos += 2;
-
-        let firstLine = state.src.slice(pos, max);
-        let found = false;
-        let lastLine = '';
-        let nextLine = startLine;
-
-        if (silent) return true;
-
-        if (firstLine.trim().endsWith(closer)) {
-            firstLine = firstLine.trim().slice(0, -closer.length);
-            found = true;
-        }
-
-        for (nextLine = startLine; !found;) {
-            nextLine += 1;
-            if (nextLine >= endLine) {
-                break;
-            }
-
-            pos = state.bMarks[nextLine] + state.tShift[nextLine];
-            max = state.eMarks[nextLine];
-
-            if (pos < max && state.tShift[nextLine] < state.blkIndent) {
-                break;
-            }
-
-            const line = state.src.slice(pos, max);
-            if (line.trim().endsWith(closer)) {
-                const lastPos = line.lastIndexOf(closer);
-                lastLine = line.slice(0, lastPos);
-                found = true;
-            }
-        }
-
-        state.line = nextLine + 1;
-
-        const token = state.push('math_block', 'math', 0);
-        token.block = true;
-        token.content = (firstLine && firstLine.trim() ? `${firstLine}\n` : '')
-            + state.getLines(startLine + 1, nextLine, state.tShift[startLine], true)
-            + (lastLine && lastLine.trim() ? lastLine : '');
-        token.map = [startLine, state.line];
-        token.markup = opener;
-
-        return true;
-    }
-
-    md.inline.ruler.before('escape', 'html_line_break', htmlLineBreak);
-    md.inline.ruler.before('escape', 'math_inline_paren', mathInlineParen);
-    md.inline.ruler.before('escape', 'math_inline_bracket', mathInlineBracket);
-    md.inline.ruler.after('escape', 'math_inline_dollar', mathInlineDollar);
-    // Add math_block before 'code' rule to prevent indented math from being parsed as code blocks
-    md.block.ruler.before('code', 'math_block', mathBlock, {
-        alt: ['paragraph', 'reference', 'blockquote', 'list']
-    });
-
-    md.renderer.rules.math_inline = function(tokens, idx) {
-        const content = escapeHtml(tokens[idx].content);
-        if (tokens[idx].displayMode || tokens[idx].markup === '\\[') {
-            return `<span class="math-display">\\[${content}\\]</span>`;
-        }
-        return `<span class="math-inline">\\(${content}\\)</span>`;
-    };
-
-    md.renderer.rules.math_block = function(tokens, idx) {
-        const content = escapeHtml(tokens[idx].content);
-        return `<div class="math-display">\\[${content}\\]</div>`;
-    };
+function fetchUserStateAndApply() {
+    return CommonUtils.fetchUserState().then(applyUserState);
 }
 
-let markdownRenderer = null;
-let tocObserver = null;
-let tocCollapsed = null;
-
-function getMarkdownRenderer() {
-    if (markdownRenderer) return markdownRenderer;
-    if (typeof markdownit === 'undefined') return null;
-
-    const md = markdownit({
-        html: false,
-        linkify: true,
-        typographer: false,
-        breaks: true
-    });
-
-    // Disable indented code blocks to prevent math blocks from being parsed as code
-    // Fenced code blocks (```) still work
-    md.disable('code');
-
-    md.validateLink = (url) => isSafeUrl(url);
-    md.use(markdownItMathPlugin);
-
-    // Custom image renderer to use figure/figcaption
-    md.renderer.rules.image = function(tokens, idx, options, env, self) {
-        const token = tokens[idx];
-        const src = token.attrGet('src');
-        const alt = token.content;
-        const title = token.attrGet('title');
-
-        if (!isSafeUrl(src)) return '';
-
-        let caption = alt;
-        if (title) caption = title;
-
-        // Use figure for images with captions
-        if (caption) {
-            return `<figure>
-                <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy">
-                <figcaption>${escapeHtml(caption)}</figcaption>
-            </figure>`;
-        }
-
-        return `<figure><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy"></figure>`;
-    };
-
-    const defaultLinkRender = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
-        return self.renderToken(tokens, idx, options);
-    };
-
-    md.renderer.rules.link_open = function(tokens, idx, options, env, self) {
-        const href = tokens[idx].attrGet('href') || '';
-        if (isSafeUrl(href)) {
-            try {
-                const url = new URL(href, window.location.href);
-                if ((url.protocol === 'http:' || url.protocol === 'https:') && url.origin !== window.location.origin) {
-                    tokens[idx].attrSet('target', '_blank');
-                    tokens[idx].attrSet('rel', 'noopener noreferrer');
-                }
-            } catch (e) {
-                // ignore invalid URLs
+function handleUserEvent(event, options = {}) {
+    if (!event || typeof event !== 'object') return;
+    if (event.type === 'user_state_changed') {
+        if (event.reason === 'rename_tag' && event.from && event.to) {
+            summaryApp.userTags = (summaryApp.userTags || []).map(t => (t === event.from ? event.to : t));
+            summaryApp.negativeTags = (summaryApp.negativeTags || []).map(t => (t === event.from ? event.to : t));
+            renderTagDropdown();
+        } else if (event.reason === 'delete_tag' && event.tag) {
+            summaryApp.userTags = (summaryApp.userTags || []).filter(t => t !== event.tag);
+            summaryApp.negativeTags = (summaryApp.negativeTags || []).filter(t => t !== event.tag);
+            renderTagDropdown();
+        } else if (event.reason === 'tag_feedback' && event.pid && summaryApp.pid && event.pid === summaryApp.pid) {
+            const pos = new Set(summaryApp.userTags || []);
+            const neg = new Set(summaryApp.negativeTags || []);
+            if (event.label === 1) {
+                pos.add(event.tag);
+                neg.delete(event.tag);
+            } else if (event.label === -1) {
+                pos.delete(event.tag);
+                neg.add(event.tag);
+            } else {
+                pos.delete(event.tag);
+                neg.delete(event.tag);
             }
+            summaryApp.userTags = Array.from(pos);
+            summaryApp.negativeTags = Array.from(neg);
+            renderTagDropdown();
         }
-        return defaultLinkRender(tokens, idx, options, env, self);
-    };
-
-    markdownRenderer = md;
-    return markdownRenderer;
-}
-
-function slugifyHeading(text, slugCounts) {
-    const cleaned = String(text || '')
-        .trim()
-        .toLowerCase()
-        .replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~]/g, '')
-        .replace(/\s+/g, '-');
-    const base = cleaned || 'section';
-    const count = slugCounts[base] || 0;
-    slugCounts[base] = count + 1;
-    return count > 0 ? `${base}-${count + 1}` : base;
-}
-
-function extractHeadingText(token) {
-    if (!token) return '';
-    if (token.type === 'inline' && Array.isArray(token.children)) {
-        return token.children.map((child) => {
-            if (child.type === 'text' || child.type === 'code_inline') {
-                return child.content;
-            }
-            return '';
-        }).join('');
-    }
-    return token.content || '';
-}
-
-function buildTocHtml(items) {
-    if (!items || items.length < 2) return '';
-    const list = items.map((item) => {
-        const title = escapeHtml(item.title);
-        const slug = escapeHtml(item.slug);
-        return `<li class="toc-item toc-level-${item.level}"><a href="#${slug}">${title}</a></li>`;
-    }).join('');
-    return `
-        <div class="toc-header">
-            <div class="toc-title">Contents</div>
-            <div class="toc-actions">
-                <span class="toc-count">${items.length}</span>
-                <button type="button" class="toc-toggle" aria-expanded="true">Collapse</button>
-            </div>
-        </div>
-        <ul class="toc-list">
-            ${list}
-        </ul>
-    `;
-}
-
-function setActiveTocLink(tocContainer, link) {
-    if (!tocContainer) return;
-    const active = tocContainer.querySelector('.toc-item a.is-active');
-    if (active) {
-        active.classList.remove('is-active');
-    }
-    if (link) {
-        link.classList.add('is-active');
+        fetchUserStateAndApply();
     }
 }
 
-function setupTocObserver(tocContainer, markdownContainer) {
-    if (tocObserver) {
-        tocObserver.disconnect();
-        tocObserver = null;
-    }
-    if (!tocContainer || !markdownContainer) return;
-
-    const headings = markdownContainer.querySelectorAll('h1, h2, h3, h4');
-    if (!headings.length) return;
-
-    const linkMap = new Map();
-    const links = tocContainer.querySelectorAll('a[href^="#"]');
-    links.forEach((link) => {
-        const href = link.getAttribute('href') || '';
-        const id = href.slice(1);
-        if (id) {
-            linkMap.set(id, link);
-        }
-    });
-
-    tocObserver = new IntersectionObserver((entries) => {
-        const visible = entries.filter((entry) => entry.isIntersecting);
-        if (!visible.length) return;
-        visible.sort((a, b) => {
-            if (b.intersectionRatio !== a.intersectionRatio) {
-                return b.intersectionRatio - a.intersectionRatio;
-            }
-            return a.boundingClientRect.top - b.boundingClientRect.top;
-        });
-        const target = visible[0].target;
-        const link = linkMap.get(target.id);
-        setActiveTocLink(tocContainer, link);
-    }, {
-        rootMargin: '0px 0px -70% 0px',
-        threshold: [0, 1]
-    });
-
-    headings.forEach((heading) => {
-        tocObserver.observe(heading);
-    });
-}
-
-function setupTocToggle(tocContainer) {
-    if (!tocContainer) return;
-    const toggle = tocContainer.querySelector('.toc-toggle');
-    if (!toggle) return;
-
-    if (tocCollapsed === null) {
-        tocCollapsed = window.matchMedia('(max-width: 960px)').matches;
-    }
-
-    const applyState = (collapsed) => {
-        tocContainer.classList.toggle('is-collapsed', collapsed);
-        toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-        toggle.textContent = collapsed ? 'Expand' : 'Collapse';
-    };
-
-    applyState(tocCollapsed);
-
-    toggle.addEventListener('click', () => {
-        tocCollapsed = !tocCollapsed;
-        applyState(tocCollapsed);
-    });
-}
-
-function wrapMarkdownTables(container) {
-    const tables = container.querySelectorAll('table');
-    tables.forEach((table) => {
-        const parent = table.parentElement;
-        if (parent && parent.classList.contains('table-wrap')) return;
-        const wrapper = document.createElement('div');
-        wrapper.className = 'table-wrap';
-        if (parent) {
-            parent.insertBefore(wrapper, table);
-        }
-        wrapper.appendChild(table);
-    });
-}
-
-function setupImageZoom(container) {
-    const images = container.querySelectorAll('img');
-    images.forEach((img) => {
-        // Remove any existing click listeners to prevent duplicates if called multiple times
-        const newImg = img.cloneNode(true);
-        img.parentNode.replaceChild(newImg, img);
-
-        newImg.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-
-            // Create overlay
-            const overlay = document.createElement('div');
-            overlay.className = 'image-zoom-overlay';
-            overlay.innerHTML = `
-                <div class="image-zoom-container">
-                    <img src="${newImg.src}" alt="${newImg.alt || ''}" />
-                    <button class="image-zoom-close" aria-label="Close">&times;</button>
-                </div>
-            `;
-            document.body.appendChild(overlay);
-            document.body.style.overflow = 'hidden';
-
-            // Close on click
-            overlay.addEventListener('click', (e) => {
-                if (e.target === overlay || e.target.classList.contains('image-zoom-close')) {
-                    overlay.remove();
-                    document.body.style.overflow = '';
-                }
-            });
-
-            // Close on Escape key
-            const handleEscape = (e) => {
-                if (e.key === 'Escape') {
-                    overlay.remove();
-                    document.body.style.overflow = '';
-                    document.removeEventListener('keydown', handleEscape);
-                }
-            };
-            document.addEventListener('keydown', handleEscape);
-        });
-
-        // Add error handling for broken images
-        newImg.addEventListener('error', () => {
-            newImg.style.display = 'none';
-            const errorMsg = document.createElement('span');
-            errorMsg.className = 'image-load-error';
-            errorMsg.textContent = '[Image failed to load]';
-            newImg.parentNode.insertBefore(errorMsg, newImg.nextSibling);
-        });
-    });
-}
-
-/**
- * Normalize indented display math blocks to prevent them from being parsed as code blocks.
- * Also ensures multi-line math blocks are properly formatted for parsing.
- */
-function normalizeIndentedDisplayMath(markdownText) {
-    const text = String(markdownText || '').replace(/\r\n/g, '\n');
-    const lines = text.split('\n');
-    let inMathBlock = false;
-    let mathOpener = '';
-    let mathCloser = '';
-
-    for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        const trimmed = String(line).trim();
-
-        if (!inMathBlock) {
-            // Check if this line starts a deeply indented math block (4+ spaces)
-            const mathStart = line.match(/^([ \t]{4,})(\\\[|\$\$)/);
-            if (mathStart) {
-                mathOpener = mathStart[2];
-                mathCloser = mathOpener === '$$' ? '$$' : '\\]';
-                inMathBlock = true;
-                // Reduce indentation to 0-2 spaces to avoid code block parsing
-                lines[i] = line.replace(/^[ \t]{4,}/, '');
-                // Check if closer is on the same line (after opener)
-                const afterOpener = trimmed.slice(mathOpener.length);
-                if (afterOpener.includes(mathCloser)) {
-                    inMathBlock = false;
-                    mathCloser = '';
-                }
-            }
-            continue;
-        }
-
-        // Inside math block - reduce indentation
-        lines[i] = line.replace(/^[ \t]{4,}/, '');
-
-        if (trimmed.includes(mathCloser)) {
-            inMathBlock = false;
-            mathCloser = '';
-        }
-    }
-
-    return lines.join('\n');
-}
-
-/**
- * Fix \tag placement in aligned environments for MathJax compatibility.
- * MathJax doesn't allow \tag inside aligned environment, but LaTeX does.
- * This function moves \tag from inside aligned to after \end{aligned}.
- */
-function fixAlignedTags(text) {
-    // Match aligned environments with \tag inside, and move \tag to after \end{aligned}
-    // Handles: \begin{aligned}...\tag{N}...\end{aligned}
-    // Converts to: \begin{aligned}...\end{aligned}\tag{N}
-    return text.replace(
-        /(\\begin\{aligned\})([\s\S]*?)(\\tag\{[^}]+\})([\s\S]*?)(\\end\{aligned\})/g,
-        (match, begin, content1, tag, content2, end) => {
-            // Remove the tag from inside and place it after \end{aligned}
-            return begin + content1 + content2 + end + ' ' + tag;
-        }
-    );
-}
-
-function renderSummaryMarkdown(text, markdownContainer, tocContainer) {
-    if (!text || !markdownContainer) return;
-
-    const md = getMarkdownRenderer();
-    if (!md) {
-        markdownContainer.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
-        return;
-    }
-
-    try {
-        if (tocObserver) {
-            tocObserver.disconnect();
-            tocObserver = null;
-        }
-        // Preprocess: reduce indentation of deeply indented math blocks
-        let normalizedText = normalizeIndentedDisplayMath(text);
-        // Fix \tag placement in aligned environments for MathJax compatibility
-        normalizedText = fixAlignedTags(normalizedText);
-        const env = {};
-        const tokens = md.parse(normalizedText, env);
-        const slugCounts = {};
-        const tocItems = [];
-
-        for (let i = 0; i < tokens.length; i += 1) {
-            const token = tokens[i];
-            if (token.type !== 'heading_open') continue;
-            const level = Number(token.tag.slice(1));
-            if (Number.isNaN(level) || level > 4) continue;
-
-            const inlineToken = tokens[i + 1];
-            const title = extractHeadingText(inlineToken);
-            if (!title) continue;
-
-            const slug = slugifyHeading(title, slugCounts);
-            token.attrSet('id', slug);
-            tocItems.push({ level, title, slug });
-        }
-
-        markdownContainer.innerHTML = md.renderer.render(tokens, md.options, env);
-        wrapMarkdownTables(markdownContainer);
-        setupImageZoom(markdownContainer);
-
-        if (tocContainer) {
-            const tocHtml = buildTocHtml(tocItems);
-            tocContainer.innerHTML = tocHtml;
-            tocContainer.classList.toggle('is-empty', !tocHtml);
-            const contentContainer = tocContainer.closest('.summary-content');
-            if (contentContainer) {
-                contentContainer.classList.toggle('has-toc', Boolean(tocHtml));
-            }
-            if (tocHtml) {
-                setupTocToggle(tocContainer);
-                setupTocObserver(tocContainer, markdownContainer);
-                const firstLink = tocContainer.querySelector('.toc-item a');
-                if (firstLink) {
-                    setActiveTocLink(tocContainer, firstLink);
-                }
-            }
-        }
-
-        if (typeof MathJax !== 'undefined' && MathJax.startup) {
-            MathJax.startup.promise
-                .then(() => MathJax.typesetPromise([markdownContainer]))
-                .catch((err) => {
-                    console.warn('MathJax rendering error:', err);
-                });
-        }
-    } catch (err) {
-        console.error('Markdown render error:', err);
-        markdownContainer.innerHTML = `<pre>${escapeHtml(text)}</pre>`;
-    }
-}
+// Summary markdown rendering is handled by markdown_summary_utils.js
 
 // Simplified state management
 class SummaryState {
@@ -722,9 +117,8 @@ class SummaryState {
             this.renderMath();
         }
 
-        // Render tag dropdown and bind events (once) after DOM update
+        // Render tag dropdown (shared implementation) after DOM update
         if (typeof user !== 'undefined' && user) {
-            attachTagEventListeners(); // Only binds once due to tagEventsBound flag
             renderTagDropdown();
         }
     }
@@ -919,7 +313,10 @@ class SummaryState {
         // Paper header section - styled like paper list with full abstract
         const pidSafe = this.paper ? String(this.paper.id || '') : '';
         const titleSafe = this.paper ? escapeHtml(this.paper.title) : '';
-        const authorsSafe = this.paper ? escapeHtml(this.paper.authors) : '';
+        const authorsFull = this.paper ? String(this.paper.authors || '') : '';
+        const authorsDisplay = formatAuthorsText(authorsFull, { maxAuthors: 10, head: 5, tail: 3 });
+        const authorsSafe = escapeHtml(authorsDisplay);
+        const authorsTitleSafe = escapeHtml(authorsFull);
         const timeSafe = this.paper ? escapeHtml(this.paper.time) : '';
         const tagsSafe = (this.paper && this.paper.tags) ? escapeHtml(this.paper.tags) : '';
         const abstractSafe = this.paper ? escapeHtml(this.paper.summary || 'No abstract available.') : '';
@@ -943,7 +340,7 @@ class SummaryState {
                             </a>
                         </h1>
                         <div class="paper-authors-line">
-                            ${authorsSafe}
+                            <span title="${authorsTitleSafe}">${authorsSafe}</span>
                         </div>
                         <div class="paper-meta-line">
                             <span class="paper-time">${timeSafe}</span>
@@ -1202,7 +599,8 @@ summaryApp.confirmClearModel = async function() {
             notice: `Summary for model "${currentModel}" cleared. Click Generate to create a new one.`,
         });
     } catch (error) {
-        this.setState({ clearing: false, error: error.message });
+        const friendlyMsg = CommonUtils.handleApiError(error, 'Clear Model Summary');
+        this.setState({ clearing: false, error: friendlyMsg });
     }
 };
 
@@ -1224,7 +622,8 @@ summaryApp.confirmClearAll = async function() {
             notice: 'All caches cleared. Click Generate to fetch a fresh summary.',
         });
     } catch (error) {
-        this.setState({ clearing: false, error: error.message });
+        const friendlyMsg = CommonUtils.handleApiError(error, 'Clear All Caches');
+        this.setState({ clearing: false, error: friendlyMsg });
     }
 };
 
@@ -1237,127 +636,136 @@ summaryApp.clearCache = summaryApp.confirmClearAll;
 
 // Load summary function
 summaryApp.loadSummary = async function(pid, options = {}) {
-    const requestId = (this.requestSeq = (this.requestSeq || 0) + 1);
-    const chosenModel = options.model || this.getCurrentModel();
-    const force = Boolean(options.force_regenerate);
-    const cacheOnly = Boolean(options.cache_only);
-    this.clearAutoRetry();
+    return await CommonUtils.measurePerformanceAsync(
+        `loadSummary(${pid}, model=${options.model || 'default'})`,
+        async () => {
+            const requestId = (this.requestSeq = (this.requestSeq || 0) + 1);
+            const chosenModel = options.model || this.getCurrentModel();
+            const force = Boolean(options.force_regenerate);
+            const cacheOnly = Boolean(options.cache_only);
+            this.clearAutoRetry();
 
-    const chosenModelStr = String(chosenModel || '').trim();
-    if (force && chosenModelStr) {
-        this.inflightModels[chosenModelStr] = true;
-    }
-
-    const prevContentModel = String(this.contentModel || '').trim();
-    const modelChanged = chosenModelStr && chosenModelStr !== prevContentModel;
-
-    const inFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
-    const shouldShowLoading = force || (!cacheOnly && !this.content) || (cacheOnly && inFlight);
-    this.setState({
-        loading: shouldShowLoading,
-        error: null,
-        regenerating: force,
-        selectedModel: chosenModel || '',
-        notice: cacheOnly ? '' : this.notice,
-        // Prevent showing another model's summary while fetching this model
-        content: modelChanged ? null : this.content,
-        meta: modelChanged ? null : this.meta,
-    });
-
-    try {
-        const result = await fetchSummary(pid, {
-            model: chosenModel,
-            force_regenerate: force,
-            cache_only: cacheOnly,
-        });
-
-        // Ignore stale responses (user may have switched models)
-        if (requestId !== this.requestSeq) {
-            return;
-        }
-
-        const meta = result.meta || {};
-        const content = result.content;
-        if (
-            typeof content === 'string' &&
-            content.startsWith('# Error') &&
-            content.includes('Summary is being generated')
-        ) {
-            this.pendingGenerationModel = chosenModel || '';
-            this.setState({
-                loading: true,
-                regenerating: false,
-                notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
-                error: null,
-                content: null,
-                meta: null,
-            });
-            this.scheduleAutoRetry(pid, { model: chosenModel });
-            return;
-        }
-
-        const selectedModel = this.selectedModel || chosenModel || '';
-        this.autoRetryCount = 0;
-        this.pendingGenerationModel = '';
-        if (chosenModelStr) {
-            this.inflightModels[chosenModelStr] = false;
-        }
-        this.setState({
-            loading: false,
-            regenerating: false,
-            content: content,
-            meta: meta,
-            contentModel: String(selectedModel || '').trim(),
-            selectedModel,
-            notice: '',
-        });
-    } catch (error) {
-        if (requestId !== this.requestSeq) {
-            return;
-        }
-        if (error.code === 'summary_cache_miss' && cacheOnly) {
-            const stillInFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
-            if (stillInFlight) {
-                this.pendingGenerationModel = chosenModelStr;
-                this.setState({
-                    loading: true,
-                    regenerating: false,
-                    notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
-                    error: null,
-                    content: null,
-                    meta: null,
-                });
-                this.scheduleAutoRetry(pid, { model: chosenModelStr });
-                return;
+            const chosenModelStr = String(chosenModel || '').trim();
+            if (force && chosenModelStr) {
+                this.inflightModels[chosenModelStr] = true;
             }
+
+            const prevContentModel = String(this.contentModel || '').trim();
+            const modelChanged = chosenModelStr && chosenModelStr !== prevContentModel;
+
+            const inFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
+            const shouldShowLoading = force || (!cacheOnly && !this.content) || (cacheOnly && inFlight);
             this.setState({
-                loading: false,
-                regenerating: false,
-                notice: 'No cached summary for this model. Click Generate to create one.',
+                loading: shouldShowLoading,
                 error: null,
-                content: null,
-                meta: null,
-                contentModel: String(chosenModelStr || '').trim(),
+                regenerating: force,
+                selectedModel: chosenModel || '',
+                notice: cacheOnly ? '' : this.notice,
+                // Prevent showing another model's summary while fetching this model
+                content: modelChanged ? null : this.content,
+                meta: modelChanged ? null : this.meta,
             });
-            return;
+
+            try {
+                const result = await fetchSummary(pid, {
+                    model: chosenModel,
+                    force_regenerate: force,
+                    cache_only: cacheOnly,
+                });
+
+                // Ignore stale responses (user may have switched models)
+                if (requestId !== this.requestSeq) {
+                    return;
+                }
+
+                const meta = result.meta || {};
+                const content = result.content;
+                if (
+                    typeof content === 'string' &&
+                    content.startsWith('# Error') &&
+                    content.includes('Summary is being generated')
+                ) {
+                    this.pendingGenerationModel = chosenModel || '';
+                    this.setState({
+                        loading: true,
+                        regenerating: false,
+                        notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
+                        error: null,
+                        content: null,
+                        meta: null,
+                    });
+                    this.scheduleAutoRetry(pid, { model: chosenModel });
+                    return;
+                }
+
+                const selectedModel = this.selectedModel || chosenModel || '';
+                this.autoRetryCount = 0;
+                this.pendingGenerationModel = '';
+                if (chosenModelStr) {
+                    this.inflightModels[chosenModelStr] = false;
+                }
+                this.setState({
+                    loading: false,
+                    regenerating: false,
+                    content: content,
+                    meta: meta,
+                    contentModel: String(selectedModel || '').trim(),
+                    selectedModel,
+                    notice: '',
+                });
+            } catch (error) {
+                if (requestId !== this.requestSeq) {
+                    return;
+                }
+                if (error.code === 'summary_cache_miss' && cacheOnly) {
+                    const stillInFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
+                    if (stillInFlight) {
+                        this.pendingGenerationModel = chosenModelStr;
+                        this.setState({
+                            loading: true,
+                            regenerating: false,
+                            notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
+                            error: null,
+                            content: null,
+                            meta: null,
+                        });
+                        this.scheduleAutoRetry(pid, { model: chosenModelStr });
+                        return;
+                    }
+                    this.setState({
+                        loading: false,
+                        regenerating: false,
+                        notice: 'No cached summary for this model. Click Generate to create one.',
+                        error: null,
+                        content: null,
+                        meta: null,
+                        contentModel: String(chosenModelStr || '').trim(),
+                    });
+                    return;
+                }
+                const friendlyMsg = CommonUtils.handleApiError(error, 'Load Summary');
+                this.setState({ loading: false, regenerating: false, error: friendlyMsg });
+                if (error.code === 'summary_timeout' || String(error.message || '').includes('Failed to fetch')) {
+                    this.scheduleAutoRetry(pid, { model: chosenModel });
+                }
+                if (force && chosenModelStr) {
+                    this.inflightModels[chosenModelStr] = false;
+                }
+            }
         }
-        this.setState({ loading: false, regenerating: false, error: error.message });
-        if (error.code === 'summary_timeout' || String(error.message || '').includes('Failed to fetch')) {
-            this.scheduleAutoRetry(pid, { model: chosenModel });
-        }
-        if (force && chosenModelStr) {
-            this.inflightModels[chosenModelStr] = false;
-        }
-    }
+    );
 };
 
 summaryApp.loadModels = async function() {
-    try {
-        const models = await fetchModels();
-        this.setState({ models, modelsError: null });
-    } catch (error) {
-        this.setState({ modelsError: error.message });
-    }
+    return await CommonUtils.measurePerformanceAsync('loadModels', async () => {
+        try {
+            const models = await fetchModels();
+            this.setState({ models, modelsError: null });
+        } catch (error) {
+            const friendlyMsg = CommonUtils.handleApiError(error, 'Load Models');
+            this.setState({ modelsError: friendlyMsg });
+        }
+    });
 };
 
 summaryApp.selectInitialModel = async function(pid) {
@@ -1450,6 +858,7 @@ async function initSummaryApp() {
         clearing: false,
         defaultModel: typeof defaultSummaryModel !== 'undefined' ? defaultSummaryModel : '',
         userTags: paper.utags || [],
+        negativeTags: paper.ntags || [],
         availableTags: [],
         tagDropdownOpen: false,
         tagSearchValue: '',
@@ -1465,293 +874,43 @@ async function initSummaryApp() {
     // Initialize tag management if user is logged in
     if (typeof user !== 'undefined' && user) {
         await initTagManagement();
+        setupUserEventStream();
     }
 }
 
-// MultiSelectDropdown component for tags
-function MultiSelectDropdown(selectedTags, availableTags, isOpen, callbacks) {
-    const { onToggle, onTagToggle, onRemoveTag, onNewTagChange, onAddNewTag, onSearchChange } = callbacks;
-    const { newTagValue, searchValue } = summaryApp;
-
-    const selectedTagElements = selectedTags.map((tag, ix) =>
-        `<div class="multi-select-selected-tag">
-            <span>${escapeHtml(tag)}</span>
-            <span class="remove-tag" data-tag="${escapeHtml(tag)}">×</span>
-        </div>`
-    ).join('');
-
-    const triggerContent = selectedTags.length > 0 ?
-        `<div class="multi-select-selected-tags">${selectedTagElements}</div>` :
-        '<div class="multi-select-placeholder">Select tags...</div>';
-
-    // Filter tags by search value
-    const searchLower = (searchValue || '').toLowerCase();
-    const filteredTags = availableTags.filter(tag =>
-        tag.toLowerCase().includes(searchLower)
-    );
-
-    const optionElements = filteredTags.map((tag, ix) => {
-        const isSelected = selectedTags.includes(tag);
-        return `<div class="multi-select-option" data-tag="${escapeHtml(tag)}">
-            <input type="checkbox" class="multi-select-checkbox" ${isSelected ? 'checked' : ''} />
-            <span class="multi-select-option-text">${escapeHtml(tag)}</span>
-        </div>`;
-    }).join('');
-
-    const dropdownMenu = isOpen ? `
-        <div class="multi-select-dropdown-menu">
-            <div class="multi-select-search">
-                <input type="text"
-                       id="tag-search-input"
-                       placeholder="Search tags..."
-                       value="${escapeHtml(searchValue)}"
-                       autocomplete="off" />
-            </div>
-            ${optionElements}
-            <div class="multi-select-new-tag">
-                <input type="text"
-                       id="new-tag-input"
-                       placeholder="Enter new tag..."
-                       value="${escapeHtml(newTagValue)}"
-                       autocomplete="off" />
-                <button id="add-new-tag-btn" ${!newTagValue.trim() ? 'disabled' : ''}>Add</button>
-            </div>
-        </div>
-    ` : '';
-
-    return `<div class="multi-select-dropdown ${isOpen ? 'open' : ''}" id="summary-tag-dropdown-inner">
-        <div class="multi-select-trigger ${isOpen ? 'active' : ''}">
-            <div class="multi-select-content">
-                ${triggerContent}
-            </div>
-            <span class="multi-select-arrow">${isOpen ? '▲' : '▼'}</span>
-        </div>
-        ${dropdownMenu}
-    </div>`;
-}
+// Tag dropdown UI is provided by static/tag_dropdown_shared.js (shared React implementation)
 
 function renderTagDropdown() {
     const container = document.getElementById('summary-tag-dropdown');
     if (!container) return;
+    if (!window.ArxivSanityTagDropdown || typeof window.ArxivSanityTagDropdown.mount !== 'function') return;
 
-    const html = MultiSelectDropdown(
-        summaryApp.userTags || [],
-        summaryApp.availableTags || [],
-        summaryApp.tagDropdownOpen,
-        {}
-    );
+    const pidValue = summaryApp.paper && summaryApp.paper.id ? String(summaryApp.paper.id) : '';
+    if (!pidValue) return;
 
-    container.innerHTML = html;
-
-    // Restore input values after re-render
-    const searchInput = container.querySelector('#tag-search-input');
-    if (searchInput && summaryApp.tagSearchValue) {
-        searchInput.value = summaryApp.tagSearchValue;
+    const prevUi = sharedTagDropdownApi && sharedTagDropdownApi.getUiState ? sharedTagDropdownApi.getUiState() : {};
+    if (sharedTagDropdownApi && sharedTagDropdownApi.unmount) {
+        sharedTagDropdownApi.unmount();
+        sharedTagDropdownApi = null;
     }
 
-    const newTagInput = container.querySelector('#new-tag-input');
-    if (newTagInput && summaryApp.newTagValue) {
-        newTagInput.value = summaryApp.newTagValue;
-    }
-}
-
-// Use event delegation - bind once on document body
-let tagEventsBound = false;
-
-function attachTagEventListeners() {
-    if (tagEventsBound) return;
-
-    tagEventsBound = true;
-
-    // Use event delegation on document body (persists through render cycles)
-    document.body.addEventListener('click', (e) => {
-        const target = e.target;
-
-        // Only handle events within summary-tag-dropdown
-        if (!target.closest('#summary-tag-dropdown')) return;
-
-        // Handle trigger click
-        const trigger = target.closest('.multi-select-trigger');
-        if (trigger) {
-            e.preventDefault();
-            e.stopPropagation();
-            handleToggleTagDropdown();
-            return;
-        }
-
-        // Handle remove tag
-        const removeBtn = target.closest('.remove-tag');
-        if (removeBtn) {
-            e.preventDefault();
-            e.stopPropagation();
-            const tagName = removeBtn.getAttribute('data-tag');
-            if (tagName) handleRemoveTag(tagName);
-            return;
-        }
-
-        // Handle option click
-        const option = target.closest('.multi-select-option');
-        if (option) {
-            e.preventDefault();
-            e.stopPropagation();
-            const tagName = option.getAttribute('data-tag');
-            if (tagName) handleTagToggle(tagName);
-            return;
-        }
-
-        // Handle add new tag button
-        const addBtn = target.closest('#add-new-tag-btn');
-        if (addBtn) {
-            e.preventDefault();
-            e.stopPropagation();
-            handleAddNewTag();
-            return;
-        }
-
-        // Stop propagation for input clicks
-        if (target.closest('#tag-search-input') || target.closest('#new-tag-input')) {
-            e.stopPropagation();
-            return;
-        }
+    sharedTagDropdownApi = window.ArxivSanityTagDropdown.mount(container, {
+        pid: pidValue,
+        selectedTags: summaryApp.userTags || [],
+        negativeTags: summaryApp.negativeTags || [],
+        availableTags: summaryApp.availableTags || [],
+        open: summaryApp.tagDropdownOpen || prevUi.open,
+        searchValue: summaryApp.tagSearchValue || prevUi.searchValue,
+        newTagValue: summaryApp.newTagValue || prevUi.newTagValue,
+        onStateChange: (st) => {
+            summaryApp.userTags = st.selectedTags || [];
+            summaryApp.negativeTags = st.negativeTags || [];
+            summaryApp.availableTags = st.availableTags || [];
+            summaryApp.tagDropdownOpen = !!st.open;
+            summaryApp.tagSearchValue = st.searchValue || '';
+            summaryApp.newTagValue = st.newTagValue || '';
+        },
     });
-
-    // Handle input events
-    document.body.addEventListener('input', (e) => {
-        const target = e.target;
-
-        if (target.id === 'tag-search-input' && target.closest('#summary-tag-dropdown')) {
-            summaryApp.tagSearchValue = target.value;
-            renderTagDropdown();
-            // Restore focus
-            setTimeout(() => {
-                const input = document.getElementById('tag-search-input');
-                if (input) input.focus();
-            }, 0);
-        }
-
-        if (target.id === 'new-tag-input' && target.closest('#summary-tag-dropdown')) {
-            summaryApp.newTagValue = target.value;
-            renderTagDropdown();
-            // Restore focus
-            setTimeout(() => {
-                const input = document.getElementById('new-tag-input');
-                if (input) input.focus();
-            }, 0);
-        }
-    });
-
-    // Handle keypress for new tag input
-    document.body.addEventListener('keypress', (e) => {
-        if (e.target.id === 'new-tag-input' && e.target.closest('#summary-tag-dropdown')) {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                handleAddNewTag();
-            }
-        }
-    });
-}
-
-function handleToggleTagDropdown() {
-    summaryApp.tagDropdownOpen = !summaryApp.tagDropdownOpen;
-    if (summaryApp.tagDropdownOpen) {
-        summaryApp.tagSearchValue = '';
-    }
-    renderTagDropdown();
-}
-
-function handleTagToggle(tagName) {
-    const isSelected = summaryApp.userTags.includes(tagName);
-
-    if (isSelected) {
-        handleRemoveTag(tagName);
-    } else {
-        handleAddTag(tagName);
-    }
-}
-
-async function handleAddTag(tagName) {
-    if (!summaryApp.paper || !summaryApp.paper.id) {
-        alert('Paper ID not found');
-        return;
-    }
-
-    try {
-        const response = await csrfFetch(`/add/${summaryApp.paper.id}/${encodeURIComponent(tagName)}`);
-        const text = await response.text();
-
-        if (text.startsWith('ok')) {
-            if (!summaryApp.userTags.includes(tagName)) {
-                summaryApp.userTags = [...summaryApp.userTags, tagName];
-            }
-            renderTagDropdown();
-            console.log(`Added tag: ${tagName}`);
-        } else {
-            console.error('Server error adding tag:', text);
-            alert('Failed to add tag: ' + text);
-        }
-    } catch (error) {
-        console.error('Error adding tag:', error);
-        alert('Network error, failed to add tag');
-    }
-}
-
-async function handleRemoveTag(tagName) {
-    if (!summaryApp.paper || !summaryApp.paper.id) {
-        alert('Paper ID not found');
-        return;
-    }
-
-    try {
-        const response = await csrfFetch(`/sub/${summaryApp.paper.id}/${encodeURIComponent(tagName)}`);
-        const text = await response.text();
-
-        if (text.startsWith('ok')) {
-            summaryApp.userTags = summaryApp.userTags.filter(tag => tag !== tagName);
-            renderTagDropdown();
-            console.log(`Removed tag: ${tagName}`);
-        } else {
-            console.error('Server error removing tag:', text);
-            alert('Failed to remove tag: ' + text);
-        }
-    } catch (error) {
-        console.error('Error removing tag:', error);
-        alert('Network error, failed to remove tag');
-    }
-}
-
-async function handleAddNewTag() {
-    const trimmedTag = summaryApp.newTagValue.trim();
-
-    if (!trimmedTag) return;
-
-    if (summaryApp.userTags.includes(trimmedTag)) {
-        alert('Tag already exists');
-        return;
-    }
-
-    try {
-        const response = await csrfFetch(`/add/${summaryApp.paper.id}/${encodeURIComponent(trimmedTag)}`);
-        const text = await response.text();
-
-        if (text.startsWith('ok')) {
-            summaryApp.userTags = [...summaryApp.userTags, trimmedTag];
-            summaryApp.newTagValue = '';
-
-            // Add to available tags if not already there
-            if (!summaryApp.availableTags.includes(trimmedTag)) {
-                summaryApp.availableTags = [...summaryApp.availableTags, trimmedTag].sort();
-            }
-
-            renderTagDropdown();
-            console.log(`Added new tag: ${trimmedTag}`);
-        } else {
-            console.error('Server error adding new tag:', text);
-            alert('Failed to add new tag: ' + text);
-        }
-    } catch (error) {
-        console.error('Error adding new tag:', error);
-        alert('Network error, failed to add new tag');
-    }
 }
 
 // Tag management functions
@@ -1769,22 +928,8 @@ async function initTagManagement() {
     if (tagDropdownListenersBound) return;
     tagDropdownListenersBound = true;
 
-    // Close dropdown when clicking outside (use mousedown like main page)
-    document.addEventListener('mousedown', (e) => {
-        const dropdown = document.getElementById('summary-tag-dropdown');
-        if (dropdown && !dropdown.contains(e.target) && summaryApp.tagDropdownOpen) {
-            summaryApp.tagDropdownOpen = false;
-            renderTagDropdown();
-        }
-    });
-
-    // Close dropdown on Escape key (like main page)
+    // Close confirm popup on Escape
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && summaryApp.tagDropdownOpen) {
-            summaryApp.tagDropdownOpen = false;
-            renderTagDropdown();
-        }
-        // Close confirm popup on Escape
         if (e.key === 'Escape' && summaryApp.pendingConfirm) {
             summaryApp.cancelConfirm();
         }

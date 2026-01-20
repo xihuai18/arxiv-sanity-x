@@ -23,7 +23,7 @@ def get_response(search_query, start_index=0, max_r=100):
     )
     # add_url = 'search_query=%s&sortBy=submittedDate&start=%d&max_results=100' % (search_query, start_index)
     search_query = base_url + add_url
-    logger.info(f"arxiv url {search_query}")
+    logger.debug(f"arxiv url {search_query}")
     logger.debug(f"Searching arxiv for {search_query}")
     req = urllib.request.Request(
         search_query,
