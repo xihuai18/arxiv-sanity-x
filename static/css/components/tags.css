@@ -1,0 +1,1605 @@
+/**
+ * Tags Component Styles
+ * Including user tags, keyword tags, etc.
+ */
+
+/* Multi-select dropdown tag "×" visibility optimization
+ * Note: The complete .multi-select-selected-tag .remove-tag styles are defined later in this file (around line 857)
+ * Not repeated here to avoid style conflicts
+ */
+
+/* Keyword tags: Modern chip style */
+.rel_ukey {
+    background-color: var(--keyword-bg-light);
+    border: 1px solid var(--keyword-border-light);
+    color: var(--keyword-text-light);
+    display: inline-flex;
+    align-items: center;
+    margin-right: 6px;
+    margin-bottom: 6px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    font-weight: 500;
+    font-size: 13px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    box-shadow: none;
+}
+
+.rel_ukey:hover {
+    background-color: var(--keyword-hover-bg-light);
+    border-color: var(--keyword-hover-border-light);
+    color: var(--keyword-hover-text-light);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(245, 124, 0, 0.2);
+}
+
+[data-theme='dark'] .rel_ukey {
+    background-color: var(--keyword-bg-dark);
+    border-color: var(--keyword-border-dark);
+    color: var(--keyword-text-dark);
+}
+
+[data-theme='dark'] .rel_ukey:hover {
+    background-color: var(--keyword-hover-bg-dark);
+    border-color: var(--keyword-hover-border-dark);
+    color: var(--keyword-hover-text-dark);
+    box-shadow: 0 2px 8px rgba(255, 166, 87, 0.2);
+}
+
+.rel_ukey_add {
+    /* add a whole key */
+    position: absolute;
+    color: white;
+    left: 7px;
+    cursor: pointer;
+    text-align: center;
+    border-radius: 3px;
+    background-color: #55f;
+    width: 22px;
+    height: 22px;
+    margin-right: 7px;
+}
+
+.rel_ukey_sub {
+    /* deletes a whole tag */
+    position: absolute;
+    color: white;
+    cursor: pointer;
+    text-align: center;
+    border-radius: 3px;
+    background-color: #f55;
+    width: 22px;
+    height: 22px;
+}
+
+/* Unified tag link text color: inherit in normal state, white on hover */
+.rel_ukey a,
+.rel_ukey_all a {
+    color: inherit;
+    text-decoration: none;
+}
+.rel_ukey:hover a,
+.rel_ukey_all:hover a {
+    color: #fff;
+}
+
+.rel_ukey_all {
+    /* Keyword "all" tag: Chip style - use keyword color variables */
+    background-color: var(--keyword-bg-light);
+    border: 1px solid var(--keyword-border-light);
+    color: var(--keyword-text-light);
+    font-weight: bold;
+    font-size: 15px;
+    padding: 4px 10px;
+    border-radius: 3px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    margin-right: 4px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition:
+        background-color 0.15s,
+        color 0.15s,
+        border-color 0.15s;
+}
+.rel_ukey_all:hover {
+    background-color: var(--keyword-hover-bg-light);
+    border-color: var(--keyword-hover-border-light);
+    color: var(--keyword-hover-text-light);
+}
+[data-theme='dark'] .rel_ukey_all {
+    background-color: var(--keyword-bg-dark);
+    border-color: var(--keyword-border-dark);
+    color: var(--keyword-text-dark);
+}
+[data-theme='dark'] .rel_ukey_all:hover {
+    background-color: var(--keyword-hover-bg-dark);
+    border-color: var(--keyword-hover-border-dark);
+    color: var(--keyword-hover-text-dark);
+}
+
+/* Original non-user tags, e.g. cs.CV */
+.rel_tags {
+    color: var(--link-color);
+    font-size: 15px;
+    display: inline-block;
+    margin-left: 0;
+    margin-right: 8px;
+    margin-bottom: 4px;
+    font-weight: 500;
+}
+
+.rel_tag_sub {
+    /* deletes a whole tag */
+    position: absolute;
+    color: white;
+    cursor: pointer;
+    text-align: center;
+    border-radius: 3px;
+    background-color: #f55;
+    width: 22px;
+    height: 22px;
+    margin-right: 7px;
+}
+.rel_tag_rename {
+    left: 7px;
+    position: absolute;
+    color: white;
+    cursor: pointer;
+    text-align: center;
+    border-radius: 3px;
+    background-color: rgb(216, 169, 15);
+    width: 22px;
+    height: 22px;
+    margin-right: 7px;
+}
+
+/* Regular tags: Modern chip style */
+.rel_utag {
+    background-color: var(--tag-bg-light);
+    border: 1px solid var(--tag-border-light);
+    color: var(--tag-text-light);
+    display: inline-flex;
+    align-items: center;
+    margin-right: 8px;
+    margin-bottom: 8px;
+    padding: 6px 14px;
+    border-radius: 22px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    font-weight: 500;
+    font-size: 13px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    box-shadow: 0 1px 3px rgba(30, 64, 175, 0.08);
+}
+
+.rel_utag:hover {
+    background-color: var(--tag-hover-bg-light);
+    border-color: var(--tag-hover-border-light);
+    color: var(--tag-hover-text-light);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(30, 64, 175, 0.15);
+}
+
+.rel_utag.tag-negative {
+    background-color: var(--tag-neg-bg-light);
+    border-color: var(--tag-neg-border-light);
+    color: var(--tag-neg-text-light);
+    box-shadow: 0 1px 3px rgba(190, 18, 60, 0.12);
+}
+
+.rel_utag.tag-negative:hover {
+    background-color: var(--tag-neg-hover-bg-light);
+    border-color: var(--tag-neg-hover-border-light);
+    color: var(--tag-neg-hover-text-light);
+    box-shadow: 0 4px 12px rgba(190, 18, 60, 0.2);
+}
+
+[data-theme='dark'] .rel_utag {
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] .rel_utag:hover {
+    background-color: var(--tag-hover-bg-dark);
+    border-color: var(--tag-hover-border-dark);
+    color: var(--tag-hover-text-dark);
+    box-shadow: 0 4px 12px rgba(96, 165, 250, 0.2);
+}
+
+[data-theme='dark'] .rel_utag.tag-negative {
+    background-color: var(--tag-neg-bg-dark);
+    border-color: var(--tag-neg-border-dark);
+    color: var(--tag-neg-text-dark);
+    box-shadow: 0 1px 3px rgba(190, 18, 60, 0.2);
+}
+
+[data-theme='dark'] .rel_utag.tag-negative:hover {
+    background-color: var(--tag-neg-hover-bg-dark);
+    border-color: var(--tag-neg-hover-border-dark);
+    color: var(--tag-neg-hover-text-dark);
+    box-shadow: 0 4px 12px rgba(190, 18, 60, 0.3);
+}
+
+.rel_utag_all {
+    /* "all" tag: Chip style - use tag color variables */
+    background-color: var(--tag-bg-light);
+    border: 1.5px solid var(--tag-border-light);
+    color: var(--tag-text-light);
+    font-weight: bold;
+    font-size: 15px;
+    padding: 4px 10px;
+    border-radius: 3px;
+    line-height: 1.4;
+    box-sizing: border-box;
+    margin-right: 4px;
+    margin-bottom: 4px;
+    cursor: pointer;
+    transition:
+        background-color 0.15s,
+        color 0.15s,
+        border-color 0.15s;
+    box-shadow: none !important;
+}
+.rel_utag_all:hover {
+    background-color: var(--tag-hover-bg-light);
+    border-color: var(--tag-hover-border-light);
+    color: var(--tag-hover-text-light);
+}
+[data-theme='dark'] .rel_utag_all {
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+}
+[data-theme='dark'] .rel_utag_all:hover {
+    background-color: var(--tag-hover-bg-dark);
+    border-color: var(--tag-hover-border-dark);
+    color: var(--tag-hover-text-dark);
+}
+
+.rel_utag_add {
+    /* adds a paper to a tag */
+    background-color: #55f;
+    margin-right: 2px;
+    width: 12px;
+    text-align: center;
+}
+
+.rel_utag_sub {
+    /* subs a tag from a paper */
+    background-color: #f55;
+    width: 12px;
+    text-align: center;
+}
+
+.rel_utag a,
+.rel_utag_all a {
+    color: inherit;
+    text-decoration: none;
+}
+
+/* Tag pill clickable label (used when tag name is rendered as <span>) */
+.tag-link {
+    cursor: pointer;
+    user-select: none;
+    color: inherit;
+    text-decoration: none;
+}
+
+/* Tag pill counts (pos/neg separated) */
+.tag-counts {
+    display: inline-flex;
+    gap: 6px;
+    margin-right: 8px;
+    font-variant-numeric: tabular-nums;
+}
+
+.tag-count {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.2;
+    border: 1px solid transparent;
+    background: rgba(0, 0, 0, 0.04);
+}
+
+[data-theme='dark'] .tag-count {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.tag-count-pos {
+    color: var(--success-color);
+    border-color: rgba(16, 185, 129, 0.35);
+    background: rgba(16, 185, 129, 0.1);
+}
+
+.tag-count-neg {
+    color: var(--danger-color);
+    border-color: rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.tag-name {
+    font-weight: 600;
+}
+
+.tag-link:hover {
+    text-decoration: none;
+}
+.rel_utag:hover a,
+.rel_utag_all:hover a {
+    color: #fff;
+}
+
+.tag-link-disabled {
+    cursor: default;
+    opacity: 0.8;
+}
+
+/* Keywords within combined tag containers use tag colors */
+.enhanced-combined-tags .rel_ukey,
+.enhanced-combined-tags .rel_ukey_all {
+    background-color: var(--tag-bg-light);
+    border-color: var(--tag-border-light);
+    color: var(--tag-text-light);
+}
+.enhanced-combined-tags .rel_ukey:hover,
+.enhanced-combined-tags .rel_ukey_all:hover {
+    background-color: var(--tag-hover-bg-light);
+    border-color: var(--tag-hover-border-light);
+    color: var(--tag-hover-text-light);
+}
+[data-theme='dark'] .enhanced-combined-tags .rel_ukey,
+[data-theme='dark'] .enhanced-combined-tags .rel_ukey_all {
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+}
+[data-theme='dark'] .enhanced-combined-tags .rel_ukey:hover,
+[data-theme='dark'] .enhanced-combined-tags .rel_ukey_all:hover {
+    background-color: var(--tag-hover-bg-dark);
+    border-color: var(--tag-hover-border-dark);
+    color: var(--tag-hover-text-dark);
+}
+
+/* Tags within paper entries use tag colors (attempt to override inline styles) */
+.rel_paper .rel_utag {
+    background-color: var(--tag-bg-light) !important;
+    border: 1px solid var(--tag-border-light) !important;
+    color: var(--tag-text-light) !important;
+}
+.rel_paper .rel_utag:hover {
+    background-color: var(--tag-hover-bg-light) !important;
+    border-color: var(--tag-hover-border-light) !important;
+    color: var(--tag-hover-text-light) !important;
+}
+[data-theme='dark'] .rel_paper .rel_utag {
+    background-color: var(--tag-bg-dark) !important;
+    border-color: var(--tag-border-dark) !important;
+    color: var(--tag-text-dark) !important;
+}
+[data-theme='dark'] .rel_paper .rel_utag:hover {
+    background-color: var(--tag-hover-bg-dark) !important;
+    border-color: var(--tag-hover-border-dark) !important;
+    color: var(--tag-hover-text-dark) !important;
+}
+
+/* Tag suggestions dropdown */
+.tag-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-top: none;
+    border-radius: 0 0 6px 6px;
+    z-index: 1000;
+    max-height: 160px;
+    overflow-y: auto;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+[data-theme='dark'] .tag-suggestions {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.tag-suggestion-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    color: var(--text-color);
+    border-bottom: 1px solid var(--border-color);
+    transition:
+        background-color 0.15s ease,
+        color 0.15s ease;
+    display: flex;
+    align-items: center;
+}
+.tag-suggestion-item:hover {
+    background-color: var(--tag-hover-bg-light);
+    color: var(--tag-hover-text-light);
+}
+[data-theme='dark'] .tag-suggestion-item:hover {
+    background-color: var(--tag-hover-bg-dark);
+    color: var(--tag-hover-text-dark);
+}
+.tag-suggestion-item:last-child {
+    border-bottom: none;
+}
+
+/* Small tag icon before tag suggestion items */
+.tag-suggestion-item:before {
+    content: '🏷';
+    margin-right: 6px;
+    opacity: 0.7;
+}
+
+/* === Additional styles from style.css L2301-L3500 === */
+[data-theme='dark'] #link-prev-page,
+[data-theme='dark'] #link-next-page {
+    color: #90caf9;
+}
+[data-theme='dark'] #link-prev-page:hover,
+[data-theme='dark'] #link-next-page:hover {
+    color: #fff;
+}
+
+@media only screen and (max-width: 720px) {
+    .page-content {
+        padding: 0 12px;
+    }
+}
+
+#pagination {
+    text-align: center;
+    margin: 32px 0;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+}
+
+.pagination-status {
+    margin: 0 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 8px 16px;
+    background: var(--card-bg);
+    border-radius: 20px;
+    border: 1px solid var(--border-color);
+}
+
+.pagination-note {
+    text-align: center;
+    margin: 8px 0 24px;
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+#link-prev-page,
+#link-next-page {
+    appearance: none;
+    margin: 0;
+    font-size: 14px;
+    cursor: pointer;
+    color: var(--primary-text);
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 100%);
+    text-decoration: none;
+    padding: 12px 24px;
+    border-radius: 24px;
+    border: none;
+    transition: all var(--transition-fast);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+    box-shadow: 0 3px 10px rgba(179, 27, 27, 0.3);
+}
+
+#link-prev-page:hover,
+#link-next-page:hover {
+    background: linear-gradient(135deg, var(--btn-hover) 0%, var(--btn-bg) 100%);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(179, 27, 27, 0.4);
+}
+
+#link-prev-page:disabled,
+#link-next-page:disabled,
+#link-prev-page.disabled,
+#link-next-page.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+    transform: none;
+    box-shadow: none;
+    background: var(--text-muted);
+}
+/* Pagination link colors in dark mode are handled through variables */
+
+/* Multi-select dropdown styles */
+.multi-select-dropdown {
+    /* This is the tag selector inside paper entries */
+    position: relative;
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    margin-bottom: 8px;
+    z-index: 10;
+}
+
+/* When dropdown is open, raise z-index above other paper cards */
+.multi-select-dropdown.open {
+    z-index: 100;
+}
+
+/* Raise parent paper card z-index when dropdown is open */
+.rel_paper:has(.multi-select-dropdown.open) {
+    z-index: 50;
+    position: relative;
+    overflow: visible;
+}
+
+/* Hide the left decoration bar when dropdown is open */
+.rel_paper:has(.multi-select-dropdown.open)::before {
+    opacity: 0 !important;
+}
+
+/* Fallback for browsers that don't support :has() - handled via JS class */
+.rel_paper.dropdown-open {
+    z-index: 50;
+    position: relative;
+    overflow: visible;
+}
+
+/* Hide the left decoration bar when dropdown is open (fallback) */
+.rel_paper.dropdown-open::before {
+    opacity: 0 !important;
+}
+
+.multi-select-trigger {
+    display: flex;
+    align-items: center;
+    padding: 10px 14px;
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    background-color: var(--card-bg);
+    cursor: pointer;
+    font-size: 14px;
+    min-height: 42px;
+    line-height: 1.5;
+    transition: all var(--transition-fast);
+    justify-content: space-between;
+}
+
+.multi-select-trigger:hover {
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.multi-select-trigger.active {
+    border-color: var(--link-color);
+    border-radius: 10px 10px 0 0;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.multi-select-content {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+}
+
+.multi-select-selected-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px; /* Increase spacing between tags */
+    flex-grow: 1; /* Allow it to occupy available space */
+}
+
+/* Enhanced tag list container styles */
+.enhanced-tag-list,
+.enhanced-combined-tag-list,
+.enhanced-keyword-list {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow-xs);
+    transition:
+        box-shadow var(--transition-fast),
+        border-color var(--transition-fast);
+}
+
+.enhanced-tag-list:hover,
+.enhanced-combined-tag-list:hover,
+.enhanced-keyword-list:hover {
+    box-shadow: var(--shadow-sm);
+}
+
+/* Tag list header styles - fully merge button and tag areas */
+.tag-list-header,
+.combined-tag-list-header,
+.keyword-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    margin-bottom: 4px;
+    padding: 0;
+    background: none;
+    border: none;
+    gap: 4px;
+    min-height: 24px;
+}
+
+/* Container for buttons and statistics */
+.tag-list-actions,
+.combined-tag-list-actions,
+.keyword-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    justify-content: flex-start;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.tag-list-actions .tag-action-btn:first-of-type,
+.combined-tag-list-actions .tag-action-btn:first-of-type,
+.keyword-list-actions .tag-action-btn:first-of-type {
+    margin-left: auto;
+}
+
+/* Action button styles */
+.tag-action-btn {
+    padding: 5px 12px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.tag-action-btn.add-btn {
+    background-color: var(--btn-bg);
+    color: var(--primary-text);
+    border-color: rgba(0, 0, 0, 0.06);
+    box-shadow: var(--shadow-xs);
+}
+
+.tag-action-btn.add-btn:hover {
+    transform: translateY(-1px);
+    background-color: var(--btn-hover);
+    border-color: var(--btn-hover);
+    box-shadow: var(--shadow-sm);
+}
+
+/* Batch delete button */
+.tag-action-btn.batch-btn {
+    background-color: #dc3545;
+    color: white;
+    border-color: rgba(0, 0, 0, 0.06);
+    box-shadow: var(--shadow-xs);
+}
+
+.tag-action-btn.batch-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+
+/* Inline statistics styles */
+.tag-stats-inline {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    background-color: rgba(148, 163, 184, 0.12);
+    padding: 3px 8px;
+    border-radius: 999px;
+    line-height: 1.4;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+[data-theme='dark'] .tag-stats-inline {
+    background-color: rgba(148, 163, 184, 0.15);
+    border-color: rgba(148, 163, 184, 0.25);
+}
+
+/* Tag container styles - fully merged into main container */
+.enhanced-tags,
+.enhanced-combined-tags,
+.enhanced-keywords {
+    padding: 0;
+    margin: 0;
+    min-height: auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 6px;
+    margin-top: 6px;
+    margin-bottom: 2px;
+}
+
+/* Hint when there are no tags */
+.enhanced-tags:empty::before,
+.enhanced-combined-tags:empty::before,
+.enhanced-keywords:empty::before {
+    content: 'No tags';
+    color: #6c757d;
+    font-style: italic;
+    font-size: 14px;
+}
+
+/* Ensure tags display correctly within container */
+.enhanced-tags .rel_utag, /* .rel_utag styles already updated, ensuring spacing here */
+.enhanced-combined-tags .rel_utag,
+.enhanced-keywords .rel_utag,
+.enhanced-tags .rel_ukey, /* Also applies to .rel_ukey */
+.enhanced-combined-tags .rel_ukey,
+.enhanced-keywords .rel_ukey {
+    margin: 2px 6px 2px 0;
+    display: inline-block;
+}
+
+/* Adjust outer container alignment for tag lists */
+#tagList,
+#keyList {
+    margin-left: 0;
+}
+
+.multi-select-selected-tag {
+    background-color: var(--tag-bg-light);
+    color: var(--tag-text-light);
+    border: 1px solid var(--tag-border-light);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem; /* 12px */
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    line-height: 1.4;
+    transition:
+        background-color 0.15s,
+        color 0.15s,
+        border-color 0.15s; /* Add transition effects */
+}
+[data-theme='dark'] .multi-select-selected-tag {
+    background-color: var(--tag-bg-dark);
+    color: var(--tag-text-dark);
+    border-color: var(--tag-border-dark);
+}
+
+.multi-select-selected-tag.tag-negative {
+    background-color: var(--tag-neg-bg-light);
+    color: var(--tag-neg-text-light);
+    border-color: var(--tag-neg-border-light);
+    box-shadow: 0 1px 4px rgba(185, 28, 28, 0.12);
+}
+[data-theme='dark'] .multi-select-selected-tag.tag-negative {
+    background-color: var(--tag-neg-bg-dark);
+    color: var(--tag-neg-text-dark);
+    border-color: var(--tag-neg-border-dark);
+    box-shadow: 0 1px 4px rgba(248, 113, 113, 0.18);
+}
+
+.tag-state-icon {
+    font-weight: 700;
+    font-size: 0.75rem;
+    line-height: 1;
+}
+
+.tag-state-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    margin-right: 8px;
+    border: 2px solid; /* Thicker border for better visibility */
+}
+
+.tag-state-badge.tag-state-positive {
+    background-color: var(--tag-bg-light);
+    color: var(--tag-text-light);
+    border-color: var(--link-color);
+}
+
+.tag-state-badge.tag-state-negative {
+    background-color: var(--tag-neg-bg-light);
+    color: var(--tag-neg-text-light);
+    border-color: #dc2626;
+}
+
+.tag-state-badge.tag-state-neutral {
+    background-color: rgba(0, 0, 0, 0.05);
+    color: var(--text-muted);
+    border-color: rgba(0, 0, 0, 0.2);
+}
+
+[data-theme='dark'] .tag-state-badge.tag-state-positive {
+    background-color: var(--tag-bg-dark);
+    color: var(--tag-text-dark);
+    border-color: var(--link-color);
+}
+
+[data-theme='dark'] .tag-state-badge.tag-state-negative {
+    background-color: var(--tag-neg-bg-dark);
+    color: var(--tag-neg-text-dark);
+    border-color: #f87171;
+}
+
+[data-theme='dark'] .tag-state-badge.tag-state-neutral {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: var(--text-muted);
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.multi-select-selected-tag .remove-tag {
+    cursor: pointer;
+    font-size: 1em;
+    color: #fff;
+    opacity: 0.9;
+    margin-left: 6px;
+    padding: 0;
+    background: none;
+    border-radius: 0;
+    width: auto;
+    height: auto;
+    display: inline;
+    align-items: unset;
+    justify-content: unset;
+    line-height: 1;
+    transition:
+        color 0.15s,
+        opacity 0.15s;
+    box-shadow: none;
+}
+
+.multi-select-selected-tag .remove-tag:hover {
+    color: #fff;
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.3);
+    text-shadow: 0 0 2px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme='dark'] .multi-select-selected-tag .remove-tag {
+    color: #ffffff;
+    opacity: 0.9;
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+[data-theme='dark'] .multi-select-selected-tag .remove-tag:hover {
+    color: #fff;
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.3);
+    text-shadow: 0 0 2px rgba(0, 0, 0, 0.5);
+}
+
+.multi-select-placeholder {
+    color: var(--text-muted);
+    font-style: normal;
+    font-size: 14px;
+}
+
+.multi-select-arrow {
+    font-size: 10px;
+    color: var(--link-color);
+    font-weight: bold;
+    margin-left: 8px;
+    flex-shrink: 0;
+    transition: transform var(--transition-fast);
+}
+
+.multi-select-trigger.active .multi-select-arrow {
+    transform: rotate(180deg);
+}
+
+.multi-select-dropdown-menu {
+    position: absolute;
+    top: calc(100% - 2px);
+    left: 0;
+    right: 0;
+    background-color: var(--card-bg);
+    border: 2px solid var(--link-color);
+    border-top: 1px solid var(--border-color);
+    border-radius: 0 0 10px 10px;
+    max-height: min(350px, calc(100vh - 200px));
+    z-index: 1001;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden; /* Keep border-radius intact */
+}
+
+/* Inner scrollable container for options */
+.multi-select-options {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 240px;
+}
+
+/* Ensure last option has rounded corners */
+.multi-select-options .multi-select-option:last-child {
+    border-radius: 0 0 8px 8px;
+}
+
+.multi-select-search {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--body-bg);
+}
+
+.multi-select-search input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: border-color var(--transition-fast);
+}
+
+.multi-select-search input:focus {
+    outline: none;
+    border-color: var(--link-color);
+}
+
+/* Multi-select dropdown within combined tag modal, dynamically adjust height based on content */
+.modal-content .multi-select-dropdown-menu {
+    max-height: min(60vh, calc(100vh - 300px));
+    min-height: auto;
+    /* No scrollbar needed when options are few */
+    overflow-y: auto;
+}
+
+/* When tag options are few, let dropdown height adapt to content */
+.modal-content .multi-select-dropdown-menu:has(.multi-select-option:nth-child(-n + 5)) {
+    max-height: none;
+    overflow-y: visible;
+}
+
+/* Provide fallback for browsers that don't support :has() */
+@supports not selector(:has(*)) {
+    .modal-content .multi-select-dropdown-menu {
+        max-height: min(50vh, calc(100vh - 250px));
+    }
+}
+
+[data-theme='dark'] .multi-select-dropdown-menu {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.multi-select-option {
+    display: flex;
+    align-items: center;
+    padding: 10px 16px; /* Adjust padding */
+    cursor: pointer;
+    font-size: 0.9375rem; /* 15px */
+    border-bottom: 1px solid rgba(0, 0, 0, 0.1); /* Light mode: subtle dark line */
+    transition:
+        background-color 0.15s,
+        color 0.15s;
+    background-color: transparent; /* Ensure initial background is transparent */
+    color: var(--text-color); /* Ensure initial text color is correct */
+}
+
+/* Dark mode: brighter separator line */
+[data-theme='dark'] .multi-select-option {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.multi-select-option:last-child {
+    border-bottom: none;
+}
+
+/* Hover style - subtle highlight with left accent */
+.multi-select-option:hover {
+    background-color: rgba(37, 99, 235, 0.12); /* Subtle blue tint */
+    border-left: 3px solid var(--link-color);
+    padding-left: 13px; /* Compensate for border */
+}
+
+/* Dark mode hover style - more visible background */
+[data-theme='dark'] .multi-select-option:hover {
+    background-color: rgba(96, 165, 250, 0.2); /* More visible blue glow */
+    border-left: 3px solid var(--link-color);
+}
+
+.multi-select-search input {
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color); /* Use theme border color */
+    width: 100%;
+    padding: 8px 10px;
+    box-sizing: border-box;
+    border-radius: 3px;
+    font-size: 0.875rem; /* 14px */
+}
+/* Search input colors in dark mode are handled through variables */
+
+.multi-select-selected-tag {
+    font-size: 0.8125rem; /* 13px */
+    padding: 3px 8px; /* Adjust padding */
+    border-radius: 6px; /* Unified border radius */
+}
+/* Selected-tag colors are handled through variables above */
+
+.multi-select-selected-tag.tag-negative {
+    background-color: var(--tag-neg-bg-light) !important;
+    color: var(--tag-neg-text-light) !important;
+    border-color: var(--tag-neg-border-light) !important;
+    box-shadow: 0 1px 4px rgba(185, 28, 28, 0.12) !important;
+}
+[data-theme='dark'] .multi-select-selected-tag.tag-negative {
+    background-color: var(--tag-neg-bg-dark) !important;
+    color: var(--tag-neg-text-dark) !important;
+    border-color: var(--tag-neg-border-dark) !important;
+    box-shadow: 0 1px 4px rgba(248, 113, 113, 0.18) !important;
+}
+
+.multi-select-search {
+    padding: 12px;
+    border-bottom: 1px solid var(--border-color);
+    background-color: var(--body-bg);
+}
+
+[data-theme='dark'] .multi-select-search {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+.multi-select-search input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 0.875rem;
+    box-sizing: border-box;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: border-color 0.15s ease;
+}
+
+.multi-select-search input:focus {
+    outline: none;
+    border-color: #009;
+}
+
+.multi-select-option {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background-color 0.1s ease;
+}
+
+.multi-select-option:hover {
+    background-color: #f0f8ff;
+}
+
+.multi-select-option:last-child {
+    border-bottom: none;
+}
+
+.multi-select-checkbox {
+    margin-right: 8px;
+    cursor: pointer;
+    width: 14px;
+    height: 14px;
+}
+
+.multi-select-option-text {
+    flex: 1;
+    color: var(--text-color);
+}
+
+.multi-select-new-tag {
+    padding: 12px;
+    border-top: 1px solid var(--border-color);
+    background-color: var(--body-bg);
+}
+
+[data-theme='dark'] .multi-select-new-tag {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+.multi-select-new-tag input {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 0.875rem;
+    box-sizing: border-box;
+    margin-bottom: 8px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: border-color 0.15s ease;
+}
+
+.multi-select-new-tag input:focus {
+    outline: none;
+    border-color: var(--link-color);
+}
+
+.multi-select-new-tag button {
+    width: 100%;
+    padding: 8px 12px;
+    background-color: var(--btn-bg);
+    color: var(--primary-text);
+    border: 1px solid var(--btn-bg);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease;
+    min-height: 36px;
+}
+
+.multi-select-new-tag button:hover:not(:disabled) {
+    background-color: var(--btn-hover);
+    border-color: var(--btn-hover);
+}
+
+.multi-select-new-tag button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Ensure dropdown displays correctly within paper container */
+.rel_utags {
+    position: relative;
+}
+
+.enhanced-tag {
+    position: relative;
+    display: inline-block;
+    margin: 3px;
+}
+
+.enhanced-tag:hover .tag-actions {
+    opacity: 1;
+}
+
+.tag-actions {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.tag-edit,
+.tag-delete {
+    background-color: var(--card-bg);
+    border: 1px solid var(--card-bg);
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tag-reco {
+    background-color: var(--card-bg);
+    border: 1px solid var(--card-bg);
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    color: #6c757d;
+}
+
+.tag-reco:hover {
+    background-color: #6c757d;
+    color: white;
+}
+
+.tag-manage-modal {
+    max-width: 920px;
+}
+
+.tag-manage-toolbar {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.tag-manage-filters {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.tag-manage-filters select {
+    padding: 6px 10px;
+    padding-right: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--card-bg);
+    color: var(--text-color);
+    font-size: 13px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 10px;
+}
+
+.tag-manage-filters select:hover {
+    border-color: var(--link-color);
+}
+
+.tag-manage-filters select:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+[data-theme='dark'] .tag-manage-filters select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+}
+
+.tag-manage-stats {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+}
+
+.tag-manage-stat {
+    padding: 2px 8px;
+    background: var(--body-bg);
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+}
+
+.tag-manage-add {
+    margin: 10px 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--body-bg);
+}
+
+[data-theme='dark'] .tag-manage-add {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.tag-manage-add-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.tag-manage-add-input {
+    flex: 1;
+    min-width: 0;
+    height: 32px;
+    padding: 6px 10px;
+    font-size: 13px;
+    border-radius: 6px;
+    border-width: 1px;
+}
+
+.tag-manage-add-btn {
+    width: 32px;
+    height: 32px;
+    min-height: 32px;
+    padding: 0;
+    font-size: 16px;
+    font-weight: bold;
+    flex-shrink: 0;
+    border-radius: 6px;
+}
+
+.tag-manage-help {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.tag-manage-pid-preview {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--card-bg);
+}
+
+[data-theme='dark'] .tag-manage-pid-preview {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.tag-manage-pid-preview-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 6px;
+    margin: 2px 0;
+    border-radius: 4px;
+    background: var(--body-bg);
+}
+
+[data-theme='dark'] .tag-manage-pid-preview-item {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.tag-manage-pid-preview-pid {
+    flex-shrink: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--link-color);
+    color: #fff;
+}
+
+[data-theme='dark'] .tag-manage-pid-preview-pid {
+    background: var(--link-color);
+}
+
+.tag-manage-pid-preview-title {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-color);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tag-manage-pid-preview-loading {
+    font-size: 12px;
+    color: var(--text-muted);
+    padding: 4px 0;
+}
+
+.tag-manage-pid-preview-error {
+    font-size: 12px;
+    color: var(--danger-color);
+    padding: 4px 0;
+}
+
+.tag-manage-pid-preview-more {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 4px 0;
+}
+
+.tag-manage-pid-preview-item.not-found .tag-manage-pid-preview-pid {
+    background: var(--danger-color);
+}
+
+.tag-manage-pid-preview-title.not-found {
+    color: var(--danger-color);
+    font-style: italic;
+}
+
+.tag-manage-list {
+    max-height: 420px;
+    overflow: auto;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 6px;
+}
+
+.tag-manage-rows {
+    display: flex;
+    flex-direction: column;
+}
+
+.tag-manage-row {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.tag-manage-row:last-child {
+    border-bottom: none;
+}
+
+.tag-manage-label {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    background: var(--card-bg);
+    color: var(--text-color);
+    cursor: pointer;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tag-manage-label.pos {
+    background: rgba(40, 167, 69, 0.12);
+    border-color: rgba(40, 167, 69, 0.35);
+    color: #28a745;
+}
+
+.tag-manage-label.neg {
+    background: rgba(220, 53, 69, 0.12);
+    border-color: rgba(220, 53, 69, 0.35);
+    color: #dc3545;
+}
+
+.tag-manage-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.tag-manage-title {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.2;
+    margin-bottom: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tag-manage-meta {
+    font-size: 12px;
+    opacity: 0.85;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.tag-manage-remove {
+    padding: 6px 10px;
+}
+
+.tag-manage-loading,
+.tag-manage-empty {
+    padding: 16px;
+    text-align: center;
+    opacity: 0.8;
+}
+
+.tag-manage-page {
+    font-size: 12px;
+    opacity: 0.85;
+}
+
+/* Tag manage pagination footer */
+.tag-manage-pagination {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    width: 100%;
+    gap: 12px;
+}
+
+.tag-manage-pagination > button:first-child {
+    justify-self: start;
+}
+
+.tag-manage-pagination > .tag-manage-page {
+    justify-self: center;
+}
+
+.tag-manage-pagination > button:last-child {
+    justify-self: end;
+}
+
+.tag-edit {
+    color: #007bff;
+}
+
+.tag-edit:hover {
+    background-color: #007bff;
+    color: white;
+}
+
+.tag-delete {
+    color: #dc3545;
+}
+
+.tag-delete:hover {
+    background-color: #dc3545;
+    color: white;
+}
+
+.tag-stats {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+    font-size: 13px;
+    color: #666;
+    text-align: center;
+}
+
+/* .modal-body and .modal-footer styles moved to components/modals.css */
+
+/* --- Tag List Alignment Overrides (Moved from forms.css) --- */
+
+/* --- Fix spacing between tag section header and 'all' tag --- */
+.tag-list-header {
+    margin-bottom: 0 !important;
+}
+.enhanced-tags {
+    margin-top: 0 !important;
+}
+
+/* --- Unified left alignment for tags, combined tags, and keywords --- */
+.enhanced-tag-list,
+.enhanced-combined-tag-list,
+.enhanced-keyword-list {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+
+.enhanced-tags,
+.enhanced-combined-tags,
+.enhanced-keywords {
+    margin-left: 0 !important;
+}
+
+.tag-list-header,
+.combined-tag-list-header,
+.keyword-list-header {
+    padding-left: 0 !important;
+}
+
+/* --- Unified left margin for visual aesthetics (consistent with main content area) --- */
+.enhanced-tag-list,
+.enhanced-combined-tag-list,
+.enhanced-keyword-list {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+}
+
+.enhanced-tags,
+.enhanced-combined-tags,
+.enhanced-keywords,
+.tag-list-header,
+.combined-tag-list-header,
+.keyword-list-header {
+    margin-left: 0 !important;
+    padding-left: 0 !important;
+}

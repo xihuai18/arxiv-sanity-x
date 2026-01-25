@@ -7,10 +7,7 @@
     const NS = 'ArxivSanityMarkdownSanitizer';
 
     function escapeText(text) {
-        return String(text)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
+        return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
     function buildLinkValidator(options) {
@@ -35,7 +32,11 @@
             if (lower.startsWith('file:')) return false;
             if (lower.startsWith('data:')) return false;
 
-            return lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('mailto:');
+            return (
+                lower.startsWith('http://') ||
+                lower.startsWith('https://') ||
+                lower.startsWith('mailto:')
+            );
         };
     }
 
@@ -49,6 +50,6 @@
     global[NS] = {
         escapeText: escapeText,
         buildLinkValidator: buildLinkValidator,
-        stripMarkdownImages: stripMarkdownImages
+        stripMarkdownImages: stripMarkdownImages,
     };
 })(typeof window !== 'undefined' ? window : this);

@@ -1,0 +1,20 @@
+# Build outputs
+static/dist/
+node_modules/
+
+# Third-party libraries
+static/lib/
+
+# Data files
+data/
+*.p
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Misc
+*.min.js
+*.min.css

@@ -22,10 +22,10 @@
 })();
 </script>
 
-<!-- CSS -->
-<link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css') }}">
-<!-- Common utilities (CSRF, events, dropdown registry) - Deferred for better performance -->
-<script defer src="{{ url_for('static', filename='dist/common_utils.js') }}"></script>
+<!-- CSS - Use built files with hash filenames -->
+<link rel="stylesheet" type="text/css" href="{{ hashed_static('dist/main.css') }}">
+<!-- Common utilities (CSRF, events, dropdown registry) - Must load synchronously as other scripts depend on it -->
+<script src="{{ hashed_static('dist/common_utils.js') }}"></script>
 <!-- Google Fonts - Inter -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

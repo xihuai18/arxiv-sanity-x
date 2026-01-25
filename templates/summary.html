@@ -2,8 +2,8 @@
 
 {% block variables %}
 <script>
-var paper = {{ paper | tojson }};
 var pid = {{ pid | tojson }};
+var paper = {{ paper | tojson }};
 var defaultSummaryModel = {{ default_summary_model | tojson }};
 var tags = {{ tags | tojson }};
 </script>
@@ -12,21 +12,31 @@ var tags = {{ tags | tojson }};
 {% block head_extra %}
 <!-- Markdown + Math rendering (summary page only) -->
 <script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/markdown_sanitizer_utils.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/markdown_renderer_utils.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/markdown_core_utils.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/markdown_summary_dom_utils.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/markdown_summary_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_sanitizer_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_renderer_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_core_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_summary_dom_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_summary_utils.js') }}"></script>
 <!-- React + shared tag dropdown (for consistent 3-state tag UI across pages) -->
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/tag_dropdown_shared.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/author_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/tag_dropdown_shared.js') }}"></script>
+<script defer src="{{ hashed_static('dist/author_utils.js') }}"></script>
 <script>
 {% raw %}
 window.MathJax = {
+    // Load textmacros extension for \texttt, \textbf etc. in math mode
     loader: {
-        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat']
+        load: ['[tex]/textmacros']
+    },
+    options: {
+        // Avoid Edge/Chromium warning: focus inside an aria-hidden subtree.
+        // We don't rely on MathJax menu/a11y on this page.
+        enableMenu: false,
+        enableAssistiveMml: false,
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+        ignoreHtmlClass: 'tex2jax_ignore',
+        processHtmlClass: 'tex2jax_process'
     },
     tex: {
         inlineMath: [['\\(', '\\)'], ['$', '$']],
@@ -42,6 +52,7 @@ window.MathJax = {
                 'boldsymbol',  // Bold symbols
                 'braket',      // Bra-ket notation for quantum mechanics
                 'cancel',      // Strikethrough
+                'cases',       // Extended cases environments (numcases, subnumcases)
                 'color',       // Colors
                 'enclose',     // Enclosing notations
                 'mathtools',   // Extended math tools
@@ -50,7 +61,7 @@ window.MathJax = {
                 'noundefined', // Don't show undefined command errors
                 'physics',     // Physics package macros
                 'tagformat',   // Allow tags in more contexts
-                'textmacros',  // Text mode macros
+                'textmacros',  // Text mode macros (enables \texttt, \textbf, etc. in \text{})
                 'unicode',     // Unicode support
                 'verb'         // Verbatim
             ]
@@ -148,28 +159,29 @@ window.MathJax = {
             littleo: ['\\mathrm{o}\\left(#1\\right)', 1],
 
             // Arrows (ensure compatibility)
-            xrightarrow: ['\\xrightarrow[#1]{#2}', 2],
-            xleftarrow: ['\\xleftarrow[#1]{#2}', 2],
+            // NOTE: xrightarrow/xleftarrow are built-in ams commands, do NOT redefine them
+            // as it causes infinite recursion. Only define aliases if needed.
             implies: '\\Rightarrow',
             impliedby: '\\Leftarrow',
             iff: '\\Leftrightarrow',
             to: '\\rightarrow',
 
-            // Text in math mode (ensure \text works reliably)
-            textit: ['\\textit{#1}', 1],
-            textbf: ['\\textbf{#1}', 1],
-            textrm: ['\\textrm{#1}', 1],
-            textsf: ['\\textsf{#1}', 1],
-            texttt: ['\\texttt{#1}', 1],
+            // Text in math mode - use math font variants for compatibility
+            // NOTE: \texttt, \textbf etc. are text-mode commands that may not work directly in math mode
+            // We map them to their math-mode equivalents
+            textit: ['\\mathit{#1}', 1],
+            textbf: ['\\mathbf{#1}', 1],
+            textrm: ['\\mathrm{#1}', 1],
+            textsf: ['\\mathsf{#1}', 1],
+            texttt: ['\\mathtt{#1}', 1],
 
             // Common abbreviations
             iid: '\\text{i.i.d.}',
             wrt: '\\text{w.r.t.}',
             aka: '\\text{a.k.a.}',
 
-            // Spacing fixes
-            given: '\\,|\\,',
-            mid: '\\,|\\,',
+            // Spacing fixes (note: do NOT redefine \\mid as it's a standard LaTeX relation symbol)
+            given: '\\\\,|\\\\,',
 
             // Matrix/Vector norms
             Fnorm: '\\|\\cdot\\|_{\\mathrm{F}}',
@@ -178,14 +190,177 @@ window.MathJax = {
             // Indicator function
             ind: '\\mathbb{1}',
             indicator: '\\mathbb{1}',
-            one: '\\mathbb{1}'
+            one: '\\mathbb{1}',
+
+            // mathbbm package support (indicator function variants)
+            mathbbm: ['\\mathbb{#1}', 1],
+            mathbbmss: ['\\mathbb{#1}', 1],
+
+            // dsfont package support (double-struck fonts)
+            mathds: ['\\mathbb{#1}', 1],
+
+            // mathrsfs package support (script fonts)
+            mathscr: ['\\mathcal{#1}', 1],
+            mathpzc: ['\\mathcal{#1}', 1],
+
+            // Additional blackboard bold symbols
+            AA: '\\mathbb{A}',
+            BB: '\\mathbb{B}',
+            DD: '\\mathbb{D}',
+            GG: '\\mathbb{G}',
+            II: '\\mathbb{I}',
+            JJ: '\\mathbb{J}',
+            KK: '\\mathbb{K}',
+            LL: '\\mathbb{L}',
+            MM: '\\mathbb{M}',
+            OO: '\\mathbb{O}',
+            SS: '\\mathbb{S}',
+            TT: '\\mathbb{T}',
+            UU: '\\mathbb{U}',
+            VV: '\\mathbb{V}',
+            WW: '\\mathbb{W}',
+            XX: '\\mathbb{X}',
+            YY: '\\mathbb{Y}',
+
+            // Calligraphic letters
+            calA: '\\mathcal{A}',
+            calB: '\\mathcal{B}',
+            calC: '\\mathcal{C}',
+            calD: '\\mathcal{D}',
+            calE: '\\mathcal{E}',
+            calF: '\\mathcal{F}',
+            calG: '\\mathcal{G}',
+            calH: '\\mathcal{H}',
+            calI: '\\mathcal{I}',
+            calJ: '\\mathcal{J}',
+            calK: '\\mathcal{K}',
+            calL: '\\mathcal{L}',
+            calM: '\\mathcal{M}',
+            calN: '\\mathcal{N}',
+            calO: '\\mathcal{O}',
+            calP: '\\mathcal{P}',
+            calQ: '\\mathcal{Q}',
+            calR: '\\mathcal{R}',
+            calS: '\\mathcal{S}',
+            calT: '\\mathcal{T}',
+            calU: '\\mathcal{U}',
+            calV: '\\mathcal{V}',
+            calW: '\\mathcal{W}',
+            calX: '\\mathcal{X}',
+            calY: '\\mathcal{Y}',
+            calZ: '\\mathcal{Z}',
+
+            // Fraktur letters (common in algebra)
+            frakA: '\\mathfrak{A}',
+            frakB: '\\mathfrak{B}',
+            frakC: '\\mathfrak{C}',
+            frakD: '\\mathfrak{D}',
+            frakE: '\\mathfrak{E}',
+            frakF: '\\mathfrak{F}',
+            frakG: '\\mathfrak{G}',
+            frakH: '\\mathfrak{H}',
+            frakI: '\\mathfrak{I}',
+            frakJ: '\\mathfrak{J}',
+            frakK: '\\mathfrak{K}',
+            frakL: '\\mathfrak{L}',
+            frakM: '\\mathfrak{M}',
+            frakN: '\\mathfrak{N}',
+            frakO: '\\mathfrak{O}',
+            frakP: '\\mathfrak{P}',
+            frakQ: '\\mathfrak{Q}',
+            frakR: '\\mathfrak{R}',
+            frakS: '\\mathfrak{S}',
+            frakT: '\\mathfrak{T}',
+            frakU: '\\mathfrak{U}',
+            frakV: '\\mathfrak{V}',
+            frakW: '\\mathfrak{W}',
+            frakX: '\\mathfrak{X}',
+            frakY: '\\mathfrak{Y}',
+            frakZ: '\\mathfrak{Z}',
+
+            // Common Lie algebras
+            gl: '\\mathfrak{gl}',
+            sl: '\\mathfrak{sl}',
+            so: '\\mathfrak{so}',
+            su: '\\mathfrak{su}',
+            sp: '\\mathfrak{sp}',
+
+            // Additional operators
+            sgn: '\\mathrm{sgn}',
+            sinc: '\\mathrm{sinc}',
+            erf: '\\mathrm{erf}',
+            erfc: '\\mathrm{erfc}',
+            Res: '\\mathrm{Res}',
+            ord: '\\mathrm{ord}',
+            lcm: '\\mathrm{lcm}',
+            gcd: '\\mathrm{gcd}',
+
+            // Machine learning specific
+            Loss: '\\mathcal{L}',
+            Data: '\\mathcal{D}',
+            Model: '\\mathcal{M}',
+            Hypothesis: '\\mathcal{H}',
+
+            // Optimization
+            prox: '\\mathrm{prox}',
+            proj: '\\mathrm{proj}',
+            dom: '\\mathrm{dom}',
+            epi: '\\mathrm{epi}',
+            conv: '\\mathrm{conv}',
+            aff: '\\mathrm{aff}',
+            relint: '\\mathrm{relint}',
+            ri: '\\mathrm{ri}',
+            cl: '\\mathrm{cl}',
+            int: '\\mathrm{int}',
+            bd: '\\mathrm{bd}',
+
+            // Category theory
+            Hom: '\\mathrm{Hom}',
+            End: '\\mathrm{End}',
+            Aut: '\\mathrm{Aut}',
+            Mor: '\\mathrm{Mor}',
+            Ob: '\\mathrm{Ob}',
+            id: '\\mathrm{id}',
+            Id: '\\mathrm{Id}',
+
+            // Topology
+            Int: '\\mathrm{Int}',
+            Cl: '\\mathrm{Cl}',
+            Bd: '\\mathrm{Bd}',
+
+            // Additional symbols
+            eps: '\\varepsilon',
+            vphi: '\\varphi',
+            vtheta: '\\vartheta',
+
+            // Transpose and related
+            T: '^{\\mathsf{T}}',
+            transpose: '^{\\mathsf{T}}',
+            inv: '^{-1}',
+            pinv: '^{\\dagger}',
+            conj: '^{*}',
+
+            // Common decorations
+            hat: ['\\widehat{#1}', 1],
+            tilde: ['\\widetilde{#1}', 1],
+            bar: ['\\overline{#1}', 1],
+            ul: ['\\underline{#1}', 1],
+
+            // Probability distributions
+            Normal: '\\mathcal{N}',
+            Uniform: '\\mathrm{Uniform}',
+            Bernoulli: '\\mathrm{Bernoulli}',
+            Binomial: '\\mathrm{Binomial}',
+            Poisson: '\\mathrm{Poisson}',
+            Exponential: '\\mathrm{Exponential}',
+            Gamma: '\\mathrm{Gamma}',
+            Beta: '\\mathrm{Beta}',
+            Dirichlet: '\\mathrm{Dirichlet}',
+            Categorical: '\\mathrm{Categorical}',
+            Multinomial: '\\mathrm{Multinomial}'
         }
     },
-    options: {
-        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
-        ignoreHtmlClass: 'tex2jax_ignore',
-        processHtmlClass: 'tex2jax_process'
-    },
+    // (moved to options above)
     chtml: {
         scale: 1.0,
         mtextInheritFont: false,
@@ -205,7 +380,10 @@ window.MathJax = {
 };
 {% endraw %}
 </script>
-<script id="MathJax-script" defer src="{{ url_for('static', filename='lib/es5/tex-chtml-full.js') }}"></script>
+
+<!-- Ensure MathJax script is actually loaded on summary page.
+    Use the same id as the on-demand loader to avoid duplicates. -->
+<script defer id="MathJax-script" src="{{ url_for('static', filename='lib/es5/tex-chtml-full.js') }}"></script>
 {% endblock %}
 
 {% block content %}
@@ -218,5 +396,5 @@ window.MathJax = {
 {% endblock %}
 
 {% block elements %}
-<script defer src="{{ url_for('static', filename='dist/paper_summary.js') }}"></script>
+<script defer src="{{ hashed_static('dist/paper_summary.js') }}"></script>
 {% endblock %}

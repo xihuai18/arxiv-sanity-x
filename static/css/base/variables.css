@@ -1,0 +1,122 @@
+/* Base: variables - Split from style.css */
+/* ===== Theme Variables ===== */
+:root {
+    /* Core colors - Modern arXiv-inspired palette */
+    --primary-bg: #b31b1b; /* ArXiv signature red */
+    --primary-bg-light: #d32f2f; /* Lighter red for hover states */
+    --primary-text: #ffffff; /* Header/button text */
+    --body-bg: #f5f7fa; /* Refined page background */
+    --card-bg: #ffffff; /* Card/control background */
+    --text-color: #1a1a2e; /* Deeper, more readable text */
+    --text-muted: #64748b; /* Modern muted text */
+    --btn-bg: #b31b1b; /* Button background (ArXiv red) */
+    --btn-hover: #8b1515; /* Button hover (dark red) */
+    --link-color: #2563eb; /* Modern vibrant blue */
+    --link-hover: #1d4ed8; /* Link hover (darker blue) */
+    --border-color: #e2e8f0; /* Subtle border color */
+    --border-radius: 10px; /* Slightly larger border radius */
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07), 0 2px 4px rgba(0, 0, 0, 0.05);
+    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.08), 0 4px 6px rgba(0, 0, 0, 0.05);
+    --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.1), 0 10px 10px rgba(0, 0, 0, 0.04);
+
+    /* Accent colors */
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --danger-color: #ef4444;
+    --info-color: #06b6d4;
+
+    /* Tag colors (blue series) - More vibrant */
+    --tag-bg-light: #eff6ff; /* Soft blue background */
+    --tag-border-light: #bfdbfe; /* Light blue border */
+    --tag-text-light: #1e40af; /* Vivid blue text */
+    --tag-hover-bg-light: #dbeafe; /* Hover blue background */
+    --tag-hover-border-light: #93c5fd; /* Hover border */
+    --tag-hover-text-light: #1e3a8a; /* Dark blue text on hover */
+
+    /* Negative tag colors (rose series) */
+    --tag-neg-bg-light: #fff5f5;
+    --tag-neg-border-light: #fecaca;
+    --tag-neg-text-light: #b91c1c;
+    --tag-neg-hover-bg-light: #fee2e2;
+    --tag-neg-hover-border-light: #fca5a5;
+    --tag-neg-hover-text-light: #991b1b;
+
+    /* Keyword colors (warm amber series) */
+    --keyword-bg-light: #fffbeb;
+    --keyword-border-light: #fde68a;
+    --keyword-text-light: #d97706;
+    --keyword-hover-bg-light: #fef3c7;
+    --keyword-hover-border-light: #fcd34d;
+    --keyword-hover-text-light: #b45309;
+
+    /* Transitions */
+    --transition-fast: 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-slow: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+
+    /* Glassmorphism */
+    --glass-bg: rgba(255, 255, 255, 0.8);
+    --glass-border: rgba(255, 255, 255, 0.3);
+    --content-max-width: 1280px;
+    --toc-width: 220px;
+    --toc-gap: 10px;
+}
+
+[data-theme='dark'] {
+    --primary-bg: #8b1515; /* Dark mode - rich red */
+    --primary-bg-light: #a52020;
+    --primary-text: #f5f5f5; /* Dark mode - bright text */
+    --body-bg: #0a0a0f; /* Deeper dark background */
+    --card-bg: #12121a; /* Card background */
+    --text-color: #e8eaed; /* Light text */
+    --text-muted: #9ca3af; /* Muted text */
+    --btn-bg: #c02f2f; /* Bright red button */
+    --btn-hover: #e53935; /* Button hover */
+    --link-color: #60a5fa; /* Bright blue link */
+    --link-hover: #93c5fd; /* Link hover */
+    --border-color: #262630; /* Subtle border */
+    --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.6);
+    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.7);
+    --shadow-xl: 0 20px 40px rgba(0, 0, 0, 0.8);
+
+    /* Accent colors for dark mode */
+    --success-color: #34d399;
+    --warning-color: #fbbf24;
+    --danger-color: #f87171;
+    --info-color: #22d3ee;
+
+    /* Tag colors (dark mode - blue series) */
+    --tag-bg-dark: #1e293b; /* Deep blue background */
+    --tag-border-dark: #334155; /* Medium blue border */
+    --tag-text-dark: #93c5fd; /* Bright blue text */
+    --tag-hover-bg-dark: #334155; /* Hover background */
+    --tag-hover-border-dark: #60a5fa; /* Hover border */
+    --tag-hover-text-dark: #bfdbfe; /* Light blue text on hover */
+
+    /* Negative tag colors (dark mode - rose series) */
+    --tag-neg-bg-dark: #2b1b1f;
+    --tag-neg-border-dark: #7f1d1d;
+    --tag-neg-text-dark: #fecdd3;
+    --tag-neg-hover-bg-dark: #3b1f25;
+    --tag-neg-hover-border-dark: #f87171;
+    --tag-neg-hover-text-dark: #ffe4e6;
+
+    /* Keyword colors (dark mode - warm amber) */
+    --keyword-bg-dark: #292524;
+    --keyword-border-dark: #44403c;
+    --keyword-text-dark: #fbbf24;
+    --keyword-hover-bg-dark: #44403c;
+    --keyword-hover-border-dark: #78716c;
+    --keyword-hover-text-dark: #fcd34d;
+
+    /* Glassmorphism */
+    --glass-bg: rgba(18, 18, 26, 0.85);
+    --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+/* ===== Theme Variables END =====  */
+/* ===== Theme Variables END ===== */

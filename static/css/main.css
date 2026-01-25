@@ -1,0 +1,45 @@
+/*
+ * Main CSS Entry Point
+ *
+ * This is the aggregated entry file for CSS modularization.
+ * All styles have been migrated from style.css to a modular structure.
+ *
+ * Module structure:
+ * - base/          # Base styles (variables, reset, typography)
+ * - layout/        # Layout styles (header, page containers)
+ * - components/    # Component styles (buttons, forms, tags, etc.)
+ * - pages/         # Page-specific styles
+ * - vendors/       # Third-party library styles
+ */
+
+/* ===== Base Styles ===== */
+@import 'base/variables.css';
+@import 'base/reset.css';
+@import 'base/typography.css';
+
+/* ===== Layout Styles ===== */
+@import 'layout/header.css';
+@import 'layout/page-content.css';
+
+/* ===== Component Styles ===== */
+@import 'components/buttons.css';
+@import 'components/forms.css';
+@import 'components/tags.css';
+@import 'components/words.css';
+@import 'components/cards.css';
+@import 'components/readinglist.css';
+@import 'components/modals.css';
+@import 'components/search.css';
+@import 'components/animations.css';
+
+/* ===== Page Styles ===== */
+@import 'pages/index.css';
+@import 'pages/summary.css';
+@import 'pages/readinglist.css';
+@import 'pages/inspect.css';
+@import 'pages/profile.css';
+@import 'pages/stats.css';
+@import 'pages/about.css';
+
+/* ===== Vendor Styles ===== */
+@import 'vendors/mathjax.css';

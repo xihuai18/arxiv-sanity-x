@@ -9,6 +9,8 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 ## 📋 Table of Contents
 
 - [Core Overview](#-core-overview)
+- [Tech Stack](#-tech-stack)
+- [Project Structure](#-project-structure)
 - [User Guide (Web UI)](#-user-guide-web-ui)
 - [Minimum Required to Run](#-minimum-required-to-run)
 - [Data Layout & Migration](#-data-layout--migration)
@@ -18,16 +20,16 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 - [Prerequisites & OS Notes](#-prerequisites--os-notes)
 - [Configuration Guide](#configuration-guide)
   - [Configuration Overview](#configuration-overview)
-  - [1. vars.py - Core Configuration](#1-varspy---core-configuration)
+  - [1. .env File - Core Configuration](#1-env-file---core-configuration)
   - [2. arxiv_daemon.py - arXiv Categories](#2-arxiv_daemonpy---arxiv-categories)
   - [3. llm.yml - LiteLLM Gateway](#3-llmyml---litellm-gateway)
-  - [4. Environment Variables](#4-environment-variables)
-  - [5. Startup Parameters](#5-startup-parameters)
+  - [4. Configuration CLI Tool](#4-configuration-cli-tool)
 - [Core Features](#-core-features)
 - [Usage Guide](#-usage-guide)
 - [AI Paper Summarization](#-ai-paper-summarization)
 - [Advanced Features](#-advanced-features)
 - [API Reference](#-api-reference)
+- [Development Guide](#-development-guide)
 - [Changelog](#-changelog)
 
 ---
@@ -44,64 +46,182 @@ Key capabilities:
 - **AI summaries on demand**: generate structured summaries from HTML (ar5iv/arxiv) or PDF parsing (MinerU), with caching and status tracking.
 - **Automation**: optional scheduler for fetch → compute → summarize → email, plus utilities for lock cleanup and data backup.
 
+## 🛠️ Tech Stack
+
+### Backend
+- **Framework**: Flask with Blueprint-based modular architecture
+- **Database**: SQLite with custom KV store (WAL mode, compression support)
+- **Task Queue**: Huey (SQLite backend) for async summary generation
+- **Configuration**: pydantic-settings for type-safe config management
+- **Real-time**: Server-Sent Events (SSE) for live updates
+
+### Frontend
+- **Templates**: Jinja2 with responsive HTML/CSS
+- **JavaScript**: Vanilla JS with esbuild bundling
+- **Rendering**: MathJax for LaTeX, markdown-it for Markdown
+- **Build**: esbuild with content-hash caching
+
+### ML/AI
+- **Search**: TF-IDF (scikit-learn) + semantic embeddings (Ollama/OpenAI API)
+- **Recommendations**: SVM classifiers trained on user feedback
+- **Summarization**: OpenAI-compatible LLM APIs
+- **PDF Parsing**: MinerU (API or local VLM)
+
+### Infrastructure
+- **Web Server**: Gunicorn with multi-worker support
+- **Scheduler**: APScheduler for automated pipelines
+- **Services**: LiteLLM gateway, Ollama embeddings, MinerU VLM
+
+## 📁 Project Structure
+
+```
+arxiv-sanity-x/
+├── serve.py              # Flask entry point
+├── tasks.py              # Huey task definitions
+│
+├── backend/              # Flask application
+│   ├── app.py            # App factory & initialization
+│   ├── blueprints/       # Route handlers (8 blueprints)
+│   │   ├── web.py        # Page routes (/, /summary, /profile, etc.)
+│   │   ├── api_user.py   # User authentication & state
+│   │   ├── api_search.py # Search endpoints
+│   │   ├── api_summary.py# Summary generation & status
+│   │   ├── api_tags.py   # Tag management
+│   │   ├── api_papers.py # Paper data & images
+│   │   ├── api_readinglist.py # Reading list
+│   │   └── api_sse.py    # Server-Sent Events
+│   ├── services/         # Business logic layer
+│   │   ├── data_service.py    # Cache & data management
+│   │   ├── search_service.py  # TF-IDF, semantic, hybrid search
+│   │   ├── summary_service.py # Summary generation & caching
+│   │   ├── semantic_service.py# Embedding & vector search
+│   │   └── ...
+│   ├── schemas/          # Pydantic request/response models
+│   └── utils/            # Helpers (cache, SSE, manifest)
+│
+├── aslite/               # Data layer
+│   ├── db.py             # SqliteKV wrapper & DB access
+│   ├── repositories.py   # Repository pattern for data access
+│   └── arxiv.py          # arXiv API client
+│
+├── config/               # Configuration
+│   ├── settings.py       # pydantic-settings definitions
+│   ├── cli.py            # Config CLI tool
+│   └── llm.yml           # LiteLLM gateway config
+│
+├── tools/                # CLI tools & automation
+│   ├── arxiv_daemon.py   # Paper fetching from arXiv
+│   ├── compute.py        # TF-IDF & embedding computation
+│   ├── daemon.py         # Scheduled task runner
+│   ├── batch_paper_summarizer.py # Batch summary generation
+│   ├── paper_summarizer.py # Single paper summarizer
+│   └── send_emails.py    # Email recommendations
+│
+├── bin/                  # Service launchers
+│   ├── run_services.py   # One-command multi-service launcher
+│   ├── up.sh             # Gunicorn startup script
+│   ├── embedding_serve.sh# Ollama embedding server
+│   ├── mineru_serve.sh   # MinerU VLM server
+│   └── litellm.sh        # LiteLLM gateway
+│
+├── static/               # Frontend assets
+│   ├── *.js              # Source JavaScript files
+│   ├── css/              # Stylesheets
+│   ├── lib/              # Third-party libraries
+│   └── dist/             # Built assets (gitignored)
+│
+├── templates/            # Jinja2 HTML templates
+├── scripts/              # Build & maintenance scripts
+├── tests/                # Test suite
+└── data/                 # Runtime data (gitignored)
+    ├── papers.db         # Paper metadata
+    ├── dict.db           # User data (tags, keywords, etc.)
+    ├── features.p        # Computed features
+    └── summary/          # Cached summaries
+```
+
 ## 🧭 User Guide (Web UI)
 
-This section is a quick “how to use the website” map. Most workflows start from the homepage.
+This section is a quick "how to use the website" map. Most workflows start from the homepage.
 
 ### 1) Sign in
 
-- Go to Profile and log in with a username (no password).
-- If you plan to expose the site publicly, put it behind authentication/VPN and set a stable `ARXIV_SANITY_SECRET_KEY` (or `secret_key.txt`).
+- Click **Profile** in the top-right corner to access your profile page
+- Enter a username to log in (no password required, suitable for personal/intranet use)
+- If you plan to expose the site publicly, put it behind authentication/VPN and set a stable `ARXIV_SANITY_SECRET_KEY` (or `secret_key.txt`)
 
-### 2) Search and filter papers
+### 2) Browse and Search Papers
 
-- Homepage search supports field filters like `ti:`, `au:`, `cat:`, and `id:`.
-- Switch search mode:
-  - **keyword**: fast, no extra services required
-  - **semantic**: needs embeddings
-  - **hybrid**: best default if embeddings are enabled (adjust weight)
+**Homepage Features:**
+- Papers are displayed by time (newest first) by default
+- Click paper title to view details, click arXiv link to open original
+- Use the search box at the top (keyboard shortcut: `Ctrl+K`)
 
-### 3) Tag papers and get recommendations
+**Search Syntax:**
+| Syntax | Example | Description |
+|--------|---------|-------------|
+| Title | `ti:transformer` | Search titles containing transformer |
+| Author | `au:goodfellow` | Search by author |
+| Category | `cat:cs.LG` | Search specific arXiv category |
+| ID | `id:2312.12345` | Find by arXiv ID |
+| Phrase | `"large language model"` | Exact phrase match |
+| Exclude | `-survey` or `!survey` | Exclude results containing the term |
 
-- Add tags to papers you like to train tag-based recommendations.
-- Use negative feedback (when enabled in UI) to down-rank unwanted topics.
-- Use combined tags (e.g. “RL,NLP”) for intersection recommendations.
+**Search Mode Toggle:**
+- **keyword**: Fastest, TF-IDF based, no extra services required
+- **semantic**: Vector similarity based, requires Embedding enabled
+- **hybrid**: Combines keyword + semantic, adjustable weight (recommended)
 
-### 4) Read summaries (on demand)
+### 3) Tagging System and Personalized Recommendations
 
-- Open a paper and click Summary.
-- The site generates summaries via your configured LLM and caches results.
-- You can clear the current model’s summary or clear all cached artifacts for a paper.
+**Adding Tags:**
+- Click the **+** button on paper cards to add tags
+- Supports positive tags (like) and negative tags (dislike)
+- Tags train your personal SVM recommendation model
 
-### 5) Reading list
+**Using Tag Recommendations:**
+- Select **Tags** sort mode on the homepage
+- Choose one or more tags, system will recommend similar papers
+- Combined tags (e.g., `RL,NLP`) enable intersection recommendations
 
-- Add papers to your reading list for later.
-- Useful when you want to queue papers before running batch summarization.
+### 4) AI Paper Summaries
 
-### 6) Optional: email recommendations
+- Click a paper to enter detail page, click **Summary** button
+- First generation requires LLM processing (typically 10-30 seconds)
+- Results are cached, subsequent visits display instantly
+- Switch between different LLM models to regenerate
+- Clear current model cache or all caches as needed
 
-- Configure SMTP in [vars.py](vars.py), set `YOUR_EMAIL_PASSWD`, and set a correct public `HOST`.
-- Add your email in Profile.
-- Run [send_emails.py](send_emails.py) or enable the scheduler daemon ([daemon.py](daemon.py)).
+### 5) Reading List
+
+- Click the **📚** button on paper cards to add to reading list
+- Visit `/readinglist` page to manage your reading list
+- Useful for batch summarization or read-later queuing
+
+### 6) Other Features
+
+- **Stats page**: View paper statistics, daily addition charts
+- **About page**: View system info, supported arXiv categories
+- **Email recommendations**: Receive daily recommendations after configuring SMTP (see Configuration Guide)
 
 ## ✅ Minimum Required to Run
 
 If you want the smallest setup that still works end-to-end (browse + search + on-demand summaries), you need:
 
-1. Create [vars.py](vars.py) from [vars_template.py](vars_template.py).
-2. Provide a working LLM API key (commonly via `YOUR_LLM_API_KEY`) and set a valid `LLM_BASE_URL` + `LLM_NAME`.
+1. Create `.env` from `.env.example`.
+2. Provide a working LLM API key via `ARXIV_SANITY_LLM_API_KEY` and set valid `ARXIV_SANITY_LLM_BASE_URL` + `ARXIV_SANITY_LLM_NAME`.
 3. Fetch papers and compute features at least once:
 
-- Run [arxiv_daemon.py](arxiv_daemon.py).
-- Run [compute.py](compute.py).
+- Run `python -m tools arxiv_daemon`.
+- Run `python -m tools compute`.
 
-4. Start the web app with [serve.py](serve.py) (or use [run_services.py](run_services.py) if your OS supports bash scripts).
+4. Start the web app with `python serve.py` (or use `python bin/run_services.py` if your OS supports bash scripts).
 
 Everything else (embeddings, MinerU, LiteLLM, emails, scheduler) is optional.
 
 ## 📦 Data Layout & Migration
 
-By default, data is stored under `data/` (configured by `DATA_DIR` in [vars.py](vars.py)):
+By default, data is stored under `data/` (configured by `ARXIV_SANITY_DATA_DIR` in `.env` / `config/settings.py`):
 
 - `data/papers.db`: fetched papers + metadata
 - `data/dict.db`: user data (tags, negative tags, keywords, reading list, email registry, summary status)
@@ -120,12 +240,12 @@ To migrate to a new machine, you typically copy at least:
 
 - The built-in login is **username only** (no password). This is intended for personal / trusted environments.
 - If you deploy on a public server, protect it behind authentication/VPN/reverse-proxy, and set a stable secret key via `ARXIV_SANITY_SECRET_KEY` or `secret_key.txt`.
-- Do not commit your API keys. Prefer environment variables over editing keys into [vars.py](vars.py).
+- Do not commit your API keys. Prefer environment variables in `.env` or your shell environment.
 
 ## 🧩 Troubleshooting
 
 - **The website is empty / no papers**: you likely didn’t run [arxiv_daemon.py](arxiv_daemon.py) + [compute.py](compute.py) yet.
-- **Summaries always fail**: check `YOUR_LLM_API_KEY`, `LLM_BASE_URL`, `LLM_NAME` in [vars.py](vars.py).
+- **Summaries always fail**: check `ARXIV_SANITY_LLM_API_KEY`, `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME` in `.env`.
 - **Semantic/hybrid search has no effect**: ensure embeddings are enabled and you regenerated features with [compute.py](compute.py) (for hybrid features).
 - **MinerU errors**:
   - API backend: check `MINERU_API_KEY` (or `ARXIV_SANITY_MINERU_API_KEY`)
@@ -158,104 +278,143 @@ pip install -r requirements.txt
 ### 2. Create Configuration Files
 
 ```bash
-# Required: Create vars.py from template
-cp vars_template.py vars.py
+# Required: Create .env from template
+cp .env.example .env
 
 # Optional: Create LiteLLM config (if using multi-model gateway)
-cp llm_template.yml llm.yml
+cp config/llm_template.yml config/llm.yml
 ```
 
 ### 3. Configure Essential Settings
 
-Edit `vars.py` with your settings (created from [vars_template.py](vars_template.py)).
+Edit `.env` with your settings (created from [.env.example](.env.example)).
 
-At minimum, you should review **paths**, **ports**, **LLM**, and (optionally) **summary source / embedding / MinerU**:
-
-```python
-# Storage
-DATA_DIR = "data"  # Put this on SSD if possible
-
-# LLM API (Required for paper summaries)
-LLM_BASE_URL = "https://openrouter.ai/api/v1"  # Or your LLM provider
-LLM_API_KEY = os.environ.get("YOUR_LLM_API_KEY", "your_api_key")
-LLM_NAME = "deepseek/deepseek-chat-v3.1:free"
-
-# Web
-SERVE_PORT = 55555
-
-# Summary source (HTML is fast & default)
-SUMMARY_MARKDOWN_SOURCE = os.environ.get("ARXIV_SANITY_SUMMARY_SOURCE", "html")  # html/mineru
-SUMMARY_HTML_SOURCES = os.environ.get("ARXIV_SANITY_HTML_SOURCES", "ar5iv,arxiv")
-
-# Email (Optional, for daily recommendations)
-from_email = "your_email@mail.com"
-smtp_server = "smtp.mail.com"
-smtp_port = 465
-email_username = "username"
-email_passwd = os.environ.get("YOUR_EMAIL_PASSWD", "")
-HOST = "http://your-server:55555"  # Public URL for email links
-
-# Embeddings (Optional)
-# - If you do NOT run local Ollama, keep EMBED_USE_LLM_API=True (default in template)
-# - If you want local Ollama embeddings, set EMBED_USE_LLM_API=False and start Ollama on EMBED_PORT
-# EMBED_USE_LLM_API = True
-# EMBED_MODEL_NAME = "qwen3-embedding:0.6b"
-
-# MinerU (Optional)
-# - api: uses mineru.net (needs MINERU_API_KEY)
-# - vlm-http-client: uses local mineru-vllm-server on MINERU_PORT
-# - pipeline: run local pipeline inside Python (heavier)
-# MINERU_ENABLED = True
-# MINERU_BACKEND = "api"
-```
-
-Also check the arXiv categories you want to index in [arxiv_daemon.py](arxiv_daemon.py) (`CORE/LANG/AGENT/APP/ALL_TAGS`).
-
-### 4. Set Environment Variables
+At minimum, you should review **LLM settings**, and (optionally) **summary source / embedding / MinerU**:
 
 ```bash
-# Required
-export YOUR_LLM_API_KEY="your-llm-api-key"
+# LLM API (Required for paper summaries)
+ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
+ARXIV_SANITY_LLM_API_KEY=your-api-key
+ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free
+ARXIV_SANITY_LLM_SUMMARY_LANG=zh
 
-# Optional
-export MINERU_API_KEY="your-mineru-api-key"     # For MinerU API backend (pdf parsing)
-# Alternative alias used by run_services.py (takes precedence over vars.py):
-# export ARXIV_SANITY_MINERU_API_KEY="your-mineru-api-key"
-export YOUR_EMAIL_PASSWD="your-email-password"  # For email recommendations
-export ARXIV_SANITY_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')"
+# Web
+ARXIV_SANITY_HOST=http://localhost:55555
+ARXIV_SANITY_SERVE_PORT=55555
 
-# Optional - proxy for arXiv fetch (and other outbound HTTP clients)
-# export http_proxy="http://127.0.0.1:7890"
-# export https_proxy="http://127.0.0.1:7890"
+# Summary source (HTML is fast & default)
+ARXIV_SANITY_SUMMARY_SOURCE=html
+ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
+
+# Email (Optional, for daily recommendations)
+ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
+ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
+ARXIV_SANITY_EMAIL_SMTP_PORT=465
+ARXIV_SANITY_EMAIL_USERNAME=username
+ARXIV_SANITY_EMAIL_PASSWORD=your-password
+
+# Embeddings (Optional)
+# ARXIV_SANITY_EMBED_USE_LLM_API=true
+# ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
+
+# MinerU (Optional)
+# ARXIV_SANITY_MINERU_ENABLED=true
+# ARXIV_SANITY_MINERU_BACKEND=api
+# MINERU_API_KEY=your-mineru-api-key
+```
+
+Also check the arXiv categories you want to index in [tools/arxiv_daemon.py](tools/arxiv_daemon.py) (`CORE/LANG/AGENT/APP/ALL_TAGS`).
+
+### 4. Verify Configuration
+
+```bash
+# Show current configuration
+python -m config.cli show
+
+# Validate configuration
+python -m config.cli validate
 ```
 
 ### 5. Fetch Papers and Start
 
 ```bash
 # Fetch papers and compute features
-python3 arxiv_daemon.py -n 10000 -m 500
-python3 compute.py --num 20000
+python -m tools arxiv_daemon -n 10000 -m 500
+python -m tools compute --num 20000
 
 # Start all services (one command)
-python3 run_services.py
+python bin/run_services.py
 
 # Visit http://localhost:55555
 ```
 
-If you need the full stack (embedding / minerU / litellm) in one terminal, use [run_services.py](run_services.py). Note that it calls bash scripts (see OS notes below).
+### Service Startup Options
+
+Choose the startup method based on your needs:
+
+#### Option 1: Minimal Startup (Web Only)
+
+```bash
+# Development mode (with hot reload)
+python serve.py
+
+# Production mode (Gunicorn)
+./bin/up.sh
+```
+
+#### Option 2: One-Command Startup (Recommended)
+
+```bash
+# Start Web + optional services (Embedding/MinerU/LiteLLM)
+python bin/run_services.py
+
+# Common options
+python bin/run_services.py --no-embed      # Skip Embedding service
+python bin/run_services.py --no-mineru     # Skip MinerU service
+python bin/run_services.py --no-litellm    # Skip LiteLLM gateway
+python bin/run_services.py --with-daemon   # Include scheduler daemon
+```
+
+#### Option 3: Start Services Separately
+
+```bash
+# Terminal 1: Web service
+./bin/up.sh
+
+# Terminal 2: Embedding service (optional)
+./bin/embedding_serve.sh
+
+# Terminal 3: MinerU service (optional)
+./bin/mineru_serve.sh
+
+# Terminal 4: LiteLLM gateway (optional)
+./bin/litellm.sh
+
+# Terminal 5: Scheduler daemon (optional)
+python -m tools daemon
+```
+
+#### Option 4: One-Time Data Initialization
+
+```bash
+# Only fetch papers and compute features, don't start services
+python bin/run_services.py --fetch-compute 10000
+```
+
+> **Note**: If you need the full stack (embedding / minerU / litellm) in one terminal, use [bin/run_services.py](bin/run_services.py). Note that it calls bash scripts (see OS notes below).
 
 ### Configuration Checklist
 
 | Item | File/Location | Required | Description |
 | --- | --- | --- | --- |
-| **Core Config** | [vars.py](vars.py) | ✅ Yes | `DATA_DIR`, `SERVE_PORT`, LLM + optional email/MinerU/embedding |
-| **LLM Provider** | [vars.py](vars.py) + env | ✅ Yes | `LLM_BASE_URL`, `LLM_NAME`, and a working key (`YOUR_LLM_API_KEY` or direct `LLM_API_KEY`) |
-| **arXiv Categories** | [arxiv_daemon.py](arxiv_daemon.py) | ⚙️ Important | `CORE/LANG/AGENT/APP/ALL_TAGS` controls what you fetch & show |
-| **Summary Source** | env or [vars.py](vars.py) | ⚙️ Recommended | `ARXIV_SANITY_SUMMARY_SOURCE=html\|mineru`, `ARXIV_SANITY_HTML_SOURCES=ar5iv,arxiv` |
-| **Embedding Backend** | env or [vars.py](vars.py) | ⚙️ Optional | `ARXIV_SANITY_EMBED_USE_LLM_API` + `EMBED_*` (API) or local Ollama on `EMBED_PORT` |
-| **MinerU Backend** | env or [vars.py](vars.py) | ⚙️ Optional | `ARXIV_SANITY_MINERU_BACKEND=api\|vlm-http-client\|pipeline` + keys/ports |
-| **Email SMTP** | [vars.py](vars.py) + env | ⚙️ Optional | SMTP settings + `HOST` + `YOUR_EMAIL_PASSWD` |
-| **Session Secret** | env/file | ⚙️ Recommended | `ARXIV_SANITY_SECRET_KEY` or `secret_key.txt` (important if public) |
+| **Core Config** | [.env](.env.example) | ✅ Yes | All settings via environment variables |
+| **LLM Provider** | `.env` | ✅ Yes | `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME`, `ARXIV_SANITY_LLM_API_KEY` |
+| **arXiv Categories** | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | ⚙️ Important | `CORE/LANG/AGENT/APP/ALL_TAGS` controls what you fetch & show |
+| **Summary Source** | `.env` | ⚙️ Recommended | `ARXIV_SANITY_SUMMARY_SOURCE=html\|mineru` |
+| **Embedding Backend** | `.env` | ⚙️ Optional | `ARXIV_SANITY_EMBED_*` settings |
+| **MinerU Backend** | `.env` | ⚙️ Optional | `ARXIV_SANITY_MINERU_*` settings + `MINERU_API_KEY` |
+| **Email SMTP** | `.env` | ⚙️ Optional | `ARXIV_SANITY_EMAIL_*` settings |
+| **Session Secret** | env/file | ⚙️ Recommended | `ARXIV_SANITY_SECRET_KEY` or `secret_key.txt` |
 
 ---
 
@@ -269,15 +428,15 @@ If you need the full stack (embedding / minerU / litellm) in one terminal, use [
 ### External services you may need
 
 - **LLM provider** (OpenAI-compatible). Required for summaries.
-- **Ollama** (optional): used when you choose local embeddings via [embedding_serve.sh](embedding_serve.sh).
+- **Ollama** (optional): used when you choose local embeddings via [bin/embedding_serve.sh](bin/embedding_serve.sh).
 - **MinerU** (optional):
   - API backend uses mineru.net and requires `MINERU_API_KEY`
-  - local VLM backend uses `mineru-vllm-server` via [mineru_serve.sh](mineru_serve.sh)
-- **LiteLLM** (optional): multi-model gateway configured by [llm.yml](llm.yml).
+  - local VLM backend uses `mineru-vllm-server` via [bin/mineru_serve.sh](bin/mineru_serve.sh)
+- **LiteLLM** (optional): multi-model gateway configured by [config/llm.yml](config/llm.yml).
 
 ### Windows note
 
-Some launchers are bash scripts ([up.sh](up.sh), [embedding_serve.sh](embedding_serve.sh), [mineru_serve.sh](mineru_serve.sh), [litellm.sh](litellm.sh)), and [run_services.py](run_services.py) invokes them with `bash`.
+Some launchers are bash scripts ([bin/up.sh](bin/up.sh), [bin/embedding_serve.sh](bin/embedding_serve.sh), [bin/mineru_serve.sh](bin/mineru_serve.sh), [bin/litellm.sh](bin/litellm.sh)), and [bin/run_services.py](bin/run_services.py) invokes them with `bash`.
 
 - On Windows, use **WSL** (recommended) or a bash-compatible environment.
 - Alternatively, skip those services and run only the web app with `python serve.py` while using API backends for embeddings / MinerU.
@@ -286,119 +445,117 @@ Some launchers are bash scripts ([up.sh](up.sh), [embedding_serve.sh](embedding_
 
 ### Configuration Overview
 
+This project uses **pydantic-settings** for configuration management. All settings are configured via environment variables or a `.env` file.
+
 | Source | Purpose | Required |
 | --- | --- | --- |
-| [vars.py](vars.py) | Core settings (paths, ports, LLM, email, MinerU, SVM) | ✅ Yes |
-| [arxiv_daemon.py](arxiv_daemon.py) | arXiv category lists for paper fetching | ⚙️ Important |
-| [llm.yml](llm.yml) | LiteLLM multi-model gateway | ⚙️ Optional |
-| Environment Variables | API keys, runtime toggles, scheduler params | ⚙️ Recommended |
-| [up.sh](up.sh) / [run_services.py](run_services.py) | Service startup parameters | ⚙️ Optional |
+| [.env](.env.example) | All configuration settings | ✅ Yes |
+| [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | arXiv category lists for paper fetching | ⚙️ Important |
+| [config/llm.yml](config/llm.yml) | LiteLLM multi-model gateway | ⚙️ Optional |
 
 **Files NOT in repository (.gitignore):**
 
-- `vars.py` - Copy from [vars_template.py](vars_template.py)
-- `llm.yml` - Copy from [llm_template.yml](llm_template.yml)
+- `.env` - Copy from [.env.example](.env.example)
+- `config/llm.yml` - Copy from [config/llm_template.yml](config/llm_template.yml)
 - `secret_key.txt` - Optional, for Flask session secret
-- `data/` - Auto-generated at runtime (except `data/dict.db`)
+- `data/` - Auto-generated at runtime
 - Local embedding models (e.g., `qwen3-embed-0.6B/`)
 
 ---
 
-### 1. vars.py - Core Configuration
+### 1. .env File - Core Configuration
 
-Copy `vars_template.py` to `vars.py` and configure the following sections:
+Copy `.env.example` to `.env` and configure the following sections:
 
 #### 1.1 Data Storage
 
-```python
-DATA_DIR = "data"                              # Data storage root (SSD recommended)
-SUMMARY_DIR = os.path.join(DATA_DIR, "summary") # Paper summaries cache
+```bash
+ARXIV_SANITY_DATA_DIR=data                    # Data storage root (SSD recommended)
+ARXIV_SANITY_SUMMARY_DIR=data/summary         # Paper summaries cache
 ```
 
 #### 1.2 Service Ports
 
-```python
-SERVE_PORT = 55555      # Web application port
-EMBED_PORT = 51000      # Ollama embedding service port
-MINERU_PORT = 52000     # MinerU VLM service port (vLLM)
-LITELLM_PORT = 53000    # LiteLLM gateway port
+```bash
+ARXIV_SANITY_SERVE_PORT=55555      # Web application port
+ARXIV_SANITY_EMBED_PORT=54000      # Ollama embedding service port
+ARXIV_SANITY_MINERU_PORT=52000     # MinerU VLM service port
+ARXIV_SANITY_LITELLM_PORT=53000    # LiteLLM gateway port
 ```
 
 #### 1.3 LLM API Configuration
 
-```python
+```bash
 # Option 1: Direct API (OpenRouter, OpenAI, etc.)
-LLM_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_API_KEY = os.environ.get("YOUR_LLM_API_KEY", "your_api_key")
-LLM_NAME = "deepseek/deepseek-chat-v3.1:free"  # Model name
-LLM_SUMMARY_LANG = "zh"                         # Summary language (zh/en)
+ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
+ARXIV_SANITY_LLM_API_KEY=your-api-key
+ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free
+ARXIV_SANITY_LLM_SUMMARY_LANG=zh
 
-# Option 2: Via LiteLLM gateway (requires llm.yml)
-LLM_BASE_URL = f"http://localhost:{LITELLM_PORT}"
-LLM_API_KEY = "no-key"  # LiteLLM handles auth
-LLM_NAME = "or-mimo"    # Model alias defined in llm.yml
+# Option 2: Via LiteLLM gateway (requires config/llm.yml)
+ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
+ARXIV_SANITY_LLM_API_KEY=no-key
+ARXIV_SANITY_LLM_NAME=or-mimo
 ```
 
 #### 1.4 Embedding Configuration
 
-```python
+```bash
 # Use OpenAI-compatible API for embeddings (default)
-EMBED_USE_LLM_API = True
-EMBED_MODEL_NAME = "qwen3-embedding:0.6b"
-EMBED_API_BASE = ""       # Empty = use LLM_BASE_URL
-EMBED_API_KEY = ""        # Empty = use LLM_API_KEY
+ARXIV_SANITY_EMBED_USE_LLM_API=true
+ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
+ARXIV_SANITY_EMBED_API_BASE=       # Empty = use LLM_BASE_URL
+ARXIV_SANITY_EMBED_API_KEY=        # Empty = use LLM_API_KEY
 
 # Or use local Ollama service
-EMBED_USE_LLM_API = False  # Uses http://localhost:{EMBED_PORT}
+ARXIV_SANITY_EMBED_USE_LLM_API=false  # Uses http://localhost:{EMBED_PORT}
 ```
 
 #### 1.5 Email Service
 
-```python
-from_email = "your_email@mail.com"
-smtp_server = "smtp.mail.com"
-smtp_port = 465                    # 25 for plain, 465 for SSL
-email_username = "username"
-email_passwd = os.environ.get("YOUR_EMAIL_PASSWD", "")
-HOST = "http://your-server:55555"  # Public URL for email links
+```bash
+ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
+ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
+ARXIV_SANITY_EMAIL_SMTP_PORT=465
+ARXIV_SANITY_EMAIL_USERNAME=username
+ARXIV_SANITY_EMAIL_PASSWORD=your-password
+ARXIV_SANITY_HOST=http://your-server:55555  # Public URL for email links
 ```
 
 #### 1.6 Paper Summary Configuration
 
-```python
-SUMMARY_MIN_CHINESE_RATIO = 0.25          # Min Chinese ratio for cache validity
-SUMMARY_DEFAULT_SEMANTIC_WEIGHT = 0.5     # Hybrid search weight (0.0-1.0)
-SUMMARY_MARKDOWN_SOURCE = "html"          # "html" (default) or "mineru"
-SUMMARY_HTML_SOURCES = "ar5iv,arxiv"      # HTML source priority order
+```bash
+ARXIV_SANITY_SUMMARY_MIN_CHINESE_RATIO=0.25      # Min Chinese ratio for cache validity
+ARXIV_SANITY_SUMMARY_DEFAULT_SEMANTIC_WEIGHT=0.5 # Hybrid search weight (0.0-1.0)
+ARXIV_SANITY_SUMMARY_SOURCE=html                 # "html" (default) or "mineru"
+ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv    # HTML source priority order
 ```
 
 #### 1.7 MinerU PDF Parsing
 
-```python
-MINERU_ENABLED = True                     # Enable/disable MinerU
-MINERU_BACKEND = "api"                    # "api" (default), "pipeline", or "vlm-http-client"
-MINERU_DEVICE = "cuda"                    # "cuda" (default) or "cpu" (pipeline backend only)
-MINERU_MAX_WORKERS = 2                    # Concurrent minerU processes (pipeline only)
-MINERU_MAX_VRAM = 3                       # Max VRAM per process in GB (pipeline+cuda only)
-MINERU_API_KEY = os.environ.get("MINERU_API_KEY", "")  # For API backend
-MINERU_API_POLL_INTERVAL = 5              # API polling interval in seconds
-MINERU_API_TIMEOUT = 600                  # API task timeout in seconds
+```bash
+ARXIV_SANITY_MINERU_ENABLED=true
+ARXIV_SANITY_MINERU_BACKEND=api                  # "api", "pipeline", or "vlm-http-client"
+ARXIV_SANITY_MINERU_DEVICE=cuda                  # "cuda" or "cpu" (pipeline only)
+ARXIV_SANITY_MINERU_MAX_WORKERS=2
+ARXIV_SANITY_MINERU_MAX_VRAM=4
+MINERU_API_KEY=your-mineru-api-key               # For API backend
 ```
 
 #### 1.8 SVM Recommendation Parameters
 
-```python
-SVM_C = 0.02          # C parameter for SVM classifier (regularization)
-SVM_MAX_ITER = 5000   # Maximum iterations
-SVM_TOL = 1e-3        # Tolerance
-SVM_NEG_WEIGHT = 5.0  # Weight for explicit negative feedback samples
+```bash
+ARXIV_SANITY_SVM_C=0.02
+ARXIV_SANITY_SVM_MAX_ITER=5000
+ARXIV_SANITY_SVM_TOL=0.001
+ARXIV_SANITY_SVM_NEG_WEIGHT=5.0
 ```
 
 ---
 
 ### 2. arxiv_daemon.py - arXiv Categories
 
-The paper fetching query is built from `ALL_TAGS` in [arxiv_daemon.py](arxiv_daemon.py). Customize these groups to control which arXiv categories to fetch:
+The paper fetching query is built from `ALL_TAGS` in [tools/arxiv_daemon.py](tools/arxiv_daemon.py). Customize these groups to control which arXiv categories to fetch:
 
 ```python
 # Default category groups (edit as needed)
@@ -433,7 +590,7 @@ Copy `llm_template.yml` to `llm.yml` if you want to use LiteLLM as a unified gat
 ```yaml
 model_list:
   # OpenRouter - Free models
-  - model_name: or-mimo            # Alias used in vars.py LLM_NAME
+  - model_name: or-mimo            # Alias used by ARXIV_SANITY_LLM_NAME
     litellm_params:
       model: openrouter/xiaomi/mimo-v2-flash:free
       api_base: https://openrouter.ai/api/v1
@@ -454,50 +611,52 @@ litellm_settings:
 
 ```bash
 # Start LiteLLM gateway
-litellm -c llm.yml --port 53000
+litellm -c config/llm.yml --port 53000
 
 # Or use run_services.py (auto-starts LiteLLM)
-python3 run_services.py
+python bin/run_services.py
 ```
 
-Then configure `vars.py`:
+Then configure `.env`:
 
-```python
-LLM_BASE_URL = f"http://localhost:{LITELLM_PORT}"
-LLM_API_KEY = "no-key"
-LLM_NAME = "or-mimo"  # Use alias from llm.yml
+```bash
+ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
+ARXIV_SANITY_LLM_API_KEY=no-key
+ARXIV_SANITY_LLM_NAME=or-mimo  # Use alias from llm.yml
 ```
 
 ---
 
-### 4. Environment Variables
+### 4. Configuration CLI Tool
 
-#### Required
+The project provides a CLI tool for configuration management:
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `YOUR_LLM_API_KEY` | LLM provider API key | `sk-or-v1-...` |
+```bash
+# Show current configuration
+python -m config.cli show
 
-#### Optional - API Keys
+# Show configuration in JSON format
+python -m config.cli show --json
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `MINERU_API_KEY` | MinerU API key (for API backend PDF parsing) | `...` |
-| `ARXIV_SANITY_MINERU_API_KEY` | MinerU API key alias (preferred by run_services.py) | `...` |
-| `YOUR_EMAIL_PASSWD` | SMTP email password | `...` |
-| `ARXIV_SANITY_SECRET_KEY` | Flask session secret (or use `secret_key.txt`) | `...` |
-| `ARXIV_SANITY_EMBED_API_BASE` | Override embedding API base URL | `https://api.openai.com/v1` |
-| `ARXIV_SANITY_EMBED_API_KEY` | Override embedding API key | `sk-...` |
+# Validate configuration
+python -m config.cli validate
 
-#### Web & Runtime
+# Generate environment variable template
+python -m config.cli env
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ARXIV_SANITY_LOG_LEVEL` | `WARNING` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `ARXIV_SANITY_ACCESS_LOG` | `0` | Enable access logging (`1`/`0`) |
-| `ARXIV_SANITY_RELOAD` | `0` | Development hot-reload mode |
-| `ARXIV_SANITY_CACHE_PAPERS` | `1` | Cache full papers table in RAM (`1`/`0`) |
-| `ARXIV_SANITY_WARMUP_DATA` | `1` | Background data cache warmup |
+#### Using Configuration in Code
+
+```python
+from config import settings
+
+# Access settings
+print(settings.data_dir)
+print(settings.llm.base_url)
+print(settings.llm.api_key)
+print(settings.mineru.enabled)
+print(settings.email.smtp_server)
+```
 | `ARXIV_SANITY_WARMUP_ML` | `1` | Background ML model warmup |
 | `ARXIV_SANITY_ENABLE_SCHEDULER` | `1` | Enable APScheduler cache refresh |
 | `ARXIV_SANITY_ENABLE_CACHE_STATUS` | `0` | Enable `/cache_status` debug page |
@@ -579,57 +738,57 @@ LLM_NAME = "or-mimo"  # Use alias from llm.yml
 
 ```bash
 # One-command start (recommended)
-python3 run_services.py
+python bin/run_services.py
 
 # Web server options
-python3 run_services.py --web gunicorn    # Use gunicorn
-python3 run_services.py --web none        # Don't start web server
+python bin/run_services.py --web gunicorn    # Use gunicorn
+python bin/run_services.py --web none        # Don't start web server
 
 # Skip heavy services
-python3 run_services.py --no-embed        # Skip Ollama embedding
-python3 run_services.py --no-mineru       # Skip MinerU
-python3 run_services.py --no-litellm      # Skip LiteLLM gateway
+python bin/run_services.py --no-embed        # Skip Ollama embedding
+python bin/run_services.py --no-mineru       # Skip MinerU
+python bin/run_services.py --no-litellm      # Skip LiteLLM gateway
 
 # Summary source
-python3 run_services.py --summary-source html
-python3 run_services.py --summary-source mineru
+python bin/run_services.py --summary-source html
+python bin/run_services.py --summary-source mineru
 
 # Include scheduler daemon
-python3 run_services.py --with-daemon
+python bin/run_services.py --with-daemon
 
 # One-shot: fetch and compute only
-python3 run_services.py --fetch-compute         # Default 10000 papers
-python3 run_services.py --fetch-compute 1000    # Custom count
+python bin/run_services.py --fetch-compute         # Default 10000 papers
+python bin/run_services.py --fetch-compute 1000    # Custom count
 ```
 
-#### arxiv_daemon.py
+#### arxiv_daemon
 
 ```bash
-python3 arxiv_daemon.py -n 10000 -m 500    # Fetch up to 10000, 500 per query
-python3 arxiv_daemon.py --init             # Initialize with keyword search
-python3 arxiv_daemon.py --num-total 5000   # Limit total papers across categories
-python3 arxiv_daemon.py --break-after 20   # Stop after 20 zero-new-paper batches
+python -m tools arxiv_daemon -n 10000 -m 500    # Fetch up to 10000, 500 per query
+python -m tools arxiv_daemon --init             # Initialize with keyword search
+python -m tools arxiv_daemon --num-total 5000   # Limit total papers across categories
+python -m tools arxiv_daemon --break-after 20   # Stop after 20 zero-new-paper batches
 ```
 
-#### compute.py
+#### compute
 
 ```bash
-python3 compute.py --num 20000             # TF-IDF features count
-python3 compute.py --use_embeddings        # Enable embeddings (default)
-python3 compute.py --no-embeddings         # Disable embeddings
-python3 compute.py --embed_model nomic-embed-text  # Embedding model
-python3 compute.py --embed_dim 512         # Embedding dimension
-python3 compute.py --embed_batch_size 2048 # Batch size
+python -m tools compute --num 20000             # TF-IDF features count
+python -m tools compute --use_embeddings        # Enable embeddings (default)
+python -m tools compute --no-embeddings         # Disable embeddings
+python -m tools compute --embed_model nomic-embed-text  # Embedding model
+python -m tools compute --embed_dim 512         # Embedding dimension
+python -m tools compute --embed_batch_size 2048 # Batch size
 ```
 
-#### batch_paper_summarizer.py
+#### batch_paper_summarizer
 
 ```bash
-python3 batch_paper_summarizer.py -n 100 -w 2         # 100 papers, 2 workers
-python3 batch_paper_summarizer.py --priority          # Priority queue mode
-python3 batch_paper_summarizer.py --priority-days 2   # Priority window
-python3 batch_paper_summarizer.py --dry-run           # Preview only
-python3 batch_paper_summarizer.py -m "gpt-4o-mini"    # Specify model
+python -m tools batch_paper_summarizer -n 100 -w 2         # 100 papers, 2 workers
+python -m tools batch_paper_summarizer --priority          # Priority queue mode
+python -m tools batch_paper_summarizer --priority-days 2   # Priority window
+python -m tools batch_paper_summarizer --dry-run           # Preview only
+python -m tools batch_paper_summarizer -m "gpt-4o-mini"    # Specify model
 ```
 
 ---
@@ -673,8 +832,8 @@ python3 batch_paper_summarizer.py -m "gpt-4o-mini"    # Specify model
 
 ### Daily Email Recommendations (optional)
 
-1. Configure SMTP in [vars.py](vars.py) and set `YOUR_EMAIL_PASSWD` in environment.
-2. Set `HOST` in [vars.py](vars.py) to the **public base URL** (used in email links).
+1. Configure SMTP in `.env` (see `.env.example`) and set `ARXIV_SANITY_EMAIL_PASSWORD`.
+2. Set `ARXIV_SANITY_HOST` to the **public base URL** (used in email links).
 3. In the website, go to Profile and set your email address.
 4. Run [send_emails.py](send_emails.py) manually or run the scheduler [daemon.py](daemon.py).
 
@@ -742,7 +901,7 @@ ollama pull nomic-embed-text
 bash embedding_serve.sh  # Starts on EMBED_PORT
 
 # Compute with embeddings
-python3 compute.py --use_embeddings --embed_model nomic-embed-text
+python -m tools compute --use_embeddings --embed_model nomic-embed-text
 ```
 
 ### Automated Scheduling
@@ -750,7 +909,7 @@ python3 compute.py --use_embeddings --embed_model nomic-embed-text
 **Built-in Scheduler:**
 
 ```bash
-python3 daemon.py
+python -m tools daemon
 ```
 
 Schedule (Asia/Shanghai timezone):
@@ -763,13 +922,13 @@ Schedule (Asia/Shanghai timezone):
 
 ```cron
 # Fetch and compute (weekdays 4x daily)
-0 9,13,17,21 * * 1-5 cd /path && python3 arxiv_daemon.py -n 1000 && python3 compute.py --use_embeddings
+0 9,13,17,21 * * 1-5 cd /path && python -m tools arxiv_daemon -n 1000 && python -m tools compute --use_embeddings
 
 # Send emails (weekdays 6 PM)
-0 18 * * 1-5 cd /path && python3 send_emails.py -t 2
+0 18 * * 1-5 cd /path && python -m tools send_emails -t 2
 
 # Generate summaries (daily 7 PM)
-0 19 * * * cd /path && python3 batch_paper_summarizer.py -n 200 -w 2
+0 19 * * * cd /path && python -m tools batch_paper_summarizer -n 200 -w 2
 ```
 
 ---
@@ -803,6 +962,99 @@ Schedule (Asia/Shanghai timezone):
 
 - `GET /stats` - System statistics
 - `GET /cache_status` - Cache status (authenticated users)
+
+---
+
+## 🔨 Development Guide
+
+### Environment Setup
+
+```bash
+# Clone repository
+git clone https://github.com/xihuai18/arxiv-sanity-x && cd arxiv-sanity-x
+
+# Create conda environment (recommended)
+conda create -n sanity python=3.10
+conda activate sanity
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Node.js dependencies (for frontend build)
+npm install
+```
+
+### Frontend Development
+
+The frontend uses vanilla JavaScript with esbuild for bundling:
+
+```bash
+# Production build (with content hash for caching)
+npm run build:static
+
+# Development build (no hash, easier debugging)
+npm run build:dev
+
+# Watch mode (auto-rebuild on changes)
+npm run build:watch
+
+# Lint JavaScript files
+npm run lint
+
+# Format code
+npm run format
+```
+
+**Note**: The `bin/up.sh` startup script automatically runs the build, so manual building is usually not needed for deployment.
+
+### Backend Development
+
+```bash
+# Run development server with auto-reload
+python serve.py
+
+# Or use gunicorn for production-like testing
+./bin/up.sh
+```
+
+### Configuration Management
+
+```bash
+# Show current configuration
+python -m config.cli show
+
+# Validate configuration
+python -m config.cli validate
+
+# Generate environment variable template
+python -m config.cli env
+```
+
+### Testing
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test categories
+pytest tests/unit/
+pytest tests/integration/
+pytest tests/e2e/
+```
+
+### Code Style
+
+- Python: Follow PEP 8, use type hints
+- JavaScript: ESLint + Prettier
+- Use `loguru` for logging in Python
+
+### Architecture Notes
+
+1. **Layered Architecture**: Blueprints → Services → Repositories → Database
+2. **Configuration**: All settings via pydantic-settings with `ARXIV_SANITY_` prefix
+3. **Caching**: Multi-level (memory LRU + file mtime-based invalidation)
+4. **Async Processing**: Huey task queue + SSE for real-time updates
+5. **Security**: CSRF protection, secure headers, input validation
 
 ---
 

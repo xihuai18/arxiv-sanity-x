@@ -24,37 +24,36 @@ var statsData = {
 
 {% block content %}
 <div id="statswrap" class="stats-container">
-    <!-- Overview Cards -->
-    <div class="stats-overview">
-        <div class="stats-card stats-card-primary">
-            <div class="stats-card-content">
-                <span class="stats-card-value">{{ num_papers }}</span>
-                <span class="stats-card-label">Total Papers</span>
-            </div>
-        </div>
-        <div class="stats-card">
-            <div class="stats-card-content">
-                <span class="stats-card-value stats-card-value-small">{{ earliest_paper }}</span>
-                <span class="stats-card-label">Earliest Paper</span>
-            </div>
-        </div>
-        <div class="stats-card">
-            <div class="stats-card-content">
-                <span class="stats-card-value stats-card-value-small">{{ latest_paper }}</span>
-                <span class="stats-card-label">Latest Paper</span>
-            </div>
-        </div>
-    </div>
-
-    <!-- Paper Flow Section -->
+    <!-- Paper Statistics Section -->
     <div class="stats-section">
-        <h2 class="stats-section-title">Paper Flow</h2>
-        <p class="stats-section-desc">Number of new papers indexed over different time periods</p>
+        <h2 class="stats-section-title">Paper Statistics</h2>
+        <p class="stats-section-desc">Overview of papers in the database</p>
+        <div class="stats-overview stats-overview-3col">
+            <div class="stats-card stats-card-primary">
+                <div class="stats-card-content">
+                    <span class="stats-card-value">{{ num_papers }}</span>
+                    <span class="stats-card-label">Total Papers</span>
+                </div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-content">
+                    <span class="stats-card-value stats-card-value-small">{{ earliest_paper }}</span>
+                    <span class="stats-card-label">Earliest Paper</span>
+                </div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-content">
+                    <span class="stats-card-value stats-card-value-small">{{ latest_paper }}</span>
+                    <span class="stats-card-label">Latest Paper</span>
+                </div>
+            </div>
+        </div>
 
-        <!-- Visual Bar Chart -->
+        <!-- Paper Flow Chart -->
+        <h3 class="stats-subsection-title">Paper Flow</h3>
+        <p class="stats-section-desc">Number of new papers indexed over different time periods</p>
         <div class="stats-chart">
             {% set max_val = [thr_1, thr_6, thr_12, thr_24, thr_48, thr_72, thr_96, thr_week, thr_month, thr_quarter, thr_semiannual, thr_year] | max %}
-
             <div class="stats-bar-group">
                 <div class="stats-bar-item">
                     <div class="stats-bar-label">1 Hour</div>
@@ -153,6 +152,56 @@ var statsData = {
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Summary Coverage Section -->
+    <div class="stats-section">
+        <h2 class="stats-section-title">Summary Coverage</h2>
+        <p class="stats-section-desc">AI-generated summaries statistics.</p>
+
+        <div class="stats-overview stats-overview-3col">
+            <div class="stats-card">
+                <div class="stats-card-content">
+                    <span class="stats-card-value">{{ summary_cache_paper_count }}</span>
+                    <span class="stats-card-label">Papers with Summaries</span>
+                </div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-content">
+                    <span class="stats-card-value">{{ summary_cache_total }}</span>
+                    <span class="stats-card-label">Total Summaries</span>
+                </div>
+            </div>
+            <div class="stats-card">
+                <div class="stats-card-content">
+                    <span class="stats-card-value">{{ queue_active_map.get('queued', 0) }} / {{ queue_active_map.get('running', 0) }}</span>
+                    <span class="stats-card-label">Queued / Running</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-table-wrap">
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Summaries</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in summary_cache_model_counts %}
+                    <tr>
+                        <td>{{ row.model }}</td>
+                        <td>{{ row.count }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="2">No summaries yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
     </div>
 </div>

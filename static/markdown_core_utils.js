@@ -16,6 +16,6 @@
         applyTextEscapeRenderer: Renderer && Renderer.applyTextEscapeRenderer,
         stripMarkdownImages: Sanitizer && Sanitizer.stripMarkdownImages,
         escapeText: Sanitizer && Sanitizer.escapeText,
-        escapeHtml: CommonUtils && CommonUtils.escapeHtml
+        escapeHtml: CommonUtils && CommonUtils.escapeHtml,
     };
 })(typeof window !== 'undefined' ? window : this);

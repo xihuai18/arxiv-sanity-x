@@ -1,5 +1,50 @@
 {% extends "base.html" %}
 
+{% block head_extra %}
+<!-- Markdown + Math rendering for abstract -->
+<script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_sanitizer_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_renderer_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/markdown_core_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/tldr_utils.js') }}"></script>
+<script>
+{% raw %}
+window.MathJax = {
+    loader: { load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat'] },
+    tex: {
+        inlineMath: [['\\(', '\\)'], ['$', '$']],
+        displayMath: [['\\[', '\\]'], ['$$', '$$']],
+        processEscapes: true,
+        processEnvironments: true,
+        packages: { '[+]': ['base', 'ams', 'boldsymbol', 'braket', 'cancel', 'color', 'enclose', 'mathtools', 'newcommand', 'noerrors', 'noundefined', 'physics', 'tagformat', 'textmacros', 'unicode', 'verb'] },
+        tags: 'ams',
+        macros: {
+            bm: ['\\mathbf{#1}', 1],
+            boldsymbol: ['\\mathbf{#1}', 1],
+            RR: '\\mathbb{R}',
+            NN: '\\mathbb{N}',
+            ZZ: '\\mathbb{Z}',
+            EE: '\\mathbb{E}',
+            abs: ['\\left|#1\\right|', 1],
+            norm: ['\\left\\|#1\\right\\|', 1],
+            argmax: '\\operatorname*{arg\\,max}',
+            argmin: '\\operatorname*{arg\\,min}',
+            textit: ['\\mathit{#1}', 1],
+            textbf: ['\\mathbf{#1}', 1],
+            textrm: ['\\mathrm{#1}', 1],
+            textsf: ['\\mathsf{#1}', 1],
+            texttt: ['\\mathtt{#1}', 1],
+            // Common spacing (note: do NOT redefine \\mid as it's a standard LaTeX relation symbol)
+            given: '\\\\,|\\\\,'
+        }
+    },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'], ignoreHtmlClass: 'tex2jax_ignore', processHtmlClass: 'tex2jax_process' },
+    chtml: { scale: 1.0, displayAlign: 'center' }
+};
+{% endraw %}
+</script>
+{% endblock %}
+
 {% block variables %}
 <script>
 var paper = {{ paper | tojson }};
@@ -19,7 +64,7 @@ var words_desc = {{ words_desc | tojson }};
 <!-- React (only needed on pages with JSX/React components) -->
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/author_utils.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/paper_detail.js') }}"></script>
-<script defer src="{{ url_for('static', filename='dist/word_list.js') }}"></script>
+<script defer src="{{ hashed_static('dist/author_utils.js') }}"></script>
+<script defer src="{{ hashed_static('dist/paper_detail.js') }}"></script>
+<script defer src="{{ hashed_static('dist/word_list.js') }}"></script>
 {% endblock %}
