@@ -1,0 +1,310 @@
+/* ===== Stats Page Enhanced Styles ===== */
+.stats-container {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+}
+
+.stats-overview {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.stats-overview-3col {
+    grid-template-columns: repeat(3, 1fr);
+}
+
+@media (max-width: 768px) {
+    .stats-overview-3col {
+        grid-template-columns: 1fr;
+    }
+}
+
+.stats-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: var(--shadow-xs);
+    transition:
+        border-color var(--transition-fast),
+        box-shadow var(--transition-fast);
+}
+
+.stats-card:hover {
+    box-shadow: var(--shadow-sm);
+}
+
+.stats-card-primary {
+    background: var(--card-bg);
+    border-color: rgba(179, 27, 27, 0.35);
+    color: var(--text-color);
+}
+
+.stats-card-primary .stats-card-label {
+    color: var(--text-muted);
+}
+
+.stats-card-icon {
+    font-size: 32px;
+    flex-shrink: 0;
+}
+
+.stats-card-content {
+    display: flex;
+    flex-direction: column;
+}
+
+.stats-card-value {
+    font-size: 28px;
+    font-weight: 650;
+    line-height: 1.2;
+    color: inherit;
+}
+
+.stats-card-value-small {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.stats-card-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.stats-card-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    opacity: 0.7;
+    margin-top: 2px;
+}
+
+.stats-section {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-xs);
+}
+
+.stats-section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 8px 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.stats-section-desc {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin: 0 0 24px 0;
+}
+
+.stats-subsection-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-color);
+    margin: 24px 0 8px 0;
+}
+
+.stats-chart {
+    margin-top: 16px;
+}
+
+.stats-bar-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.stats-bar-item {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.stats-bar-label {
+    width: 80px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.stats-bar-track {
+    flex: 1;
+    height: 26px;
+    background: var(--body-bg);
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+}
+
+.stats-bar-fill {
+    height: 100%;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 10px;
+    min-width: 50px;
+    transition: width 0.6s ease;
+}
+
+.stats-bar-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
+    text-shadow: none;
+}
+
+.stats-table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    margin-top: 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: var(--card-bg);
+}
+
+.stats-table {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: collapse;
+    margin: 0;
+    font-size: 14px;
+    color: var(--text-color);
+}
+
+.stats-table thead th {
+    text-align: left;
+    font-weight: 600;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.04);
+    border-bottom: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+}
+
+.stats-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    border-right: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.stats-table thead th:last-child,
+.stats-table tbody td:last-child {
+    border-right: none;
+}
+
+.stats-table tbody tr:nth-child(even) {
+    background: rgba(0, 0, 0, 0.02);
+}
+
+.stats-table tfoot td {
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.04);
+    border-top: 1px solid var(--border-color);
+}
+
+.stats-table-mono {
+    font-family:
+        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+        monospace;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.stats-table-error {
+    max-width: 320px;
+    word-break: break-word;
+    color: var(--text-muted);
+}
+
+.stats-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    border: 1px solid var(--border-color);
+    background: var(--body-bg);
+    color: var(--text-muted);
+    text-transform: capitalize;
+}
+
+.stats-pill-queued {
+    background: rgba(14, 165, 233, 0.12);
+    color: #0ea5e9;
+    border-color: rgba(14, 165, 233, 0.35);
+}
+
+.stats-pill-running {
+    background: rgba(234, 179, 8, 0.16);
+    color: #eab308;
+    border-color: rgba(234, 179, 8, 0.35);
+}
+
+.stats-pill-ok {
+    background: rgba(34, 197, 94, 0.16);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.35);
+}
+
+.stats-pill-failed {
+    background: rgba(239, 68, 68, 0.16);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.35);
+}
+
+.stats-meta-line {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: -10px;
+    margin-bottom: 16px;
+}
+
+.stats-meta-inline {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-left: 8px;
+}
+
+.stats-scan-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    color: #0ea5e9;
+    background: rgba(14, 165, 233, 0.12);
+    border: 1px solid rgba(14, 165, 233, 0.35);
+}
+
+.stats-scan-pill::before {
+    content: '';
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 2px solid rgba(14, 165, 233, 0.5);
+    border-top-color: #0ea5e9;
+    animation: stats-spin 0.9s linear infinite;
+}
+
+@keyframes stats-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

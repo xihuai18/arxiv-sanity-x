@@ -1,0 +1,50 @@
+/* ===== Page Content Container - Unified Width Limit ===== */
+/*
+ * This file only contains page layout container styles.
+ * Paper card styles have been moved to components/cards.css
+ * Tag styles have been moved to components/tags.css
+ * Form styles have been moved to components/forms.css
+ */
+
+.page-content {
+    max-width: var(--content-max-width);
+    margin: 0 auto;
+    padding: 0 20px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+#controls {
+    margin: 12px 0 14px 0;
+    background: var(--glass-bg);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    padding: 12px 14px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    box-shadow: var(--shadow-md);
+    transition: all var(--transition-normal);
+}
+
+#controls:hover {
+    box-shadow: var(--shadow-lg);
+}
+
+[data-theme='dark'] #controls {
+    background: var(--glass-bg);
+    border-color: var(--glass-border);
+}
+
+/* Content wrappers */
+#wrap,
+#tagwrap,
+#tagcombwrap,
+#keywrap {
+    margin: 0 0 16px 0;
+    font-size: 15px;
+}
+
+#wordwrap {
+    margin: 0 0 12px 0;
+    font-size: 15px;
+}

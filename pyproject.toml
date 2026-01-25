@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-sanity"
+version = "0.0.0"
+description = "Arxiv Sanity X"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "arxiv-sanity contributors" }]
+
+dependencies = [
+  # Web
+  "Flask",
+  "Werkzeug",
+  "gunicorn",
+
+  # ML / AI
+  "numpy",
+  "scipy",
+  "scikit-learn",
+  "scikit-learn-intelex",
+  "openai",
+
+  # Data / parsing
+  "feedparser",
+  "requests",
+  "beautifulsoup4",
+  "markdownify",
+
+  # Scheduling / tasks
+  "schedule",
+  "apscheduler",
+  "pytz",
+  "holidays",
+  "huey[sqlite]",
+
+  # Config / utils
+  "loguru",
+  "tqdm",
+  "backoff",
+  "pydantic>=2.6,<3",
+  "pydantic-settings>=2.0,<3",
+  "flasgger",
+]
+
+[project.optional-dependencies]
+# Development dependencies
+# Note: versions are not pinned to stay compatible with requirements.txt
+
+dev = [
+  "pytest",
+  "pre-commit",
+]
+
+# MinerU dependencies (optional, avoid pulling heavy deps for pure Web/indexing scenarios)
+mineru = [
+  "mineru[all]",
+  "mineru_vl_utils",
+]
+
+# Heavy dependencies: torch/vllm are usually managed by conda or specific CUDA versions
+# For CPU-only or specific CUDA versions, use conda environment installation.
+torch = [
+  "torch",
+  "vllm==0.11.0",
+]
+
+[tool.setuptools]
+# Flat package discovery: backend/, aslite/, config/, tools/ are all in the repo root
+packages = ["backend", "aslite", "config", "tools", "scripts"]
+
+[project.scripts]
+# Unified entry point (optional): after installation, use `arxiv-sanity-tools ...`
+arxiv-sanity-tools = "tools.__main__:main"
+arxiv-sanity-scripts = "scripts.__main__:main"
+
+[tool.pyright]
+# Pyright/Pylance type checking configuration
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+# Ignore pydantic Field type inference issues
+reportPrivateImportUsage = false
+# Allow pydantic dynamic features
+reportGeneralTypeIssues = "warning"
+# Exclude directories that don't need type checking
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "data/",
+    "static/dist/",
+]

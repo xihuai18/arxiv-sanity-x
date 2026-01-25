@@ -1,0 +1,77 @@
+{
+    "env": {
+        "browser": true,
+        "es2020": true,
+        "node": true
+    },
+    "extends": ["eslint:recommended", "plugin:react/recommended", "prettier"],
+    "parserOptions": {
+        "ecmaVersion": 2020,
+        "sourceType": "script",
+        "ecmaFeatures": {
+            "jsx": true
+        }
+    },
+    "plugins": ["react"],
+    "settings": {
+        "react": {
+            "version": "18.2"
+        }
+    },
+    "globals": {
+        "React": "readonly",
+        "ReactDOM": "readonly",
+        "markdownit": "readonly",
+        "DOMPurify": "readonly",
+        "MathJax": "readonly",
+        "papers": "writable",
+        "metas": "readonly",
+        "tags": "writable",
+        "combined_tags": "writable",
+        "keys": "writable",
+        "defaultSummaryModel": "readonly",
+        "user": "readonly",
+        "svm_c": "readonly",
+        "time_filter": "readonly",
+        "search_query": "readonly",
+        "search_mode": "readonly",
+        "semantic_weight": "readonly",
+        "skip_lib": "readonly",
+        "sort_order": "readonly",
+        "tag_filter": "readonly",
+        "tag_filter_mode": "readonly",
+        "author_filter": "readonly",
+        "author_filter_mode": "readonly",
+        "keyword_filter": "readonly",
+        "keyword_filter_mode": "readonly",
+        "pid": "readonly",
+        "paper": "readonly",
+        "summary_model": "readonly",
+        "summary_source": "readonly",
+        "summary_content": "readonly",
+        "summary_status": "readonly",
+        "summary_last_error": "readonly",
+        "summary_task_id": "readonly",
+        "summary_queue_rank": "readonly",
+        "summary_queue_total": "readonly",
+        "available_models": "readonly",
+        "available_sources": "readonly",
+        "words": "readonly",
+        "words_desc": "readonly"
+    },
+    "rules": {
+        "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+        "no-console": "off",
+        "react/prop-types": "off",
+        "react/react-in-jsx-scope": "off",
+        "react/no-unknown-property": "off",
+        "react/no-deprecated": "warn",
+        "react/no-unescaped-entities": "off",
+        "no-undef": "warn",
+        "no-redeclare": "warn",
+        "no-empty": "warn",
+        "prefer-const": "warn",
+        "eqeqeq": ["warn", "smart"]
+    },
+    "ignorePatterns": ["static/dist/", "static/lib/", "node_modules/"]
+}

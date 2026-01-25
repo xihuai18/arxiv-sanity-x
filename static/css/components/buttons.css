@@ -1,0 +1,453 @@
+/**
+ * Buttons Component Styles
+ * Button component styles
+ */
+
+/* Primary action button */
+.primary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px 32px;
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 50%, var(--btn-hover) 100%);
+    background-size: 200% 200%;
+    background-position: 0% 50%;
+    color: var(--primary-text);
+    border: none;
+    border-radius: 26px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    box-sizing: border-box;
+    text-align: center;
+    box-shadow: 0 4px 14px rgba(179, 27, 27, 0.35);
+    position: relative;
+    overflow: hidden;
+}
+
+.primary-btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.5s ease;
+}
+
+.primary-btn:hover {
+    background-position: 100% 50%;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(179, 27, 27, 0.45);
+}
+
+.primary-btn:hover::before {
+    left: 100%;
+}
+
+.primary-btn:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 10px rgba(179, 27, 27, 0.3);
+}
+
+/* Secondary button style */
+.secondary-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 20px;
+    background-color: var(--card-bg);
+    color: var(--link-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.secondary-btn:hover {
+    background-color: var(--body-bg);
+    border-color: var(--link-color);
+    transform: translateY(-1px);
+}
+
+/* Icon buttons */
+.icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    background-color: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.icon-btn:hover {
+    background-color: var(--body-bg);
+    color: var(--link-color);
+    border-color: var(--link-color);
+}
+
+/* Action buttons in paper cards */
+.action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    text-decoration: none;
+}
+
+.action-btn:hover {
+    background-color: var(--body-bg);
+    border-color: var(--link-color);
+    color: var(--link-color);
+}
+
+/* Danger button */
+.danger-btn {
+    background-color: var(--danger-color);
+    color: white;
+    border: none;
+}
+
+.danger-btn:hover {
+    background-color: #dc2626;
+    color: white;
+}
+
+/* Success button */
+.success-btn {
+    background-color: var(--success-color);
+    color: white;
+    border: none;
+}
+
+.success-btn:hover {
+    background-color: #059669;
+    color: white;
+}
+
+/* Button group */
+.btn-group {
+    display: inline-flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* Small button variant */
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 4px;
+}
+
+/* Large button variant */
+.btn-lg {
+    padding: 16px 36px;
+    font-size: 16px;
+    border-radius: 30px;
+}
+
+/* Disabled button state */
+.btn-disabled,
+button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Loading button state */
+.btn-loading {
+    position: relative;
+    color: transparent !important;
+}
+
+.btn-loading::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    top: 50%;
+    left: 50%;
+    margin-left: -8px;
+    margin-top: -8px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* === Additional styles from style.css L2011-L2110 === */
+
+.paper-actions-footer {
+    /* New parent container */
+    display: flex;
+    align-items: center; /* Ensure vertical alignment */
+    gap: 10px; /* Spacing between buttons */
+    margin-top: 16px; /* Spacing from elements above */
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+}
+
+.rel_more a,
+.rel_inspect a,
+.rel_summary a {
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--primary-text);
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 100%);
+    opacity: 1;
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: none;
+    font-weight: 500;
+    box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
+    transition: all var(--transition-fast);
+}
+
+.rel_more a:hover,
+.rel_inspect a:hover,
+.rel_summary a:hover {
+    color: var(--primary-text);
+    background: linear-gradient(135deg, var(--btn-hover) 0%, var(--btn-bg) 100%);
+    text-decoration: none;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(179, 27, 27, 0.35);
+}
+
+/* alphaXiv - modern pill style */
+.rel_alphaxiv {
+    margin-left: auto; /* Push alphaXiv and Cool to the right */
+}
+
+.rel_alphaxiv a {
+    display: inline-flex;
+    align-items: center;
+    color: var(--danger-color);
+    font-weight: 600;
+    font-size: 13px;
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--danger-color);
+    background: transparent;
+    transition: all var(--transition-fast);
+}
+
+.rel_alphaxiv a:hover {
+    background: var(--danger-color);
+    color: white;
+    text-decoration: none;
+    transform: translateY(-1px);
+}
+
+/* Cool - modern pill style */
+.rel_cool a {
+    display: inline-flex;
+    align-items: center;
+    color: var(--success-color);
+    font-weight: 600;
+    font-size: 13px;
+    text-decoration: none;
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--success-color);
+    background: transparent;
+    transition: all var(--transition-fast);
+}
+
+.rel_cool a:hover {
+    background: var(--success-color);
+    color: white;
+    text-decoration: none;
+    transform: translateY(-1px);
+}
+
+/* Button colors in dark mode are automatically handled through theme variables, no additional rules needed unless specific overrides are required */
+
+/* ===== Generic Button Styles ===== */
+.btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all var(--transition-fast);
+    line-height: 1.4;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-cancel {
+    background-color: var(--body-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+}
+
+.btn-cancel:hover:not(:disabled) {
+    background-color: var(--border-color);
+}
+
+.btn-primary {
+    background: var(--tag-bg-light);
+    color: var(--tag-text-light);
+    border: 1px solid var(--tag-border-light);
+    box-shadow: 0 2px 6px rgba(30, 64, 175, 0.15);
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: var(--tag-hover-bg-light);
+    border-color: var(--tag-hover-border-light);
+    color: var(--tag-hover-text-light);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(30, 64, 175, 0.25);
+}
+
+.btn-danger {
+    background: var(--tag-neg-bg-light);
+    color: var(--tag-neg-text-light);
+    border: 1px solid var(--tag-neg-border-light);
+    box-shadow: 0 2px 6px rgba(185, 28, 28, 0.15);
+}
+
+.btn-danger:hover:not(:disabled) {
+    background: var(--tag-neg-hover-bg-light);
+    border-color: var(--tag-neg-hover-border-light);
+    color: var(--tag-neg-hover-text-light);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(185, 28, 28, 0.25);
+}
+
+[data-theme='dark'] .btn-primary {
+    background: var(--tag-bg-dark);
+    color: var(--tag-text-dark);
+    border-color: var(--tag-border-dark);
+}
+
+[data-theme='dark'] .btn-primary:hover:not(:disabled) {
+    background: var(--tag-hover-bg-dark);
+    border-color: var(--tag-hover-border-dark);
+    color: var(--tag-hover-text-dark);
+}
+
+[data-theme='dark'] .btn-danger {
+    background: var(--tag-neg-bg-dark);
+    color: var(--tag-neg-text-dark);
+    border-color: var(--tag-neg-border-dark);
+}
+
+[data-theme='dark'] .btn-danger:hover:not(:disabled) {
+    background: var(--tag-neg-hover-bg-dark);
+    border-color: var(--tag-neg-hover-border-dark);
+    color: var(--tag-neg-hover-text-dark);
+}
+
+/* ===== Shortcut Buttons ===== */
+.shortcut-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 14px;
+    background-color: var(--card-bg);
+    color: var(--link-color);
+    border: 1px solid var(--border-color);
+    border-radius: 22px;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: center;
+    transition: all var(--transition-fast);
+    line-height: 1.4;
+    box-shadow: var(--shadow-xs);
+}
+
+.shortcut-btn:hover {
+    background-color: var(--link-color);
+    border-color: var(--link-color);
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+}
+
+.shortcut-btn:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* Secondary shortcut button (e.g., Clear filters) */
+.shortcut-btn-secondary {
+    color: var(--text-muted);
+    border-style: dashed;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.shortcut-btn-secondary:hover {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    border-style: solid;
+    color: white;
+    box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+}
+
+/* Dark mode shortcut buttons */
+[data-theme='dark'] .shortcut-btn {
+    background-color: var(--card-bg);
+    color: var(--link-color);
+    border-color: var(--border-color);
+    box-shadow: var(--shadow-sm);
+}
+
+[data-theme='dark'] .shortcut-btn:hover {
+    background-color: var(--link-color);
+    border-color: var(--link-color);
+    color: white;
+    box-shadow: 0 4px 12px rgba(96, 165, 250, 0.4);
+}
+
+[data-theme='dark'] .shortcut-btn:focus {
+    box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.25);
+}
+
+[data-theme='dark'] .shortcut-btn-secondary {
+    color: var(--text-muted);
+    background-color: transparent;
+    border-color: var(--text-muted);
+}
+
+[data-theme='dark'] .shortcut-btn-secondary:hover {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    color: white;
+    box-shadow: 0 4px 12px rgba(248, 113, 113, 0.4);
+}

@@ -1,0 +1,424 @@
+/**
+ * Forms Component Styles
+ * Form component styles
+ */
+
+/* Search box container */
+#sbox {
+    width: 100%;
+}
+
+/* Search input field */
+#qfield,
+.search-input {
+    width: 100%;
+    box-sizing: border-box;
+    height: 46px;
+    font-size: 16px;
+    font-weight: 400;
+    border: 2px solid var(--border-color);
+    color: var(--text-color);
+    background-color: var(--card-bg);
+    padding: 0 46px 0 46px;
+    background-image: url('/static/search.png');
+    background-repeat: no-repeat;
+    background-position: 18px center;
+    background-size: 20px 20px;
+    border-radius: 26px;
+    transition: all var(--transition-fast);
+    line-height: 44px;
+}
+
+#qfield::placeholder {
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+#qfield:focus,
+.search-input:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow:
+        0 0 0 4px rgba(37, 99, 235, 0.12),
+        var(--shadow-md);
+    background-color: var(--card-bg);
+}
+
+[data-theme='dark'] #qfield:focus,
+[data-theme='dark'] .search-input:focus {
+    box-shadow:
+        0 0 0 4px rgba(96, 165, 250, 0.2),
+        var(--shadow-md);
+}
+
+/* Control box */
+#cbox {
+    margin-top: 0px;
+    font-size: 15px;
+}
+#cbox form {
+    margin-bottom: 0;
+}
+
+/* Search row horizontal layout */
+.search-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.search-row .search-input,
+#qfield {
+    flex: 1 1 auto;
+    min-width: 280px;
+}
+
+.search-row .primary-btn {
+    flex: 0 0 auto;
+    margin-left: 0;
+    margin-bottom: 0;
+}
+
+/* Filter row */
+.filter-row {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    margin-bottom: 8px;
+    gap: 8px;
+}
+
+/* Filter Groups Styling */
+.filter-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.filter-group:last-child {
+    margin-bottom: 0;
+}
+
+.filter-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.filter-item label {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+    line-height: 1;
+    margin: 0;
+    padding: 0;
+}
+
+.filter-item input[type='text'],
+.filter-item select {
+    box-sizing: border-box;
+    height: 36px;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 6px 10px;
+    padding-right: 26px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: all var(--transition-fast);
+    line-height: 1.2;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    background-size: 10px;
+    vertical-align: middle;
+}
+
+.filter-item input[type='text'] {
+    background-image: none;
+    padding-right: 10px;
+    cursor: text;
+}
+
+.filter-item input[type='text']:focus,
+.filter-item select:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+}
+
+.filter-item select:hover {
+    border-color: var(--link-color);
+}
+
+/* Dark mode arrow for filter selects */
+html[data-theme='dark'] .filter-item select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+}
+
+/* Give specific inputs more defined widths */
+.filter-item #rank_select,
+.filter-item #logic {
+    width: 100px;
+}
+
+.filter-item #skip_have_select {
+    width: 80px;
+}
+
+.filter-item #search_mode_select {
+    width: 120px;
+}
+
+.filter-item #time_filter_field {
+    width: 90px;
+    text-align: center;
+}
+
+.filter-item #svm_c_field {
+    width: 70px;
+    text-align: center;
+}
+
+.filter-item #tags_field,
+.filter-item #pid_field {
+    width: 200px;
+}
+
+/* Filter description text */
+.filter-note {
+    grid-column: 1 / -1;
+    margin-top: 12px;
+    padding: 10px 14px;
+    background-color: var(--tag-bg-light);
+    border-left: 3px solid var(--link-color);
+    border-radius: 6px;
+}
+.filter-note small {
+    color: var(--text-color);
+    opacity: 0.85;
+    font-size: 13px;
+    line-height: 1.5;
+}
+[data-theme='dark'] .filter-note {
+    background-color: var(--tag-bg-dark);
+    border-left: 3px solid var(--link-color);
+}
+[data-theme='dark'] .filter-note small {
+    color: #cbe7ff;
+    opacity: 0.95;
+}
+
+/* Fast links box */
+#cbox_fast {
+    font-size: 15px;
+    margin-top: 12px;
+}
+#cbox_fast a {
+    display: inline-block;
+    background-color: transparent;
+    color: var(--link-color);
+    padding: 4px 8px;
+    text-decoration: none;
+    border-radius: 3px;
+    margin-right: 8px;
+    font-size: 15px;
+    border: 1px solid transparent;
+    transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease,
+        color 0.15s ease;
+}
+#cbox_fast a:hover {
+    background-color: var(--body-bg);
+    border-color: var(--border-color);
+}
+
+/* Generic form elements */
+input[type='text'],
+input[type='email'],
+input[type='password'],
+input[type='number'],
+textarea {
+    font-family: inherit;
+    font-size: 14px;
+    padding: 10px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: all var(--transition-fast);
+}
+
+input[type='text']:focus,
+input[type='email']:focus,
+input[type='password']:focus,
+input[type='number']:focus,
+textarea:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+/* Checkbox and radio styling */
+input[type='checkbox'],
+input[type='radio'] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--link-color);
+}
+
+/* Select dropdown */
+select {
+    font-family: inherit;
+    font-size: 14px;
+    padding: 10px 32px 10px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    transition: all var(--transition-fast);
+}
+
+select:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+select:hover {
+    border-color: var(--link-color);
+}
+
+/* Form label */
+label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-color);
+    margin-bottom: 6px;
+    display: inline-block;
+}
+
+/* Form group */
+.form-group {
+    margin-bottom: 16px;
+}
+
+/* Modal/inline form input (used by tag/key modals) */
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-color);
+}
+
+.form-input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    font-size: 14px;
+    box-sizing: border-box;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    transition: all var(--transition-fast);
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.15);
+}
+
+.form-input.input-success {
+    border-color: var(--success-color);
+}
+
+.form-input.input-success:focus {
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+}
+
+.form-input.input-error {
+    border-color: var(--danger-color);
+}
+
+.form-input.input-error:focus {
+    box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
+}
+
+.input-feedback {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.input-feedback.success {
+    color: var(--success-color);
+}
+
+.input-feedback.error {
+    color: var(--danger-color);
+}
+
+[data-theme='dark'] .form-input:focus {
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+}
+
+/* Form error state */
+.form-error {
+    border-color: var(--danger-color) !important;
+}
+
+.form-error-message {
+    color: var(--danger-color);
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* Form help text */
+.form-help {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+/* === Additional styles from style.css L3953-L4248 === */
+/* ===== Dark-mode form controls ===== */
+[data-theme='dark'] input[type='text'],
+[data-theme='dark'] input[type='number'],
+[data-theme='dark'] input[type='password'],
+[data-theme='dark'] textarea,
+[data-theme='dark'] select {
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    border: 1px solid var(--text-color);
+}
+[data-theme='dark'] input:focus,
+[data-theme='dark'] textarea:focus,
+[data-theme='dark'] select:focus {
+    border-color: var(--btn-bg);
+    outline: none;
+}

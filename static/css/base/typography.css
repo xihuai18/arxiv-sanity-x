@@ -1,0 +1,56 @@
+/* ===== Global Select Styling ===== */
+select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    border: 2px solid var(--border-color);
+    border-radius: 12px;
+    padding: 8px 36px 8px 14px;
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    background-size: 12px;
+}
+
+select:hover {
+    border-color: var(--link-color);
+}
+
+select:focus {
+    outline: none;
+    border-color: var(--link-color);
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.1);
+}
+
+select option {
+    background-color: var(--card-bg);
+    color: var(--text-color);
+    padding: 8px 12px;
+}
+
+/* Dark mode arrow adjustment */
+html[data-theme='dark'] select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%239ca3af' d='M2.5 4.5l3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+}
+
+/* Section title styles */
+.section-title,
+.combined-section-title,
+.tag-section-title {
+    text-align: left;
+    display: block;
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 12px;
+    padding-left: 0;
+}

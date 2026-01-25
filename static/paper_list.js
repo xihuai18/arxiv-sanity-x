@@ -6,12 +6,20 @@ var csrfFetch = CommonUtils.csrfFetch;
 var _setupUserEventStream = CommonUtils.setupUserEventStream;
 var _registerEventHandler = CommonUtils.registerEventHandler;
 var renderTldrMarkdown = CommonUtils.renderTldrMarkdown;
+var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
 var formatAuthorsText = CommonUtils.formatAuthorsText;
 var triggerMathJax = CommonUtils.triggerMathJax;
 var buildTagUrl = CommonUtils.buildTagUrl;
 var buildKeywordUrl = CommonUtils.buildKeywordUrl;
 var registerDropdown = CommonUtils.registerDropdown;
 var unregisterDropdown = CommonUtils.unregisterDropdown;
+var getCsrfToken = CommonUtils.getCsrfToken;
+// Summary status polling (shared)
+var markSummaryPending = CommonUtils.markSummaryPending;
+var unmarkSummaryPending = CommonUtils.unmarkSummaryPending;
+var canTriggerSummary = CommonUtils.canTriggerSummary;
+var formatSummaryStatus = CommonUtils.formatSummaryStatus;
+var fetchTaskStatus = CommonUtils.fetchTaskStatus;
 
 function applyUserState(state) {
     if (!state || !state.success) return;
@@ -32,19 +40,34 @@ function fetchUserStateAndApply() {
 
 // Common helpers are centralized in common_utils.js
 
-function updatePaperSummaryStatus(pid, status, error) {
+function updatePaperSummaryStatus(pid, status, error, queueRank, queueTotal, taskId) {
     if (!pid || !Array.isArray(papers)) return;
     const p = papers.find(item => item && item.id === pid);
     if (!p) return;
     p.summary_status = status || '';
     p.summary_last_error = error || '';
+    if (taskId !== undefined) {
+        p.summary_task_id = taskId ? String(taskId) : '';
+    }
+    if (status && status !== 'queued' && status !== 'running') {
+        p.summary_task_id = '';
+    }
+    if (queueRank !== undefined) {
+        p.summary_queue_rank = queueRank || 0;
+        p.summary_queue_total = queueTotal || 0;
+    }
     renderPaperList();
 }
+
+// Register callback for summary status updates from shared polling
+CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId) {
+    updatePaperSummaryStatus(pid, status, lastError, undefined, undefined, taskId);
+});
 
 function updatePaperTagsForRename(fromTag, toTag) {
     if (!fromTag || !toTag || !Array.isArray(papers)) return;
     let changed = false;
-    papers.forEach((p) => {
+    papers.forEach(p => {
         if (!p) return;
         if (Array.isArray(p.utags)) {
             const next = p.utags.map(t => (t === fromTag ? toTag : t));
@@ -67,7 +90,7 @@ function updatePaperTagsForRename(fromTag, toTag) {
 function updatePaperTagsForDelete(tagName) {
     if (!tagName || !Array.isArray(papers)) return;
     let changed = false;
-    papers.forEach((p) => {
+    papers.forEach(p => {
         if (!p) return;
         if (Array.isArray(p.utags)) {
             const next = p.utags.filter(t => t !== tagName);
@@ -126,12 +149,29 @@ function handleUserEvent(event, options = {}) {
             updatePaperTagsForRename(event.from, event.to);
         } else if (event.reason === 'delete_tag') {
             updatePaperTagsForDelete(event.tag);
-        } else if (event.reason === 'tag_feedback' && event.pid && event.tag && event.label !== undefined) {
+        } else if (
+            event.reason === 'tag_feedback' &&
+            event.pid &&
+            event.tag &&
+            event.label !== undefined
+        ) {
             applyTagFeedbackToPaper(event.pid, event.tag, event.label);
         }
         fetchUserStateAndApply();
     } else if (event.type === 'summary_status') {
-        updatePaperSummaryStatus(event.pid, event.status, event.error);
+        updatePaperSummaryStatus(
+            event.pid,
+            event.status,
+            event.error,
+            undefined,
+            undefined,
+            event.task_id
+        );
+        if (event.status === 'queued' || event.status === 'running') {
+            markSummaryPending(event.pid);
+        } else {
+            unmarkSummaryPending(event.pid);
+        }
     } else if (event.type === 'readinglist_changed') {
         handleReadingListEvent(event);
     }
@@ -142,45 +182,40 @@ function setupUserEventStream() {
     _setupUserEventStream(user, applyUserState);
 }
 
-// Shared helpers are centralized in common_utils.js
-
-function formatSummaryStatus(status) {
-    if (!status) return '';
-    if (status === 'queued') return 'Summary Queued';
-    if (status === 'running') return 'Summary Generating';
-    if (status === 'ok') return 'Summary Ready';
-    if (status === 'failed') return 'Summary Failed';
-    return 'Summary ' + status.charAt(0).toUpperCase() + status.slice(1);
-}
-
-function canTriggerSummary(status) {
-    return !(status === 'ok' || status === 'running' || status === 'queued');
-}
+// formatSummaryStatus and canTriggerSummary are now in common_utils.js
 
 // Multi-select dropdown component (shared implementation)
-const MultiSelectDropdown = (typeof window !== 'undefined' && window.ArxivSanityTagDropdown && window.ArxivSanityTagDropdown.MultiSelectDropdown)
-    ? window.ArxivSanityTagDropdown.MultiSelectDropdown
-    : (props) => {
-        // Fallback: should not happen when tag_dropdown_shared.js is loaded.
-        return React.createElement('div', null, 'Tag dropdown unavailable');
-    };
+const MultiSelectDropdown =
+    typeof window !== 'undefined' &&
+    window.ArxivSanityTagDropdown &&
+    window.ArxivSanityTagDropdown.MultiSelectDropdown
+        ? window.ArxivSanityTagDropdown.MultiSelectDropdown
+        : props => {
+              // Fallback: should not happen when tag_dropdown_shared.js is loaded.
+              return React.createElement('div', null, 'Tag dropdown unavailable');
+          };
 
 const Paper = props => {
     const p = props.paper;
     const lst = props.tags;
-    const tlst = lst.map((jtag) => jtag.name);
+    const tlst = lst.map(jtag => jtag.name);
     const ulst = p.utags;
 
-    const similar_url = "/?rank=pid&pid=" + encodeURIComponent(p.id);
-    const inspect_url = "/inspect?pid=" + encodeURIComponent(p.id);
-    const summary_url = "/summary?pid=" + encodeURIComponent(p.id);
-    const thumb_img = p.thumb_url === '' ? null : <div class='rel_img'><img src={p.thumb_url} /></div>;
+    const similar_url = '/?rank=pid&pid=' + encodeURIComponent(p.id);
+    const inspect_url = '/inspect?pid=' + encodeURIComponent(p.id);
+    const summary_url = '/summary?pid=' + encodeURIComponent(p.id);
+    const thumb_img =
+        p.thumb_url === '' ? null : (
+            <div class="rel_img">
+                <img src={p.thumb_url} loading="lazy" alt="Paper thumbnail" />
+            </div>
+        );
 
     // if the user is logged in then we can show the multi-select dropdown
     let utag_controls = null;
     if (user) {
         utag_controls = (
-            <div class='rel_utags'>
+            <div class="rel_utags">
                 <MultiSelectDropdown
                     selectedTags={ulst}
                     negativeTags={props.negativeTags}
@@ -197,28 +232,48 @@ const Paper = props => {
                     onSearchChange={props.onSearchChange}
                 />
             </div>
-        )
+        );
     }
 
     // Render TL;DR if available (with markdown and LaTeX support)
     const tldr_section = p.tldr ? (
-        <div class='rel_tldr'>
-            <div class='tldr_label'>💡 TL;DR</div>
-            <div class='tldr_text' dangerouslySetInnerHTML={{__html: renderTldrMarkdown(p.tldr)}}></div>
+        <div class="rel_tldr">
+            <div class="tldr_label">💡 TL;DR</div>
+            <div
+                class="tldr_text"
+                dangerouslySetInnerHTML={{ __html: renderTldrMarkdown(p.tldr) }}
+            ></div>
         </div>
     ) : null;
 
     const statusText = formatSummaryStatus(props.summaryStatus);
-    const statusClass = props.summaryStatus === 'ok'
-        ? 'summary-status-badge ok'
-        : props.summaryStatus === 'failed'
-            ? 'summary-status-badge failed'
-            : props.summaryStatus
+    const queueRankText =
+        props.summaryStatus === 'queued' && props.summaryQueueRank
+            ? `${props.summaryQueueRank}${props.summaryQueueTotal ? '/' + props.summaryQueueTotal : ''} Queued`
+            : '';
+    const queueRankSpan = queueRankText ? (
+        <span class="queue-rank-pill">{queueRankText}</span>
+    ) : null;
+    const statusClass =
+        props.summaryStatus === 'ok'
+            ? 'summary-status-badge ok'
+            : props.summaryStatus === 'failed'
+              ? 'summary-status-badge failed'
+              : props.summaryStatus
                 ? 'summary-status-badge'
                 : '';
+    const tooltipParts = [];
+    if (props.summaryLastError) {
+        tooltipParts.push(props.summaryLastError);
+    }
+    if (queueRankText) {
+        tooltipParts.push(`${queueRankText} (high priority only)`);
+    }
+    const badgeTitle = tooltipParts.length ? tooltipParts.join(' · ') : '';
     const statusBadge = statusText ? (
-        <div class={statusClass} title={props.summaryLastError || ''}>
+        <div class={statusClass} title={badgeTitle}>
             {statusText}
+            {queueRankSpan}
         </div>
     ) : null;
 
@@ -239,7 +294,7 @@ const Paper = props => {
     const triggerDisabled = !canTriggerSummary(props.summaryStatus);
     const triggerBtn = (
         <button
-            class='summary-trigger-btn'
+            class="summary-trigger-btn"
             onClick={props.onTriggerSummary}
             disabled={triggerDisabled}
             title={triggerDisabled ? 'Summary already available or generating' : 'Generate summary'}
@@ -249,49 +304,88 @@ const Paper = props => {
     );
 
     return (
-        <div class='rel_paper'>
+        <div class="rel_paper">
             <div class="rel_score">
                 {p.weight.toFixed(2)}
-                {p.score_breakdown && (
-                    <div class="score_breakdown">
-                        {p.score_breakdown}
-                    </div>
-                )}
+                {p.score_breakdown && <div class="score_breakdown">{p.score_breakdown}</div>}
             </div>
             {readinglist_btn}
-            <div class='rel_title'><a href={'http://arxiv.org/abs/' + p.id} target="_blank" rel="noopener noreferrer">{p.title}</a></div>
-            <div class='rel_authors' title={p.authors || ''}>{formatAuthorsText(p.authors, { maxAuthors: 10, head: 5, tail: 3 })}</div>
+            <div class="rel_title">
+                <a href={'http://arxiv.org/abs/' + p.id} target="_blank" rel="noopener noreferrer">
+                    {p.title}
+                </a>
+            </div>
+            <div class="rel_authors" title={p.authors || ''}>
+                {formatAuthorsText(p.authors, { maxAuthors: 10, head: 5, tail: 3 })}
+            </div>
             <div class="rel_time">{p.time}</div>
-            <div class='rel_tags'>{p.tags}</div>
+            <div class="rel_tags">{p.tags}</div>
             {statusBadge}
             {tldr_section}
             {thumb_img}
-            <div class='rel_abs'>{p.summary}</div>
+            <div
+                class="rel_abs"
+                dangerouslySetInnerHTML={{ __html: renderAbstractMarkdown(p.summary) }}
+            ></div>
             {utag_controls}
-            <div class='paper-actions-footer'>
-                <div class='rel_summary'>{triggerBtn}</div>
-                <div class='rel_more'><a href={similar_url} target="_blank" rel="noopener noreferrer">Similar</a></div>
-                <div class='rel_inspect'><a href={inspect_url} target="_blank" rel="noopener noreferrer">Inspect</a></div>
-                <div class='rel_summary'><a href={summary_url} target="_blank" rel="noopener noreferrer">Summary</a></div>
-                <div class='rel_alphaxiv'><a href={'https://www.alphaxiv.org/overview/' + p.id} target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
-                <div class='rel_cool'><a href={'https://papers.cool/arxiv/' + p.id} target="_blank" rel="noopener noreferrer">Cool</a></div>
+            <div class="paper-actions-footer">
+                <div class="rel_summary">{triggerBtn}</div>
+                <div class="rel_more">
+                    <a href={similar_url} target="_blank" rel="noopener noreferrer">
+                        Similar
+                    </a>
+                </div>
+                <div class="rel_inspect">
+                    <a href={inspect_url} target="_blank" rel="noopener noreferrer">
+                        Inspect
+                    </a>
+                </div>
+                <div class="rel_summary">
+                    <a href={summary_url} target="_blank" rel="noopener noreferrer">
+                        Summary
+                    </a>
+                </div>
+                <div class="rel_alphaxiv">
+                    <a
+                        href={'https://www.alphaxiv.org/overview/' + p.id}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        alphaXiv
+                    </a>
+                </div>
+                <div class="rel_cool">
+                    <a
+                        href={'https://papers.cool/arxiv/' + p.id}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        Cool
+                    </a>
+                </div>
             </div>
         </div>
-    )
-}
+    );
+};
 
 const PaperList = props => {
     const lst = props.papers;
     const filtered_tags = props.tags.filter(tag => tag.name !== 'all');
-    const plst = lst.map((jpaper, ix) => <PaperComponent key={ix} paper={jpaper} tags={filtered_tags} />);
+    const plst = lst.map((jpaper, ix) => (
+        <PaperComponent
+            key={jpaper && jpaper.id ? jpaper.id : ix}
+            paper={jpaper}
+            tags={filtered_tags}
+        />
+    ));
     return (
         <div>
             <div id="paperList" class="rel_papers">
                 {plst}
             </div>
         </div>
-    )
-}
+    );
+};
 
 class PaperComponent extends React.Component {
     constructor(props) {
@@ -310,9 +404,13 @@ class PaperComponent extends React.Component {
             searchValue: '',
             inReadingList: isInReadingList(props.paper.id),
             summaryStatus: props.paper.summary_status || '',
-            summaryLastError: props.paper.summary_last_error || ''
+            summaryLastError: props.paper.summary_last_error || '',
+            summaryQueueRank: props.paper.summary_queue_rank || 0,
+            summaryQueueTotal: props.paper.summary_queue_total || 0,
+            summaryTaskId: props.paper.summary_task_id ? String(props.paper.summary_task_id) : '',
         };
         this.dropdownId = 'dropdown-' + props.paper.id;
+        this.queueRankTimer = null;
         this.handleToggleDropdown = this.handleToggleDropdown.bind(this);
         this.handleTagCycle = this.handleTagCycle.bind(this);
         this.handleClearTag = this.handleClearTag.bind(this);
@@ -336,22 +434,89 @@ class PaperComponent extends React.Component {
                     }
                 }
                 this.setState({ dropdownOpen: false });
-            }
+            },
         });
-        // Trigger MathJax rendering for TL;DR content
-        if (this.state.paper.tldr) {
+        // Trigger MathJax rendering for TL;DR / abstract content.
+        // Scoped to the list container to avoid full-document scans.
+        if (this.state.paper.tldr || this.state.paper.summary) {
             triggerMathJax(document.getElementById('paperList'));
         }
     }
 
-    componentDidUpdate(prevProps) {
+    componentDidUpdate(prevProps, prevState) {
         if (prevProps.tags !== this.props.tags) {
             this.setState({ tags: this.props.tags });
+        }
+        if (
+            prevProps.paper.summary_status !== this.props.paper.summary_status ||
+            prevProps.paper.summary_last_error !== this.props.paper.summary_last_error ||
+            prevProps.paper.summary_queue_rank !== this.props.paper.summary_queue_rank ||
+            prevProps.paper.summary_queue_total !== this.props.paper.summary_queue_total ||
+            prevProps.paper.summary_task_id !== this.props.paper.summary_task_id
+        ) {
+            this.setState({
+                summaryStatus: this.props.paper.summary_status || '',
+                summaryLastError: this.props.paper.summary_last_error || '',
+                summaryQueueRank: this.props.paper.summary_queue_rank || 0,
+                summaryQueueTotal: this.props.paper.summary_queue_total || 0,
+                summaryTaskId: this.props.paper.summary_task_id
+                    ? String(this.props.paper.summary_task_id)
+                    : '',
+            });
+        }
+        if (this.state.summaryStatus !== prevState.summaryStatus) {
+            if (this.state.summaryStatus === 'queued' && this.state.summaryTaskId) {
+                this.startQueueRankPolling();
+            } else if (this.state.summaryStatus !== 'queued') {
+                this.stopQueueRankPolling();
+                if (this.state.summaryQueueRank) {
+                    this.setState({ summaryQueueRank: 0, summaryQueueTotal: 0 });
+                }
+            }
         }
     }
 
     componentWillUnmount() {
         unregisterDropdown(this.dropdownId);
+        this.stopQueueRankPolling();
+    }
+
+    startQueueRankPolling() {
+        if (this.queueRankTimer) return;
+        this.queueRankTimer = setInterval(() => {
+            this.refreshQueueRank();
+        }, 6000);
+        this.refreshQueueRank();
+    }
+
+    stopQueueRankPolling() {
+        if (this.queueRankTimer) {
+            clearInterval(this.queueRankTimer);
+            this.queueRankTimer = null;
+        }
+    }
+
+    refreshQueueRank() {
+        const taskId = this.state.summaryTaskId;
+        if (!taskId) return;
+        fetchTaskStatus(taskId).then(data => {
+            if (!data) return;
+            if (data.status && data.status !== 'queued') {
+                this.setState({ summaryQueueRank: 0, summaryQueueTotal: 0, summaryTaskId: '' });
+                this.stopQueueRankPolling();
+                return;
+            }
+            const queueRank = Number(data.queue_rank || 0);
+            const queueTotal = Number(data.queue_total || 0);
+            this.setState({ summaryQueueRank: queueRank, summaryQueueTotal: queueTotal });
+            updatePaperSummaryStatus(
+                this.state.paper.id,
+                this.state.summaryStatus,
+                this.state.summaryLastError,
+                queueRank,
+                queueTotal
+            );
+        });
     }
 
     handleToggleDropdown() {
@@ -371,14 +536,14 @@ class PaperComponent extends React.Component {
             }
             return {
                 dropdownOpen: newOpen,
-                searchValue: newOpen ? '' : prevState.searchValue // Reset search when opened
+                searchValue: newOpen ? '' : prevState.searchValue, // Reset search when opened
             };
         });
     }
 
     handleSearchChange(event) {
         this.setState({
-            searchValue: event.target.value
+            searchValue: event.target.value,
         });
     }
 
@@ -387,7 +552,7 @@ class PaperComponent extends React.Component {
         return csrfFetch('/api/tag_feedback', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pid: paper.id, tag: tagName, label: label })
+            body: JSON.stringify({ pid: paper.id, tag: tagName, label: label }),
         })
             .then(response => response.json())
             .then(data => {
@@ -448,24 +613,22 @@ class PaperComponent extends React.Component {
         const isNegative = (paper.ntags || []).includes(tagName);
         const nextLabel = isPositive ? -1 : isNegative ? 0 : 1;
 
-        this.applyTagFeedback(tagName, nextLabel)
-            .catch(error => {
-                console.error('Error updating tag feedback:', error);
-                alert('Failed to update tag feedback: ' + error.message);
-            });
+        this.applyTagFeedback(tagName, nextLabel).catch(error => {
+            console.error('Error updating tag feedback:', error);
+            alert('Failed to update tag feedback: ' + error.message);
+        });
     }
 
     handleClearTag(tagName) {
-        this.applyTagFeedback(tagName, 0)
-            .catch(error => {
-                console.error('Error clearing tag feedback:', error);
-                alert('Failed to clear tag feedback: ' + error.message);
-            });
+        this.applyTagFeedback(tagName, 0).catch(error => {
+            console.error('Error clearing tag feedback:', error);
+            alert('Failed to clear tag feedback: ' + error.message);
+        });
     }
 
     handleNewTagChange(event) {
         this.setState({
-            newTagValue: event.target.value
+            newTagValue: event.target.value,
         });
     }
 
@@ -485,7 +648,7 @@ class PaperComponent extends React.Component {
             .then(() => {
                 this.setState({
                     paper: paper,
-                    newTagValue: ''
+                    newTagValue: '',
                 });
                 console.log(`Added new tag: ${trimmedTag}`);
             })
@@ -500,10 +663,10 @@ class PaperComponent extends React.Component {
 
         if (inReadingList) {
             // Remove from reading list
-            csrfFetch("/api/readinglist/remove", {
+            csrfFetch('/api/readinglist/remove', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: paper.id })
+                body: JSON.stringify({ pid: paper.id }),
             })
                 .then(response => response.json())
                 .then(data => {
@@ -520,16 +683,34 @@ class PaperComponent extends React.Component {
                 });
         } else {
             // Add to reading list
-            csrfFetch("/api/readinglist/add", {
+            csrfFetch('/api/readinglist/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: paper.id })
+                body: JSON.stringify({ pid: paper.id }),
             })
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
                         addToReadingListCache(paper.id);
-                        this.setState({ inReadingList: true, summaryStatus: 'queued', summaryLastError: '' });
+                        const taskId = data.task_id ? String(data.task_id) : '';
+                        this.setState({
+                            inReadingList: true,
+                            summaryStatus: 'queued',
+                            summaryLastError: '',
+                            summaryTaskId: taskId,
+                        });
+                        if (taskId) {
+                            this.startQueueRankPolling();
+                        }
+                        markSummaryPending(paper.id);
+                        updatePaperSummaryStatus(
+                            paper.id,
+                            'queued',
+                            '',
+                            undefined,
+                            undefined,
+                            taskId
+                        );
                         console.log(`Added ${paper.id} to reading list, top_tags:`, data.top_tags);
                     } else {
                         console.error('Failed to add to reading list:', data.error);
@@ -548,26 +729,59 @@ class PaperComponent extends React.Component {
         if (!canTriggerSummary(summaryStatus)) return;
 
         this.setState({ summaryStatus: 'queued', summaryLastError: '' });
+        markSummaryPending(paper.id);
         csrfFetch('/api/trigger_paper_summary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pid: paper.id })
+            body: JSON.stringify({ pid: paper.id }),
         })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
+                    const taskId = data.task_id ? String(data.task_id) : '';
                     this.setState({
                         summaryStatus: data.status || 'queued',
-                        summaryLastError: data.last_error || ''
+                        summaryLastError: data.last_error || '',
+                        summaryTaskId: taskId,
                     });
+                    if (taskId) {
+                        this.startQueueRankPolling();
+                    }
+                    if (data.status === 'queued' || data.status === 'running') {
+                        markSummaryPending(paper.id);
+                    } else {
+                        unmarkSummaryPending(paper.id);
+                    }
+                    updatePaperSummaryStatus(
+                        paper.id,
+                        data.status || 'queued',
+                        data.last_error || '',
+                        undefined,
+                        undefined,
+                        taskId
+                    );
                 } else {
-                    this.setState({ summaryStatus: 'failed', summaryLastError: data.error || '' });
+                    this.setState({
+                        summaryStatus: 'failed',
+                        summaryLastError: data.error || '',
+                        summaryTaskId: '',
+                        summaryQueueRank: 0,
+                        summaryQueueTotal: 0,
+                    });
+                    unmarkSummaryPending(paper.id);
                     alert('Failed to trigger summary: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error triggering summary:', error);
-                this.setState({ summaryStatus: 'failed', summaryLastError: String(error) });
+                this.setState({
+                    summaryStatus: 'failed',
+                    summaryLastError: String(error),
+                    summaryTaskId: '',
+                    summaryQueueRank: 0,
+                    summaryQueueTotal: 0,
+                });
+                unmarkSummaryPending(paper.id);
                 alert('Network error, failed to trigger summary');
             });
     }
@@ -592,6 +806,8 @@ class PaperComponent extends React.Component {
                 onToggleReadingList={this.handleToggleReadingList}
                 summaryStatus={this.state.summaryStatus}
                 summaryLastError={this.state.summaryLastError}
+                summaryQueueRank={this.state.summaryQueueRank}
+                summaryQueueTotal={this.state.summaryQueueTotal}
                 onTriggerSummary={this.handleTriggerSummary}
             />
         );
@@ -602,22 +818,24 @@ const Tag = props => {
     const t = props.tag;
     const turl = buildTagUrl(t.name);
     const isNegOnly = t.neg_only === true;
-    const tag_class = 'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '') + (isNegOnly ? ' tag-negative' : '');
+    const tag_class =
+        'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '') + (isNegOnly ? ' tag-negative' : '');
     const isEditable = t.name !== 'all';
-    const tooltip = t.name === 'all'
-        ? '包含所有标签'
-        : `Positive: ${t.pos_n || 0} · Negative: ${t.neg_n || 0}`;
+    const tooltip =
+        t.name === 'all'
+            ? 'Contains all tags'
+            : `Positive: ${t.pos_n || 0} · Negative: ${t.neg_n || 0}`;
 
     const posCount = Number(t.pos_n || 0);
     const negCount = Number(t.neg_n || 0);
 
-    const handleOpenManage = (e) => {
+    const handleOpenManage = e => {
         e.preventDefault();
         e.stopPropagation();
         if (props.onManage) props.onManage(t);
     };
 
-    const handleOpenReco = (e) => {
+    const handleOpenReco = e => {
         e.preventDefault();
         e.stopPropagation();
         if (isNegOnly) {
@@ -635,25 +853,35 @@ const Tag = props => {
                 onClick={handleOpenManage}
             >
                 <span class="tag-counts">
-                    <span class="tag-count tag-count-pos" title="Positive count">+{posCount}</span>
-                    <span class="tag-count tag-count-neg" title="Negative count">−{negCount}</span>
+                    <span class="tag-count tag-count-pos" title="Positive count">
+                        +{posCount}
+                    </span>
+                    <span class="tag-count tag-count-neg" title="Negative count">
+                        −{negCount}
+                    </span>
                 </span>
                 <span class="tag-name">{t.name}</span>
             </span>
             {isEditable && (
                 <div class="tag-actions">
-                    <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">↗</span>
-                    <span class="tag-edit" onClick={() => props.onEdit(t)} title="Edit tag">✎</span>
-                    <span class="tag-delete" onClick={() => props.onDelete(t)} title="Delete tag">×</span>
+                    <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">
+                        ↗
+                    </span>
+                    <span class="tag-edit" onClick={() => props.onEdit(t)} title="Edit tag">
+                        ✎
+                    </span>
+                    <span class="tag-delete" onClick={() => props.onDelete(t)} title="Delete tag">
+                        ×
+                    </span>
                 </div>
             )}
         </div>
-    )
-}
+    );
+};
 
 const TagList = props => {
     const lst = props.tags;
-    const tlst = lst.map((jtag, ix) =>
+    const tlst = lst.map((jtag, ix) => (
         <Tag
             key={ix}
             tag={jtag}
@@ -661,18 +889,23 @@ const TagList = props => {
             onDelete={props.onDeleteTag}
             onManage={props.onManageTag}
         />
-    );
+    ));
 
     // show the #wordwrap element if the user clicks inspect
     const show_inspect = () => {
-        const wordwrap = document.getElementById("wordwrap");
-        if (wordwrap.style.display === "block") {
-            wordwrap.style.display = "none";
+        const wordwrap = document.getElementById('wordwrap');
+        if (wordwrap.style.display === 'block') {
+            wordwrap.style.display = 'none';
         } else {
-            wordwrap.style.display = "block";
+            wordwrap.style.display = 'block';
         }
     };
-    const inspect_elt = words.length > 0 ? <div id="inspect_svm" onClick={show_inspect}>inspect</div> : null;
+    const inspect_elt =
+        words.length > 0 ? (
+            <div id="inspect_svm" onClick={show_inspect}>
+                inspect
+            </div>
+        ) : null;
 
     return (
         <div class="enhanced-tag-list">
@@ -690,10 +923,12 @@ const TagList = props => {
             {/* Edit Modal */}
             {props.showEditModal && (
                 <div class="modal-overlay" onClick={props.onCloseEditModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Edit Tag</h3>
-                            <span class="modal-close" onClick={props.onCloseEditModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseEditModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="form-group">
@@ -708,8 +943,12 @@ const TagList = props => {
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>Cancel</button>
-                            <button class="btn btn-primary" onClick={props.onSaveTagEdit}>Save</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-primary" onClick={props.onSaveTagEdit}>
+                                Save
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -718,10 +957,12 @@ const TagList = props => {
             {/* Add Tag Modal */}
             {props.showAddModal && (
                 <div class="modal-overlay" onClick={props.onCloseAddModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Add Tag</h3>
-                            <span class="modal-close" onClick={props.onCloseAddModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseAddModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="form-group">
@@ -736,8 +977,12 @@ const TagList = props => {
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>Cancel</button>
-                            <button class="btn btn-primary" onClick={props.onSaveNewTag}>Save</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-primary" onClick={props.onSaveNewTag}>
+                                Save
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -746,18 +991,30 @@ const TagList = props => {
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
                 <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
-                            <p>Are you sure you want to delete tag "<strong>{props.deletingTag && props.deletingTag.name}</strong>"?</p>
-                            <p class="warning-text">This action is irreversible. All papers under this tag will lose the tag.</p>
+                            <p>
+                                Are you sure you want to delete tag "
+                                <strong>{props.deletingTag && props.deletingTag.name}</strong>"?
+                            </p>
+                            <p class="warning-text">
+                                This action is irreversible. All papers under this tag will lose the
+                                tag.
+                            </p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>Cancel</button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>Delete</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
+                                Delete
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -766,16 +1023,24 @@ const TagList = props => {
             {/* Tag Manage Modal */}
             {props.showManageModal && (
                 <div class="modal-overlay" onClick={props.onCloseManageModal}>
-                    <div class="modal-content wide tag-manage-modal" onClick={(e) => e.stopPropagation()}>
+                    <div
+                        class="modal-content wide tag-manage-modal"
+                        onClick={e => e.stopPropagation()}
+                    >
                         <div class="modal-header">
                             <h3>Manage Tag: {props.managingTagName}</h3>
-                            <span class="modal-close" onClick={props.onCloseManageModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseManageModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="tag-manage-toolbar">
                                 <div class="tag-manage-filters">
                                     <label>View:</label>
-                                    <select value={props.manageLabelFilter} onChange={props.onManageLabelFilterChange}>
+                                    <select
+                                        value={props.manageLabelFilter}
+                                        onChange={props.onManageLabelFilterChange}
+                                    >
                                         <option value="all">All</option>
                                         <option value="pos">Positive</option>
                                         <option value="neg">Negative</option>
@@ -791,7 +1056,9 @@ const TagList = props => {
                                 <div class="tag-manage-stats">
                                     <span class="tag-manage-stat">pos: {props.managePosTotal}</span>
                                     <span class="tag-manage-stat">neg: {props.manageNegTotal}</span>
-                                    <span class="tag-manage-stat">total: {props.manageTotalCount}</span>
+                                    <span class="tag-manage-stat">
+                                        total: {props.manageTotalCount}
+                                    </span>
                                 </div>
                             </div>
 
@@ -803,8 +1070,11 @@ const TagList = props => {
                                         placeholder="Enter PID(s), e.g. 2501.01234"
                                         value={props.manageAddPidsValue}
                                         onChange={props.onManageAddPidsChange}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && props.manageAddPidsValue.trim()) {
+                                        onKeyDown={e => {
+                                            if (
+                                                e.key === 'Enter' &&
+                                                props.manageAddPidsValue.trim()
+                                            ) {
                                                 e.preventDefault();
                                                 props.onManageAddPids(1);
                                             }
@@ -829,26 +1099,55 @@ const TagList = props => {
                                 </div>
                                 <div class="tag-manage-help">
                                     <small>
-                                        Multiple PIDs: separate by comma / space / newline. Enter to add as +. Use buttons for + / −.
+                                        Multiple PIDs: separate by comma / space / newline. Enter to
+                                        add as +. Use buttons for + / −.
                                     </small>
                                 </div>
 
-                                {(props.managePidPreviewLoading || (props.managePidPreviewItems && props.managePidPreviewItems.length) || props.managePidPreviewError) ? (
+                                {props.managePidPreviewLoading ||
+                                (props.managePidPreviewItems &&
+                                    props.managePidPreviewItems.length) ||
+                                props.managePidPreviewError ? (
                                     <div class="tag-manage-pid-preview">
                                         {props.managePidPreviewLoading ? (
-                                            <div class="tag-manage-pid-preview-loading">Previewing…</div>
+                                            <div class="tag-manage-pid-preview-loading">
+                                                Previewing…
+                                            </div>
                                         ) : null}
                                         {props.managePidPreviewError ? (
-                                            <div class="tag-manage-pid-preview-error">{props.managePidPreviewError}</div>
-                                        ) : null}
-                                        {(props.managePidPreviewItems || []).slice(0, 8).map((it, ix) => (
-                                            <div key={it.pid + '-' + ix} class={'tag-manage-pid-preview-item' + (it.title ? '' : ' not-found')}>
-                                                <span class="tag-manage-pid-preview-pid">{it.pid}</span>
-                                                <span class={'tag-manage-pid-preview-title' + (it.title ? '' : ' not-found')}>{it.title || 'Not found in database'}</span>
+                                            <div class="tag-manage-pid-preview-error">
+                                                {props.managePidPreviewError}
                                             </div>
-                                        ))}
+                                        ) : null}
+                                        {(props.managePidPreviewItems || [])
+                                            .slice(0, 8)
+                                            .map((it, ix) => (
+                                                <div
+                                                    key={it.pid + '-' + ix}
+                                                    class={
+                                                        'tag-manage-pid-preview-item' +
+                                                        (it.title ? '' : ' not-found')
+                                                    }
+                                                >
+                                                    <span class="tag-manage-pid-preview-pid">
+                                                        {it.pid}
+                                                    </span>
+                                                    <span
+                                                        class={
+                                                            'tag-manage-pid-preview-title' +
+                                                            (it.title ? '' : ' not-found')
+                                                        }
+                                                    >
+                                                        {it.title || 'Not found in database'}
+                                                    </span>
+                                                </div>
+                                            ))}
                                         {(props.managePidPreviewItems || []).length > 8 ? (
-                                            <div class="tag-manage-pid-preview-more">…and {(props.managePidPreviewItems || []).length - 8} more</div>
+                                            <div class="tag-manage-pid-preview-more">
+                                                …and{' '}
+                                                {(props.managePidPreviewItems || []).length - 8}{' '}
+                                                more
+                                            </div>
                                         ) : null}
                                     </div>
                                 ) : null}
@@ -857,55 +1156,98 @@ const TagList = props => {
                             <div class="tag-manage-list">
                                 {props.manageLoading ? (
                                     <div class="tag-manage-loading">Loading…</div>
+                                ) : (props.manageItems || []).length === 0 ? (
+                                    <div class="tag-manage-empty">No papers in this tag.</div>
                                 ) : (
-                                    (props.manageItems || []).length === 0 ? (
-                                        <div class="tag-manage-empty">No papers in this tag.</div>
-                                    ) : (
-                                        <div class="tag-manage-rows">
-                                            {(props.manageItems || []).map((it, ix) => (
-                                                <div key={it.pid + '-' + ix} class="tag-manage-row">
-                                                    <button
-                                                        class={"tag-manage-label " + (it.label === 1 ? 'pos' : it.label === -1 ? 'neg' : 'none')}
-                                                        onClick={() => props.onManageCyclePid(it.pid, it.label)}
-                                                        title="Cycle label"
-                                                    >
-                                                        {it.label === 1 ? '+' : it.label === -1 ? '−' : '·'}
-                                                    </button>
-                                                    <div class="tag-manage-main">
-                                                        <div class="tag-manage-title">
-                                                            <a href={'/summary?pid=' + encodeURIComponent(it.pid)} target="_blank" rel="noreferrer">
-                                                                {it.title || it.pid}
-                                                            </a>
-                                                        </div>
-                                                        <div class="tag-manage-meta">
-                                                            <span class="tag-manage-time">{it.time || ''}</span>
-                                                            <span class="tag-manage-authors" title={it.authors || ''}>{formatAuthorsText(it.authors, { maxAuthors: 10, head: 5, tail: 3 })}</span>
-                                                        </div>
+                                    <div class="tag-manage-rows">
+                                        {(props.manageItems || []).map((it, ix) => (
+                                            <div key={it.pid + '-' + ix} class="tag-manage-row">
+                                                <button
+                                                    class={
+                                                        'tag-manage-label ' +
+                                                        (it.label === 1
+                                                            ? 'pos'
+                                                            : it.label === -1
+                                                              ? 'neg'
+                                                              : 'none')
+                                                    }
+                                                    onClick={() =>
+                                                        props.onManageCyclePid(it.pid, it.label)
+                                                    }
+                                                    title="Cycle label"
+                                                >
+                                                    {it.label === 1
+                                                        ? '+'
+                                                        : it.label === -1
+                                                          ? '−'
+                                                          : '·'}
+                                                </button>
+                                                <div class="tag-manage-main">
+                                                    <div class="tag-manage-title">
+                                                        <a
+                                                            href={
+                                                                '/summary?pid=' +
+                                                                encodeURIComponent(it.pid)
+                                                            }
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                        >
+                                                            {it.title || it.pid}
+                                                        </a>
                                                     </div>
-                                                    <button class="btn btn-cancel tag-manage-remove" onClick={() => props.onManageSetPid(it.pid, 0)}>
-                                                        Remove
-                                                    </button>
+                                                    <div class="tag-manage-meta">
+                                                        <span class="tag-manage-time">
+                                                            {it.time || ''}
+                                                        </span>
+                                                        <span
+                                                            class="tag-manage-authors"
+                                                            title={it.authors || ''}
+                                                        >
+                                                            {formatAuthorsText(it.authors, {
+                                                                maxAuthors: 10,
+                                                                head: 5,
+                                                                tail: 3,
+                                                            })}
+                                                        </span>
+                                                    </div>
                                                 </div>
-                                            ))}
-                                        </div>
-                                    )
+                                                <button
+                                                    class="btn btn-cancel tag-manage-remove"
+                                                    onClick={() => props.onManageSetPid(it.pid, 0)}
+                                                >
+                                                    Remove
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
                                 )}
                             </div>
                         </div>
                         <div class="modal-footer">
                             <div class="tag-manage-pagination">
-                                <button class="btn btn-cancel" onClick={props.onManagePrevPage} disabled={props.managePageNumber <= 1 || props.manageLoading}>Prev</button>
+                                <button
+                                    class="btn btn-cancel"
+                                    onClick={props.onManagePrevPage}
+                                    disabled={props.managePageNumber <= 1 || props.manageLoading}
+                                >
+                                    Prev
+                                </button>
                                 <span class="tag-manage-page">Page {props.managePageNumber}</span>
-                                <button class="btn btn-primary" onClick={props.onManageNextPage} disabled={props.manageLoading || !props.manageHasMore}>Next</button>
+                                <button
+                                    class="btn btn-primary"
+                                    onClick={props.onManageNextPage}
+                                    disabled={props.manageLoading || !props.manageHasMore}
+                                >
+                                    Next
+                                </button>
                             </div>
                         </div>
                     </div>
                 </div>
             )}
         </div>
-    )
-}
-
+    );
+};
 
 class TagListComponent extends React.Component {
     constructor(props) {
@@ -935,7 +1277,7 @@ class TagListComponent extends React.Component {
             manageAddPidsValue: '',
             managePidPreviewLoading: false,
             managePidPreviewItems: [],
-            managePidPreviewError: ''
+            managePidPreviewError: '',
         };
         this.handleEditTag = this.handleEditTag.bind(this);
         this.handleDeleteTag = this.handleDeleteTag.bind(this);
@@ -996,28 +1338,28 @@ class TagListComponent extends React.Component {
         this.setState({
             showEditModal: true,
             editingTag: tag,
-            editingTagName: tag.name
+            editingTagName: tag.name,
         });
     }
 
     handleDeleteTag(tag) {
         this.setState({
             showDeleteModal: true,
-            deletingTag: tag
+            deletingTag: tag,
         });
     }
 
     handleAddTag() {
         this.setState({
             showAddModal: true,
-            newTagName: ''
+            newTagName: '',
         });
     }
 
     handleCloseAddModal() {
         this.setState({
             showAddModal: false,
-            newTagName: ''
+            newTagName: '',
         });
     }
 
@@ -1043,11 +1385,11 @@ class TagListComponent extends React.Component {
             return;
         }
 
-        csrfFetch("/add_tag/" + encodeURIComponent(trimmedTag))
+        csrfFetch('/add_tag/' + encodeURIComponent(trimmedTag))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags
                                 .filter(tag => tag.name !== 'all')
@@ -1057,7 +1399,7 @@ class TagListComponent extends React.Component {
                         return {
                             tags: nextTags,
                             showAddModal: false,
-                            newTagName: ''
+                            newTagName: '',
                         };
                     });
                     console.log('Tag added successfully');
@@ -1071,19 +1413,18 @@ class TagListComponent extends React.Component {
             });
     }
 
-
     handleCloseEditModal() {
         this.setState({
             showEditModal: false,
             editingTag: null,
-            editingTagName: ''
+            editingTagName: '',
         });
     }
 
     handleCloseDeleteModal() {
         this.setState({
             showDeleteModal: false,
-            deletingTag: null
+            deletingTag: null,
         });
     }
 
@@ -1102,7 +1443,7 @@ class TagListComponent extends React.Component {
             manageAddPidsValue: '',
             managePidPreviewLoading: false,
             managePidPreviewItems: [],
-            managePidPreviewError: ''
+            managePidPreviewError: '',
         });
     }
 
@@ -1110,7 +1451,7 @@ class TagListComponent extends React.Component {
         const parts = String(raw || '')
             .trim()
             .split(/[\s,\n\r\t;\uFF0C\u3001]+/)
-            .map((s) => s.trim())
+            .map(s => s.trim())
             .filter(Boolean);
         const seen = new Set();
         const out = [];
@@ -1126,7 +1467,11 @@ class TagListComponent extends React.Component {
     async fetchPidPreview(pids) {
         const list = Array.isArray(pids) ? pids : [];
         if (list.length === 0) {
-            this.setState({ managePidPreviewLoading: false, managePidPreviewItems: [], managePidPreviewError: '' });
+            this.setState({
+                managePidPreviewLoading: false,
+                managePidPreviewItems: [],
+                managePidPreviewError: '',
+            });
             return;
         }
         this.setState({ managePidPreviewLoading: true, managePidPreviewError: '' });
@@ -1134,11 +1479,11 @@ class TagListComponent extends React.Component {
             const resp = await csrfFetch('/api/paper_titles', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pids: list })
+                body: JSON.stringify({ pids: list }),
             });
             const data = await resp.json().catch(() => null);
             if (!data || !data.success) {
-                throw new Error((data && data.error) ? data.error : 'Failed to preview PIDs');
+                throw new Error(data && data.error ? data.error : 'Failed to preview PIDs');
             }
             const items = Array.isArray(data.items) ? data.items : [];
             this.setState({ managePidPreviewItems: items, managePidPreviewLoading: false });
@@ -1147,18 +1492,31 @@ class TagListComponent extends React.Component {
             this.setState({
                 managePidPreviewLoading: false,
                 managePidPreviewItems: [],
-                managePidPreviewError: friendlyMsg
+                managePidPreviewError: friendlyMsg,
             });
         }
     }
 
     async fetchManageMembers(overrides = {}) {
-        const managingTag = overrides.managingTag !== undefined ? overrides.managingTag : this.state.managingTag;
+        const managingTag =
+            overrides.managingTag !== undefined ? overrides.managingTag : this.state.managingTag;
         if (!managingTag || !managingTag.name) return;
-        const page_number = overrides.managePageNumber !== undefined ? overrides.managePageNumber : this.state.managePageNumber;
-        const label = overrides.manageLabelFilter !== undefined ? overrides.manageLabelFilter : this.state.manageLabelFilter;
-        const page_size = overrides.managePageSize !== undefined ? overrides.managePageSize : this.state.managePageSize;
-        const search = overrides.manageSearchValue !== undefined ? overrides.manageSearchValue : this.state.manageSearchValue;
+        const page_number =
+            overrides.managePageNumber !== undefined
+                ? overrides.managePageNumber
+                : this.state.managePageNumber;
+        const label =
+            overrides.manageLabelFilter !== undefined
+                ? overrides.manageLabelFilter
+                : this.state.manageLabelFilter;
+        const page_size =
+            overrides.managePageSize !== undefined
+                ? overrides.managePageSize
+                : this.state.managePageSize;
+        const search =
+            overrides.manageSearchValue !== undefined
+                ? overrides.manageSearchValue
+                : this.state.manageSearchValue;
 
         this.setState({ manageLoading: true });
         try {
@@ -1170,10 +1528,12 @@ class TagListComponent extends React.Component {
             if (search && search.trim()) {
                 params.set('search', search.trim());
             }
-            const resp = await fetch('/api/tag_members?' + params.toString(), { credentials: 'same-origin' });
+            const resp = await fetch('/api/tag_members?' + params.toString(), {
+                credentials: 'same-origin',
+            });
             const data = await resp.json();
             if (!data || !data.success) {
-                throw new Error((data && data.error) ? data.error : 'Failed to load tag members');
+                throw new Error(data && data.error ? data.error : 'Failed to load tag members');
             }
             const items = Array.isArray(data.items) ? data.items : [];
             this.setState({
@@ -1181,7 +1541,7 @@ class TagListComponent extends React.Component {
                 manageTotalCount: data.total_count || 0,
                 managePosTotal: data.pos_total || 0,
                 manageNegTotal: data.neg_total || 0,
-                manageHasMore: (page_number * page_size) < (data.total_count || 0)
+                manageHasMore: page_number * page_size < (data.total_count || 0),
             });
         } catch (e) {
             const friendlyMsg = CommonUtils.handleApiError(e, 'Fetch Tag Members');
@@ -1206,9 +1566,15 @@ class TagListComponent extends React.Component {
                 managePosTotal: 0,
                 manageNegTotal: 0,
                 manageHasMore: false,
-                manageAddPidsValue: ''
+                manageAddPidsValue: '',
             },
-            () => this.fetchManageMembers({ managingTag: tag, managePageNumber: 1, manageLabelFilter: 'all', manageSearchValue: '' })
+            () =>
+                this.fetchManageMembers({
+                    managingTag: tag,
+                    managePageNumber: 1,
+                    manageLabelFilter: 'all',
+                    manageSearchValue: '',
+                })
         );
     }
 
@@ -1235,13 +1601,17 @@ class TagListComponent extends React.Component {
         if (this.state.manageLoading) return;
         const nextPage = Math.max(1, (this.state.managePageNumber || 1) - 1);
         if (nextPage === this.state.managePageNumber) return;
-        this.setState({ managePageNumber: nextPage }, () => this.fetchManageMembers({ managePageNumber: nextPage }));
+        this.setState({ managePageNumber: nextPage }, () =>
+            this.fetchManageMembers({ managePageNumber: nextPage })
+        );
     }
 
     handleManageNextPage() {
         if (this.state.manageLoading || !this.state.manageHasMore) return;
         const nextPage = (this.state.managePageNumber || 1) + 1;
-        this.setState({ managePageNumber: nextPage }, () => this.fetchManageMembers({ managePageNumber: nextPage }));
+        this.setState({ managePageNumber: nextPage }, () =>
+            this.fetchManageMembers({ managePageNumber: nextPage })
+        );
     }
 
     async handleManageSetPid(pid, label) {
@@ -1251,11 +1621,11 @@ class TagListComponent extends React.Component {
             const resp = await csrfFetch('/api/tag_feedback', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid, tag: managingTag.name, label })
+                body: JSON.stringify({ pid, tag: managingTag.name, label }),
             });
             const data = await resp.json();
             if (!data || !data.success) {
-                throw new Error((data && data.error) ? data.error : 'Update failed');
+                throw new Error(data && data.error ? data.error : 'Update failed');
             }
             await this.fetchManageMembers();
         } catch (e) {
@@ -1291,17 +1661,25 @@ class TagListComponent extends React.Component {
         if (pids.length === 0) return;
         this.setState({ manageLoading: true });
         try {
-            const tasks = pids.map(pid => csrfFetch('/api/tag_feedback', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid, tag: managingTag.name, label })
-            }).then(r => r.json()).catch(() => null));
+            const tasks = pids.map(pid =>
+                csrfFetch('/api/tag_feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pid, tag: managingTag.name, label }),
+                })
+                    .then(r => r.json())
+                    .catch(() => null)
+            );
             const results = await Promise.all(tasks);
             const failed = results.filter(r => !r || !r.success).length;
             if (failed) {
                 alert(`Added with ${failed} failures (check PIDs).`);
             }
-            this.setState({ manageAddPidsValue: '', managePidPreviewItems: [], managePidPreviewError: '' });
+            this.setState({
+                manageAddPidsValue: '',
+                managePidPreviewItems: [],
+                managePidPreviewError: '',
+            });
             await this.fetchManageMembers();
         } finally {
             this.setState({ manageLoading: false });
@@ -1325,26 +1703,30 @@ class TagListComponent extends React.Component {
             return;
         }
 
-        csrfFetch("/rename/" + encodeURIComponent(editingTag.name) + "/" + encodeURIComponent(trimmedName))
+        csrfFetch(
+            '/rename/' + encodeURIComponent(editingTag.name) + '/' + encodeURIComponent(trimmedName)
+        )
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.map(tag =>
-                                tag.name === editingTag.name
-                                    ? { ...tag, name: trimmedName }
-                                    : tag
+                                tag.name === editingTag.name ? { ...tag, name: trimmedName } : tag
                             )
                         );
-                        const nextCombinedTags = renameCombinedTagsForTag(combined_tags, editingTag.name, trimmedName);
+                        const nextCombinedTags = renameCombinedTagsForTag(
+                            combined_tags,
+                            editingTag.name,
+                            trimmedName
+                        );
                         setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
                         setGlobalTags(nextTags, { renderTags: false });
                         return {
                             tags: nextTags,
                             showEditModal: false,
                             editingTag: null,
-                            editingTagName: ''
+                            editingTagName: '',
                         };
                     });
                     console.log('Tag renamed successfully');
@@ -1361,21 +1743,24 @@ class TagListComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingTag } = this.state;
 
-        csrfFetch("/del/" + encodeURIComponent(deletingTag.name))
+        csrfFetch('/del/' + encodeURIComponent(deletingTag.name))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.filter(tag => tag.name !== deletingTag.name)
                         );
-                        const nextCombinedTags = removeCombinedTagsWithTag(combined_tags, deletingTag.name);
+                        const nextCombinedTags = removeCombinedTagsWithTag(
+                            combined_tags,
+                            deletingTag.name
+                        );
                         setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
                         setGlobalTags(nextTags, { renderTags: false });
                         return {
                             tags: nextTags,
                             showDeleteModal: false,
-                            deletingTag: null
+                            deletingTag: null,
                         };
                     });
                     console.log('Tag deleted successfully');
@@ -1390,7 +1775,10 @@ class TagListComponent extends React.Component {
     }
 
     render() {
-        const managingTagName = (this.state.managingTag && this.state.managingTag.name) ? this.state.managingTag.name : '';
+        const managingTagName =
+            this.state.managingTag && this.state.managingTag.name
+                ? this.state.managingTag.name
+                : '';
         return (
             <TagList
                 tags={this.state.tags}
@@ -1412,7 +1800,6 @@ class TagListComponent extends React.Component {
                 onSaveTagEdit={this.handleSaveTagEdit}
                 onSaveNewTag={this.handleSaveNewTag}
                 onConfirmDelete={this.handleConfirmDelete}
-
                 showManageModal={this.state.showManageModal}
                 managingTagName={managingTagName}
                 manageLabelFilter={this.state.manageLabelFilter}
@@ -1453,29 +1840,45 @@ const CombinedTag = props => {
                 {t.name}
             </a>
             <div class="combined-tag-actions">
-                <span class="combined-tag-edit" onClick={() => props.onEdit(t)} title="Edit combined tag">✎</span>
-                <span class="combined-tag-delete" onClick={() => props.onDelete(t)} title="Delete combined tag">×</span>
+                <span
+                    class="combined-tag-edit"
+                    onClick={() => props.onEdit(t)}
+                    title="Edit combined tag"
+                >
+                    ✎
+                </span>
+                <span
+                    class="combined-tag-delete"
+                    onClick={() => props.onDelete(t)}
+                    title="Delete combined tag"
+                >
+                    ×
+                </span>
             </div>
         </div>
-    )
-}
+    );
+};
 
 const CombinedTagList = props => {
     const lst = props.combined_tags;
-    const tlst = lst.map((jtag, ix) =>
+    const tlst = lst.map((jtag, ix) => (
         <CombinedTag
             key={ix}
             comtag={jtag}
             onEdit={props.onEditCombinedTag}
             onDelete={props.onDeleteCombinedTag}
         />
-    );
+    ));
 
     return (
         <div class="enhanced-combined-tag-list">
             <div class="combined-tag-list-actions">
                 <span class="tag-stats-inline">({lst.length} combined tags)</span>
-                <button class="tag-action-btn add-btn" onClick={props.onAddCombinedTag} title="Add new combined tag">
+                <button
+                    class="tag-action-btn add-btn"
+                    onClick={props.onAddCombinedTag}
+                    title="Add new combined tag"
+                >
                     + Add
                 </button>
             </div>
@@ -1486,10 +1889,16 @@ const CombinedTagList = props => {
             {/* Add/Edit Combined Tag Modal */}
             {props.showAddEditModal && (
                 <div class="modal-overlay" onClick={props.onCloseAddEditModal}>
-                    <div class="modal-content wide" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content wide" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
-                            <h3>{props.editingCombinedTag ? 'Edit Combined Tag' : 'Add Combined Tag'}</h3>
-                            <span class="modal-close" onClick={props.onCloseAddEditModal}>×</span>
+                            <h3>
+                                {props.editingCombinedTag
+                                    ? 'Edit Combined Tag'
+                                    : 'Add Combined Tag'}
+                            </h3>
+                            <span class="modal-close" onClick={props.onCloseAddEditModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="form-group">
@@ -1516,17 +1925,29 @@ const CombinedTagList = props => {
                                     <h4>Preview Combination:</h4>
                                     <div class="tag-combination-preview-tags">
                                         {props.selectedTagsForCombination.map((tag, ix) => (
-                                            <span key={ix} class="tag-combination-preview-tag">{tag}</span>
+                                            <span key={ix} class="tag-combination-preview-tag">
+                                                {tag}
+                                            </span>
                                         ))}
                                     </div>
-                                    <p style={{ marginTop: '10px', fontSize: '12px', color: 'var(--text-color)', opacity: '0.8' }}>
-                                        Combination Name: {props.selectedTagsForCombination.join(', ')}
+                                    <p
+                                        style={{
+                                            marginTop: '10px',
+                                            fontSize: '12px',
+                                            color: 'var(--text-color)',
+                                            opacity: '0.8',
+                                        }}
+                                    >
+                                        Combination Name:{' '}
+                                        {props.selectedTagsForCombination.join(', ')}
                                     </p>
                                 </div>
                             )}
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddEditModal}>Cancel</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseAddEditModal}>
+                                Cancel
+                            </button>
                             <button
                                 class="btn btn-primary"
                                 onClick={props.onSaveCombinedTag}
@@ -1542,25 +1963,37 @@ const CombinedTagList = props => {
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
                 <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
-                            <p>Are you sure you want to delete combined tag "<strong>{props.deletingCombinedTag && props.deletingCombinedTag.name}</strong>"?</p>
+                            <p>
+                                Are you sure you want to delete combined tag "
+                                <strong>
+                                    {props.deletingCombinedTag && props.deletingCombinedTag.name}
+                                </strong>
+                                "?
+                            </p>
                             <p class="warning-text">This action is irreversible.</p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>Cancel</button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>Delete</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
+                                Delete
+                            </button>
                         </div>
                     </div>
                 </div>
             )}
         </div>
-    )
-}
+    );
+};
 
 class CombinedTagListComponent extends React.Component {
     constructor(props) {
@@ -1574,7 +2007,7 @@ class CombinedTagListComponent extends React.Component {
             deletingCombinedTag: null,
             selectedTagsForCombination: [],
             combinationDropdownOpen: false,
-            combinationSearchValue: ''
+            combinationSearchValue: '',
         };
         this.handleAddCombinedTag = this.handleAddCombinedTag.bind(this);
         this.handleEditCombinedTag = this.handleEditCombinedTag.bind(this);
@@ -1602,7 +2035,7 @@ class CombinedTagListComponent extends React.Component {
         if (tagsChanged || combinedChanged) {
             this.setState({
                 tags: this.props.tags,
-                combined_tags: this.props.combined_tags
+                combined_tags: this.props.combined_tags,
             });
         }
     }
@@ -1638,7 +2071,7 @@ class CombinedTagListComponent extends React.Component {
             showAddEditModal: true,
             editingCombinedTag: null,
             selectedTagsForCombination: [],
-            combinationSearchValue: ''
+            combinationSearchValue: '',
         });
     }
 
@@ -1652,17 +2085,16 @@ class CombinedTagListComponent extends React.Component {
             showAddEditModal: true,
             editingCombinedTag: combinedTag,
             selectedTagsForCombination: existingTags,
-            combinationSearchValue: ''
+            combinationSearchValue: '',
         });
     }
 
     handleDeleteCombinedTag(combinedTag) {
         this.setState({
             showDeleteModal: true,
-            deletingCombinedTag: combinedTag
+            deletingCombinedTag: combinedTag,
         });
     }
-
 
     handleCloseAddEditModal() {
         this.setState({
@@ -1670,14 +2102,14 @@ class CombinedTagListComponent extends React.Component {
             editingCombinedTag: null,
             selectedTagsForCombination: [],
             combinationDropdownOpen: false,
-            combinationSearchValue: ''
+            combinationSearchValue: '',
         });
     }
 
     handleCloseDeleteModal() {
         this.setState({
             showDeleteModal: false,
-            deletingCombinedTag: null
+            deletingCombinedTag: null,
         });
     }
 
@@ -1699,15 +2131,15 @@ class CombinedTagListComponent extends React.Component {
 
             // Edit existing combined tag atomically
             csrfFetch(
-                "/rename_ctag/" +
-                encodeURIComponent(editingCombinedTag.name) +
-                "/" +
-                encodeURIComponent(combinationName)
+                '/rename_ctag/' +
+                    encodeURIComponent(editingCombinedTag.name) +
+                    '/' +
+                    encodeURIComponent(combinationName)
             )
                 .then(response => response.text())
                 .then(text => {
                     if (text.includes('ok')) {
-                        this.setState((prevState) => {
+                        this.setState(prevState => {
                             const nextCombinedTags = renameCombinedTagInList(
                                 prevState.combined_tags,
                                 editingCombinedTag.name,
@@ -1720,7 +2152,7 @@ class CombinedTagListComponent extends React.Component {
                                 editingCombinedTag: null,
                                 selectedTagsForCombination: [],
                                 combinationDropdownOpen: false,
-                                combinationSearchValue: ''
+                                combinationSearchValue: '',
                             };
                         });
                         console.log('Combined tag edited successfully');
@@ -1734,19 +2166,21 @@ class CombinedTagListComponent extends React.Component {
                 });
         } else {
             // Add new combined tag
-            csrfFetch("/add_ctag/" + encodeURIComponent(combinationName))
+            csrfFetch('/add_ctag/' + encodeURIComponent(combinationName))
                 .then(response => response.text())
                 .then(text => {
                     if (text.includes('ok')) {
-                        this.setState((prevState) => {
-                            const nextCombinedTags = prevState.combined_tags.concat([{ name: combinationName }]);
+                        this.setState(prevState => {
+                            const nextCombinedTags = prevState.combined_tags.concat([
+                                { name: combinationName },
+                            ]);
                             setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
                             return {
                                 combined_tags: nextCombinedTags,
                                 showAddEditModal: false,
                                 selectedTagsForCombination: [],
                                 combinationDropdownOpen: false,
-                                combinationSearchValue: ''
+                                combinationSearchValue: '',
                             };
                         });
                         console.log('Combined tag added successfully');
@@ -1764,11 +2198,11 @@ class CombinedTagListComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingCombinedTag } = this.state;
 
-        csrfFetch("/del_ctag/" + encodeURIComponent(deletingCombinedTag.name))
+        csrfFetch('/del_ctag/' + encodeURIComponent(deletingCombinedTag.name))
             .then(response => response.text())
             .then(text => {
                 if (text.includes('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextCombinedTags = prevState.combined_tags.filter(
                             tag => tag.name !== deletingCombinedTag.name
                         );
@@ -1776,7 +2210,7 @@ class CombinedTagListComponent extends React.Component {
                         return {
                             combined_tags: nextCombinedTags,
                             showDeleteModal: false,
-                            deletingCombinedTag: null
+                            deletingCombinedTag: null,
                         };
                     });
                     console.log('Combined tag deleted successfully');
@@ -1793,7 +2227,9 @@ class CombinedTagListComponent extends React.Component {
     handleToggleCombinationDropdown() {
         this.setState(prevState => ({
             combinationDropdownOpen: !prevState.combinationDropdownOpen,
-            combinationSearchValue: !prevState.combinationDropdownOpen ? '' : prevState.combinationSearchValue
+            combinationSearchValue: !prevState.combinationDropdownOpen
+                ? ''
+                : prevState.combinationSearchValue,
         }));
     }
 
@@ -1803,20 +2239,22 @@ class CombinedTagListComponent extends React.Component {
             return {
                 selectedTagsForCombination: isSelected
                     ? prevState.selectedTagsForCombination.filter(tag => tag !== tagName)
-                    : [...prevState.selectedTagsForCombination, tagName]
+                    : [...prevState.selectedTagsForCombination, tagName],
             };
         });
     }
 
     handleRemoveCombinationTag(tagName) {
         this.setState(prevState => ({
-            selectedTagsForCombination: prevState.selectedTagsForCombination.filter(tag => tag !== tagName)
+            selectedTagsForCombination: prevState.selectedTagsForCombination.filter(
+                tag => tag !== tagName
+            ),
         }));
     }
 
     handleCombinationSearchChange(event) {
         this.setState({
-            combinationSearchValue: event.target.value
+            combinationSearchValue: event.target.value,
         });
     }
 
@@ -1852,11 +2290,11 @@ class CombinedTagListComponent extends React.Component {
     }
 }
 
-
 const Key = props => {
     const k = props.jkey;
     const kurl = buildKeywordUrl(k.name);
-    const key_class = 'rel_ukey' + (k.name === 'Artificial general intelligence' ? ' rel_ukey_all' : '');
+    const key_class =
+        'rel_ukey' + (k.name === 'Artificial general intelligence' ? ' rel_ukey_all' : '');
     const isEditable = k.name !== 'Artificial general intelligence';
 
     return (
@@ -1866,33 +2304,40 @@ const Key = props => {
             </a>
             {isEditable && (
                 <div class="keyword-actions">
-                    <span class="keyword-edit" onClick={() => props.onEdit(k)} title="Edit keyword">✎</span>
-                    <span class="keyword-delete" onClick={() => props.onDelete(k)} title="Delete keyword">×</span>
+                    <span class="keyword-edit" onClick={() => props.onEdit(k)} title="Edit keyword">
+                        ✎
+                    </span>
+                    <span
+                        class="keyword-delete"
+                        onClick={() => props.onDelete(k)}
+                        title="Delete keyword"
+                    >
+                        ×
+                    </span>
                 </div>
             )}
         </div>
-    )
-}
+    );
+};
 
 const KeyList = props => {
     const lst = props.keys;
-    const klst = lst.map((jkey, ix) =>
-        <Key
-            key={ix}
-            jkey={jkey}
-            onEdit={props.onEditKey}
-            onDelete={props.onDeleteKey}
-        />
-    );
+    const klst = lst.map((jkey, ix) => (
+        <Key key={ix} jkey={jkey} onEdit={props.onEditKey} onDelete={props.onDeleteKey} />
+    ));
 
     return (
         <div class="enhanced-keyword-list">
-                <div class="keyword-list-actions">
-                    <span class="tag-stats-inline">({lst.length} keywords)</span>
-                    <button class="tag-action-btn add-btn" onClick={props.onAddKey} title="Add new keyword">
-                        + Add
-                    </button>
-                </div>
+            <div class="keyword-list-actions">
+                <span class="tag-stats-inline">({lst.length} keywords)</span>
+                <button
+                    class="tag-action-btn add-btn"
+                    onClick={props.onAddKey}
+                    title="Add new keyword"
+                >
+                    + Add
+                </button>
+            </div>
             <div id="keyList" class="rel_utags enhanced-keywords">
                 {klst}
             </div>
@@ -1900,10 +2345,12 @@ const KeyList = props => {
             {/* Add Keyword Modal */}
             {props.showAddModal && (
                 <div class="modal-overlay" onClick={props.onCloseAddModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Add Keyword</h3>
-                            <span class="modal-close" onClick={props.onCloseAddModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseAddModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="form-group">
@@ -1918,8 +2365,12 @@ const KeyList = props => {
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>Cancel</button>
-                            <button class="btn btn-primary" onClick={props.onSaveNewKey}>Save</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-primary" onClick={props.onSaveNewKey}>
+                                Save
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1928,10 +2379,12 @@ const KeyList = props => {
             {/* Edit Modal */}
             {props.showEditModal && (
                 <div class="modal-overlay" onClick={props.onCloseEditModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Edit Keyword</h3>
-                            <span class="modal-close" onClick={props.onCloseEditModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseEditModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
                             <div class="form-group">
@@ -1946,8 +2399,12 @@ const KeyList = props => {
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>Cancel</button>
-                            <button class="btn btn-primary" onClick={props.onSaveKeyEdit}>Save</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-primary" onClick={props.onSaveKeyEdit}>
+                                Save
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1956,25 +2413,37 @@ const KeyList = props => {
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
                 <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
-                    <div class="modal-content" onClick={(e) => e.stopPropagation()}>
+                    <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>×</span>
+                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                                ×
+                            </span>
                         </div>
                         <div class="modal-body">
-                            <p>Are you sure you want to delete keyword "<strong>{props.deletingKey && props.deletingKey.name}</strong>"?</p>
-                            <p class="warning-text">This action is irreversible, all data related to this keyword will be deleted.</p>
+                            <p>
+                                Are you sure you want to delete keyword "
+                                <strong>{props.deletingKey && props.deletingKey.name}</strong>"?
+                            </p>
+                            <p class="warning-text">
+                                This action is irreversible, all data related to this keyword will
+                                be deleted.
+                            </p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>Cancel</button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>Delete</button>
+                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                                Cancel
+                            </button>
+                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
+                                Delete
+                            </button>
                         </div>
                     </div>
                 </div>
             )}
         </div>
-    )
-}
+    );
+};
 
 class KeyComponent extends React.Component {
     constructor(props) {
@@ -1987,7 +2456,7 @@ class KeyComponent extends React.Component {
             editingKey: null,
             editingKeyName: '',
             deletingKey: null,
-            newKeyName: ''
+            newKeyName: '',
         };
         this.handleEditKey = this.handleEditKey.bind(this);
         this.handleDeleteKey = this.handleDeleteKey.bind(this);
@@ -2035,28 +2504,28 @@ class KeyComponent extends React.Component {
         this.setState({
             showEditModal: true,
             editingKey: key,
-            editingKeyName: key.name
+            editingKeyName: key.name,
         });
     }
 
     handleDeleteKey(key) {
         this.setState({
             showDeleteModal: true,
-            deletingKey: key
+            deletingKey: key,
         });
     }
 
     handleAddKey() {
         this.setState({
             showAddModal: true,
-            newKeyName: ''
+            newKeyName: '',
         });
     }
 
     handleCloseAddModal() {
         this.setState({
             showAddModal: false,
-            newKeyName: ''
+            newKeyName: '',
         });
     }
 
@@ -2079,17 +2548,17 @@ class KeyComponent extends React.Component {
             return;
         }
 
-        csrfFetch("/add_key/" + encodeURIComponent(trimmedKey))
+        csrfFetch('/add_key/' + encodeURIComponent(trimmedKey))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextKeys = [...prevState.keys, { name: trimmedKey, pids: [] }];
                         setGlobalKeys(nextKeys, { renderKeys: false });
                         return {
                             keys: nextKeys,
                             showAddModal: false,
-                            newKeyName: ''
+                            newKeyName: '',
                         };
                     });
                     console.log('Keyword added successfully');
@@ -2103,19 +2572,18 @@ class KeyComponent extends React.Component {
             });
     }
 
-
     handleCloseEditModal() {
         this.setState({
             showEditModal: false,
             editingKey: null,
-            editingKeyName: ''
+            editingKeyName: '',
         });
     }
 
     handleCloseDeleteModal() {
         this.setState({
             showDeleteModal: false,
-            deletingKey: null
+            deletingKey: null,
         });
     }
 
@@ -2133,32 +2601,32 @@ class KeyComponent extends React.Component {
         const trimmedKeyName = editingKeyName.trim();
 
         // Check if new name already exists
-        if (this.state.keys.some(key => key.name === trimmedKeyName && key.name !== editingKey.name)) {
+        if (
+            this.state.keys.some(key => key.name === trimmedKeyName && key.name !== editingKey.name)
+        ) {
             alert('Keyword already exists');
             return;
         }
 
         csrfFetch(
-            "/rename_key/" +
-            encodeURIComponent(editingKey.name) +
-            "/" +
-            encodeURIComponent(trimmedKeyName)
+            '/rename_key/' +
+                encodeURIComponent(editingKey.name) +
+                '/' +
+                encodeURIComponent(trimmedKeyName)
         )
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
+                    this.setState(prevState => {
                         const nextKeys = prevState.keys.map(key =>
-                            key.name === editingKey.name
-                                ? { ...key, name: trimmedKeyName }
-                                : key
+                            key.name === editingKey.name ? { ...key, name: trimmedKeyName } : key
                         );
                         setGlobalKeys(nextKeys, { renderKeys: false });
                         return {
                             keys: nextKeys,
                             showEditModal: false,
                             editingKey: null,
-                            editingKeyName: ''
+                            editingKeyName: '',
                         };
                     });
                     console.log('Keyword renamed successfully');
@@ -2175,17 +2643,19 @@ class KeyComponent extends React.Component {
     handleConfirmDelete() {
         const { deletingKey } = this.state;
 
-        csrfFetch("/del_key/" + encodeURIComponent(deletingKey.name))
+        csrfFetch('/del_key/' + encodeURIComponent(deletingKey.name))
             .then(response => response.text())
             .then(text => {
                 if (text.startsWith('ok')) {
-                    this.setState((prevState) => {
-                        const nextKeys = prevState.keys.filter(key => key.name !== deletingKey.name);
+                    this.setState(prevState => {
+                        const nextKeys = prevState.keys.filter(
+                            key => key.name !== deletingKey.name
+                        );
                         setGlobalKeys(nextKeys, { renderKeys: false });
                         return {
                             keys: nextKeys,
                             showDeleteModal: false,
-                            deletingKey: null
+                            deletingKey: null,
                         };
                     });
                     console.log('Keyword deleted successfully');
@@ -2225,25 +2695,24 @@ class KeyComponent extends React.Component {
     }
 }
 
-
-
 function normalizeTags(list) {
     const base = (list || []).filter(tag => tag && tag.name && tag.name !== 'all');
     const normalized = base.map(tag => {
-        const pos_n = (tag.pos_n !== undefined) ? Number(tag.pos_n || 0) : undefined;
-        const neg_n = (tag.neg_n !== undefined) ? Number(tag.neg_n || 0) : undefined;
-        const n = (pos_n !== undefined && neg_n !== undefined)
-            ? (pos_n + neg_n)
-            : Number(tag.n || 0);
-        const neg_only = (tag.neg_only !== undefined)
-            ? Boolean(tag.neg_only)
-            : (pos_n !== undefined && neg_n !== undefined ? (pos_n === 0 && neg_n > 0) : false);
+        const pos_n = tag.pos_n !== undefined ? Number(tag.pos_n || 0) : undefined;
+        const neg_n = tag.neg_n !== undefined ? Number(tag.neg_n || 0) : undefined;
+        const n = pos_n !== undefined && neg_n !== undefined ? pos_n + neg_n : Number(tag.n || 0);
+        const neg_only =
+            tag.neg_only !== undefined
+                ? Boolean(tag.neg_only)
+                : pos_n !== undefined && neg_n !== undefined
+                  ? pos_n === 0 && neg_n > 0
+                  : false;
         return {
             name: tag.name,
             n: n,
-            pos_n: pos_n !== undefined ? pos_n : (tag.pos_n || 0),
-            neg_n: neg_n !== undefined ? neg_n : (tag.neg_n || 0),
-            neg_only: neg_only
+            pos_n: pos_n !== undefined ? pos_n : tag.pos_n || 0,
+            neg_n: neg_n !== undefined ? neg_n : tag.neg_n || 0,
+            neg_only: neg_only,
         };
     });
     if (normalized.length > 0) {
@@ -2256,8 +2725,8 @@ function normalizeTags(list) {
 function normalizeCombinedTags(list) {
     const seen = new Set();
     const normalized = [];
-    (list || []).forEach((tag) => {
-        const name = (tag && tag.name) ? tag.name : '';
+    (list || []).forEach(tag => {
+        const name = tag && tag.name ? tag.name : '';
         if (!name || seen.has(name)) return;
         seen.add(name);
         normalized.push({ name });
@@ -2270,10 +2739,13 @@ function renameCombinedTagsForTag(list, oldTag, newTag) {
     if (!oldTag || !newTag) return normalizeCombinedTags(list);
     const seen = new Set();
     const updated = [];
-    (list || []).forEach((tag) => {
+    (list || []).forEach(tag => {
         const name = tag && tag.name ? tag.name : '';
         if (!name) return;
-        const parts = name.split(',').map(t => t.trim()).filter(Boolean);
+        const parts = name
+            .split(',')
+            .map(t => t.trim())
+            .filter(Boolean);
         if (parts.length === 0) return;
         const nextParts = parts.includes(oldTag)
             ? parts.map(t => (t === oldTag ? newTag : t))
@@ -2288,9 +2760,12 @@ function renameCombinedTagsForTag(list, oldTag, newTag) {
 
 function removeCombinedTagsWithTag(list, tagName) {
     if (!tagName) return normalizeCombinedTags(list);
-    const filtered = (list || []).filter((tag) => {
+    const filtered = (list || []).filter(tag => {
         const name = tag && tag.name ? tag.name : '';
-        const parts = name.split(',').map(t => t.trim()).filter(Boolean);
+        const parts = name
+            .split(',')
+            .map(t => t.trim())
+            .filter(Boolean);
         return !parts.includes(tagName);
     });
     return normalizeCombinedTags(filtered);
@@ -2298,7 +2773,7 @@ function removeCombinedTagsWithTag(list, tagName) {
 
 function renameCombinedTagInList(list, oldName, newName) {
     if (!oldName || !newName) return normalizeCombinedTags(list);
-    const mapped = (list || []).map((tag) => {
+    const mapped = (list || []).map(tag => {
         if (tag && tag.name === oldName) {
             return { name: newName };
         }
@@ -2347,26 +2822,25 @@ function adjustTagStats(tagName, posDelta, negDelta) {
     let found = false;
     let tagAdded = false;
     let tagRemoved = false;
-    const updated = baseTags
-        .map((tag) => {
-            if (tag.name !== tagName) return tag;
-            found = true;
-            const prevPos = tag.pos_n || 0;
-            const prevNeg = tag.neg_n || 0;
-            const nextPos = Math.max(0, prevPos + posD);
-            const nextNeg = Math.max(0, prevNeg + negD);
-            const nextCount = nextPos + nextNeg;
-            if ((prevPos + prevNeg) > 0 && nextCount === 0) {
-                tagRemoved = true;
-            }
-            return {
-                ...tag,
-                n: nextCount,
-                pos_n: nextPos,
-                neg_n: nextNeg,
-                neg_only: nextPos === 0 && nextNeg > 0
-            };
-        });
+    const updated = baseTags.map(tag => {
+        if (tag.name !== tagName) return tag;
+        found = true;
+        const prevPos = tag.pos_n || 0;
+        const prevNeg = tag.neg_n || 0;
+        const nextPos = Math.max(0, prevPos + posD);
+        const nextNeg = Math.max(0, prevNeg + negD);
+        const nextCount = nextPos + nextNeg;
+        if (prevPos + prevNeg > 0 && nextCount === 0) {
+            tagRemoved = true;
+        }
+        return {
+            ...tag,
+            n: nextCount,
+            pos_n: nextPos,
+            neg_n: nextNeg,
+            neg_only: nextPos === 0 && nextNeg > 0,
+        };
+    });
     if (!found && (posD > 0 || negD > 0)) {
         const nextPos = Math.max(0, posD);
         const nextNeg = Math.max(0, negD);
@@ -2375,7 +2849,7 @@ function adjustTagStats(tagName, posDelta, negDelta) {
             n: nextPos + nextNeg,
             pos_n: nextPos,
             neg_n: nextNeg,
-            neg_only: nextPos === 0 && nextNeg > 0
+            neg_only: nextPos === 0 && nextNeg > 0,
         });
         tagAdded = true;
     }
@@ -2439,7 +2913,10 @@ function renderKeyList() {
 
 function renderCombinedTagList() {
     if (tagcombwrap_elt) {
-        ReactDOM.render(<CombinedTagListComponent combined_tags={combined_tags} tags={tags} />, tagcombwrap_elt);
+        ReactDOM.render(
+            <CombinedTagListComponent combined_tags={combined_tags} tags={tags} />,
+            tagcombwrap_elt
+        );
     }
 }
 
@@ -2456,4 +2933,13 @@ fetchReadingList().then(() => {
     renderCombinedTagList();
 
     setupUserEventStream();
+
+    if (Array.isArray(papers)) {
+        papers.forEach(p => {
+            if (!p || !p.id) return;
+            if (p.summary_status === 'queued' || p.summary_status === 'running') {
+                markSummaryPending(p.id);
+            }
+        });
+    }
 });

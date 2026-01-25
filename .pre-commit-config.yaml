@@ -52,3 +52,15 @@ repos:
         files: ^static/.*\.js$
         exclude: ^static/dist/
         pass_filenames: false
+      - id: eslint
+        name: ESLint
+        entry: npx eslint
+        language: system
+        files: \.(js|jsx)$
+        exclude: ^(static/dist/|static/lib/|node_modules/)
+      - id: prettier
+        name: Prettier
+        entry: npx prettier --write
+        language: system
+        files: \.(js|jsx|css|json)$
+        exclude: ^(static/dist/|static/lib/|node_modules/|package-lock\.json)

@@ -9,6 +9,8 @@ from collections import OrderedDict
 
 import feedparser
 
+from config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,7 +33,7 @@ def get_response(search_query, start_index=0, max_r=100):
             "User-Agent": "arxiv-sanity-x (+https://github.com/karpathy/arxiv-sanity-lite)",
         },
     )
-    with urllib.request.urlopen(req, timeout=20) as url:
+    with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as url:
         response = url.read()
         if getattr(url, "status", 200) != 200:
             logger.error("arxiv did not return status 200 response")

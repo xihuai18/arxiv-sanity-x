@@ -1,0 +1,329 @@
+/* ===== Header Styles ===== */
+#header {
+    height: 60px;
+    background: linear-gradient(135deg, var(--primary-bg) 0%, #9c1515 50%, #8b1010 100%);
+    color: var(--primary-text);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 28px;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    /* Use a subtle neutral shadow (matches the final look previously enforced by search UI overrides) */
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+    backdrop-filter: blur(12px);
+}
+
+[data-theme='dark'] #header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.45);
+}
+
+#home-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--primary-text) !important;
+    text-decoration: none !important;
+    transition: all var(--transition-fast);
+}
+
+#home-link:hover {
+    transform: scale(1.02);
+    text-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
+}
+
+#home-link .logo-icon {
+    font-size: 1.4em;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+    animation: logoPulse 3s ease-in-out infinite;
+}
+
+@keyframes logoPulse {
+    0%,
+    100% {
+        transform: scale(1);
+    }
+    50% {
+        transform: scale(1.05);
+    }
+}
+
+#home-link .logo-text {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+
+#home-link .logo-highlight {
+    background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 900;
+    margin-left: 1px;
+}
+
+#home-link:hover .logo-icon {
+    animation: logoSpin 0.6s ease-in-out;
+}
+
+@keyframes logoSpin {
+    0% {
+        transform: rotate(0deg) scale(1);
+    }
+    25% {
+        transform: rotate(-10deg) scale(1.1);
+    }
+    75% {
+        transform: rotate(10deg) scale(1.1);
+    }
+    100% {
+        transform: rotate(0deg) scale(1);
+    }
+}
+
+#hint {
+    text-align: center;
+    margin: 0 20px;
+    font-weight: 400;
+    font-size: 14px;
+    opacity: 0.85;
+    color: var(--primary-text);
+}
+
+/* Header link unified styles */
+#header a {
+    color: var(--primary-text);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    margin: 0 4px;
+    padding: 8px 14px;
+    border-radius: 16px;
+    transition: all var(--transition-fast);
+    position: relative;
+    --nav-highlight-gap: 12%;
+    --nav-highlight-color: transparent;
+}
+
+/* Ensure header nav links share the same hover/active highlight (avoid double layers) */
+#header .nav-link {
+    background: transparent;
+    border-radius: 16px;
+}
+
+#header a:hover {
+    --nav-highlight-color: rgba(255, 255, 255, 0.15);
+    background-color: transparent;
+    background-image: linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent var(--nav-highlight-gap),
+        var(--nav-highlight-color) var(--nav-highlight-gap),
+        var(--nav-highlight-color) calc(100% - var(--nav-highlight-gap)),
+        transparent calc(100% - var(--nav-highlight-gap)),
+        transparent 100%
+    );
+    color: var(--primary-text);
+    transform: translateY(-1px);
+}
+
+#header a:active {
+    --nav-highlight-color: rgba(255, 255, 255, 0.2);
+    background-color: transparent;
+    background-image: linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent var(--nav-highlight-gap),
+        var(--nav-highlight-color) var(--nav-highlight-gap),
+        var(--nav-highlight-color) calc(100% - var(--nav-highlight-gap)),
+        transparent calc(100% - var(--nav-highlight-gap)),
+        transparent 100%
+    );
+    color: var(--primary-text);
+    transform: translateY(0);
+}
+
+#header a.active,
+#header a[aria-current='page'] {
+    --nav-highlight-color: rgba(255, 255, 255, 0.25);
+    background-color: transparent;
+    background-image: linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent var(--nav-highlight-gap),
+        var(--nav-highlight-color) var(--nav-highlight-gap),
+        var(--nav-highlight-color) calc(100% - var(--nav-highlight-gap)),
+        transparent calc(100% - var(--nav-highlight-gap)),
+        transparent 100%
+    );
+    color: var(--primary-text);
+    font-weight: 600;
+}
+a,
+a:visited {
+    color: var(--link-color);
+    text-decoration: none;
+    transition: color var(--transition-fast);
+}
+
+a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+}
+/* Link colors in dark mode are handled through variables, no additional rules needed */
+
+/* Button that looks like a link (used for CSRF-safe logout) */
+button.link-button {
+    background: none;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    font: inherit;
+    color: var(--link-color);
+    cursor: pointer;
+}
+button.link-button:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+}
+
+/* nav right container */
+.nav-right {
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+}
+
+/* theme toggle button */
+#theme-toggle {
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--primary-text);
+    cursor: pointer;
+    margin-left: 12px;
+    padding: 0;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+#theme-toggle svg {
+    position: absolute;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+#theme-toggle .sun-icon {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+}
+
+#theme-toggle .moon-icon {
+    opacity: 0;
+    transform: rotate(-90deg) scale(0.5);
+}
+
+#theme-toggle.dark-mode .sun-icon {
+    opacity: 0;
+    transform: rotate(90deg) scale(0.5);
+}
+
+#theme-toggle.dark-mode .moon-icon {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+}
+
+#theme-toggle:hover {
+    background-color: rgba(255, 255, 255, 0.25);
+    transform: scale(1.1);
+    box-shadow: 0 0 20px rgba(255, 255, 255, 0.2);
+}
+
+#theme-toggle:hover .sun-icon {
+    animation: sunSpin 2s linear infinite;
+}
+
+@keyframes sunSpin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+#theme-toggle.dark-mode:hover .sun-icon {
+    animation: none;
+}
+
+#theme-toggle.dark-mode:hover .moon-icon {
+    animation: moonGlow 1.5s ease-in-out infinite;
+}
+
+@keyframes moonGlow {
+    0%,
+    100% {
+        filter: drop-shadow(0 0 2px currentColor);
+    }
+    50% {
+        filter: drop-shadow(0 0 8px currentColor);
+    }
+}
+
+/* Cancel old float layout */
+#stats-link,
+#login-link {
+    float: none;
+    margin: 0 12px;
+}
+
+/* Mobile header optimizations (shared across pages) */
+@media (max-width: 768px) {
+    #header {
+        padding: 0 10px;
+        height: 52px;
+        justify-content: space-between;
+    }
+
+    #home-link {
+        font-size: 18px;
+    }
+
+    #hint {
+        display: none; /* Hide hint on mobile to save space */
+    }
+
+    .nav-right {
+        gap: 4px;
+    }
+
+    /* Mobile Header: hide text, show icons only */
+    #header a {
+        padding: 8px;
+        margin: 0 2px;
+    }
+
+    .nav-text {
+        display: none;
+    }
+
+    .nav-icon {
+        font-size: 1.4em;
+    }
+
+    .nav-link {
+        padding: 6px 8px;
+        font-size: 13px;
+    }
+}

@@ -29,6 +29,6 @@
     global[NS] = {
         createMarkdownIt: createMarkdownIt,
         setSafeLinkValidator: setSafeLinkValidator,
-        applyTextEscapeRenderer: applyTextEscapeRenderer
+        applyTextEscapeRenderer: applyTextEscapeRenderer,
     };
 })(typeof window !== 'undefined' ? window : this);

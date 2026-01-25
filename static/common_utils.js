@@ -3,6 +3,16 @@
 // Common utilities shared across paper_list.js, paper_summary.js, and other modules.
 // Exposes: window.ArxivSanityCommon
 
+// Debug flag - set to true to enable render timing logs
+const RENDER_DEBUG =
+    typeof localStorage !== 'undefined' && localStorage.getItem('arxiv_render_debug') === '1';
+
+function debugLog(category, message, data) {
+    if (!RENDER_DEBUG) return;
+    const timestamp = performance.now().toFixed(2);
+    console.log(`[${timestamp}ms] [${category}] ${message}`, data || '');
+}
+
 (function (global) {
     const NS = 'ArxivSanityCommon';
 
@@ -16,7 +26,7 @@
      */
     function getCsrfToken() {
         const meta = document.querySelector('meta[name="csrf-token"]');
-        return meta ? (meta.getAttribute('content') || '') : '';
+        return meta ? meta.getAttribute('content') || '' : '';
     }
 
     /**
@@ -149,7 +159,7 @@
 
         const channel = initBroadcastChannel();
         if (channel) {
-            channel.onmessage = (e) => {
+            channel.onmessage = e => {
                 dispatchUserEvent(e.data || {}, { fromBroadcast: true });
             };
         }
@@ -164,7 +174,7 @@
             eventSource.onopen = () => {
                 stopUserStatePolling();
             };
-            eventSource.onmessage = (evt) => {
+            eventSource.onmessage = evt => {
                 if (!evt || !evt.data) return;
                 try {
                     const payload = JSON.parse(evt.data);
@@ -199,7 +209,7 @@
         if (dropdownListenersBound) return;
         dropdownListenersBound = true;
 
-        document.addEventListener('mousedown', (event) => {
+        document.addEventListener('mousedown', event => {
             dropdownRegistry.forEach((api, id) => {
                 if (!api || !api.isOpen || !api.isOpen()) return;
                 const dropdown = document.getElementById(id);
@@ -209,9 +219,9 @@
             });
         });
 
-        document.addEventListener('keydown', (event) => {
+        document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
-            dropdownRegistry.forEach((api) => {
+            dropdownRegistry.forEach(api => {
                 if (api && api.isOpen && api.isOpen()) api.close();
             });
         });
@@ -261,6 +271,12 @@
             return 'Authentication required. Please log in again.';
         }
         if (msg.includes('403') || msg.includes('Forbidden')) {
+            // CSRF token mismatch after server restart - auto reload page
+            if (msg.includes('CSRF') || msg.includes('csrf')) {
+                console.warn('CSRF token invalid, reloading page...');
+                window.location.reload();
+                return 'Session expired. Reloading page...';
+            }
             return 'Access denied. You do not have permission for this operation.';
         }
         if (msg.includes('404') || msg.includes('Not Found')) {
@@ -390,7 +406,11 @@
         const params = new URLSearchParams();
         params.set('rank', 'search');
         appendParam(params, 'q', keyword);
-        appendCommonFilters(params, { includeSearchMode: true, includeSemanticWeight: true }, opts.gvars);
+        appendCommonFilters(
+            params,
+            { includeSearchMode: true, includeSemanticWeight: true },
+            opts.gvars
+        );
         return '/?' + params.toString();
     }
 
@@ -405,7 +425,11 @@
      * @returns {string} Formatted authors text
      */
     function formatAuthorsText(authorsText, options) {
-        if (typeof window !== 'undefined' && window.ArxivSanityAuthors && window.ArxivSanityAuthors.format) {
+        if (
+            typeof window !== 'undefined' &&
+            window.ArxivSanityAuthors &&
+            window.ArxivSanityAuthors.format
+        ) {
             return window.ArxivSanityAuthors.format(authorsText, options).text;
         }
         return String(authorsText || '');
@@ -421,7 +445,11 @@
      * @returns {string} Rendered HTML
      */
     function renderTldrMarkdown(text) {
-        if (typeof window !== 'undefined' && window.ArxivSanityTldr && window.ArxivSanityTldr.render) {
+        if (
+            typeof window !== 'undefined' &&
+            window.ArxivSanityTldr &&
+            window.ArxivSanityTldr.render
+        ) {
             return window.ArxivSanityTldr.render(text);
         }
         if (!text) return '';
@@ -432,28 +460,442 @@
             .replace(/\n/g, '<br>');
     }
 
+    // =========================================================================
+    // Abstract Markdown Rendering Helpers
+    // =========================================================================
+
+    let abstractMarkdownIt = null;
+
+    function getAbstractMarkdownIt() {
+        if (abstractMarkdownIt) return abstractMarkdownIt;
+
+        // Prefer shared markdown-it wrapper (when available)
+        try {
+            const Renderer =
+                typeof window !== 'undefined' ? window.ArxivSanityMarkdownRenderer : null;
+            if (Renderer && typeof Renderer.createMarkdownIt === 'function') {
+                const md = Renderer.createMarkdownIt({
+                    html: false,
+                    breaks: true,
+                    linkify: true,
+                    typographer: false,
+                });
+                if (md) {
+                    // Enforce safe links (prevent javascript:, data:, file:, etc.)
+                    if (typeof Renderer.setSafeLinkValidator === 'function') {
+                        Renderer.setSafeLinkValidator(md, {
+                            allowRelative: true,
+                            allowHash: true,
+                            baseValidator: isSafeUrl,
+                        });
+                    }
+                    abstractMarkdownIt = md;
+                    return abstractMarkdownIt;
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        // Fallback to global markdownit if present
+        try {
+            if (typeof window !== 'undefined' && typeof window.markdownit === 'function') {
+                const md = window.markdownit({
+                    html: false,
+                    breaks: true,
+                    linkify: true,
+                    typographer: false,
+                });
+                // Best-effort safe link validation
+                const Sanitizer =
+                    typeof window !== 'undefined' ? window.ArxivSanityMarkdownSanitizer : null;
+                if (Sanitizer && typeof Sanitizer.buildLinkValidator === 'function') {
+                    md.validateLink = Sanitizer.buildLinkValidator({
+                        allowRelative: true,
+                        allowHash: true,
+                        baseValidator: isSafeUrl,
+                    });
+                }
+                abstractMarkdownIt = md;
+                return abstractMarkdownIt;
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        return null;
+    }
+
+    /**
+     * Render abstract markdown to HTML.
+     *
+     * Strategy:
+     * 1) Prefer the shared TL;DR renderer (adds math parsing and safe escaping) when available.
+     * 2) Otherwise, use a local markdown-it instance (html disabled + safe link validator).
+     * 3) Fallback to escaped plain text.
+     *
+     * @param {string} text - Abstract text (may include markdown and LaTeX)
+     * @returns {string} Rendered HTML
+     */
+    function renderAbstractMarkdown(text) {
+        if (!text) return '';
+
+        let s = String(text);
+
+        // Remove images for safety/UX (abstracts should be text-only)
+        try {
+            if (
+                typeof window !== 'undefined' &&
+                window.ArxivSanityMarkdownSanitizer &&
+                typeof window.ArxivSanityMarkdownSanitizer.stripMarkdownImages === 'function'
+            ) {
+                s = window.ArxivSanityMarkdownSanitizer.stripMarkdownImages(s);
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        // Prefer TL;DR renderer if present (consistent markdown + math handling)
+        if (
+            typeof window !== 'undefined' &&
+            window.ArxivSanityTldr &&
+            typeof window.ArxivSanityTldr.render === 'function'
+        ) {
+            return window.ArxivSanityTldr.render(s);
+        }
+
+        const md = getAbstractMarkdownIt();
+        if (md && typeof md.render === 'function') {
+            try {
+                return md.render(s);
+            } catch (e) {
+                // fall through
+            }
+        }
+
+        // Final fallback: escape + preserve line breaks
+        return escapeHtml(s).replace(/\n/g, '<br>');
+    }
+
     /**
      * Trigger MathJax typesetting for element
      * @param {HTMLElement} [element] - Element to typeset (or entire document if omitted)
      */
     function triggerMathJax(element) {
-        if (typeof window !== 'undefined' && window.ArxivSanityTldr && window.ArxivSanityTldr.triggerMathJax) {
-            return window.ArxivSanityTldr.triggerMathJax(element);
-        }
-        if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
-            MathJax.typesetPromise(element ? [element] : undefined).catch(function (err) {
+        function _typesetNow() {
+            if (typeof MathJax === 'undefined') return;
+            const nodes = element ? [element] : undefined;
+            try {
+                if (MathJax.startup && MathJax.startup.promise) {
+                    MathJax.startup.promise
+                        .then(() => {
+                            if (MathJax.typesetPromise) return MathJax.typesetPromise(nodes);
+                            if (MathJax.typeset) MathJax.typeset(nodes);
+                            return null;
+                        })
+                        .catch(err => {
+                            console.warn('MathJax typeset error:', err);
+                        });
+                    return;
+                }
+                if (MathJax.typesetPromise) {
+                    MathJax.typesetPromise(nodes).catch(function (err) {
+                        console.warn('MathJax typeset error:', err);
+                    });
+                    return;
+                }
+                if (MathJax.typeset) {
+                    MathJax.typeset(nodes);
+                }
+            } catch (err) {
                 console.warn('MathJax typeset error:', err);
-            });
+            }
         }
+
+        // If MathJax is fully loaded (has typeset methods), typeset immediately.
+        if (typeof MathJax !== 'undefined' && (MathJax.typesetPromise || MathJax.typeset)) {
+            _typesetNow();
+            return;
+        }
+
+        // Only lazy-load MathJax if we detect math content.
+        // Note: MathJax config object may exist but script not loaded yet
+        try {
+            const text = element
+                ? element.textContent || ''
+                : (document.body && document.body.textContent) || '';
+            if (!hasMathContent(text)) return;
+        } catch (e) {
+            // If detection fails, be conservative and load MathJax.
+        }
+
+        loadMathJaxOnDemand(function () {
+            _typesetNow();
+        });
+    }
+
+    // =========================================================================
+    // MathJax Lazy Loading
+    // =========================================================================
+
+    let mathJaxLoading = false;
+    let mathJaxLoaded = false;
+    const mathJaxCallbacks = [];
+
+    /**
+     * Default MathJax configuration
+     */
+    const defaultMathJaxConfig = {
+        options: {
+            enableMenu: false,
+            enableAssistiveMml: false,
+            skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+            ignoreHtmlClass: 'tex2jax_ignore',
+            processHtmlClass: 'tex2jax_process',
+        },
+        tex: {
+            inlineMath: [
+                ['\\(', '\\)'],
+                ['$', '$'],
+            ],
+            displayMath: [
+                ['\\[', '\\]'],
+                ['$$', '$$'],
+            ],
+            processEscapes: true,
+            processEnvironments: true,
+            processRefs: true,
+            packages: {
+                '[+]': [
+                    'base',
+                    'ams',
+                    'boldsymbol',
+                    'braket',
+                    'cancel',
+                    'cases',
+                    'color',
+                    'enclose',
+                    'mathtools',
+                    'newcommand',
+                    'noerrors',
+                    'noundefined',
+                    'physics',
+                    'tagformat',
+                    'textmacros',
+                    'unicode',
+                    'verb',
+                ],
+            },
+            tags: 'ams',
+            macros: {
+                // Bold and emphasis
+                bm: ['\\mathbf{#1}', 1],
+                boldsymbol: ['\\mathbf{#1}', 1],
+                bold: ['\\mathbf{#1}', 1],
+                pmb: ['\\mathbf{#1}', 1],
+
+                // Common sets (blackboard bold)
+                RR: '\\mathbb{R}',
+                NN: '\\mathbb{N}',
+                ZZ: '\\mathbb{Z}',
+                QQ: '\\mathbb{Q}',
+                CC: '\\mathbb{C}',
+                PP: '\\mathbb{P}',
+                EE: '\\mathbb{E}',
+                HH: '\\mathbb{H}',
+                FF: '\\mathbb{F}',
+
+                // Delimiters
+                abs: ['\\left|#1\\right|', 1],
+                norm: ['\\left\\|#1\\right\\|', 1],
+                inner: ['\\left\\langle#1,#2\\right\\rangle', 2],
+                set: ['\\left\\{#1\\right\\}', 1],
+                floor: ['\\left\\lfloor#1\\right\\rfloor', 1],
+                ceil: ['\\left\\lceil#1\\right\\rceil', 1],
+
+                // Common operators
+                argmax: '\\operatorname*{arg\\,max}',
+                argmin: '\\operatorname*{arg\\,min}',
+
+                // Indicator function (mathbbm package support)
+                ind: '\\mathbb{1}',
+                indicator: '\\mathbb{1}',
+                one: '\\mathbb{1}',
+                mathbbm: ['\\mathbb{#1}', 1],
+                mathds: ['\\mathbb{#1}', 1],
+
+                // Script fonts
+                mathscr: ['\\mathcal{#1}', 1],
+                mathpzc: ['\\mathcal{#1}', 1],
+
+                // Probability and statistics
+                Var: '\\mathrm{Var}',
+                Cov: '\\mathrm{Cov}',
+                Corr: '\\mathrm{Corr}',
+                Pr: '\\mathrm{Pr}',
+                E: '\\mathbb{E}',
+
+                // Linear algebra
+                rank: '\\mathrm{rank}',
+                tr: '\\mathrm{tr}',
+                Tr: '\\mathrm{Tr}',
+                diag: '\\mathrm{diag}',
+                vec: ['\\mathbf{#1}', 1],
+                mat: ['\\mathbf{#1}', 1],
+
+                // Text in math mode - use math font variants for compatibility
+                textit: ['\\mathit{#1}', 1],
+                textbf: ['\\mathbf{#1}', 1],
+                textrm: ['\\mathrm{#1}', 1],
+                textsf: ['\\mathsf{#1}', 1],
+                texttt: ['\\mathtt{#1}', 1],
+
+                // Common spacing (note: do NOT redefine \mid as it's a standard LaTeX relation symbol)
+                given: '\\,|\\,',
+
+                // Transpose and related
+                T: '^{\\mathsf{T}}',
+                transpose: '^{\\mathsf{T}}',
+                inv: '^{-1}',
+
+                // Common decorations
+                hat: ['\\widehat{#1}', 1],
+                tilde: ['\\widetilde{#1}', 1],
+                bar: ['\\overline{#1}', 1],
+
+                // Machine learning
+                Loss: '\\mathcal{L}',
+                Data: '\\mathcal{D}',
+                Model: '\\mathcal{M}',
+
+                // Optimization
+                prox: '\\mathrm{prox}',
+                proj: '\\mathrm{proj}',
+                dom: '\\mathrm{dom}',
+
+                // Additional symbols
+                eps: '\\varepsilon',
+                vphi: '\\varphi',
+
+                // Probability distributions
+                Normal: '\\mathcal{N}',
+            },
+        },
+        // (moved to options above)
+        chtml: {
+            scale: 1.0,
+            displayAlign: 'center',
+        },
+    };
+
+    /**
+     * Check if text contains math expressions
+     * @param {string} text - Text to check
+     * @returns {boolean} True if math expressions found
+     */
+    function hasMathContent(text) {
+        if (!text) return false;
+        // Check for common LaTeX patterns
+        return /\$[^$]+\$|\\\[|\\\(|\\begin\{|\\frac|\\sum|\\int|\\alpha|\\beta|\\gamma/.test(text);
+    }
+
+    /**
+     * Check if page has any math content that needs rendering
+     * @returns {boolean} True if math content found
+     */
+    function pageHasMathContent() {
+        const body = document.body;
+        if (!body) return false;
+        // Check text content for math patterns
+        const text = body.textContent || '';
+        return hasMathContent(text);
+    }
+
+    /**
+     * Load MathJax on demand
+     * @param {Function} [callback] - Called when MathJax is ready
+     * @param {string} [scriptUrl] - Custom MathJax script URL
+     */
+    function loadMathJaxOnDemand(callback, scriptUrl) {
+        // Already loaded
+        if (mathJaxLoaded || (typeof MathJax !== 'undefined' && MathJax.typesetPromise)) {
+            mathJaxLoaded = true;
+            if (callback) callback();
+            return;
+        }
+
+        // Queue callback
+        if (callback) {
+            mathJaxCallbacks.push(callback);
+        }
+
+        // Already loading
+        if (mathJaxLoading) return;
+        mathJaxLoading = true;
+
+        // Set config before loading script
+        if (typeof window.MathJax === 'undefined') {
+            window.MathJax = defaultMathJaxConfig;
+        }
+
+        // Create and load script (avoid duplicates)
+        let script = document.getElementById('MathJax-script');
+        if (!script) {
+            script = document.createElement('script');
+            script.id = 'MathJax-script';
+            script.src = scriptUrl || '/static/lib/es5/tex-chtml-full.js';
+            script.async = true;
+            document.head.appendChild(script);
+        }
+        script.onload = function () {
+            mathJaxLoaded = true;
+            mathJaxLoading = false;
+
+            const runCallbacks = function () {
+                while (mathJaxCallbacks.length > 0) {
+                    const cb = mathJaxCallbacks.shift();
+                    try {
+                        cb();
+                    } catch (e) {
+                        console.warn('MathJax callback error:', e);
+                    }
+                }
+            };
+
+            // Wait for MathJax startup (if available) before running callbacks.
+            try {
+                if (typeof MathJax !== 'undefined' && MathJax.startup && MathJax.startup.promise) {
+                    MathJax.startup.promise.then(runCallbacks).catch(runCallbacks);
+                    return;
+                }
+            } catch (e) {}
+            runCallbacks();
+        };
+        script.onerror = function () {
+            mathJaxLoading = false;
+            console.warn('Failed to load MathJax');
+        };
+    }
+
+    /**
+     * Load MathJax only if page has math content
+     * @param {Function} [callback] - Called when MathJax is ready (only if loaded)
+     */
+    function loadMathJaxIfNeeded(callback) {
+        if (pageHasMathContent()) {
+            loadMathJaxOnDemand(callback);
+            return true;
+        }
+        return false;
     }
 
     // =========================================================================
     // Performance Monitoring (Development only)
     // =========================================================================
 
-    const isDevelopment = typeof window !== 'undefined' &&
-                         (window.location.hostname === 'localhost' ||
-                          window.location.hostname === '127.0.0.1');
+    const isDevelopment =
+        typeof window !== 'undefined' &&
+        (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
     /**
      * Measure synchronous function performance (development only)
@@ -517,6 +959,258 @@
     }
 
     // =========================================================================
+    // Summary Fallback Detection
+    // =========================================================================
+
+    /**
+     * Check if a summary response indicates a model fallback occurred.
+     * @param {Object} meta - The summary_meta from API response
+     * @param {string} requestedModel - The model that was originally requested
+     * @returns {{occurred: boolean, actualModel: string, notice: string}}
+     */
+    function checkSummaryFallback(meta, requestedModel) {
+        const actualModel = String((meta && meta.llm_model) || '').trim();
+        const requested = String(requestedModel || '').trim();
+
+        if (actualModel && requested && actualModel !== requested) {
+            return {
+                occurred: true,
+                actualModel: actualModel,
+                notice: `Note: Fallback occurred. Summary generated by "${actualModel}" instead of "${requested}".`,
+            };
+        }
+        return { occurred: false, actualModel: actualModel || requested, notice: '' };
+    }
+
+    // =========================================================================
+    // Summary Status Polling (shared across paper_list.js and readinglist.html)
+    // =========================================================================
+
+    const SUMMARY_PENDING = new Set();
+    let summaryStatusPoller = null;
+    let summaryStatusCallback = null;
+
+    /**
+     * Normalize a paper ID to a consistent string format.
+     * @param {string} pid - Paper ID
+     * @returns {string} Normalized paper ID
+     */
+    function normalizePid(pid) {
+        return String(pid || '').trim();
+    }
+
+    /**
+     * Get the default summary model from global variable.
+     * @returns {string} Model name or empty string
+     */
+    function getSummaryModel() {
+        if (typeof defaultSummaryModel !== 'undefined') {
+            return String(defaultSummaryModel || '').trim();
+        }
+        return '';
+    }
+
+    /**
+     * Mark a paper as pending summary generation.
+     * @param {string} pid - Paper ID
+     */
+    function markSummaryPending(pid) {
+        const key = normalizePid(pid);
+        if (!key) return;
+        SUMMARY_PENDING.add(key);
+        startSummaryStatusPolling();
+    }
+
+    /**
+     * Unmark a paper from pending summary generation.
+     * @param {string} pid - Paper ID
+     */
+    function unmarkSummaryPending(pid) {
+        const key = normalizePid(pid);
+        if (!key) return;
+        SUMMARY_PENDING.delete(key);
+        if (SUMMARY_PENDING.size === 0) {
+            stopSummaryStatusPolling();
+        }
+    }
+
+    /**
+     * Stop the summary status polling interval.
+     */
+    function stopSummaryStatusPolling() {
+        if (summaryStatusPoller) {
+            clearInterval(summaryStatusPoller);
+            summaryStatusPoller = null;
+        }
+    }
+
+    /**
+     * Start polling for summary status updates.
+     */
+    function startSummaryStatusPolling() {
+        if (summaryStatusPoller) return;
+        summaryStatusPoller = setInterval(() => {
+            if (SUMMARY_PENDING.size === 0) {
+                stopSummaryStatusPolling();
+                return;
+            }
+            pollSummaryStatuses();
+        }, 6000);
+        pollSummaryStatuses();
+    }
+
+    /**
+     * Poll the server for summary status of pending papers.
+     */
+    function pollSummaryStatuses() {
+        if (SUMMARY_PENDING.size === 0) return;
+        const model = getSummaryModel();
+        const pids = Array.from(SUMMARY_PENDING);
+        csrfFetch('/api/summary_status', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ pids, model }),
+        })
+            .then(resp => resp.json())
+            .then(data => {
+                if (!data || !data.success || !data.statuses) return;
+                const statuses = data.statuses || {};
+                Object.keys(statuses).forEach(pid => {
+                    const info = statuses[pid] || {};
+                    const status = info.status || '';
+                    const lastError = info.last_error || '';
+                    const taskId = info.task_id ? String(info.task_id) : '';
+                    // Call the registered callback if available
+                    if (summaryStatusCallback) {
+                        summaryStatusCallback(pid, status, lastError, taskId);
+                    }
+                    if (status && status !== 'queued' && status !== 'running') {
+                        unmarkSummaryPending(pid);
+                    }
+                });
+            })
+            .catch(err => {
+                console.warn('Failed to poll summary status:', err);
+            });
+    }
+
+    /**
+     * Register a callback to be called when summary status updates are received.
+     * @param {Function} callback - Function(pid, status, lastError, taskId)
+     */
+    function setSummaryStatusCallback(callback) {
+        summaryStatusCallback = callback;
+    }
+
+    /**
+     * Fetch task status from the server.
+     * @param {string} taskId - Task ID
+     * @returns {Promise<Object|null>} Task status or null
+     */
+    function fetchTaskStatus(taskId) {
+        if (!taskId) return Promise.resolve(null);
+        return fetch(`/api/task_status/${encodeURIComponent(taskId)}`)
+            .then(resp => (resp.ok ? resp.json() : null))
+            .then(data => (data && data.success ? data : null))
+            .catch(() => null);
+    }
+
+    /**
+     * Check if a summary can be triggered based on current status.
+     * @param {string} status - Current summary status
+     * @returns {boolean} True if summary can be triggered
+     */
+    function canTriggerSummary(status) {
+        return !(status === 'ok' || status === 'running' || status === 'queued');
+    }
+
+    /**
+     * Format summary status for display.
+     * @param {string} status - Summary status
+     * @returns {string} Formatted status text
+     */
+    function formatSummaryStatus(status) {
+        if (!status) return '';
+        if (status === 'queued') return 'Summary Queued';
+        if (status === 'running') return 'Summary Generating';
+        if (status === 'ok') return 'Summary Ready';
+        if (status === 'failed') return 'Summary Failed';
+        return 'Summary ' + status.charAt(0).toUpperCase() + status.slice(1);
+    }
+
+    // =========================================================================
+    // Clipboard
+    // =========================================================================
+
+    /**
+     * Copy text to clipboard with fallbacks.
+     *
+     * Notes:
+     * - navigator.clipboard may not be available in insecure contexts (HTTP) or some browsers
+     * - execCommand('copy') still works in older environments but may require user gesture
+     *
+     * @param {string} text - text to copy
+     * @returns {Promise<boolean>} resolves true if copy succeeded, else false
+     */
+    function copyTextToClipboard(text) {
+        const value = String(text == null ? '' : text);
+
+        // Preferred: Async Clipboard API
+        try {
+            if (
+                typeof navigator !== 'undefined' &&
+                navigator.clipboard &&
+                typeof navigator.clipboard.writeText === 'function'
+            ) {
+                return navigator.clipboard
+                    .writeText(value)
+                    .then(() => true)
+                    .catch(() => false);
+            }
+        } catch (e) {}
+
+        // Fallback: temporary textarea + execCommand
+        return new Promise(resolve => {
+            try {
+                if (typeof document === 'undefined' || !document.body) {
+                    resolve(false);
+                    return;
+                }
+
+                const ta = document.createElement('textarea');
+                ta.value = value;
+                ta.setAttribute('readonly', '');
+                // Avoid iOS zoom and keep off-screen
+                ta.style.position = 'fixed';
+                ta.style.top = '-1000px';
+                ta.style.left = '-1000px';
+                ta.style.width = '1px';
+                ta.style.height = '1px';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+
+                ta.focus();
+                ta.select();
+                ta.setSelectionRange(0, ta.value.length);
+
+                let ok = false;
+                try {
+                    ok = document.execCommand && document.execCommand('copy');
+                } catch (e) {
+                    ok = false;
+                }
+
+                document.body.removeChild(ta);
+                resolve(!!ok);
+            } catch (e) {
+                resolve(false);
+            }
+        });
+    }
+
+    // =========================================================================
     // Export API
     // =========================================================================
 
@@ -552,6 +1246,29 @@
         formatAuthorsText,
         // TL;DR
         renderTldrMarkdown,
+        // Abstract
+        renderAbstractMarkdown,
         triggerMathJax,
+        // MathJax lazy loading
+        hasMathContent,
+        pageHasMathContent,
+        loadMathJaxOnDemand,
+        loadMathJaxIfNeeded,
+        // Summary
+        checkSummaryFallback,
+        // Summary status polling (shared)
+        normalizePid,
+        getSummaryModel,
+        markSummaryPending,
+        unmarkSummaryPending,
+        startSummaryStatusPolling,
+        stopSummaryStatusPolling,
+        pollSummaryStatuses,
+        setSummaryStatusCallback,
+        fetchTaskStatus,
+        canTriggerSummary,
+        formatSummaryStatus,
+        // Clipboard
+        copyTextToClipboard,
     };
 })(typeof window !== 'undefined' ? window : this);

@@ -1,10 +1,11 @@
-# Web框架和服务器
+# Web framework and server
 Flask
 Werkzeug
 gunicorn
 
-# 机器学习和AI
+# Machine learning and AI
 numpy
+scipy
 scikit-learn
 scikit-learn-intelex
 openai
@@ -12,23 +13,28 @@ mineru[all]
 mineru_vl_utils
 vllm==0.11.0
 
-# 数据处理和存储
+# Data processing and storage
 feedparser
-sqlitedict
+# sqlitedict  # Replaced by native sqlite3 implementation in aslite/db.py
 
-# 任务调度和时间处理
+# Task scheduling and time handling
 schedule
 apscheduler
 pytz
 holidays
+huey[sqlite]
 
-# 工具和实用程序
+# Tools and utilities
 tqdm
 backoff
 loguru
 requests
 beautifulsoup4
 markdownify
+pydantic>=2.6,<3
+pydantic-settings>=2.0,<3
+flasgger
 
-# 开发工具
+# Development tools
+pytest
 pre-commit

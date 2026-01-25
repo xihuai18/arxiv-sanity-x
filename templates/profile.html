@@ -30,7 +30,7 @@
                 <span class="note-icon">ℹ️</span>
                 <span>This feature is in beta. Remove your email to unsubscribe.</span>
             </div>
-            <form id="email-form" action="{{ url_for('register_email') }}" method="post">
+            <form id="email-form" action="{{ url_for('user.register_email') }}" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="form-group">
                     <label for="email-input">Email Address</label>
@@ -46,7 +46,7 @@
                 <h3>Session</h3>
             </div>
             <p class="profile-description">End your current session and return to the login page.</p>
-            <form action="{{ url_for('logout') }}" method="post">
+            <form action="{{ url_for('user.logout') }}" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="btn btn-outline-danger">Log Out</button>
             </form>

@@ -1,11 +1,23 @@
 {
-  "name": "arxiv-sanity-x",
-  "private": true,
-  "devDependencies": {
-    "esbuild": "^0.25.0",
-    "markdown-it": "^14.1.0"
-  },
-  "scripts": {
-    "build:static": "esbuild static/paper_list.js static/word_list.js static/paper_detail.js static/paper_summary.js static/tag_dropdown_shared.js static/author_utils.js static/tldr_utils.js static/common_utils.js static/markdown_summary_utils.js static/markdown_core_utils.js static/markdown_sanitizer_utils.js static/markdown_renderer_utils.js static/markdown_summary_dom_utils.js --outdir=static/dist --loader:.js=jsx --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2017 --format=iife --minify"
-  }
+    "name": "arxiv-sanity-x",
+    "private": true,
+    "devDependencies": {
+        "esbuild": "^0.25.0",
+        "eslint": "^8.57.0",
+        "eslint-config-prettier": "^9.1.0",
+        "eslint-plugin-react": "^7.34.0",
+        "globals": "^15.0.0",
+        "markdown-it": "^14.1.0",
+        "prettier": "^3.2.5"
+    },
+    "scripts": {
+        "build:static": "node scripts/build.js",
+        "build:dev": "node scripts/build.js --dev",
+        "build:watch": "node scripts/build.js --watch --dev",
+        "build:legacy": "esbuild static/paper_list.js static/word_list.js static/paper_detail.js static/paper_summary.js static/tag_dropdown_shared.js static/author_utils.js static/tldr_utils.js static/common_utils.js static/markdown_summary_utils.js static/markdown_core_utils.js static/markdown_sanitizer_utils.js static/markdown_renderer_utils.js static/markdown_summary_dom_utils.js --outdir=static/dist --loader:.js=jsx --jsx-factory=React.createElement --jsx-fragment=React.Fragment --target=es2017 --format=iife --minify",
+        "lint": "eslint static/*.js scripts/*.js",
+        "lint:fix": "eslint static/*.js scripts/*.js --fix",
+        "format": "prettier --write \"static/*.js\" \"scripts/*.js\" \"static/css/**/*.css\"",
+        "format:check": "prettier --check \"static/*.js\" \"scripts/*.js\" \"static/css/**/*.css\""
+    }
 }

@@ -1,0 +1,116 @@
+/* ===== Math Formula Styles (MathJax Only) ===== */
+
+/* MathJax specific styles */
+.MathJax {
+    font-size: 1em !important;
+    display: inline !important;
+    margin: 0 2px !important;
+}
+
+.MathJax_Display {
+    margin: 1em 0 !important;
+    text-align: center !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+}
+
+/* MathJax container styles */
+.MathJax_Preview {
+    color: transparent !important;
+}
+
+.MathJax_Processing {
+    visibility: hidden !important;
+}
+
+/* Support for MathJax v3 */
+mjx-container {
+    display: inline-block !important;
+    margin: 0 2px !important;
+}
+
+mjx-container[display='true'] {
+    display: block !important;
+    margin: 1em 0 !important;
+    text-align: center !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+}
+
+/* Fallback math styles for when MathJax is not available */
+.math-inline,
+.math-display {
+    font-family: 'Computer Modern', 'Latin Modern Math', 'Times New Roman', serif;
+    font-style: italic;
+    display: inline;
+    margin: 0 2px;
+}
+
+.math-display {
+    display: block;
+    margin: 1em 0;
+    text-align: center;
+    overflow-x: auto;
+}
+
+/* Dark theme adjustments for math */
+[data-theme='dark'] .MathJax,
+[data-theme='dark'] mjx-container {
+    color: var(--text-color) !important;
+}
+
+[data-theme='dark'] .math-inline,
+[data-theme='dark'] .math-display {
+    color: var(--text-color);
+}
+
+/* Ensure math formulas don't overflow in narrow containers */
+.markdown-content .MathJax_Display,
+.markdown-content mjx-container[display='true'] {
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.markdown-content .MathJax_Display .MathJax,
+.markdown-content mjx-container[display='true'] {
+    white-space: nowrap;
+}
+
+/* Fix MathJax display issues in markdown content */
+.markdown-content .MathJax {
+    vertical-align: baseline !important;
+}
+
+.markdown-content .MathJax_Display {
+    width: 100% !important;
+    margin: 1em 0 !important;
+}
+
+/* Responsive math formulas */
+@media (max-width: 768px) {
+    mjx-container,
+    .MathJax {
+        font-size: 0.9em !important;
+    }
+
+    mjx-container[display='true'],
+    .MathJax_Display {
+        font-size: 0.85em !important;
+    }
+}
+
+/* Accessible keyboard focus styling */
+:focus-visible {
+    outline: 2px solid var(--link-color);
+    outline-offset: 2px;
+}
+
+/* Respect reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation: none !important;
+        transition: none !important;
+    }
+}
