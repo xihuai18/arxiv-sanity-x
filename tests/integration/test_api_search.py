@@ -44,6 +44,33 @@ class TestTagSearchApi:
         resp = client.post("/api/tag_search", json={"tag_name": "test_tag"})
         assert resp.status_code == 401
 
+    def test_tag_search_with_api_key_allows_access(self, client):
+        """Test that internal API key can be used for non-browser calls."""
+        resp = client.post(
+            "/api/tag_search",
+            json={"tag_name": "test_tag", "user": "test_user", "time_delta": 365, "limit": 5},
+            headers={"X-ARXIV-SANITY-API-KEY": "test-api-key"},
+        )
+        assert resp.status_code in [200, 400]
+
+    def test_tag_search_with_api_key_missing_user_returns_400(self, client):
+        """Test that API-key auth requires user field for login-required endpoints."""
+        resp = client.post(
+            "/api/tag_search",
+            json={"tag_name": "test_tag"},
+            headers={"X-ARXIV-SANITY-API-KEY": "test-api-key"},
+        )
+        assert resp.status_code == 400
+
+    def test_tag_search_with_wrong_api_key_returns_401(self, client):
+        """Test that wrong API key does not bypass login requirement."""
+        resp = client.post(
+            "/api/tag_search",
+            json={"tag_name": "test_tag", "user": "test_user"},
+            headers={"X-ARXIV-SANITY-API-KEY": "wrong-key"},
+        )
+        assert resp.status_code == 401
+
     def test_tag_search_missing_tag_returns_400(self, logged_in_client):
         """Test that missing tag_name returns 400."""
         resp = logged_in_client.post("/api/tag_search", json={})
@@ -74,6 +101,15 @@ class TestTagsSearchApi:
         """Test that tags search requires login."""
         resp = client.post("/api/tags_search", json={"tags": ["test_tag"]})
         assert resp.status_code == 401
+
+    def test_tags_search_with_api_key_allows_access(self, client):
+        """Test that internal API key can be used for non-browser calls."""
+        resp = client.post(
+            "/api/tags_search",
+            json={"tags": ["test_tag"], "user": "test_user", "time_delta": 365, "limit": 5},
+            headers={"X-ARXIV-SANITY-API-KEY": "test-api-key"},
+        )
+        assert resp.status_code in [200, 400]
 
     def test_tags_search_missing_tags_returns_400(self, logged_in_client):
         """Test that missing tags returns 400."""

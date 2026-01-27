@@ -630,6 +630,12 @@ async function fetchSummary(pid, options = {}) {
 
         const data = await response.json().catch(() => null);
         if (response.ok && data && data.success) {
+            // Handle cache miss (backend returns 200 with cached=false)
+            if (data.cached === false) {
+                const err = new Error('No cached summary available');
+                err.code = 'summary_cache_miss';
+                throw err;
+            }
             return {
                 content: data.summary_content,
                 meta: data.summary_meta || {},
@@ -1531,8 +1537,10 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             const modelChanged = chosenModelStr && chosenModelStr !== prevContentModel;
 
             const inFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
+            // Show loading when: force regenerate, or no content yet, or in-flight generation,
+            // or model changed (to avoid showing "No summary" flash before API returns)
             const shouldShowLoading =
-                force || (!cacheOnly && !this.content) || (cacheOnly && inFlight);
+                force || (!cacheOnly && !this.content) || (cacheOnly && inFlight) || modelChanged;
             this.setState({
                 loading: shouldShowLoading,
                 error: null,

@@ -27,7 +27,6 @@ node_modules
 
 # Data directory
 data/*
-!data/dict.db
 data/*.db-shm
 data/*.db-wal
 data/tmp_*

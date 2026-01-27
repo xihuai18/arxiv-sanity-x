@@ -75,6 +75,16 @@ USE_INTEL_EXT = False
 # API call configuration from centralized settings
 API_BASE_URL = settings.reco.api_base_url
 API_TIMEOUT = settings.reco.api_timeout
+API_KEY = getattr(settings.reco, "api_key", "")
+API_HEADERS: dict = {}
+
+
+def _build_api_headers(api_key: str) -> dict:
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        return {}
+    return {"X-ARXIV-SANITY-API-KEY": api_key}
+
 
 # Thread configuration from centralized settings
 num_threads = _resolve_num_threads(settings.reco.num_threads)
@@ -512,13 +522,17 @@ def _api_worker_count(n_tasks: int) -> int:
 
 def _post_recommendation(url: str, payload: dict, label: str, key: str):
     try:
-        response = requests.post(url, json=payload, timeout=API_TIMEOUT)
+        response = requests.post(url, json=payload, headers=API_HEADERS or None, timeout=API_TIMEOUT)
     except requests.RequestException as e:
         logger.error(f"API request exception for {label} {key}: {e}")
         return None
 
     if response.status_code != 200:
-        logger.error(f"API request failed for {label} {key}: {response.status_code}")
+        body = (response.text or "").strip().replace("\n", " ")
+        if len(body) > 200:
+            body = body[:200] + "..."
+        suffix = f" body={body}" if body else ""
+        logger.error(f"API request failed for {label} {key}: {response.status_code}{suffix}")
         return None
 
     try:
@@ -1039,6 +1053,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Recommendation API base url (env: ARXIV_SANITY_RECO_API_BASE_URL)",
     )
     parser.add_argument(
+        "--api-key",
+        type=str,
+        default=API_KEY,
+        help="Recommendation API key for non-browser calls (env: ARXIV_SANITY_RECO_API_KEY)",
+    )
+    parser.add_argument(
         "--api-timeout",
         type=float,
         default=API_TIMEOUT,
@@ -1084,7 +1104,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global API_BASE_URL, API_TIMEOUT, WEB, num_threads, RECO_HPARAMS, USE_INTEL_EXT, args, tnow_str
+    global API_BASE_URL, API_TIMEOUT, API_HEADERS, WEB, num_threads, RECO_HPARAMS, USE_INTEL_EXT, args, tnow_str
 
     argv = sys.argv[1:] if argv is None else list(argv)
     parser = build_parser()
@@ -1093,6 +1113,7 @@ def main(argv: list[str] | None = None) -> int:
     # Apply CLI/env configuration to globals used by helper functions.
     API_BASE_URL = args.api_base_url
     API_TIMEOUT = float(args.api_timeout)
+    API_HEADERS = _build_api_headers(args.api_key)
     WEB = args.web_name
     num_threads = _resolve_num_threads(int(args.num_threads))
     RECO_HPARAMS = RecoHyperparams(api_limit=int(args.api_limit), model_C=float(args.reco_c))

@@ -60,6 +60,7 @@ def configure_test_env() -> None:
     os.environ["ARXIV_SANITY_SUMMARY_REPAIR_ENABLE"] = "0"
     os.environ["ARXIV_SANITY_ENABLE_SWAGGER"] = "0"
     os.environ["ARXIV_SANITY_SECRET_KEY"] = "test-secret-key"
+    os.environ.setdefault("ARXIV_SANITY_RECO_API_KEY", "test-api-key")
     os.environ.setdefault("ARXIV_SANITY_LOG_LEVEL", "ERROR")
 
 

@@ -43,7 +43,6 @@ from aslite.db import (
     get_combined_tags_db,
     get_email_db,
     get_keywords_db,
-    get_last_active_db,
     get_metas_db,
     get_neg_tags_db,
     get_papers_db,
@@ -1167,20 +1166,6 @@ class UserRepository:
         """Set email address for a user."""
         with get_email_db(flag="c") as edb:
             edb[user] = email
-
-    @staticmethod
-    def get_last_active(user: str) -> Optional[float]:
-        """Get last active timestamp for a user."""
-        with get_last_active_db() as ladb:
-            return ladb.get(user)
-
-    @staticmethod
-    def update_last_active(user: str, timestamp: Optional[float] = None):
-        """Update last active timestamp for a user."""
-        if timestamp is None:
-            timestamp = time.time()
-        with get_last_active_db(flag="c") as ladb:
-            ladb[user] = timestamp
 
     @staticmethod
     def get_all_users() -> List[str]:

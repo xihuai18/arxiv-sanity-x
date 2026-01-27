@@ -300,6 +300,8 @@ class BatchProcessor:
                     continue
 
                 try:
+                    api_key = str(getattr(settings.reco, "api_key", "") or "").strip()
+                    headers = {"X-ARXIV-SANITY-API-KEY": api_key} if api_key else None
                     payload = {
                         "tag_name": tag_name,
                         "user": user,
@@ -310,6 +312,7 @@ class BatchProcessor:
                     resp = requests.post(
                         f"{API_BASE_URL}/api/tag_search",
                         json=payload,
+                        headers=headers,
                         timeout=API_TIMEOUT,
                     )
                     if resp.status_code == 200:

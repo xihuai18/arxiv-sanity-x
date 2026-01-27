@@ -6,12 +6,7 @@ from contextlib import contextmanager
 
 from flask import g, session
 
-from aslite.repositories import (
-    KeywordRepository,
-    NegativeTagRepository,
-    TagRepository,
-    UserRepository,
-)
+from aslite.repositories import KeywordRepository, NegativeTagRepository, TagRepository
 
 
 def get_tags():
@@ -95,8 +90,6 @@ def before_request():
 
     ensure_background_services_started()
     g.user = session.get("user", None)
-    if g.user:
-        UserRepository.update_last_active(g.user)
 
 
 def close_connection(_error=None):

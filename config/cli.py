@@ -137,6 +137,12 @@ def cmd_show(args):
 
         print("\n📬 Recommendation Configuration:")
         print(f"  api_base_url:     {settings.reco.api_base_url}")
+        reco_api_key = str(getattr(settings.reco, "api_key", "") or "")
+        if reco_api_key:
+            masked = f"{reco_api_key[:4]}...{reco_api_key[-4:]}" if len(reco_api_key) > 8 else "***"
+            print(f"  api_key:          {masked}")
+        else:
+            print("  api_key:          (not set)")
         print(f"  api_timeout:      {settings.reco.api_timeout}s")
         print(f"  api_limit:        {settings.reco.api_limit}")
         print(f"  model_c:          {settings.reco.model_c}")

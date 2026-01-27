@@ -19,6 +19,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import sys
 import time
 from collections import defaultdict
@@ -259,13 +260,34 @@ def _parse_api_request(
 
     Returns (data, error_response) tuple. If error_response is not None, return it immediately.
     """
+    data = request.get_json(silent=True)
+    if not data:
+        data = {}
+
     if require_login and g.user is None:
-        return None, _api_error("Not logged in", 401)
+        # Allow internal service-to-service calls for endpoints that already disable CSRF.
+        # This is used by scripts like tools/send_emails.py which do not have a browser session.
+        header_key = (request.headers.get("X-ARXIV-SANITY-API-KEY") or request.headers.get("X-API-KEY") or "").strip()
+        auth_header = (request.headers.get("Authorization") or "").strip()
+        bearer_key = ""
+        if auth_header.lower().startswith("bearer "):
+            bearer_key = auth_header.split(" ", 1)[-1].strip()
+        provided_key = header_key or bearer_key
+
+        configured_key = str(getattr(settings.reco, "api_key", "") or "").strip()
+        machine_authed = bool(configured_key and provided_key and secrets.compare_digest(provided_key, configured_key))
+
+        if machine_authed and not require_csrf:
+            requested_user = str(data.get("user") or "").strip()
+            if not requested_user:
+                return None, _api_error("User is required", 400)
+            g.user = requested_user
+        else:
+            return None, _api_error("Not logged in", 401)
 
     if require_csrf:
         _csrf_protect()
 
-    data = request.get_json()
     if not data:
         return None, _api_error("No JSON data provided", 400)
 
@@ -1537,8 +1559,14 @@ def api_get_paper_summary():
             summary_meta=_public_summary_meta(summary_meta),
         )
 
-    except SummaryCacheMiss as e:
-        return _api_error(str(e), 404, code="summary_cache_miss")
+    except SummaryCacheMiss:
+        # Return 200 with cached=false instead of 404 to avoid error handling in frontend
+        return _api_success(
+            pid=pid,
+            summary_content=None,
+            summary_meta=None,
+            cached=False,
+        )
     except HTTPException:
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
@@ -1583,6 +1611,20 @@ def api_trigger_paper_summary():
         except Exception:
             priority = None
         task_id = _trigger_summary_async(g.user, raw_pid, model=model, priority=priority)
+        if task_id is None and not settings.huey.allow_thread_fallback:
+            # Enqueue failed and we do not allow running summaries inside web workers.
+            err_msg = None
+            try:
+                info = SummaryStatusRepository.get_status(raw_pid, model)
+                if isinstance(info, dict):
+                    err_msg = info.get("last_error")
+            except Exception:
+                err_msg = None
+            err_msg = err_msg or "Failed to enqueue summary task"
+            _update_summary_status_db(raw_pid, model, "failed", err_msg, task_user=g.user)
+            if g.user:
+                _update_readinglist_summary_status(g.user, raw_pid, "failed", err_msg)
+            return _api_error(err_msg, 503, code="summary_queue_unavailable")
         if task_id:
             _update_summary_status_db(raw_pid, model, "queued", None, task_id=task_id, task_user=g.user)
             if g.user:
@@ -3071,6 +3113,18 @@ def api_readinglist_add():
 
         def _trigger_fn(user, pid):
             task_id = _trigger_summary_async(user, pid)
+            if task_id is None and not settings.huey.allow_thread_fallback:
+                err_msg = None
+                try:
+                    info = SummaryStatusRepository.get_status(pid, (LLM_NAME or "").strip())
+                    if isinstance(info, dict):
+                        err_msg = info.get("last_error")
+                except Exception:
+                    err_msg = None
+                err_msg = err_msg or "Failed to enqueue summary task"
+                _update_summary_status_db(pid, None, "failed", err_msg, task_user=user)
+                _update_readinglist_summary_status(user, pid, "failed", err_msg)
+                return None
             if task_id:
                 _update_summary_status_db(pid, None, "queued", None, task_id=task_id, task_user=user)
                 _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id)

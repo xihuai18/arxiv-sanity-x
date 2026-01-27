@@ -113,7 +113,12 @@ HUEY_DB_PATH = settings.huey.db_path or os.path.join(DATA_DIR, "huey.db")
 SUMMARY_PRIORITY_HIGH = settings.huey.summary_priority_high
 SUMMARY_PRIORITY_LOW = settings.huey.summary_priority_low
 
-huey = SqliteHuey("arxiv-sanity", filename=HUEY_DB_PATH)
+HUEY_SQLITE_TIMEOUT = (
+    float(settings.huey.sqlite_timeout_worker)
+    if _is_huey_consumer_process()
+    else float(settings.huey.sqlite_timeout_web)
+)
+huey = SqliteHuey("arxiv-sanity", filename=HUEY_DB_PATH, timeout=HUEY_SQLITE_TIMEOUT)
 
 
 def _is_upload_pid(pid: str) -> bool:
