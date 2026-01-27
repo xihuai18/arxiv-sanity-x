@@ -280,6 +280,17 @@ class HueySettings(BaseSettings):
     # SSE configuration
     tasks_sse_enabled: bool = Field(default=True, description="Enable task SSE event push")
 
+    # SQLite storage tuning (Huey uses SQLite transactions for enqueue/dequeue).
+    # Web requests should fail fast to avoid tying up gunicorn threads.
+    sqlite_timeout_web: float = Field(default=1.0, description="Huey SQLite timeout for web process (seconds)")
+    sqlite_timeout_worker: float = Field(default=5.0, description="Huey SQLite timeout for Huey consumer (seconds)")
+
+    # Fallback behavior
+    allow_thread_fallback: bool = Field(
+        default=False,
+        description="Allow in-process thread fallback when Huey enqueue fails (NOT recommended for production)",
+    )
+
 
 class GunicornSettings(BaseSettings):
     """Gunicorn server configuration"""
@@ -402,6 +413,10 @@ class RecommendationSettings(BaseSettings):
     )
 
     api_base_url: str = Field(default="", description="Recommendation API base URL (empty uses local service)")
+    api_key: str = Field(
+        default="",
+        description="Internal API key for service-to-service calls (e.g. send_emails.py -> /api/tag_search)",
+    )
     api_timeout: float = Field(default=120.0, description="Recommendation API timeout (seconds)")
     api_limit: int = Field(default=1000, description="Candidate papers limit per query")
     model_c: float = Field(default=0.1, description="Recommendation model C parameter")

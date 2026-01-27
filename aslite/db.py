@@ -506,17 +506,6 @@ def get_keywords_db(flag="r", autocommit=True):
     )
 
 
-def get_last_active_db(flag="r", autocommit=True):
-    return _safe_open_db(
-        DICT_DB_FILE,
-        "last_active",
-        flag,
-        autocommit,
-        compressed=False,
-        allow_create_on_read=True,
-    )
-
-
 def get_email_db(flag="r", autocommit=True):
     return _safe_open_db(
         DICT_DB_FILE,

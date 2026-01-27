@@ -1,5 +1,5 @@
 import datetime
-import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -156,43 +156,64 @@ def send_email():
 
 
 def backup_user_data():
-    logger.debug("Backup user data")
+    logger.debug("Backup user data to submodule")
 
     if not settings.daemon.enable_git_backup:
         logger.debug("Git backup disabled; set ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true to enable")
         return
 
+    # Source: data/dict.db (actual file used by the application)
+    # Destination: data-repo/dict.db (submodule for backup)
+    src_file = PROJECT_ROOT / "data" / "dict.db"
+    data_repo_dir = PROJECT_ROOT / "data-repo"
+    dst_file = data_repo_dir / "dict.db"
+
+    if not src_file.is_file():
+        logger.warning(f"Source dict.db not found: {src_file}")
+        return
+
+    if not data_repo_dir.is_dir():
+        logger.warning(f"Submodule directory not found: {data_repo_dir}")
+        return
+
+    # Copy dict.db to submodule
     try:
-        from aslite.db import DICT_DB_FILE
+        shutil.copy2(src_file, dst_file)
     except Exception as e:
-        logger.warning(f"Failed to resolve dict.db path: {e}")
+        logger.warning(f"Failed to copy dict.db to submodule: {e}")
         return
 
-    if not os.path.isfile(DICT_DB_FILE):
-        logger.warning(f"dict.db not found: {DICT_DB_FILE}")
-        return
-
-    add_result = subprocess.run(["git", "add", DICT_DB_FILE], capture_output=True, text=True)
+    # Stage dict.db in submodule
+    add_result = subprocess.run(["git", "add", "dict.db"], cwd=data_repo_dir, capture_output=True, text=True)
     if add_result.returncode != 0:
-        logger.warning(f"git add failed: {add_result.stderr.strip()}")
+        logger.warning(f"git add failed in submodule: {add_result.stderr.strip()}")
         return
 
-    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", DICT_DB_FILE])
+    # Check if there are staged changes
+    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "dict.db"], cwd=data_repo_dir)
     if diff_result.returncode == 0:
         logger.debug("No changes to back up")
         return
     if diff_result.returncode not in (0, 1):
-        logger.warning("git diff failed while checking staged changes")
+        logger.warning("git diff failed while checking staged changes in submodule")
         return
 
-    commit_result = subprocess.run(["git", "commit", "-m", "backup dict.db"], capture_output=True, text=True)
+    # Commit in submodule
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    commit_result = subprocess.run(
+        ["git", "commit", "-m", f"backup dict.db ({timestamp})"],
+        cwd=data_repo_dir,
+        capture_output=True,
+        text=True,
+    )
     if commit_result.returncode != 0:
-        logger.warning(f"git commit failed: {commit_result.stderr.strip()}")
+        logger.warning(f"git commit failed in submodule: {commit_result.stderr.strip()}")
         return
 
-    push_result = subprocess.run(["git", "push"], capture_output=True, text=True)
+    # Push submodule
+    push_result = subprocess.run(["git", "push"], cwd=data_repo_dir, capture_output=True, text=True)
     if push_result.returncode != 0:
-        logger.warning(f"git push failed: {push_result.stderr.strip()}")
+        logger.warning(f"git push failed in submodule: {push_result.stderr.strip()}")
 
 
 def create_scheduler() -> BlockingScheduler:

@@ -17,6 +17,7 @@ from flask import g
 from loguru import logger
 
 from aslite.repositories import ReadingListRepository, SummaryStatusRepository
+from config import settings
 
 from ..utils.sse import emit_all_event, emit_user_event
 
@@ -170,8 +171,35 @@ def trigger_summary_async(
             )
         except Exception as e:
             logger.warning(f"Failed to enqueue summary task for {pid}: {e}")
+            if not settings.huey.allow_thread_fallback:
+                err = f"Failed to enqueue summary task: {e}"
+                try:
+                    if user and update_readinglist_fn:
+                        update_readinglist_fn(user, pid, "failed", err)
+                except Exception:
+                    pass
+                try:
+                    if update_db_fn:
+                        update_db_fn(pid, model, "failed", err, task_user=user)
+                except Exception:
+                    pass
+                return None
 
     # Fallback to thread-based execution
+    if not settings.huey.allow_thread_fallback:
+        err = "Summary queue unavailable (Huey disabled); enable ARXIV_SANITY_HUEY_ALLOW_THREAD_FALLBACK=true to use in-process fallback."
+        try:
+            if user and update_readinglist_fn:
+                update_readinglist_fn(user, pid, "failed", err)
+        except Exception:
+            pass
+        try:
+            if update_db_fn:
+                update_db_fn(pid, model, "failed", err, task_user=user)
+        except Exception:
+            pass
+        return None
+
     def _run():
         try:
             if user and update_readinglist_fn:
