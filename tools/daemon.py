@@ -216,6 +216,26 @@ def backup_user_data():
         logger.warning(f"git push failed in submodule: {push_result.stderr.strip()}")
 
 
+def cleanup_task_records():
+    """Cleanup old terminal task records to keep summary_status DB small."""
+    try:
+        from tasks import cleanup_tasks
+
+        # Keep active tasks; delete old terminal records only.
+        res = cleanup_tasks(
+            status_filter=["ok", "failed", "canceled"],
+            max_age_s=7 * 24 * 3600,
+            dry_run=False,
+        )
+        cleaned = int(res.get("cleaned") or 0) if isinstance(res, dict) else 0
+        if cleaned:
+            logger.info(f"Cleaned {cleaned} old task records")
+        else:
+            logger.debug("No old task records to clean")
+    except Exception as e:
+        logger.warning(f"Task record cleanup failed: {e}")
+
+
 def create_scheduler() -> BlockingScheduler:
     scheduler = BlockingScheduler(timezone=settings.daemon.timezone)
     scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=8)
@@ -224,6 +244,7 @@ def create_scheduler() -> BlockingScheduler:
     scheduler.add_job(fetch_compute, "cron", day_of_week="mon,tue,wed,thu,fri", hour=20)
     scheduler.add_job(send_email, "cron", day_of_week="tue,wed,thu,fri,mon", hour=18)
     scheduler.add_job(backup_user_data, "cron", hour=20)
+    scheduler.add_job(cleanup_task_records, "cron", hour=3)
     return scheduler
 
 

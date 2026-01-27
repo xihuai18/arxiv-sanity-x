@@ -1403,6 +1403,7 @@ function debugLog(category, message, data) {
         if (status === 'running') return 'Summary Generating';
         if (status === 'ok') return 'Summary Ready';
         if (status === 'failed') return 'Summary Failed';
+        if (status === 'canceled') return 'Summary Canceled';
         return 'Summary ' + status.charAt(0).toUpperCase() + status.slice(1);
     }
 

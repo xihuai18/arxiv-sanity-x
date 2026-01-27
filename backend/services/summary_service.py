@@ -597,13 +597,22 @@ def safe_rmtree(path: Path) -> bool:
     return False
 
 
-def clear_model_summary(pid: str, model: str, metas_getter=None):
+def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | None = None):
     """Clear summary cache for a specific model."""
     meta = metas_getter().get(pid.split("v")[0] if "v" in pid else pid) if metas_getter and pid else None
     cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
     ids_to_clear = {cache_pid, raw_pid}
     model = (model or "").strip()
     cleared = False
+    cancel_info = {"canceled_task_ids": [], "epoch": 0}
+
+    # Best-effort: cancel any in-flight summary tasks for this pid+model.
+    try:
+        from tasks import cancel_summary_tasks
+
+        cancel_info = cancel_summary_tasks(raw_pid, model, user=user, reason="Canceled by user (clear current summary)")
+    except Exception:
+        cancel_info = {"canceled_task_ids": [], "epoch": 0}
 
     # Best-effort: check whether a summary for (pid, model) exists BEFORE deletion.
     # Track per pid so we can decrement accurately when both cache_pid/raw_pid have entries.
@@ -641,7 +650,17 @@ def clear_model_summary(pid: str, model: str, metas_getter=None):
                 cleared = True
 
         try:
-            SummaryStatusRepository.delete_status(paper_id, model)
+            if cancel_info.get("canceled_task_ids"):
+                SummaryStatusRepository.set_status(
+                    paper_id,
+                    model,
+                    "canceled",
+                    "Canceled by user (clear current summary)",
+                    task_id=None,
+                    task_user=None,
+                )
+            else:
+                SummaryStatusRepository.delete_status(paper_id, model)
             cleared = True
         except Exception as e:
             logger.warning(f"Failed to clear summary status for {paper_id}::{model}: {e}")
@@ -660,11 +679,19 @@ def clear_model_summary(pid: str, model: str, metas_getter=None):
             invalidate_summary_cache_stats()
 
 
-def clear_paper_cache(pid: str, metas_getter=None):
+def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
     """Clear all caches for a paper."""
     meta = metas_getter().get(pid.split("v")[0] if "v" in pid else pid) if metas_getter and pid else None
     cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
     ids_to_clear = {cache_pid, raw_pid}
+
+    # Best-effort: cancel any in-flight summary tasks for this paper (all models).
+    try:
+        from tasks import cancel_paper_summary_tasks
+
+        cancel_paper_summary_tasks(raw_pid, user=user, reason="Canceled by user (clear all caches)")
+    except Exception:
+        pass
 
     # Collect all per-model summaries under each cache dir for decrement.
     # Use meta['model'/'llm_model'] when present; fallback to filename for older caches.
@@ -702,6 +729,20 @@ def clear_paper_cache(pid: str, metas_getter=None):
             Path(SUMMARY_DIR) / f".{paper_id}.lock",
         ):
             safe_unlink(path)
+
+        # Clear all persisted per-model status records for this paper to avoid stale UI states.
+        try:
+            from aslite.db import get_summary_status_db
+
+            with get_summary_status_db(flag="c") as sdb:
+                keys = [k for k, _v in sdb.items_with_prefix(f"{paper_id}::")]
+                for k in keys:
+                    try:
+                        del sdb[k]
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         if safe_rmtree(Path(DATA_DIR) / "html_md" / paper_id):
             logger.debug(f"Cleared HTML cache for {paper_id}")
         if safe_rmtree(Path(DATA_DIR) / "mineru" / paper_id):
@@ -776,6 +817,13 @@ def generate_paper_summary(
             return "# Error\n\nPaper not found.", {}
 
         summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+
+        # Cooperative cancellation epoch snapshot (bumped by clear actions).
+        start_epoch = 0
+        try:
+            start_epoch = SummaryStatusRepository.get_generation_epoch(cache_pid, model or "")
+        except Exception:
+            start_epoch = 0
 
         # Define cache file path
         cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
@@ -860,6 +908,13 @@ def generate_paper_summary(
             return "# Error\n\nSummary is being generated, please retry shortly.", {}
 
         try:
+            # If canceled while waiting for lock, abort without writing caches.
+            try:
+                if SummaryStatusRepository.get_generation_epoch(cache_pid, model or "") != start_epoch:
+                    return "# Error\n\nSummary canceled.", {}
+            except Exception:
+                pass
+
             cached_summary, cached_meta = _read_cached_summary()
             if cached_summary and not force_refresh:
                 if not summary_source_matches(cached_meta, summary_source):
@@ -910,6 +965,14 @@ def generate_paper_summary(
             is_error = summary_content.startswith("# Error") or summary_content.startswith(
                 "# PDF Parsing Service Unavailable"
             )
+
+            # If canceled after generation, do not write cache and do not return a "ready" signal.
+            # Note: cancellation is keyed by the requested model epoch snapshot.
+            try:
+                if SummaryStatusRepository.get_generation_epoch(cache_pid, model or "") != start_epoch:
+                    return "# Error\n\nSummary canceled.", {}
+            except Exception:
+                pass
 
             if not is_error:
                 try:

@@ -2775,7 +2775,27 @@ def release_summary_lock(fd: int, lock_path: Path) -> None:
         lock_path: Path to lock file
     """
     try:
+        # Be careful not to delete a *new* lock created after this lock file was
+        # externally removed (e.g. by cache clear) and recreated by another worker.
+        fd_ino = None
+        try:
+            fd_ino = os.fstat(fd).st_ino
+        except Exception:
+            fd_ino = None
+
+        path_ino = None
+        try:
+            path_ino = lock_path.stat().st_ino
+        except FileNotFoundError:
+            path_ino = None
+        except Exception:
+            path_ino = None
+
         os.close(fd)
+
+        # Only unlink if the path still points to the same inode we created.
+        if fd_ino is not None and path_ino is not None and fd_ino != path_ino:
+            return
         lock_path.unlink(missing_ok=True)
     except Exception as e:
         logger.warning(f"Failed to release summary lock: {e}")

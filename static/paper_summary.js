@@ -338,7 +338,7 @@ class SummaryState {
 
         const modelLabel = currentModel ? escapeHtml(currentModel) : 'current model';
         const inflightNote = this.isCurrentModelGenerating()
-            ? `<p class="confirm-warning">Note: generation for this model is currently running. Clearing does not cancel it; it may recreate cache when finished.</p>`
+            ? `<p class="confirm-warning">Note: generation for this model is currently running. Clearing will cancel the in-flight job, but it may take a moment to stop.</p>`
             : '';
 
         return `
@@ -854,15 +854,23 @@ summaryApp.confirmClearModel = async function () {
 
     try {
         await clearModelSummary(this.pid, currentModel);
+        // Cancel local in-flight UI state.
+        if (currentModel) {
+            this.inflightModels[currentModel] = false;
+        }
+        this.pendingGenerationModel = '';
         this.setState({
             clearing: false,
             content: null,
             meta: null,
+            queueRank: 0,
+            queueTotal: 0,
+            lastTaskId: '',
             notice: `Summary for model "${currentModel}" cleared. Click Generate to create a new one.`,
         });
     } catch (error) {
         const friendlyMsg = CommonUtils.handleApiError(error, 'Clear Model Summary');
-        this.setState({ clearing: false, error: friendlyMsg });
+        this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
     }
 };
 
@@ -1001,15 +1009,21 @@ summaryApp.confirmClearAll = async function () {
             this.paper.parse_status = 'pending';
             this.paper.parse_error = 'Cache cleared, re-parsing required';
         }
+        // Cancel local in-flight UI state for all models.
+        this.inflightModels = Object.create(null);
+        this.pendingGenerationModel = '';
         this.setState({
             clearing: false,
             content: null,
             meta: null,
+            queueRank: 0,
+            queueTotal: 0,
+            lastTaskId: '',
             notice: 'All caches cleared. Click Generate to fetch a fresh summary.',
         });
     } catch (error) {
         const friendlyMsg = CommonUtils.handleApiError(error, 'Clear All Caches');
-        this.setState({ clearing: false, error: friendlyMsg });
+        this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
     }
 };
 
@@ -1493,6 +1507,9 @@ summaryApp.loadSummary = async function (pid, options = {}) {
     return await CommonUtils.measurePerformanceAsync(
         `loadSummary(${pid}, model=${options.model || 'default'})`,
         async () => {
+            if (this.clearing) {
+                return;
+            }
             const requestId = (this.requestSeq = (this.requestSeq || 0) + 1);
             const chosenModel = options.model || this.getCurrentModel() || this.defaultModel || '';
             const force = Boolean(options.force_regenerate);

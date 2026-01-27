@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 from huey import SqliteHuey
 from loguru import logger
@@ -36,6 +37,10 @@ from tools.paper_summarizer import (
 DATA_DIR = str(settings.data_dir)
 LLM_NAME = settings.llm.name
 SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
+
+
+class SummaryCanceled(Exception):
+    """Raised when a running/queued summary task is canceled."""
 
 
 def _is_huey_consumer_process() -> bool:
@@ -259,7 +264,172 @@ def _is_error_summary(summary_content: str) -> bool:
     return summary_content.startswith("# Error") or summary_content.startswith("# PDF Parsing Service Unavailable")
 
 
-def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
+def _is_task_canceled(task_id: str | None) -> bool:
+    if not task_id:
+        return False
+    try:
+        info = SummaryStatusRepository.get_task_status(str(task_id))
+        return bool(isinstance(info, dict) and info.get("status") == "canceled")
+    except Exception:
+        return False
+
+
+def _revoke_task_by_id(task_id: str) -> None:
+    """Best-effort revoke (prevents queued tasks from executing)."""
+    if not task_id:
+        return
+    try:
+        # Huey expects a Task instance (uses task.revoke_id). We can construct a dummy
+        # task and override its revoke_id to match the target task id.
+        dummy = generate_summary_task.s("_", model=LLM_NAME or "default", user=None)
+        dummy.revoke_id = f"r:{task_id}"
+        huey.revoke(dummy, revoke_once=True)
+    except Exception:
+        # Revoke is best-effort; cooperative cancellation will still prevent writes.
+        pass
+
+
+def cancel_summary_tasks(
+    pid: str,
+    model: str | None = None,
+    *,
+    user: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Cancel queued/running summary tasks for a given (pid, model).
+
+    Behavior:
+    - Marks matching tasks as canceled in the task status store.
+    - Revokes tasks in Huey best-effort (prevents queued execution).
+    - Bumps per-(pid, model) generation epoch for cooperative cancellation.
+    """
+    model = (model or LLM_NAME or "").strip()
+    if not pid or not model:
+        return {"canceled_task_ids": [], "epoch": 0}
+
+    # Normalize to raw pid (unversioned) to match enqueue de-duplication.
+    raw_pid, _ = split_pid_version(pid)
+    pid = raw_pid or pid
+
+    reason = (reason or "Canceled by user").strip()
+
+    canceled_task_ids: list[str] = []
+
+    # 1) Fast path: summary status record points to the active task.
+    try:
+        info = SummaryStatusRepository.get_status(pid, model)
+        if isinstance(info, dict) and info.get("status") in ("queued", "running"):
+            tid = info.get("task_id")
+            if tid:
+                canceled_task_ids.append(str(tid))
+    except Exception:
+        pass
+
+    # 2) Best-effort scan for any duplicate queued/running tasks for this pid/model.
+    try:
+        for key, tinfo in SummaryStatusRepository.get_items_with_prefix("task::"):
+            if not isinstance(tinfo, dict):
+                continue
+            if tinfo.get("status") not in ("queued", "running"):
+                continue
+            if tinfo.get("pid") != pid or tinfo.get("model") != model:
+                continue
+            canceled_task_ids.append(str(key).replace("task::", ""))
+    except Exception:
+        pass
+
+    # De-dup while preserving order
+    seen = set()
+    canceled_task_ids = [x for x in canceled_task_ids if x and (x not in seen and not seen.add(x))]
+
+    # Cooperative cancellation: bump epoch first, so any in-flight task can see it quickly.
+    try:
+        epoch = SummaryStatusRepository.bump_generation_epoch(pid, model)
+    except Exception:
+        epoch = 0
+
+    for tid in canceled_task_ids:
+        existing_user = None
+        try:
+            existing = SummaryStatusRepository.get_task_status(tid)
+            if isinstance(existing, dict):
+                existing_user = existing.get("user")
+        except Exception:
+            existing_user = None
+        try:
+            # Mark task canceled (do not rely on Huey revoke alone).
+            SummaryStatusRepository.set_task_status(
+                tid,
+                "canceled",
+                error=reason,
+                pid=pid,
+                model=model,
+                user=(user if user is not None else existing_user),
+                canceled_time=time.time(),
+            )
+        except Exception:
+            pass
+        _revoke_task_by_id(tid)
+
+    # Clear summary status so UI doesn't stay in queued/running state.
+    try:
+        if canceled_task_ids:
+            SummaryStatusRepository.set_status(pid, model, "canceled", reason, task_id=None, task_user=None)
+    except Exception:
+        pass
+
+    return {"canceled_task_ids": canceled_task_ids, "epoch": epoch}
+
+
+def cancel_paper_summary_tasks(
+    pid: str,
+    *,
+    user: str | None = None,
+    reason: str | None = None,
+) -> dict:
+    """Cancel queued/running summary tasks for a paper (all models)."""
+    if not pid:
+        return {"canceled": {}, "total": 0}
+
+    raw_pid, _ = split_pid_version(pid)
+    pid = raw_pid or pid
+
+    reason = (reason or "Canceled by user").strip()
+
+    # Collect active tasks grouped by model.
+    model_to_task_ids: dict[str, list[str]] = {}
+    try:
+        for key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
+            if not isinstance(info, dict):
+                continue
+            if info.get("status") not in ("queued", "running"):
+                continue
+            if info.get("pid") != pid:
+                continue
+            m = (info.get("model") or "").strip()
+            if not m:
+                continue
+            model_to_task_ids.setdefault(m, []).append(str(key).replace("task::", ""))
+    except Exception:
+        model_to_task_ids = {}
+
+    results: dict[str, dict] = {}
+    total = 0
+    for m, tids in sorted(model_to_task_ids.items(), key=lambda kv: kv[0]):
+        # cancel_summary_tasks scans too, but we already have tids; still OK for simplicity
+        res = cancel_summary_tasks(pid, m, user=user, reason=reason)
+        results[m] = res
+        total += len(res.get("canceled_task_ids") or [])
+
+    return {"canceled": results, "total": total}
+
+
+def _generate_and_cache_summary(
+    pid: str,
+    model: str,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+) -> tuple[str, dict]:
     cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, None)
     if not _paper_exists(raw_pid):
         return "# Error\n\nPaper not found.", {}
@@ -284,6 +454,9 @@ def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
         if summary_source_matches(cached_meta, summary_source):
             return cached_summary, cached_meta
 
+    if cancel_check and cancel_check():
+        raise SummaryCanceled("Canceled before lock acquisition")
+
     lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
     if lock_fd is None:
         if cached_summary:
@@ -294,6 +467,9 @@ def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
     acquired_lock_file = lock_file
 
     try:
+        if cancel_check and cancel_check():
+            raise SummaryCanceled("Canceled after lock acquisition")
+
         cached_summary, cached_meta = _read_cached_summary(cache_file, meta_file, legacy_cache, legacy_meta, model)
         if cached_summary:
             if summary_source_matches(cached_meta, summary_source):
@@ -303,6 +479,9 @@ def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
             pid_for_summary = pid if has_explicit_version else cache_pid
         else:
             pid_for_summary = pid if has_explicit_version else raw_pid
+
+        if cancel_check and cancel_check():
+            raise SummaryCanceled("Canceled before LLM request")
 
         summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
         summary_content, summary_meta = normalize_summary_result(summary_result)
@@ -320,6 +499,9 @@ def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
                 existed_before = cache_file.exists() or legacy_cache.exists()
             except Exception:
                 pass
+
+        if cancel_check and cancel_check():
+            raise SummaryCanceled("Canceled before cache write")
 
         if not _is_error_summary(summary_content):
             meta = {}
@@ -350,7 +532,13 @@ def _generate_and_cache_summary(pid: str, model: str) -> tuple[str, dict]:
 
 
 @huey.task(retries=3, retry_delay=60, context=True)
-def generate_summary_task(pid: str, model: str | None = None, user: str | None = None, task=None) -> None:
+def generate_summary_task(
+    pid: str,
+    model: str | None = None,
+    user: str | None = None,
+    epoch: int | None = None,
+    task=None,
+) -> None:
     model = (model or LLM_NAME or "").strip()
     task_id = getattr(task, "id", None)
 
@@ -364,9 +552,42 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
     try:
         existing = SummaryStatusRepository.get_task_status(str(task_id)) if task_id else None
         if isinstance(existing, dict):
+            # Respect pre-cancellation (e.g. user cleared summary while task was queued).
+            if existing.get("status") == "canceled":
+                reason = (existing.get("error") or "Canceled by user").strip()
+                _update_task_status(task_id, "canceled", error=reason, pid=pid, model=model, user=user)
+                _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+                if user:
+                    _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None)
+                return
             attempt = int(existing.get("attempt") or 0) + 1
     except Exception:
         attempt = 1
+
+    start_epoch = 0
+    if epoch is not None:
+        try:
+            start_epoch = int(epoch or 0)
+        except Exception:
+            start_epoch = 0
+    else:
+        try:
+            start_epoch = SummaryStatusRepository.get_generation_epoch(pid, model)
+        except Exception:
+            start_epoch = 0
+
+    # If the epoch has moved since enqueue, treat as canceled (cooperative cancellation).
+    try:
+        cur_epoch = SummaryStatusRepository.get_generation_epoch(pid, model)
+    except Exception:
+        cur_epoch = start_epoch
+    if cur_epoch != start_epoch:
+        reason = "Canceled by user"
+        _update_task_status(task_id, "canceled", error=reason, pid=pid, model=model, user=user, epoch=start_epoch)
+        _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+        if user:
+            _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None)
+        return
 
     _update_task_status(
         task_id,
@@ -376,12 +597,22 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
         user=user,
         attempt=attempt,
         max_attempts=max_attempts,
+        epoch=start_epoch,
     )
     _update_summary_status_db(pid, model, "running", None, task_id=task_id, task_user=user)
     if user:
         _update_readinglist_summary_status(user, pid, "running", None, task_id=task_id)
 
     try:
+
+        def _cancel_check() -> bool:
+            if _is_task_canceled(str(task_id) if task_id else None):
+                return True
+            try:
+                return SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch
+            except Exception:
+                return False
+
         # Uploaded papers are private; ensure the task user owns the paper.
         if _is_upload_pid(pid):
             from aslite.repositories import UploadedPaperRepository
@@ -392,7 +623,10 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
             if record.get("parse_status") != "ok":
                 raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
 
-        summary_content, _meta = _generate_and_cache_summary(pid, model)
+        summary_content, _meta = _generate_and_cache_summary(pid, model, cancel_check=_cancel_check)
+
+        if _cancel_check():
+            raise SummaryCanceled("Canceled after generation")
 
         # Check if this is a lock contention error (not a real failure)
         if _is_error_summary(summary_content):
@@ -425,6 +659,12 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
         _update_summary_status_db(pid, model, "ok", None, task_id=task_id, task_user=user)
         if user:
             _update_readinglist_summary_status(user, pid, "ok", None, task_id=task_id)
+    except SummaryCanceled as e:
+        reason = str(e) if str(e) else "Canceled by user"
+        _update_task_status(task_id, "canceled", error=reason, pid=pid, model=model, user=user, epoch=start_epoch)
+        _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+        if user:
+            _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None)
     except Exception as e:
         logger.warning(f"Failed to generate summary for {pid}: {e}")
         err = str(e)
@@ -498,7 +738,13 @@ def enqueue_summary_task(
             return ""
 
         task_priority = SUMMARY_PRIORITY_HIGH if priority is None else priority
-        task = generate_summary_task.s(pid, model=model, user=user)
+        epoch = 0
+        try:
+            epoch = SummaryStatusRepository.get_generation_epoch(pid, model)
+        except Exception:
+            epoch = 0
+
+        task = generate_summary_task.s(pid, model=model, user=user, epoch=epoch)
         task.priority = task_priority
         result = huey.enqueue(task)
         task_id = task.id or getattr(result, "id", None)
@@ -506,7 +752,7 @@ def enqueue_summary_task(
             logger.warning(f"Failed to obtain Huey task id for {pid}::{model}")
             return ""
 
-        _update_task_status(task_id, "queued", pid=pid, model=model, user=user, priority=task_priority)
+        _update_task_status(task_id, "queued", pid=pid, model=model, user=user, priority=task_priority, epoch=epoch)
         _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
         if user:
             _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id)

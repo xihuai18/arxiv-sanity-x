@@ -74,6 +74,16 @@ def task_status_key(task_id: str) -> str:
     return f"task::{task_id}"
 
 
+def summary_generation_epoch_key(pid: str, model: str) -> str:
+    """Generate per-(pid, model) generation epoch key.
+
+    This is used for cooperative cancellation: when an epoch is bumped, any in-flight
+    summary jobs that were started/enqueued under an older epoch should abort and
+    avoid writing caches.
+    """
+    return f"epoch::{pid}::{model}"
+
+
 def parse_readinglist_key(key: str) -> Tuple[str, str]:
     """Parse reading list key into (user, pid)."""
     parts = key.split("::", 1)
@@ -1072,10 +1082,14 @@ class SummaryStatusRepository:
             List of (key, value) tuples
         """
         with get_summary_status_db() as sdb:
-            items = list(sdb.items())
-            if limit is not None and limit > 0:
-                return items[:limit]
-            return items
+            if limit is None or limit <= 0:
+                return list(sdb.items())
+            out = []
+            for i, item in enumerate(sdb.items()):
+                if i >= limit:
+                    break
+                out.append(item)
+            return out
 
     @staticmethod
     def get_items_with_prefix(prefix: str, limit: Optional[int] = None):
@@ -1090,10 +1104,14 @@ class SummaryStatusRepository:
             List of (key, value) tuples
         """
         with get_summary_status_db() as sdb:
-            items = list(sdb.items_with_prefix(prefix))
-            if limit is not None and limit > 0:
-                return items[:limit]
-            return items
+            if limit is None or limit <= 0:
+                return list(sdb.items_with_prefix(prefix))
+            out = []
+            for i, item in enumerate(sdb.items_with_prefix(prefix)):
+                if i >= limit:
+                    break
+                out.append(item)
+            return out
 
     @staticmethod
     def get_task_status(task_id: str) -> Optional[dict]:
@@ -1139,6 +1157,39 @@ class SummaryStatusRepository:
                 else:
                     existing[field] = value
             sdb[key] = existing
+
+    @staticmethod
+    def get_generation_epoch(pid: str, model: str) -> int:
+        """Get current cancellation epoch for a (pid, model) pair."""
+        pid = (pid or "").strip()
+        model = (model or "").strip()
+        if not pid or not model:
+            return 0
+        key = summary_generation_epoch_key(pid, model)
+        with get_summary_status_db() as sdb:
+            val = sdb.get(key)
+        try:
+            return int(val or 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def bump_generation_epoch(pid: str, model: str) -> int:
+        """Increment cancellation epoch for a (pid, model) pair and return new value."""
+        pid = (pid or "").strip()
+        model = (model or "").strip()
+        if not pid or not model:
+            return 0
+        key = summary_generation_epoch_key(pid, model)
+        with get_summary_status_db(flag="c") as sdb:
+            cur = sdb.get(key)
+            try:
+                cur_i = int(cur or 0)
+            except Exception:
+                cur_i = 0
+            cur_i += 1
+            sdb[key] = cur_i
+            return cur_i
 
 
 # -----------------------------------------------------------------------------
