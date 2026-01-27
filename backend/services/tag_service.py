@@ -342,14 +342,60 @@ def get_tag_members(
     # Pre-fetch all paper info for sorting and searching
     all_pids = [pid for pid, _ in pairs]
     mdb = get_metas_fn() if get_metas_fn else {}
+    upload_records = {}
+    upload_time = {}
+    if all_pids:
+        upload_pids = [pid for pid in all_pids if pid.startswith("up_")]
+        if upload_pids:
+            from flask import g
+
+            from aslite.repositories import UploadedPaperRepository
+
+            if g.user:
+                all_uploads = UploadedPaperRepository.get_by_owner(g.user) or {}
+                for pid in upload_pids:
+                    record = all_uploads.get(pid)
+                    if record:
+                        upload_records[pid] = record
+                        upload_time[pid] = float(record.get("created_time") or 0.0)
+
+    def _format_upload_time(record: dict) -> str:
+        created_time = record.get("created_time", 0)
+        if created_time:
+            from datetime import datetime
+
+            dt = datetime.fromtimestamp(created_time)
+            return f"Uploaded: {dt.strftime('%Y-%m-%d %H:%M')}"
+        return ""
+
+    def _build_upload_paper(record: dict, pid: str) -> dict:
+        meta = record.get("meta_extracted", {})
+        override = record.get("meta_override", {})
+        title = override.get("title") or meta.get("title") or record.get("original_filename", pid)
+        authors_list = override.get("authors") or meta.get("authors") or []
+        return {
+            "title": title,
+            "authors": authors_list,
+            "_time": float(record.get("created_time") or 0.0),
+            "_time_str": _format_upload_time(record),
+            "kind": "upload",
+        }
 
     # Sort by time desc (fixed order)
-    pairs.sort(key=lambda x: (mdb.get(x[0]) or {}).get("_time", 0), reverse=True)
+    def _sort_time(pid: str) -> float:
+        if pid in upload_time:
+            return upload_time.get(pid, 0.0)
+        return float((mdb.get(pid) or {}).get("_time", 0.0))
+
+    pairs.sort(key=lambda x: _sort_time(x[0]), reverse=True)
 
     # If search query, filter and need paper details
     pid_to_paper = {}
     if search:
         pid_to_paper = get_papers_bulk_fn(all_pids) if get_papers_bulk_fn and all_pids else {}
+        if upload_records:
+            for pid, record in upload_records.items():
+                pid_to_paper[pid] = _build_upload_paper(record, pid)
         filtered = []
         for pid, lab in pairs:
             p = pid_to_paper.get(pid)
@@ -358,7 +404,14 @@ def get_tag_members(
                     filtered.append((pid, lab))
                 continue
             title = (p.get("title") or "").lower()
-            authors = " ".join(a.get("name", "") for a in (p.get("authors") or []) if a).lower()
+            authors_val = p.get("authors") or []
+            if isinstance(authors_val, list):
+                if authors_val and isinstance(authors_val[0], dict):
+                    authors = " ".join(a.get("name", "") for a in authors_val if a).lower()
+                else:
+                    authors = " ".join(str(a) for a in authors_val if a).lower()
+            else:
+                authors = str(authors_val).lower()
             if search in pid.lower() or search in title or search in authors:
                 filtered.append((pid, lab))
         pairs = filtered
@@ -372,6 +425,10 @@ def get_tag_members(
     pids = [pid for pid, _lab in page_pairs]
     if not search:
         pid_to_paper = get_papers_bulk_fn(pids) if get_papers_bulk_fn and pids else {}
+        if upload_records:
+            for pid, record in upload_records.items():
+                if pid in pids:
+                    pid_to_paper[pid] = _build_upload_paper(record, pid)
 
     items = []
     for pid, lab in page_pairs:
@@ -379,12 +436,20 @@ def get_tag_members(
         if not p:
             items.append({"pid": pid, "title": "(missing paper)", "time": "", "authors": "", "label": lab})
             continue
+        authors_val = p.get("authors") or []
+        if isinstance(authors_val, list):
+            if authors_val and isinstance(authors_val[0], dict):
+                authors_text = ", ".join(a.get("name", "") for a in authors_val if a)
+            else:
+                authors_text = ", ".join(str(a) for a in authors_val if a)
+        else:
+            authors_text = str(authors_val)
         items.append(
             {
                 "pid": pid,
                 "title": p.get("title", ""),
                 "time": p.get("_time_str", ""),
-                "authors": ", ".join(a.get("name", "") for a in (p.get("authors") or []) if a),
+                "authors": authors_text,
                 "label": lab,
             }
         )

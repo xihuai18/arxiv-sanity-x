@@ -75,6 +75,27 @@ class LLMSettings(BaseSettings):
         return [m.strip() for m in models.split(",") if m.strip()]
 
 
+class ExtractInfoSettings(BaseSettings):
+    """Extract Info LLM configuration (for metadata extraction from uploaded papers)"""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ARXIV_SANITY_EXTRACT_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Model name for extract info task (simpler task, can use smaller model)
+    model_name: str = Field(default="glm-4.7-flash", description="LLM model for metadata extraction")
+    # Optional: override base_url and api_key (empty uses main LLM settings)
+    base_url: str = Field(default="", description="Extract Info API base URL (empty uses LLM_BASE_URL)")
+    api_key: str = Field(default="", description="Extract Info API key (empty uses LLM_API_KEY)")
+    temperature: float = Field(default=0.1, description="LLM temperature for extraction")
+    # Reasoning models need more tokens for their thinking process
+    max_tokens: int = Field(default=8192, description="Max tokens for extraction response (8192 for reasoning models)")
+    timeout: int = Field(default=60, description="Request timeout in seconds")
+
+
 class EmbeddingSettings(BaseSettings):
     """Embedding service configuration"""
 
@@ -241,6 +262,8 @@ class HueySettings(BaseSettings):
     db_path: str = Field(default="", description="Huey database path (default data_dir/huey.db)")
     workers: int = Field(default=4, description="Huey worker count")
     worker_type: str = Field(default="thread", description="Huey worker type (thread/process/greenlet)")
+    # Memory limit for Huey consumer process (MB). 0 = no limit.
+    max_memory_mb: int = Field(default=0, description="Max memory for Huey consumer (MB, 0=unlimited)")
 
     # Summary task priority
     summary_priority_high: int = Field(default=100, description="High priority summary task")
@@ -268,10 +291,20 @@ class GunicornSettings(BaseSettings):
         extra="ignore",
     )
 
-    workers: int = Field(default=4, description="Gunicorn worker processes")
-    threads: int = Field(default=0, description="Threads per worker (0=auto)")
+    # NOTE:
+    # - Each gunicorn worker is a separate process and may duplicate large in-memory caches.
+    # - Keeping defaults small reduces the chance of OOM-kill on smaller machines.
+    workers: int = Field(default=2, description="Gunicorn worker processes")
+    threads: int = Field(default=2, description="Threads per worker")
     preload: bool = Field(default=True, description="Preload app (copy-on-write shared memory)")
-    extra_args: str = Field(default="--reload", description="Extra Gunicorn arguments")
+    preload_caches: bool = Field(
+        default=True, description="Preload data caches in master process (requires preload=True)"
+    )
+    # NOTE: Do NOT enable --reload by default in production.
+    # Use settings.web.reload=true (ARXIV_SANITY_RELOAD=true) to enable dev hot-reload.
+    extra_args: str = Field(default="", description="Extra Gunicorn arguments")
+    # Memory limit per worker (MB). 0 = no limit. Workers exceeding this will be restarted.
+    max_memory_mb: int = Field(default=0, description="Max memory per worker (MB, 0=unlimited)")
 
 
 class WebSettings(BaseSettings):
@@ -298,7 +331,7 @@ class WebSettings(BaseSettings):
     secret_key: str = Field(default="", description="Flask session secret key")
     cookie_samesite: str = Field(default="Lax", description="Cookie SameSite policy")
     cookie_secure: bool = Field(default=False, description="Cookie Secure flag")
-    max_content_length: int = Field(default=1048576, description="Max request body size (bytes)")
+    max_content_length: int = Field(default=52428800, description="Max request body size (bytes, default 50MB)")
 
     # Cache statistics
     summary_cache_stats_refresh: int = Field(default=1800, description="Summary cache stats refresh interval (seconds)")
@@ -439,6 +472,7 @@ class Settings(BaseSettings):
     # This approach is more concise than Field(default_factory=...) and provides better type inference
     email: EmailSettings = EmailSettings()
     llm: LLMSettings = LLMSettings()
+    extract_info: ExtractInfoSettings = ExtractInfoSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
     mineru: MinerUSettings = MinerUSettings()
     summary: SummarySettings = SummarySettings()

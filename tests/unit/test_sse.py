@@ -69,12 +69,11 @@ class TestEmitUserEvent:
             emit_user_event("test_user", {"type": "test", "data": "hello"})
 
             # Check if event was received
-            try:
-                event = q.get(timeout=1)
-                assert "test" in str(event) or "hello" in str(event)
-            except queue.Empty:
-                # Event might not be received if implementation differs
-                pass
+            event = q.get(timeout=1)
+            assert isinstance(event, dict)
+            assert event["type"] == "test"
+            assert event["data"] == "hello"
+            assert "ts" in event
         finally:
             unregister_user_stream("test_user", q)
 
@@ -116,11 +115,10 @@ class TestEmitAllEvent:
             emit_all_event({"type": "broadcast", "data": "hello"})
 
             # Check if event was received
-            try:
-                event = q.get(timeout=1)
-                assert event is not None
-            except queue.Empty:
-                # Event might not be received if implementation differs
-                pass
+            event = q.get(timeout=1)
+            assert isinstance(event, dict)
+            assert event["type"] == "broadcast"
+            assert event["data"] == "hello"
+            assert "ts" in event
         finally:
             unregister_user_stream("test_user", q)

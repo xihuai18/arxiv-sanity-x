@@ -116,7 +116,19 @@ SUMMARY_PRIORITY_LOW = settings.huey.summary_priority_low
 huey = SqliteHuey("arxiv-sanity", filename=HUEY_DB_PATH)
 
 
+def _is_upload_pid(pid: str) -> bool:
+    """Check if pid is an uploaded paper ID."""
+    return bool(pid and pid.startswith("up_"))
+
+
 def _paper_exists(pid: str) -> bool:
+    # Check for upload pid first
+    if _is_upload_pid(pid):
+        from aslite.repositories import UploadedPaperRepository
+
+        record = UploadedPaperRepository.get(pid)
+        return record is not None and record.get("parse_status") == "ok"
+
     raw_pid, _ = split_pid_version(pid)
     if not raw_pid:
         return False
@@ -337,12 +349,44 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
     model = (model or LLM_NAME or "").strip()
     task_id = getattr(task, "id", None)
 
-    _update_task_status(task_id, "running", pid=pid, model=model, user=user)
+    max_attempts = 1
+    try:
+        max_attempts = int(getattr(task, "retries", 0) or 0) + 1
+    except Exception:
+        max_attempts = 1
+
+    attempt = 1
+    try:
+        existing = SummaryStatusRepository.get_task_status(str(task_id)) if task_id else None
+        if isinstance(existing, dict):
+            attempt = int(existing.get("attempt") or 0) + 1
+    except Exception:
+        attempt = 1
+
+    _update_task_status(
+        task_id,
+        "running",
+        pid=pid,
+        model=model,
+        user=user,
+        attempt=attempt,
+        max_attempts=max_attempts,
+    )
     _update_summary_status_db(pid, model, "running", None, task_id=task_id, task_user=user)
     if user:
         _update_readinglist_summary_status(user, pid, "running", None, task_id=task_id)
 
     try:
+        # Uploaded papers are private; ensure the task user owns the paper.
+        if _is_upload_pid(pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(pid)
+            if not user or not record or record.get("owner") != user:
+                raise RuntimeError("Uploaded paper not found")
+            if record.get("parse_status") != "ok":
+                raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
+
         summary_content, _meta = _generate_and_cache_summary(pid, model)
 
         # Check if this is a lock contention error (not a real failure)
@@ -350,7 +394,23 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
             if "Summary is being generated" in summary_content:
                 # This is lock contention, not a real failure - retry
                 logger.info(f"Lock contention for {pid}, will retry")
-                # Keep status as running and let Huey retry
+                # Reflect that we're waiting on another generator rather than doing work.
+                _update_task_status(
+                    task_id,
+                    "queued",
+                    pid=pid,
+                    model=model,
+                    user=user,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                )
+                _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
+                if user:
+                    _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id)
+
+                # If we've exhausted our retries, mark as failed to avoid stuck states.
+                if attempt >= max_attempts:
+                    raise RuntimeError("Lock contention exhausted")
                 raise RuntimeError("Lock contention, retrying")
             else:
                 # Real generation failure
@@ -365,7 +425,13 @@ def generate_summary_task(pid: str, model: str | None = None, user: str | None =
         err = str(e)
 
         # Don't mark as failed if it's just lock contention
-        if "Lock contention" not in err:
+        if "Lock contention" in err:
+            if attempt >= max_attempts:
+                _update_task_status(task_id, "failed", error=err, pid=pid, model=model, user=user)
+                _update_summary_status_db(pid, model, "failed", err, task_id=task_id, task_user=user)
+                if user:
+                    _update_readinglist_summary_status(user, pid, "failed", err, task_id=task_id)
+        else:
             _update_task_status(task_id, "failed", error=err, pid=pid, model=model, user=user)
             _update_summary_status_db(pid, model, "failed", err, task_id=task_id, task_user=user)
             if user:
@@ -404,6 +470,16 @@ def enqueue_summary_task(
     # Serialize enqueue across processes to reduce race-induced duplicate tasks.
     enqueue_lock = _enqueue_lock_path(pid, model)
     lock_fd = acquire_summary_lock(enqueue_lock, timeout_s=2)
+    if lock_fd is None:
+        # Another process is enqueueing this pid/model. Avoid enqueueing duplicates.
+        existing_task_id, existing_task_user = _find_active_task(pid, model)
+        if existing_task_id:
+            if _allow_task_id(existing_task_user, user):
+                return existing_task_id
+            return ""
+        # No active task found; best-effort: let caller fall back to summary_status polling.
+        logger.warning(f"Enqueue lock timeout for {pid}::{model}; skipping enqueue to avoid duplicates")
+        return ""
 
     try:
         # Check if there's already a queued/running task for this pid+model.
@@ -421,6 +497,9 @@ def enqueue_summary_task(
         task.priority = task_priority
         result = huey.enqueue(task)
         task_id = task.id or getattr(result, "id", None)
+        if task_id is None:
+            logger.warning(f"Failed to obtain Huey task id for {pid}::{model}")
+            return ""
 
         _update_task_status(task_id, "queued", pid=pid, model=model, user=user, priority=task_priority)
         _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
@@ -429,11 +508,10 @@ def enqueue_summary_task(
 
         return str(task_id)
     finally:
-        if lock_fd is not None:
-            try:
-                release_summary_lock(lock_fd, enqueue_lock)
-            except Exception:
-                pass
+        try:
+            release_summary_lock(lock_fd, enqueue_lock)
+        except Exception:
+            pass
 
 
 def _collect_task_priority_map() -> dict:
@@ -529,8 +607,21 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
 
             user_info = user_map.get((pid, model))
             user = user_info.get("user") if user_info else None
+            task_id = info.get("task_id") if isinstance(info, dict) else None
 
             if requeue:
+                if task_id:
+                    try:
+                        SummaryStatusRepository.set_task_status(
+                            str(task_id),
+                            "failed",
+                            error="stale_running_repaired",
+                            pid=pid,
+                            model=model,
+                            user=user,
+                        )
+                    except Exception:
+                        pass
                 priority_info = priority_map.get((pid, model))
                 priority = priority_info.get("priority") if priority_info else None
                 enqueue_summary_task(pid, model=model, user=user, priority=priority)
@@ -544,6 +635,18 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
                         "updated_time": now,
                     },
                 )
+                if task_id:
+                    try:
+                        SummaryStatusRepository.set_task_status(
+                            str(task_id),
+                            "failed",
+                            error="stale_running_repaired",
+                            pid=pid,
+                            model=model,
+                            user=user,
+                        )
+                    except Exception:
+                        pass
                 if user:
                     _update_readinglist_summary_status(user, pid, "failed", "stale_running_repaired")
             repaired += 1
@@ -645,6 +748,13 @@ def cleanup_tasks(
                             SummaryStatusRepository.delete_status(pid, model)
                     except Exception:
                         pass
+                # Best-effort: clear readinglist task linkage to avoid UI stuck in queued/running.
+                task_user = info.get("user")
+                if pid and task_user and status in ("queued", "running"):
+                    try:
+                        _update_readinglist_summary_status(task_user, pid, "failed", "task_cleaned", task_id=None)
+                    except Exception:
+                        pass
 
             cleaned += 1
 
@@ -652,3 +762,64 @@ def cleanup_tasks(
         logger.warning(f"Failed to cleanup tasks: {e}")
 
     return {"cleaned": cleaned, "details": details, "dry_run": dry_run}
+
+
+# -----------------------------------------------------------------------------
+# Uploaded PDF Processing Task
+# -----------------------------------------------------------------------------
+
+
+@huey.task(retries=2, retry_delay=60)
+def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None) -> None:
+    """
+    Process an uploaded PDF: MinerU parsing + LLM metadata extraction.
+    After parsing completes, automatically triggers summary generation.
+
+    Args:
+        pid: Upload PID (e.g., up_V1StGXR8_Z5j)
+        user: Username (owner)
+        model: LLM model for summary (optional, uses default)
+    """
+    from backend.services.upload_service import process_uploaded_pdf
+
+    try:
+        process_uploaded_pdf(pid, user, model)
+    except Exception as e:
+        logger.error(f"Failed to process uploaded PDF {pid}: {e}")
+        raise
+
+
+@huey.task(retries=2, retry_delay=60)
+def parse_uploaded_pdf_task(pid: str, user: str) -> None:
+    """
+    Parse an uploaded PDF with MinerU only (no metadata extraction).
+
+    Args:
+        pid: Upload PID
+        user: Username (owner)
+    """
+    from backend.services.upload_service import do_parse_only
+
+    try:
+        do_parse_only(pid, user)
+    except Exception as e:
+        logger.error(f"Failed to parse uploaded PDF {pid}: {e}")
+        raise
+
+
+@huey.task(retries=2, retry_delay=30)
+def extract_info_task(pid: str, user: str) -> None:
+    """
+    Extract metadata from an already-parsed uploaded PDF.
+
+    Args:
+        pid: Upload PID
+        user: Username (owner)
+    """
+    from backend.services.upload_service import do_extract_metadata
+
+    try:
+        do_extract_metadata(pid, user)
+    except Exception as e:
+        logger.error(f"Failed to extract info for {pid}: {e}")
+        raise

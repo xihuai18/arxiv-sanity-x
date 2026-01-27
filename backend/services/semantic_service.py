@@ -27,7 +27,10 @@ from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE
 _MODEL_LOCK = Lock()
 _EMBEDDINGS_LOCK = Lock()
 
+_DOC_MODEL_LOCK = Lock()
+
 _semantic_model: Qwen3EmbeddingVllm | None = None
+_document_model: Qwen3EmbeddingVllm | None = None
 _cached_embeddings: dict[str, Any] | None = None
 _cached_embeddings_mtime: float = 0.0
 
@@ -69,6 +72,57 @@ def get_semantic_model() -> Qwen3EmbeddingVllm | None:
         except Exception as e:
             logger.error(f"Error initializing semantic model API client: {e}")
             _semantic_model = None
+            return None
+
+
+def get_document_model() -> Qwen3EmbeddingVllm | None:
+    """Get embedding model client for document/paper encoding.
+
+    Important:
+    - Global paper embeddings (tools/compute.py) use Qwen3EmbeddingVllm with the
+      *default* document-oriented instruction (instruction=None).
+    - Query embeddings (get_semantic_model) use a query-specific instruction.
+
+    To avoid drift, uploaded-paper similarity should use this document model.
+    """
+    global _document_model
+
+    if _document_model is not None:
+        return _document_model
+
+    with _DOC_MODEL_LOCK:
+        if _document_model is not None:
+            return _document_model
+
+        try:
+            if EMBED_USE_LLM_API:
+                api_base = (EMBED_API_BASE or LLM_BASE_URL or "").rstrip("/")
+                api_key = (EMBED_API_KEY or LLM_API_KEY or "").strip() or None
+            else:
+                api_base = f"http://localhost:{EMBED_PORT}"
+                api_key = None
+
+            api_type = "OpenAI-compatible" if EMBED_USE_LLM_API else "Ollama"
+            logger.debug(f"Initializing document embedding model {api_type} API client...")
+
+            # Use instruction=None to match tools/compute.py default behavior.
+            model = Qwen3EmbeddingVllm(
+                model_name_or_path=EMBED_MODEL_NAME,
+                instruction=None,
+                api_base=api_base,
+                api_key=api_key,
+                use_openai_api=EMBED_USE_LLM_API,
+            )
+            if not model.initialize():
+                logger.error("Failed to initialize document embedding model API client")
+                _document_model = None
+                return None
+
+            _document_model = model
+            return _document_model
+        except Exception as e:
+            logger.error(f"Error initializing document embedding model API client: {e}")
+            _document_model = None
             return None
 
 
@@ -158,6 +212,38 @@ def get_query_embedding(q: str, embed_dim: int):
     return query_vec
 
 
+def get_document_embedding(text: str, embed_dim: int) -> np.ndarray | None:
+    """Encode a document/paper text into a normalized embedding vector.
+
+    This intentionally does NOT share the query embedding cache to avoid
+    storing huge document texts in memory.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    model = get_document_model()
+    if model is None:
+        return None
+
+    try:
+        emb = model.encode([text], dim=int(embed_dim))
+        if emb is None:
+            return None
+        if hasattr(emb, "cpu"):
+            emb = emb.cpu().numpy()
+        else:
+            emb = np.asarray(emb)
+        vec = np.asarray(emb).reshape(-1).astype(np.float32, copy=False)
+        n = float(np.linalg.norm(vec))
+        if n > 0:
+            vec /= n
+        return vec
+    except Exception as e:
+        logger.error(f"Failed to encode document embedding: {e}")
+        return None
+
+
 def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float]]:
     """Execute pure semantic search."""
     q = (q or "").strip()
@@ -181,6 +267,10 @@ def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float
     embeddings = paper_data.get("embeddings")
     pids_all = paper_data.get("pids") or []
     if embeddings is None:
+        return [], []
+    if not pids_all:
+        # Be defensive: embeddings without pid list cannot be mapped back to papers.
+        logger.error("Embeddings available but pid list is missing/empty")
         return [], []
 
     try:

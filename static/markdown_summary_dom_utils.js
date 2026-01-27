@@ -10,6 +10,7 @@
 
     let tocObserver = null;
     let tocCollapsed = null;
+    let backToTopScrollHandler = null;
 
     function slugifyHeading(text, slugCounts) {
         const cleaned = String(text || '')
@@ -73,6 +74,10 @@
         try {
             const existing = document.querySelector('.back-to-top');
             if (existing) existing.remove();
+            if (backToTopScrollHandler) {
+                window.removeEventListener('scroll', backToTopScrollHandler);
+                backToTopScrollHandler = null;
+            }
         } catch (e) {}
 
         const onClick = evt => {
@@ -180,10 +185,16 @@
 
         applyState(tocCollapsed);
 
-        toggle.addEventListener('click', () => {
+        const onToggleClick = () => {
             tocCollapsed = !tocCollapsed;
             applyState(tocCollapsed);
-        });
+        };
+
+        if (toggle._tocToggleClick) {
+            toggle.removeEventListener('click', toggle._tocToggleClick);
+        }
+        toggle._tocToggleClick = onToggleClick;
+        toggle.addEventListener('click', onToggleClick);
     }
 
     function wrapMarkdownTables(container) {
@@ -495,23 +506,28 @@
                 document.body.appendChild(overlay);
                 document.body.style.overflow = 'hidden';
 
+                let closed = false;
+                function cleanup() {
+                    if (closed) return;
+                    closed = true;
+                    overlay.remove();
+                    document.body.style.overflow = '';
+                    document.removeEventListener('keydown', handleEscape);
+                }
+
+                function handleEscape(evt) {
+                    if (evt.key === 'Escape') cleanup();
+                }
+
                 overlay.addEventListener('click', evt => {
                     if (
                         evt.target === overlay ||
                         evt.target.classList.contains('image-zoom-close')
                     ) {
-                        overlay.remove();
-                        document.body.style.overflow = '';
+                        cleanup();
                     }
                 });
 
-                const handleEscape = evt => {
-                    if (evt.key === 'Escape') {
-                        overlay.remove();
-                        document.body.style.overflow = '';
-                        document.removeEventListener('keydown', handleEscape);
-                    }
-                };
                 document.addEventListener('keydown', handleEscape);
             });
 
@@ -547,6 +563,10 @@
         // Remove existing button if any
         const existing = document.querySelector('.back-to-top');
         if (existing) existing.remove();
+        if (backToTopScrollHandler) {
+            window.removeEventListener('scroll', backToTopScrollHandler);
+            backToTopScrollHandler = null;
+        }
 
         // Prefer "Back to Top" inside TOC when TOC exists
         const toc = document.querySelector('.summary-toc');
@@ -565,7 +585,8 @@
             btn.classList.toggle('visible', scrollY > 300);
         };
 
-        window.addEventListener('scroll', toggleVisibility, { passive: true });
+        backToTopScrollHandler = toggleVisibility;
+        window.addEventListener('scroll', backToTopScrollHandler, { passive: true });
         toggleVisibility();
 
         // Scroll to top on click

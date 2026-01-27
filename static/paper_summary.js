@@ -291,19 +291,31 @@ class SummaryState {
             contentModel === String(currentModel).trim()
         );
 
+        const isUploadedPaper = this.paper && this.paper.kind === 'upload';
+        const uploadParseStatus =
+            this.paper && this.paper.parse_status ? String(this.paper.parse_status) : '';
+        const uploadNotParsed = isUploadedPaper && uploadParseStatus && uploadParseStatus !== 'ok';
+
         // Allow clearing while generating; only block actions during clearing.
         // Keep Generate disabled during loading to avoid concurrent generations.
+        // For uploaded papers, require MinerU parsing to be complete.
         const disableGenerate =
-            this.loading || this.clearing || this.isCurrentModelGenerating() || hasCachedSummary
+            this.loading ||
+            this.clearing ||
+            this.isCurrentModelGenerating() ||
+            hasCachedSummary ||
+            uploadNotParsed
                 ? 'disabled'
                 : '';
         const disableClear = this.clearing ? 'disabled' : '';
         // Allow switching models even while generating
         const disableSelect = this.clearing ? 'disabled' : '';
         const regenLabel = this.regenerating ? 'Generating...' : 'Generate';
-        const generateTitle = hasCachedSummary
-            ? 'Clear current summary to regenerate.'
-            : 'Generate summary';
+        const generateTitle = uploadNotParsed
+            ? 'Parse PDF first before generating summary.'
+            : hasCachedSummary
+              ? 'Clear current summary to regenerate.'
+              : 'Generate summary';
         const modelOptions = this.renderModelOptions();
         const errorNote = this.modelsError
             ? `<div class="summary-note" style="color: #d9534f;" role="status" aria-live="polite">${escapeHtml(this.modelsError)}</div>`
@@ -433,21 +445,66 @@ class SummaryState {
         // Check if user is logged in
         const isLoggedIn = typeof user !== 'undefined' && user;
 
-        const headerHTML = this.paper
-            ? `
-            <div class="paper-header">
+        // Check if this is an uploaded paper (hide arXiv-specific links)
+        const isUploadedPaper = this.paper && this.paper.kind === 'upload';
+
+        // Build navigation links - for uploaded papers, show Similar button; for arXiv, show all links
+        const navLinksHTML = isUploadedPaper
+            ? (() => {
+                  const ps =
+                      this.paper && this.paper.parse_status ? String(this.paper.parse_status) : '';
+                  const disabled = ps && ps !== 'ok';
+                  const metaExtracted = this.paper && this.paper.meta_extracted_ok === true;
+                  // Similar and Inspect require both parse and metadata extraction
+                  const featureDisabled = disabled || !metaExtracted;
+                  const title = featureDisabled
+                      ? disabled
+                          ? 'Parse PDF first to find similar papers'
+                          : 'Extract metadata first to find similar papers'
+                      : 'Find similar arXiv papers';
+                  const featureDisabledAttr = featureDisabled ? 'disabled' : '';
+                  const featureDisabledClass = featureDisabled ? 'disabled' : '';
+                  const inspectTitle = featureDisabled
+                      ? disabled
+                          ? 'Parse PDF first to inspect features'
+                          : 'Extract metadata first to inspect features'
+                      : 'Inspect TF-IDF features';
+                  const extractDisabled = disabled || metaExtracted;
+                  const extractTitle = metaExtracted
+                      ? 'Metadata already extracted'
+                      : disabled
+                        ? 'Parse PDF first before extracting info'
+                        : 'Extract title/authors from PDF with LLM';
+                  const extractDisabledAttr = extractDisabled ? 'disabled' : '';
+                  const extractDisabledClass = extractDisabled ? 'disabled' : '';
+                  return `
+                <div class="paper-nav paper-actions-footer">
+                    <div class="rel_more"><button class="upload-similar-btn ${featureDisabledClass}" ${featureDisabledAttr} onclick="summaryApp.findSimilarPapers()" title="${title}">Similar</button></div>
+                    <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer" class="${featureDisabled ? 'disabled-link' : ''}" ${featureDisabled ? 'onclick="return false;"' : ''} title="${inspectTitle}">Inspect</a></div>
+                    <div class="rel_extract"><button class="action-btn extract-btn ${extractDisabledClass}" ${extractDisabledAttr} onclick="summaryApp.extractInfo()" title="${extractTitle}">🔍 Extract Info</button></div>
+                </div>`;
+              })()
+            : `
                 <div class="paper-nav paper-actions-footer">
                     <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
                     <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
                     <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
                     <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
-                </div>
+                </div>`;
+
+        // Title link - for uploaded papers, link to PDF download; for arXiv papers, link to arXiv
+        const titleLinkHTML = isUploadedPaper
+            ? `<a href="/api/uploaded_papers/pdf/${encodeURIComponent(pidSafe)}" title="Download PDF">${titleSafe}</a>`
+            : `<a href="https://arxiv.org/abs/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">${titleSafe}</a>`;
+
+        const headerHTML = this.paper
+            ? `
+            <div class="paper-header">
+                ${navLinksHTML}
                 <div class="paper-content-section">
                     <div class="paper-main">
                         <h1 class="paper-title">
-                            <a href="https://arxiv.org/abs/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">
-                                ${titleSafe}
-                            </a>
+                            ${titleLinkHTML}
                         </h1>
                         <div class="paper-authors-line">
                             <span title="${authorsTitleSafe}">${authorsSafe}</span>
@@ -460,7 +517,7 @@ class SummaryState {
                             ${abstractHtml}
                         </div>
                         ${
-                            isLoggedIn
+                            isLoggedIn && !isUploadedPaper
                                 ? `
                         <div class="paper-user-tags-section">
                             <div class="rel_utags" id="summary-tag-dropdown"></div>
@@ -753,6 +810,16 @@ summaryApp.handleModelChange = function (event) {
 
 summaryApp.regenerate = function () {
     if (!this.pid || this.loading || this.isCurrentModelGenerating()) return;
+
+    // Guard: uploaded paper must be parsed before summary generation.
+    if (this.paper && this.paper.kind === 'upload') {
+        const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
+        if (ps && ps !== 'ok') {
+            alert('Parse PDF first before generating summary.');
+            return;
+        }
+    }
+
     const currentModel = this.getCurrentModel();
     const contentModel = String(this.contentModel || '').trim();
     const hasCachedSummary = Boolean(
@@ -837,6 +904,19 @@ summaryApp.queueSummary = async function (pid, options = {}) {
         options.model || this.getCurrentModel() || this.defaultModel || ''
     ).trim();
     if (!pid) return;
+
+    // Guard: uploaded paper must be parsed before summary generation.
+    if (this.paper && this.paper.kind === 'upload') {
+        const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
+        if (ps && ps !== 'ok') {
+            this.setState({
+                loading: false,
+                regenerating: false,
+                error: 'Parse PDF first before generating summary.',
+            });
+            return;
+        }
+    }
     if (!targetModel) {
         this.setState({
             loading: false,
@@ -911,6 +991,10 @@ summaryApp.confirmClearAll = async function () {
 
     try {
         await clearPaperCache(this.pid);
+        if (this.paper && this.paper.kind === 'upload') {
+            this.paper.parse_status = 'pending';
+            this.paper.parse_error = 'Cache cleared, re-parsing required';
+        }
         this.setState({
             clearing: false,
             content: null,
@@ -925,6 +1009,198 @@ summaryApp.confirmClearAll = async function () {
 
 summaryApp.cancelConfirm = function () {
     this.setState({ pendingConfirm: null });
+};
+
+// Find similar papers for uploaded papers
+summaryApp.findSimilarPapers = async function () {
+    if (!this.paper || this.paper.kind !== 'upload') {
+        return;
+    }
+
+    // Uploaded paper must be parsed before similarity can be computed.
+    // Keep this aligned with readinglist.js behavior (disable when parse_status != 'ok').
+    if (this.paper.parse_status && this.paper.parse_status !== 'ok') {
+        alert('Parse PDF first to find similar papers.');
+        return;
+    }
+
+    const pid = this.pid;
+    const btn = document.querySelector('.upload-similar-btn');
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Finding...';
+    }
+
+    try {
+        const resp = await fetch('/api/uploaded_papers/similar/' + encodeURIComponent(pid));
+        const data = await resp.json();
+
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Similar';
+        }
+
+        if (data.success && data.papers && data.papers.length > 0) {
+            this.showSimilarPapersModal(data.papers);
+        } else if (data.success && (!data.papers || data.papers.length === 0)) {
+            alert(
+                'No similar papers found. This may happen if the paper content is too short or unique.'
+            );
+        } else {
+            alert('Failed to find similar papers: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        console.error('Error finding similar papers:', err);
+        alert('Failed to find similar papers');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Similar';
+        }
+    }
+};
+
+summaryApp.showSimilarPapersModal = function (papers) {
+    // Remove existing modal if any
+    const existingModal = document.getElementById('similar-papers-modal');
+    if (existingModal) {
+        if (typeof existingModal._cleanupModal === 'function') {
+            existingModal._cleanupModal();
+        } else {
+            existingModal.remove();
+        }
+    }
+
+    const escapeHtml = text => {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    };
+
+    const buildPaperItem = (p, i) => {
+        const titleSafe = escapeHtml(p.title || p.id);
+        const authorsSafe = escapeHtml(p.authors || '');
+        const timeSafe = escapeHtml(p.time || '');
+        // Prefer TL;DR over abstract
+        const contentText = p.tldr || p.abstract || '';
+        const contentSafe = escapeHtml(contentText);
+        const contentLabel = p.tldr ? '💡 TL;DR' : p.abstract ? 'Abstract' : '';
+
+        return `
+            <div class="similar-paper-item">
+                <span class="similar-paper-rank">${i + 1}</span>
+                <div class="similar-paper-info">
+                    <a href="/summary?pid=${encodeURIComponent(p.id)}" target="_blank" rel="noopener noreferrer" class="similar-paper-title">${titleSafe}</a>
+                    ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
+                    <div class="similar-paper-meta-line">
+                        ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
+                        <span class="similar-paper-score">Score: ${p.score.toFixed(3)}</span>
+                    </div>
+                    ${
+                        contentSafe
+                            ? `
+                        <div class="similar-paper-content">
+                            ${contentLabel ? `<span class="similar-paper-content-label">${contentLabel}</span>` : ''}
+                            <span class="similar-paper-content-text">${contentSafe}</span>
+                        </div>
+                    `
+                            : ''
+                    }
+                </div>
+            </div>
+        `;
+    };
+
+    const modal = document.createElement('div');
+    modal.id = 'similar-papers-modal';
+    modal.className = 'similar-modal-overlay';
+    modal.innerHTML = `
+        <div class="similar-modal-content">
+            <div class="similar-modal-header">
+                <h3>Similar Papers (${papers.length})</h3>
+                <button class="similar-modal-close">&times;</button>
+            </div>
+            <div class="similar-modal-body">
+                ${papers.map((p, i) => buildPaperItem(p, i)).join('')}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    // Close handlers
+    let modalClosed = false;
+    function cleanupModal() {
+        if (modalClosed) return;
+        modalClosed = true;
+        if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
+        document.removeEventListener('keydown', escHandler);
+    }
+    function escHandler(e) {
+        if (e.key === 'Escape') cleanupModal();
+    }
+    modal._cleanupModal = cleanupModal;
+    modal.querySelector('.similar-modal-close').addEventListener('click', cleanupModal);
+    modal.addEventListener('click', e => {
+        if (e.target === modal) cleanupModal();
+    });
+    document.addEventListener('keydown', escHandler);
+};
+
+// Extract metadata for uploaded papers
+summaryApp.extractInfo = async function () {
+    if (!this.paper || this.paper.kind !== 'upload') {
+        return;
+    }
+
+    // Check if already extracted
+    if (this.paper.meta_extracted_ok === true) {
+        alert('Metadata already extracted.');
+        return;
+    }
+
+    // Check if parsed
+    if (this.paper.parse_status && this.paper.parse_status !== 'ok') {
+        alert('Parse PDF first before extracting info.');
+        return;
+    }
+
+    const pid = this.pid;
+    const btn = document.querySelector('.extract-btn');
+
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Extracting...';
+    }
+
+    try {
+        const resp = await csrfFetch('/api/uploaded_papers/extract_info', {
+            method: 'POST',
+            body: JSON.stringify({ pid: pid }),
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+            // Refresh the page to show updated info
+            alert('Metadata extraction started. The page will refresh shortly.');
+            setTimeout(() => {
+                window.location.reload();
+            }, 2000);
+        } else {
+            alert('Failed to extract: ' + (data.error || 'Unknown error'));
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '🔍 Extract Info';
+            }
+        }
+    } catch (err) {
+        console.error('Error triggering extract:', err);
+        alert('Failed to trigger extraction');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔍 Extract Info';
+        }
+    }
 };
 
 // Export summary as Markdown ZIP
@@ -1192,7 +1468,11 @@ function loadJSZip() {
             return;
         }
         const script = document.createElement('script');
-        script.src = '/static/lib/jszip.min.js';
+        // Resolve static base in case the app is deployed under a URL prefix.
+        script.src =
+            CommonUtils && typeof CommonUtils.staticUrl === 'function'
+                ? CommonUtils.staticUrl('lib/jszip.min.js')
+                : '/static/lib/jszip.min.js';
         script.onload = resolve;
         script.onerror = () => reject(new Error('Failed to load JSZip library'));
         document.head.appendChild(script);
@@ -1223,6 +1503,25 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                     error: 'No summary model configured. Please configure a default model.',
                 });
                 return;
+            }
+
+            // Uploaded papers must be parsed before summary generation can work.
+            // Avoid making an API call that will fail with 404/400 and instead show
+            // a clear action hint to the user.
+            if (this.paper && this.paper.kind === 'upload') {
+                const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
+                if (ps && ps !== 'ok') {
+                    this.setState({
+                        loading: false,
+                        regenerating: false,
+                        notice: 'Parse PDF first before generating summary.',
+                        error: null,
+                        content: null,
+                        meta: null,
+                        contentModel: String(chosenModelStr || '').trim(),
+                    });
+                    return;
+                }
             }
             if (force && chosenModelStr) {
                 this.inflightModels[chosenModelStr] = true;
@@ -1512,7 +1811,8 @@ async function initSummaryApp() {
     // Initialize tag management if user is logged in
     if (typeof user !== 'undefined' && user) {
         await initTagManagement();
-        _setupUserEventStream();
+        _registerEventHandler(handleUserEvent);
+        _setupUserEventStream(user, applyUserState);
     }
 
     // Setup back to top button

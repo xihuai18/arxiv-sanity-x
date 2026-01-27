@@ -8,29 +8,34 @@
 
 ## 📋 目录
 
+### 入门
 - [核心功能概览](#-核心功能概览)
-- [技术栈](#-技术栈)
-- [项目结构](#-项目结构)
-- [用户使用指南（Web）](#-用户使用指南web)
-- [最低可运行要求](#-最低可运行要求)
-- [数据目录与迁移](#-数据目录与迁移)
-- [部署与安全说明](#-部署与安全说明)
-- [常见问题与排错](#-常见问题与排错)
 - [快速开始](#-快速开始)
-- [运行前准备与系统说明](#-运行前准备与系统说明)
-- [配置指南](#配置指南)
-  - [配置概览](#配置概览)
-  - [1. .env 文件 - 核心配置](#1-env-文件---核心配置)
-  - [2. arxiv_daemon.py - arXiv 分类](#2-arxiv_daemonpy---arxiv-分类)
-  - [3. llm.yml - LiteLLM 网关](#3-llmyml---litellm-网关)
-  - [4. 配置 CLI 工具](#4-配置-cli-工具)
-- [核心功能](#-核心功能)
-- [使用指南](#-使用指南)
+
+### 使用
+- [用户使用指南](#-用户使用指南)
 - [AI 论文总结](#-ai-论文总结)
 - [高级功能](#-高级功能)
+
+### 配置
+- [配置指南](#配置指南)
+- [运行前准备](#-运行前准备与系统说明)
+
+### 运维
+- [数据目录与迁移](#-数据目录与迁移)
+- [部署与安全](#-部署与安全说明)
+- [常见问题](#-常见问题与排错)
+
+### 开发
+- [技术栈](#-技术栈)
+- [项目结构](#-项目结构)
+- [架构说明](#架构说明)
 - [API 参考](#-api-参考)
 - [开发指南](#-开发指南)
+
+### 其他
 - [更新日志](#-更新日志)
+- [致谢](#-致谢)
 
 ---
 
@@ -38,17 +43,21 @@
 
 arxiv-sanity-X 是一个面向个人科研/工程阅读流的 arXiv 工作台：把「拉取与索引论文」「快速检索」「基于反馈的推荐」以及「AI 总结」整合到同一个网站里，帮助你更快找到重点、沉淀标签体系，并持续跟踪最新论文。
 
-主要能力包括：
+### 主要能力
 
-- **论文采集与索引**：按你选择的 arXiv 分类拉取论文，落库到本地 SQLite（便于长期维护与增量更新）。
-- **多种检索模式**：关键词检索（TF‑IDF）、语义检索（Embedding）、混合检索（权重可调）。
-- **个人组织体系**：正/负反馈标签、组合标签、关键词跟踪、阅读列表等。
-- **按需 AI 总结**：支持 HTML（ar5iv/arxiv）或 PDF（MinerU）解析后再用 LLM 总结，带缓存与状态追踪。
-- **自动化流水线**：可选调度器完成 获取 → 计算 → 总结 → 邮件；并提供锁清理/备份等运维工具。
+| 功能 | 说明 |
+|------|------|
+| 🔍 **多模式搜索** | 关键词（TF-IDF）、语义（Embedding）、混合搜索，权重可调 |
+| 🎯 **智能推荐** | 基于正/负反馈标签训练 SVM 分类器，个性化推荐 |
+| 🤖 **AI 总结** | HTML/PDF 解析 + LLM 生成结构化总结，支持多模型切换 |
+| 🏷️ **标签系统** | 正/负反馈、组合标签、关键词跟踪、阅读列表 |
+| 📧 **邮件推荐** | 每日自动推荐邮件，假期感知调度 |
+| 🔄 **自动化** | 内置调度器：获取 → 计算 → 总结 → 邮件 |
 
 ## 🛠️ 技术栈
 
 ### 后端
+
 - **框架**：Flask，基于 Blueprint 的模块化架构
 - **数据库**：SQLite，自定义 KV 存储（WAL 模式，支持压缩）
 - **任务队列**：Huey（SQLite 后端），用于异步摘要生成
@@ -56,18 +65,21 @@ arxiv-sanity-X 是一个面向个人科研/工程阅读流的 arXiv 工作台：
 - **实时通信**：Server-Sent Events (SSE) 实时推送
 
 ### 前端
+
 - **模板引擎**：Jinja2，响应式 HTML/CSS
 - **JavaScript**：原生 JS，esbuild 打包
 - **渲染**：MathJax 渲染 LaTeX，markdown-it 渲染 Markdown
 - **构建**：esbuild，支持内容哈希缓存
 
 ### 机器学习/AI
+
 - **搜索**：TF-IDF（scikit-learn）+ 语义嵌入（Ollama/OpenAI API）
 - **推荐**：基于用户反馈训练的 SVM 分类器
 - **摘要生成**：OpenAI 兼容的 LLM API
 - **PDF 解析**：MinerU（API 或本地 VLM）
 
 ### 基础设施
+
 - **Web 服务器**：Gunicorn，多 worker 支持
 - **调度器**：APScheduler，自动化流水线
 - **服务组件**：LiteLLM 网关、Ollama 嵌入、MinerU VLM
@@ -140,9 +152,9 @@ arxiv-sanity-x/
     └── summary/          # 缓存的摘要
 ```
 
-## 🧭 用户使用指南（Web）
+## 🧭 用户使用指南
 
-下面这段是"怎么用网站"的速览地图。大多数操作都从首页开始。
+本节介绍如何使用 arxiv-sanity-X 网站的各项功能。大多数操作都从首页开始。
 
 ### 1）登录
 
@@ -153,6 +165,7 @@ arxiv-sanity-x/
 ### 2）浏览与检索论文
 
 **首页功能：**
+
 - 默认按时间排序显示最新论文
 - 点击论文标题查看详情，点击 arXiv 链接跳转原文
 - 使用顶部搜索框进行检索（支持快捷键 `Ctrl+K`）
@@ -168,6 +181,7 @@ arxiv-sanity-x/
 | 排除 | `-survey` 或 `!survey` | 排除包含该词的结果 |
 
 **搜索模式切换：**
+
 - **关键词**：最快，基于 TF-IDF，不依赖额外服务
 - **语义**：基于向量相似度，需要启用 Embedding
 - **混合**：结合关键词+语义，权重可调（推荐）
@@ -175,11 +189,13 @@ arxiv-sanity-x/
 ### 3）标签系统与个性化推荐
 
 **打标签：**
+
 - 在论文卡片上点击 **+** 按钮添加标签
 - 支持正向标签（喜欢）和负向标签（不喜欢）
 - 标签会训练个人 SVM 推荐模型
 
 **使用标签推荐：**
+
 - 在首页选择 **Tags** 排序模式
 - 选择一个或多个标签，系统会推荐相似论文
 - 组合标签（如 `RL,NLP`）可做交集推荐
@@ -203,19 +219,6 @@ arxiv-sanity-x/
 - **Stats 页面**：查看论文统计、每日新增图表
 - **About 页面**：查看系统信息、支持的 arXiv 分类
 - **邮件推荐**：配置 SMTP 后可接收每日推荐邮件（详见配置指南）
-
-## ✅ 最低可运行要求
-
-如果你只想用"最小配置"跑通端到端（能浏览 + 搜索 + 按需生成总结），需要满足：
-
-1. 从模板生成 `.env`：复制 `.env.example`。
-2. 配好可用的 LLM：设置 `ARXIV_SANITY_LLM_API_KEY`、`ARXIV_SANITY_LLM_BASE_URL` 与 `ARXIV_SANITY_LLM_NAME`。
-3. 至少执行一次"拉取 + 特征计算"：
-   - 运行 `python -m tools arxiv_daemon`
-   - 运行 `python -m tools compute`
-4. 启动 Web：运行 `python serve.py`（或在支持 bash 的环境下使用 `python bin/run_services.py` 一键启动）。
-
-其余（嵌入/Embedding、MinerU、LiteLLM、邮件、调度器）都属于可选增强。
 
 ## 📦 数据目录与迁移
 
@@ -246,8 +249,8 @@ arxiv-sanity-x/
 - **总结一直失败**：检查 `.env` 里的 `ARXIV_SANITY_LLM_API_KEY`、`ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`。
 - **语义/混合检索没效果**：确认嵌入（Embedding）已启用，并用 [compute.py](compute.py) 重新生成特征（混合特征需要包含嵌入）。
 - **MinerU 报错**：
-  - API 后端：检查 `MINERU_API_KEY`（或 `ARXIV_SANITY_MINERU_API_KEY`）
-  - 本地后端：检查 `ARXIV_SANITY_MINERU_BACKEND`，以及服务是否能在 `MINERU_PORT` 访问
+    - API 后端：检查 `MINERU_API_KEY`（或 `ARXIV_SANITY_MINERU_API_KEY`）
+    - 本地后端：检查 `ARXIV_SANITY_MINERU_BACKEND`，以及服务是否能在 `MINERU_PORT` 访问
 - **崩溃后卡住（锁文件）**：运行 [cleanup_locks.py](cleanup_locks.py)，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
 - **features.p 读取失败（NumPy 版本不匹配）**：在当前环境重新运行 [compute.py](compute.py) 生成特征文件。
 
@@ -257,11 +260,11 @@ arxiv-sanity-x/
 
 ### 推荐运行档位
 
-| 档位 | 你能得到什么 | 需要什么 | 适合 |
-| --- | --- | --- | --- |
-| **最小（仅 LLM）** | 浏览 + TF‑IDF 搜索 + LLM 总结 | LLM API key | 上手体验 / 资源有限 |
-| **混合搜索** | TF‑IDF + Embedding 混合搜索 | LLM API key + Embedding 后端 | 更好的检索相关性 |
-| **完整（MinerU）** | 更强的 PDF→Markdown（公式/表格） | MinerU（API 或本地） | 最佳总结可读性 |
+| 档位               | 你能得到什么                     | 需要什么                     | 适合                |
+| ------------------ | -------------------------------- | ---------------------------- | ------------------- |
+| **最小（仅 LLM）** | 浏览 + TF‑IDF 搜索 + LLM 总结    | LLM API key                  | 上手体验 / 资源有限 |
+| **混合搜索**       | TF‑IDF + Embedding 混合搜索      | LLM API key + Embedding 后端 | 更好的检索相关性    |
+| **完整（MinerU）** | 更强的 PDF→Markdown（公式/表格） | MinerU（API 或本地）         | 最佳总结可读性      |
 
 ### 1. 安装
 
@@ -399,16 +402,16 @@ python bin/run_services.py --fetch-compute 10000
 
 ### 配置清单
 
-| 项目 | 文件/位置 | 必需 | 说明 |
-|------|----------|------|------|
-| **核心配置** | [.env](.env.example) | ✅ 必需 | 所有配置通过环境变量设置 |
-| **LLM 服务** | `.env` | ✅ 必需 | `ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`、`ARXIV_SANITY_LLM_API_KEY` |
-| **arXiv 分类** | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | ⚙️ 重要 | `CORE/LANG/AGENT/APP/ALL_TAGS` 决定拉取范围与 About 展示 |
-| **总结来源** | `.env` | ⚙️ 推荐 | `ARXIV_SANITY_SUMMARY_SOURCE=html\|mineru` |
-| **Embedding 后端** | `.env` | ⚙️ 可选 | `ARXIV_SANITY_EMBED_*` 相关设置 |
-| **MinerU 后端** | `.env` | ⚙️ 可选 | `ARXIV_SANITY_MINERU_*` 相关设置 + `MINERU_API_KEY` |
-| **邮件 SMTP** | `.env` | ⚙️ 可选 | `ARXIV_SANITY_EMAIL_*` 相关设置 |
-| **会话密钥** | 环境变量/文件 | ⚙️ 推荐 | `ARXIV_SANITY_SECRET_KEY` 或 `secret_key.txt`（公网部署强烈建议） |
+| 项目               | 文件/位置                                      | 必需    | 说明                                                                             |
+| ------------------ | ---------------------------------------------- | ------- | -------------------------------------------------------------------------------- |
+| **核心配置**       | [.env](.env.example)                           | ✅ 必需 | 所有配置通过环境变量设置                                                         |
+| **LLM 服务**       | `.env`                                         | ✅ 必需 | `ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`、`ARXIV_SANITY_LLM_API_KEY` |
+| **arXiv 分类**     | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | ⚙️ 重要 | `CORE/LANG/AGENT/APP/ALL_TAGS` 决定拉取范围与 About 展示                         |
+| **总结来源**       | `.env`                                         | ⚙️ 推荐 | `ARXIV_SANITY_SUMMARY_SOURCE=html\|mineru`                                       |
+| **Embedding 后端** | `.env`                                         | ⚙️ 可选 | `ARXIV_SANITY_EMBED_*` 相关设置                                                  |
+| **MinerU 后端**    | `.env`                                         | ⚙️ 可选 | `ARXIV_SANITY_MINERU_*` 相关设置 + `MINERU_API_KEY`                              |
+| **邮件 SMTP**      | `.env`                                         | ⚙️ 可选 | `ARXIV_SANITY_EMAIL_*` 相关设置                                                  |
+| **会话密钥**       | 环境变量/文件                                  | ⚙️ 推荐 | `ARXIV_SANITY_SECRET_KEY` 或 `secret_key.txt`（公网部署强烈建议）                |
 
 ---
 
@@ -424,8 +427,8 @@ python bin/run_services.py --fetch-compute 10000
 - **LLM 服务商**（OpenAI 兼容 API）：用于总结（必需）。
 - **Ollama**（可选）：当你选择本地 embedding 时，由 [bin/embedding_serve.sh](bin/embedding_serve.sh) 启动。
 - **MinerU**（可选）：
-  - `api` 后端：走 mineru.net，需要 `MINERU_API_KEY`
-  - 本地 VLM 后端：由 [bin/mineru_serve.sh](bin/mineru_serve.sh) 启动 `mineru-vllm-server`
+    - `api` 后端：走 mineru.net，需要 `MINERU_API_KEY`
+    - 本地 VLM 后端：由 [bin/mineru_serve.sh](bin/mineru_serve.sh) 启动 `mineru-vllm-server`
 - **LiteLLM**（可选）：多模型网关，由 [config/llm.yml](config/llm.yml) 配置。
 
 ### Windows 注意事项
@@ -442,11 +445,11 @@ python bin/run_services.py --fetch-compute 10000
 
 本项目使用 **pydantic-settings** 进行配置管理。所有配置通过环境变量或 `.env` 文件设置。
 
-| 来源 | 作用 | 必需 |
-| --- | --- | --- |
-| [.env](.env.example) | 所有配置设置 | ✅ 必须 |
+| 来源                                           | 作用                           | 必需    |
+| ---------------------------------------------- | ------------------------------ | ------- |
+| [.env](.env.example)                           | 所有配置设置                   | ✅ 必须 |
 | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | arXiv 分类列表（论文采集范围） | ⚙️ 重要 |
-| [config/llm.yml](config/llm.yml) | LiteLLM 多模型网关 | ⚙️ 可选 |
+| [config/llm.yml](config/llm.yml)               | LiteLLM 多模型网关             | ⚙️ 可选 |
 
 **仓库中不包含的文件（.gitignore）：**
 
@@ -584,22 +587,22 @@ ALL_TAGS = CORE + LANG + AGENT + APP
 
 ```yaml
 model_list:
-  # OpenRouter - 免费模型
-  - model_name: or-mimo            # .env 中 ARXIV_SANITY_LLM_NAME 使用的别名
-    litellm_params:
-      model: openrouter/xiaomi/mimo-v2-flash:free
-      api_base: https://openrouter.ai/api/v1
-      api_key: YOUR_OPENROUTER_API_KEY  # 替换为您的密钥
-      max_tokens: 32768
+    # OpenRouter - 免费模型
+    - model_name: or-mimo # .env 中 ARXIV_SANITY_LLM_NAME 使用的别名
+      litellm_params:
+          model: openrouter/xiaomi/mimo-v2-flash:free
+          api_base: https://openrouter.ai/api/v1
+          api_key: YOUR_OPENROUTER_API_KEY # 替换为您的密钥
+          max_tokens: 32768
 
-  - model_name: or-glm
-    litellm_params:
-      model: openai/z-ai/glm-4.5-air:free
-      api_base: https://openrouter.ai/api/v1
-      api_key: YOUR_OPENROUTER_API_KEY
+    - model_name: or-glm
+      litellm_params:
+          model: openai/z-ai/glm-4.5-air:free
+          api_base: https://openrouter.ai/api/v1
+          api_key: YOUR_OPENROUTER_API_KEY
 
 litellm_settings:
-  drop_params: true
+    drop_params: true
 ```
 
 **使用方法：**
@@ -653,43 +656,43 @@ print(settings.mineru.enabled)
 print(settings.email.smtp_server)
 ```
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ARXIV_SANITY_MINERU_ENABLED` | `true` | 启用/禁用 MinerU |
-| `ARXIV_SANITY_MINERU_BACKEND` | `api` | `api`、`pipeline` 或 `vlm-http-client` |
-| `ARXIV_SANITY_MINERU_DEVICE` | `cuda` | pipeline 后端设备 |
-| `ARXIV_SANITY_MINERU_MAX_WORKERS` | `2` | 最大并发 minerU 进程数 |
-| `ARXIV_SANITY_MINERU_MAX_VRAM` | `3` | 每进程最大显存（GB） |
-| `MINERU_API_POLL_INTERVAL` | `5` | API 轮询间隔（秒） |
-| `MINERU_API_TIMEOUT` | `600` | API 任务超时（秒） |
+| 变量                              | 默认值 | 说明                                   |
+| --------------------------------- | ------ | -------------------------------------- |
+| `ARXIV_SANITY_MINERU_ENABLED`     | `true` | 启用/禁用 MinerU                       |
+| `ARXIV_SANITY_MINERU_BACKEND`     | `api`  | `api`、`pipeline` 或 `vlm-http-client` |
+| `ARXIV_SANITY_MINERU_DEVICE`      | `cuda` | pipeline 后端设备                      |
+| `ARXIV_SANITY_MINERU_MAX_WORKERS` | `2`    | 最大并发 minerU 进程数                 |
+| `ARXIV_SANITY_MINERU_MAX_VRAM`    | `3`    | 每进程最大显存（GB）                   |
+| `MINERU_API_POLL_INTERVAL`        | `5`    | API 轮询间隔（秒）                     |
+| `MINERU_API_TIMEOUT`              | `600`  | API 任务超时（秒）                     |
 
 #### 锁与并发
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` | `600` | 总结缓存锁“过期清理”阈值（异常退出后建议保留默认） |
-| `ARXIV_SANITY_MINERU_LOCK_STALE_SEC` | `3600` | MinerU 解析 / GPU-slot 锁过期清理阈值 |
+| 变量                                  | 默认值 | 说明                                               |
+| ------------------------------------- | ------ | -------------------------------------------------- |
+| `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` | `600`  | 总结缓存锁“过期清理”阈值（异常退出后建议保留默认） |
+| `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`  | `3600` | MinerU 解析 / GPU-slot 锁过期清理阈值              |
 
 #### 嵌入
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
+| 变量                             | 默认值 | 说明                  |
+| -------------------------------- | ------ | --------------------- |
 | `ARXIV_SANITY_EMBED_USE_LLM_API` | `true` | 使用 LLM API 生成嵌入 |
 
 #### 守护进程/调度器
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ARXIV_SANITY_FETCH_NUM` | `2000` | 每次获取的论文数 |
-| `ARXIV_SANITY_FETCH_MAX` | `1000` | 每次 API 查询最大结果数 |
-| `ARXIV_SANITY_SUMMARY_NUM` | `200` | 每次总结的论文数 |
-| `ARXIV_SANITY_SUMMARY_WORKERS` | `2` | 总结工作线程数 |
-| `ARXIV_SANITY_DAEMON_SUMMARY` | `1` | 守护进程中启用总结生成 |
-| `ARXIV_SANITY_DAEMON_EMBEDDINGS` | `1` | 守护进程中启用嵌入 |
-| `ARXIV_SANITY_PRIORITY_QUEUE` | `1` | 启用总结优先队列 |
-| `ARXIV_SANITY_PRIORITY_DAYS` | `2` | 优先窗口（天） |
-| `ARXIV_SANITY_PRIORITY_LIMIT` | `100` | 最大优先论文数 |
-| `ARXIV_SANITY_ENABLE_GIT_BACKUP` | `1` | 启用 dict.db 的 git 备份 |
+| 变量                             | 默认值 | 说明                     |
+| -------------------------------- | ------ | ------------------------ |
+| `ARXIV_SANITY_FETCH_NUM`         | `2000` | 每次获取的论文数         |
+| `ARXIV_SANITY_FETCH_MAX`         | `1000` | 每次 API 查询最大结果数  |
+| `ARXIV_SANITY_SUMMARY_NUM`       | `200`  | 每次总结的论文数         |
+| `ARXIV_SANITY_SUMMARY_WORKERS`   | `2`    | 总结工作线程数           |
+| `ARXIV_SANITY_DAEMON_SUMMARY`    | `1`    | 守护进程中启用总结生成   |
+| `ARXIV_SANITY_DAEMON_EMBEDDINGS` | `1`    | 守护进程中启用嵌入       |
+| `ARXIV_SANITY_PRIORITY_QUEUE`    | `1`    | 启用总结优先队列         |
+| `ARXIV_SANITY_PRIORITY_DAYS`     | `2`    | 优先窗口（天）           |
+| `ARXIV_SANITY_PRIORITY_LIMIT`    | `100`  | 最大优先论文数           |
+| `ARXIV_SANITY_ENABLE_GIT_BACKUP` | `1`    | 启用 dict.db 的 git 备份 |
 
 #### 网络 / 代理
 
@@ -697,12 +700,12 @@ print(settings.email.smtp_server)
 
 #### Gunicorn（up.sh）
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `GUNICORN_WORKERS` | `2` | 工作进程数 |
-| `GUNICORN_THREADS` | `4` | 每工作进程线程数 |
-| `ARXIV_SANITY_GUNICORN_PRELOAD` | `1` | 在主进程中预加载应用 |
-| `GUNICORN_EXTRA_ARGS` | `` | 额外的 gunicorn 参数 |
+| 变量                            | 默认值 | 说明                 |
+| ------------------------------- | ------ | -------------------- |
+| `GUNICORN_WORKERS`              | `2`    | 工作进程数           |
+| `GUNICORN_THREADS`              | `4`    | 每工作进程线程数     |
+| `ARXIV_SANITY_GUNICORN_PRELOAD` | `1`    | 在主进程中预加载应用 |
+| `GUNICORN_EXTRA_ARGS`           | ``     | 额外的 gunicorn 参数 |
 
 ---
 
@@ -764,69 +767,6 @@ python -m tools batch_paper_summarizer --priority-days 2   # 优先窗口
 python -m tools batch_paper_summarizer --dry-run           # 仅预览
 python -m tools batch_paper_summarizer -m "gpt-4o-mini"    # 指定模型
 ```
-
----
-
-## 🚀 核心功能
-
-- **🤖 AI 论文总结**：完整处理管道，包含 HTML（arXiv/ar5iv）解析或 `minerU` PDF 解析、LLM 总结和智能缓存系统
-- **🔍 高级搜索引擎**：关键词、语义和混合搜索模式，支持可配置权重和智能时间过滤
-- **🎯 智能推荐系统**：混合 TF-IDF + 嵌入特征，基于用户偏好训练动态 SVM 分类器
-- **🏷️ 灵活组织管理**：个人标签支持正/负反馈、组合标签、关键词跟踪，支持 AND/OR 逻辑操作
-- **📚 阅读列表**：个人论文收藏功能，支持添加/移除、摘要状态跟踪和专属管理页面
-- **📧 邮件智能服务**：自动化每日推荐，个性化 HTML 模板和假期感知调度
-- **⚡ 高性能优化**：多核处理、Intel 扩展、增量更新、Ollama 嵌入 + minerU(vLLM) 和智能缓存
-- **🔗 现代化架构**：RESTful API、响应式 Web 界面、异步总结加载和全面错误处理
-- **🔄 完全自动化**：内置调度器管理 获取→计算→总结→邮件 流程，智能资源管理
-
----
-
-## 📖 使用指南
-
-### 用户界面功能
-
-- **账户系统（极简）**：
-  - 登录只需要用户名（无密码），适合个人/内网。
-  - 如果你要公网部署，建议放在统一认证 / VPN 后面，并设置稳定的会话密钥（`ARXIV_SANITY_SECRET_KEY` 或 `secret_key.txt`）。
-- **高级搜索**：
-  - **关键词搜索**：传统基于文本的搜索，使用 TF-IDF 评分
-  - **语义搜索**：AI 驱动的相似性搜索，使用嵌入向量
-  - **混合搜索**：结合关键词+语义，支持可调权重（0.0-1.0）
-  - **标签推荐**：基于您的个人标签训练 SVM 推荐
-  - **时间过滤**：智能过滤，即使在时间窗口外也保留已标记论文
-- **组织工具**：
-  - **个人标签**：单篇论文标记，支持 AND/OR 逻辑
-  - **组合标签**：多标签分类（如 "RL,NLP"）处理复杂主题
-  - **关键词跟踪**：跟踪所有论文中的特定术语
-- **AI 论文总结**：
-  - 点击"总结"获取 LLM 生成的总结
-  - MathJax 渲染 LaTeX 公式
-  - 异步加载和进度指示器
-  - 缓存机制提升性能
-
-### 每日邮件推荐（可选）
-
-1. 在 `.env`（参考 `.env.example`）里配置 SMTP，并设置 `ARXIV_SANITY_EMAIL_PASSWORD`。
-2. 设置 `ARXIV_SANITY_HOST` 为**公网可访问的 base URL**（邮件里链接用它拼）。
-3. 在网站 Profile 页面填写你的邮箱地址。
-4. 手动运行 [send_emails.py](send_emails.py)，或直接运行调度器 [daemon.py](daemon.py)。
-
-用户/标签多时可以调 `ARXIV_SANITY_EMAIL_API_WORKERS` 来限制并发，避免把本机/网络打满。
-
-### 搜索语法
-
-| 语法 | 示例 | 说明 |
-|------|------|------|
-| 字段过滤 | `ti:transformer`、`au:goodfellow`、`cat:cs.LG` | 搜索特定字段 |
-| 短语 | `"diffusion model"` | 精确短语匹配 |
-| 排除 | `-survey`、`!survey` | 排除术语 |
-| arXiv ID | `id:2312.12345` | 按论文 ID 查找 |
-
-**示例：**
-
-- `ti:"graph neural network" cat:cs.LG` - 标题包含短语，分类为 cs.LG
-- `au:goodfellow -survey` - 作者是 Goodfellow，排除综述
-- `id:2312.12345` - 查找特定论文
 
 ---
 
@@ -909,33 +849,83 @@ python -m tools daemon
 
 ## 📚 API 参考
 
-### 搜索与推荐
+系统提供 54 个 API 端点，分布在 8 个 Blueprint 模块中。
 
-- `GET /?rank=search&q=<query>` - 关键词搜索
-- `GET /?rank=search&q=<query>&search_mode=semantic` - 语义搜索
-- `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=0.5` - 混合搜索
-- `GET /?rank=tags&tags=<tag_list>&logic=<and|or>` - 基于标签的 SVM 推荐
-- `GET /?rank=time&time_filter=<days>` - 时间过滤论文
-- `GET /?rank=pid&pid=<paper_id>` - 相似论文
+### 页面路由 (web.py)
 
-### 论文总结
+| 路由 | 说明 |
+|------|------|
+| `GET /` | 首页，论文列表 |
+| `GET /summary` | 论文总结页面 |
+| `GET /profile` | 用户个人中心 |
+| `GET /stats` | 系统统计页面 |
+| `GET /about` | 关于页面 |
+| `GET /readinglist` | 阅读列表页面 |
 
-- `GET /summary?pid=<paper_id>` - 查看总结页面
-- `POST /api/get_paper_summary` - 获取总结 JSON
-- `POST /api/clear_model_summary` - 清除特定模型的总结
-- `POST /api/clear_paper_cache` - 清除所有论文缓存
+### 搜索与推荐 (api_search.py)
 
-### 标签与关键词管理
+| 端点 | 说明 |
+|------|------|
+| `GET /?rank=search&q=<query>` | 关键词搜索（TF-IDF） |
+| `GET /?rank=search&q=<query>&search_mode=semantic` | 语义搜索 |
+| `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=0.5` | 混合搜索 |
+| `GET /?rank=tags&tags=<tag_list>&logic=<and\|or>` | 基于标签的 SVM 推荐 |
+| `GET /?rank=time&time_filter=<days>` | 时间过滤论文 |
+| `GET /?rank=pid&pid=<paper_id>` | 相似论文推荐 |
+| `POST /api/tag_search` | 单标签搜索（需认证） |
+| `POST /api/tags_search` | 多标签搜索（需认证） |
 
-- `GET /add/<pid>/<tag>` - 为论文添加标签
-- `GET /sub/<pid>/<tag>` - 从论文移除标签
-- `GET /add_key/<keyword>` - 添加跟踪关键词
-- `GET /del_key/<keyword>` - 移除跟踪关键词
+### 论文总结 (api_summary.py)
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/get_paper_summary` | 获取/生成论文总结 |
+| `POST /api/clear_model_summary` | 清除特定模型的总结缓存 |
+| `POST /api/clear_paper_cache` | 清除论文所有缓存 |
+| `GET /api/summary_status/<pid>` | 获取总结生成状态 |
+
+### 标签管理 (api_tags.py)
+
+| 端点 | 说明 |
+|------|------|
+| `GET /add/<pid>/<tag>` | 为论文添加正向标签 |
+| `GET /sub/<pid>/<tag>` | 移除论文标签 |
+| `GET /neg/<pid>/<tag>` | 为论文添加负向标签 |
+| `GET /add_key/<keyword>` | 添加跟踪关键词 |
+| `GET /del_key/<keyword>` | 移除跟踪关键词 |
+| `POST /api/add_combined_tag` | 添加组合标签 |
+| `POST /api/remove_combined_tag` | 移除组合标签 |
+
+### 阅读列表 (api_readinglist.py)
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/readinglist/add` | 添加论文到阅读列表 |
+| `POST /api/readinglist/remove` | 从阅读列表移除论文 |
+| `GET /api/readinglist/status/<pid>` | 获取论文阅读列表状态 |
+
+### 用户管理 (api_user.py)
+
+| 端点 | 说明 |
+|------|------|
+| `POST /api/login` | 用户登录 |
+| `POST /api/logout` | 用户登出 |
+| `POST /api/update_email` | 更新邮箱地址 |
+| `GET /api/user_state` | 获取用户状态 |
+
+### 实时推送 (api_sse.py)
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/sse/user/<username>` | 用户专属 SSE 流 |
+| `GET /api/sse/global` | 全局 SSE 流 |
 
 ### 系统
 
-- `GET /stats` - 系统统计
-- `GET /cache_status` - 缓存状态（需认证用户）
+| 端点 | 说明 |
+|------|------|
+| `GET /cache_status` | 缓存状态（需认证） |
+| `POST /api/upload_paper` | 上传私有 PDF（实验性） |
 
 ---
 
@@ -1024,15 +1014,80 @@ pytest tests/e2e/
 
 ### 架构说明
 
-1. **分层架构**：Blueprints → Services → Repositories → Database
-2. **配置管理**：所有配置通过 pydantic-settings，使用 `ARXIV_SANITY_` 前缀
-3. **缓存策略**：多级缓存（内存 LRU + 基于文件 mtime 的失效）
-4. **异步处理**：Huey 任务队列 + SSE 实时推送
-5. **安全措施**：CSRF 保护、安全头、输入验证
+#### 分层架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  入口层 (serve.py)                                          │
+│  - Flask 应用创建                                           │
+│  - Gunicorn 预加载实现 copy-on-write 内存共享               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  API 层 (backend/blueprints/)                               │
+│  - 8 个 Flask Blueprint 按领域组织路由                      │
+│  - 请求验证、认证、响应格式化                               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  服务层 (backend/services/)                                 │
+│  - 业务逻辑、缓存、搜索算法                                 │
+│  - 跨 Blueprint 复用，便于独立测试                          │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  仓储层 (aslite/repositories.py)                            │
+│  - 数据访问抽象，封装原始 DB 操作                           │
+│  - 批量操作、类型提示、易于 Mock                            │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  数据层 (aslite/db.py)                                      │
+│  - 自定义 SQLite 封装 (SqliteKV)，WAL 模式                  │
+│  - 类字典接口，支持压缩                                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### 核心设计模式
+
+1. **Repository 模式**：`PaperRepository`、`TagRepository`、`ReadingListRepository` 等提供清晰的数据访问抽象
+2. **服务层模式**：`data_service`（多级缓存）、`search_service`（查询解析与排序）、`summary_service`（总结生成编排）
+3. **工厂模式**：`create_app()` 创建配置好的 Flask 实例，支持测试和 Gunicorn 预加载
+4. **任务队列模式**：Huey + SQLite 后端实现异步总结生成，支持优先队列
+5. **缓存旁路模式**：特征缓存（mtime 失效）、论文缓存（内存 LRU）、总结缓存（文件+锁）
+
+#### 数据流：从 arXiv 到展示
+
+```
+arXiv API → arxiv_daemon.py → papers.db/dict.db
+                    ↓
+            compute.py → features.p (TF-IDF + Embeddings)
+                    ↓
+用户搜索 → search_service → 排序结果 → 前端渲染
+                    ↓
+点击总结 → Huey 任务 → HTML/PDF 解析 → LLM → 缓存 → SSE 推送
+```
 
 ---
 
 ## 📈 更新日志
+
+### v3.2 - 上传功能、测试增强与安全加固
+
+- 📤 **论文上传**：上传私有 PDF 文件，与论文库进行相似度搜索（实验性功能）
+- 🧪 **测试套件增强**：全面的单元测试和集成测试，覆盖 API、服务和工具函数
+- 🔒 **安全修复**：
+  - 标签搜索 API（`/api/tag_search`、`/api/tags_search`）现在需要登录认证并验证用户身份
+  - 邮箱验证支持现代长 TLD（最长 63 字符，如 `.engineering`、`.museum`）
+  - 语义搜索增加 pid 列表缺失时的防御性检查，避免 IndexError
+- 🛠️ **守护进程改进**：
+  - `ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS=false` 现在通过 `--no-embeddings` 标志正确禁用嵌入
+  - 支持邮件干运行模式（`ARXIV_SANITY_DAEMON_EMAIL_DRY_RUN`）
+- 🏗️ **架构重构**：
+  - Repository 模式实现更清晰的数据访问（`aslite/repositories.py`）
+  - 原生 SQLite3 替代 sqlitedict，提升并发性能
+  - 跨进程数据库操作锁机制
+- 🎨 **前端优化**：MathJax 集成重构、静态资源清理、同步加载优化
 
 ### v3.1 - 阅读列表与增强标签系统
 

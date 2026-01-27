@@ -110,6 +110,8 @@ def fetch_compute():
     compute_cmd = [PYTHON, str(TOOLS_DIR / "compute.py")]
     if ENABLE_EMBEDDINGS:
         compute_cmd.append("--use_embeddings")
+    else:
+        compute_cmd.append("--no-embeddings")
     _run_cmd(compute_cmd, "compute")
 
     gen_summary()

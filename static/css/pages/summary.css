@@ -92,6 +92,59 @@
     border-color: var(--success-color);
 }
 
+/* Similar button for uploaded papers - matches arXiv Similar link style */
+.upload-similar-btn {
+    font-family: inherit;
+    line-height: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--primary-text);
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 100%);
+    opacity: 1;
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: 20px;
+    border: none;
+    font-weight: 500;
+    box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
+    transition: all var(--transition-fast);
+    cursor: pointer;
+}
+
+.upload-similar-btn:hover:not(:disabled) {
+    color: var(--primary-text);
+    background: linear-gradient(135deg, var(--btn-hover) 0%, var(--btn-bg) 100%);
+    text-decoration: none;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(179, 27, 27, 0.35);
+}
+
+.upload-similar-btn:disabled {
+    /* Match Parse/Extract Info disabled behavior: keep visible, just non-interactive */
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+    background: var(--body-bg);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+}
+
+/* When we also add a disabled class (same pattern as readinglist), ensure consistent look */
+.upload-similar-btn.disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+    background: var(--body-bg);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+}
+
 .paper-title-section {
     margin-top: 16px;
 }
@@ -208,6 +261,28 @@
     margin-bottom: 0;
 }
 
+.paper-user-tags-section .upload-tag-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    border-radius: 8px;
+    font-size: 13px;
+    color: #3b82f6;
+}
+
+[data-theme='dark'] .paper-user-tags-section .upload-tag-info {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.4);
+    color: #60a5fa;
+}
+
+.paper-user-tags-section .upload-tag-info span {
+    flex: 1;
+}
+
 /* Paper action buttons */
 .paper-action-buttons {
     display: flex;
@@ -228,26 +303,29 @@
 
 .btn-similar,
 .btn-inspect {
-    font-size: 0.8125rem; /* 13px */
-    display: inline-block;
+    font-size: 13px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     color: var(--primary-text); /* Button text color */
-    background-color: var(--btn-bg); /* Button background color */
+    background: linear-gradient(135deg, var(--btn-bg) 0%, #c02f2f 100%);
     opacity: 1; /* Ensure button is completely opaque */
     text-decoration: none;
-    padding: 5px 12px; /* Button padding */
-    border-radius: 4px; /* Button border radius */
-    border: 1px solid var(--btn-bg); /* Button border */
-    transition:
-        background-color 0.15s ease,
-        border-color 0.15s ease;
+    padding: 8px 16px; /* Button padding */
+    border-radius: 20px; /* Button border radius */
+    border: none;
+    font-weight: 500;
+    box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
+    transition: all var(--transition-fast);
 }
 
 .btn-similar:hover,
 .btn-inspect:hover {
     color: var(--primary-text);
-    background-color: var(--btn-hover); /* Button hover background */
-    border-color: var(--btn-hover); /* Button hover border */
+    background: linear-gradient(135deg, var(--btn-hover) 0%, var(--btn-bg) 100%);
     text-decoration: none; /* No underline on hover */
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(179, 27, 27, 0.35);
 }
 
 /* Fix tag and time alignment */
@@ -1188,12 +1266,13 @@ html[data-theme='dark'] .summary-actions select {
 
 /* ===== Summary Trigger Button & Status ===== */
 .summary-trigger-btn {
-    padding: 6px 10px;
-    border-radius: 8px;
+    padding: 8px 16px;
+    border-radius: 20px;
     border: 1px solid var(--border-color);
     background: var(--card-bg);
     color: var(--text-color);
-    font-size: 0.85rem;
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
     transition: all var(--transition-fast);
 }

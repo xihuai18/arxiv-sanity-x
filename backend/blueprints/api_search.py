@@ -22,19 +22,28 @@ def api_keyword_search():
         schema:
           type: object
           properties:
+            keyword:
+              type: string
+              description: Search keyword (alias: q, search_query)
             q:
               type: string
-              description: Search query
+              description: Alias of keyword
+            search_query:
+              type: string
+              description: Alias of keyword
+            time_delta:
+              type: number
+              description: Time window in days (alias: time_filter)
             time_filter:
               type: string
               enum: [day, week, month, year, all]
-              description: Time filter
+              description: Alias of time_delta (named window)
+            limit:
+              type: integer
+              description: Maximum number of results to return
             skip_num:
               type: integer
               description: Number of results to skip
-            search_query:
-              type: string
-              description: Additional search query
     responses:
       200:
         description: Search results
@@ -64,14 +73,27 @@ def api_tag_search():
         schema:
           type: object
           properties:
+            tag_name:
+              type: string
+              description: Tag name to search (alias: tag)
             tag:
               type: string
-              description: Tag name to search
+              description: Alias of tag_name
+            user:
+              type: string
+              description: Backward compatible user field (must match session user if provided)
+            time_delta:
+              type: number
+              description: Time window in days (alias: time_filter)
             time_filter:
               type: string
               enum: [day, week, month, year, all]
             skip_num:
               type: integer
+            limit:
+              type: integer
+            C:
+              type: number
     responses:
       200:
         description: Search results
@@ -94,11 +116,28 @@ def api_tags_search():
         schema:
           type: object
           properties:
+            tags:
+              type: array
+              items:
+                type: string
+              description: Tag list (comma-separated string also accepted)
+            user:
+              type: string
+              description: Backward compatible user field (must match session user if provided)
+            logic:
+              type: string
+              enum: [and, or]
             time_filter:
               type: string
               enum: [day, week, month, year, all]
+            time_delta:
+              type: number
             skip_num:
               type: integer
+            limit:
+              type: integer
+            C:
+              type: number
     responses:
       200:
         description: Search results ranked by SVM

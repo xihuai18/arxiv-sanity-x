@@ -73,7 +73,8 @@ def register_user_email(email: str) -> str:
 
     if g.user:
         # do some basic input validation
-        proper_email = re.match(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}$", email, re.IGNORECASE)
+        # Keep validation lightweight but accept modern long TLDs (up to 63 chars).
+        proper_email = re.match(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", email, re.IGNORECASE)
         if email == "" or proper_email:  # allow empty email, meaning no email
             # everything checks out, write using Repository
             UserRepository.set_email(g.user, email)

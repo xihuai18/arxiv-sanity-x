@@ -34,7 +34,10 @@
 <link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon-x.png') }}" />
 
 <script>
-var user = {{ user | tojson }};
+// Injected globals for frontend modules.
+// Keep these in base.html so every page gets a consistent baseline.
+var user = {{ user | default('', true) | tojson }};
+var __arxivSanityStaticBase = {{ url_for('static', filename='') | tojson }};
 </script>
 {% block variables %}
 {% endblock %}

@@ -924,7 +924,11 @@ class PaperSummarizer:
             logger.trace(f"Error releasing GPU slot {slot}: {e}")
 
     def parse_pdf_with_mineru(
-        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
+        self,
+        pdf_path: Path,
+        cache_pid: Optional[str] = None,
+        cached_version: Optional[str] = None,
+        keep_pdf: bool = False,
     ) -> Optional[Path]:
         """
         Parse PDF to Markdown using minerU (with multi-process lock protection)
@@ -934,6 +938,7 @@ class PaperSummarizer:
             cache_pid: Optional paper ID to use for output directory (should be raw PID).
                        If not provided, uses the PDF filename (stem).
             cached_version: Version of the PDF that was actually downloaded (e.g., "3")
+            keep_pdf: If True, do not delete the PDF file after parsing (for uploaded papers)
 
         Returns:
             Generated Markdown file path, None if failed
@@ -949,7 +954,7 @@ class PaperSummarizer:
 
             # Handle API backend separately
             if backend == "api":
-                return self._parse_pdf_with_mineru_api(pdf_path, pdf_name, cached_version)
+                return self._parse_pdf_with_mineru_api(pdf_path, pdf_name, cached_version, keep_pdf=keep_pdf)
 
             # Check if already parsed
             existing_md_path = self._find_mineru_markdown(pdf_name, backend=backend)
@@ -1030,12 +1035,13 @@ class PaperSummarizer:
 
                 if result.returncode != 0:
                     logger.trace(f"minerU execution failed: {result.stderr}")
-                    # Delete PDF file when minerU parsing fails
-                    try:
-                        pdf_path.unlink(missing_ok=True)
-                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
-                    except Exception as e:
-                        logger.trace(f"Failed to delete PDF file: {e}")
+                    # Delete PDF file when minerU parsing fails (unless keep_pdf is True)
+                    if not keep_pdf:
+                        try:
+                            pdf_path.unlink(missing_ok=True)
+                            logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
+                        except Exception as e:
+                            logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
                 # Post-execution migration logic: check if new vlm directory was generated, rename to auto
@@ -1047,12 +1053,13 @@ class PaperSummarizer:
                     # Write meta.json for MinerU output with version info
                     self._write_mineru_meta(pdf_name, backend, cached_version=cached_version)
 
-                    # Delete PDF file after successful parsing to save space
-                    try:
-                        pdf_path.unlink(missing_ok=True)
-                        logger.trace(f"Deleted PDF source file: {pdf_path}")
-                    except Exception as e:
-                        logger.trace(f"Failed to delete PDF file: {e}")
+                    # Delete PDF file after successful parsing to save space (unless keep_pdf is True)
+                    if not keep_pdf:
+                        try:
+                            pdf_path.unlink(missing_ok=True)
+                            logger.trace(f"Deleted PDF source file: {pdf_path}")
+                        except Exception as e:
+                            logger.trace(f"Failed to delete PDF file: {e}")
 
                     # Clean up files other than images and markdown
                     self._cleanup_mineru_output(output_dir / pdf_name)
@@ -1064,12 +1071,13 @@ class PaperSummarizer:
                     return existing_md_path
                 else:
                     logger.trace(f"Generated Markdown file not found for {pdf_name} in minerU outputs")
-                    # Delete PDF file when parsing fails
-                    try:
-                        pdf_path.unlink(missing_ok=True)
-                        logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
-                    except Exception as e:
-                        logger.trace(f"Failed to delete PDF file: {e}")
+                    # Delete PDF file when parsing fails (unless keep_pdf is True)
+                    if not keep_pdf:
+                        try:
+                            pdf_path.unlink(missing_ok=True)
+                            logger.trace(f"Parse failed, deleted PDF source file: {pdf_path}")
+                        except Exception as e:
+                            logger.trace(f"Failed to delete PDF file: {e}")
                     return None
 
             finally:
@@ -1084,32 +1092,39 @@ class PaperSummarizer:
 
         except subprocess.TimeoutExpired:
             logger.trace("minerU execution timeout")
-            # Delete PDF file when parsing times out
-            try:
-                pdf_path.unlink(missing_ok=True)
-                logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
-            except Exception as e:
-                logger.trace(f"Failed to delete PDF file: {e}")
-            return None
-        except Exception as e:
-            logger.trace(f"PDF parse failed: {e}")
-            # Delete PDF file when parsing exception occurs
-            if pdf_path:
+            # Delete PDF file when parsing times out (unless keep_pdf is True)
+            if not keep_pdf:
                 try:
                     pdf_path.unlink(missing_ok=True)
-                    logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
+                    logger.trace(f"Parse timeout, deleted PDF source file: {pdf_path}")
                 except Exception as e:
                     logger.trace(f"Failed to delete PDF file: {e}")
             return None
+        except Exception as e:
+            logger.trace(f"PDF parse failed: {e}")
+            # Delete PDF file when parsing exception occurs (unless keep_pdf is True)
+            if pdf_path and not keep_pdf:
+                try:
+                    pdf_path.unlink(missing_ok=True)
+                    logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
+                except Exception as e2:
+                    logger.trace(f"Failed to delete PDF file: {e2}")
+            return None
 
     def _parse_pdf_with_mineru_api(
-        self, pdf_path: Path, pdf_name: str, cached_version: Optional[str] = None
+        self, pdf_path: Path, pdf_name: str, cached_version: Optional[str] = None, keep_pdf: bool = False
     ) -> Optional[Path]:
         """
         Parse PDF using MinerU API service with file upload mode.
 
         Uses the batch file upload API to upload local PDF and trigger parsing,
         which is more stable than URL mode (avoids MinerU server accessing foreign URLs).
+
+        Args:
+            pdf_path: PDF file path
+            pdf_name: Name to use for output directory
+            cached_version: Version of the PDF
+            keep_pdf: If True, do not delete the PDF file after parsing (for uploaded papers)
         """
         # Check API key
         if not MINERU_API_KEY or not MINERU_API_KEY.strip():
@@ -1270,20 +1285,21 @@ class PaperSummarizer:
             self._cleanup_mineru_output(self.mineru_dir / pdf_name)
             self._normalize_mineru_images(output_path, target_md)
 
-            # Delete PDF file after successful parsing to save space
-            try:
-                pdf_path.unlink(missing_ok=True)
-                logger.trace(f"Deleted PDF source file: {pdf_path}")
-            except Exception as e:
-                logger.trace(f"Failed to delete PDF file: {e}")
+            # Delete PDF file after successful parsing to save space (unless keep_pdf is True)
+            if not keep_pdf:
+                try:
+                    pdf_path.unlink(missing_ok=True)
+                    logger.trace(f"Deleted PDF source file: {pdf_path}")
+                except Exception as e:
+                    logger.trace(f"Failed to delete PDF file: {e}")
 
             logger.debug(f"Successfully parsed: {target_md}")
             return target_md
 
         except ValueError as e:
-            # Only delete PDF for parsing errors, not for config/auth errors
+            # Only delete PDF for parsing errors, not for config/auth errors (and not if keep_pdf)
             error_msg = str(e)
-            if "MINERU_API_KEY_MISSING" not in error_msg and "MINERU_API_EXPIRED" not in error_msg:
+            if not keep_pdf and "MINERU_API_KEY_MISSING" not in error_msg and "MINERU_API_EXPIRED" not in error_msg:
                 try:
                     pdf_path.unlink(missing_ok=True)
                     logger.trace(f"API error, deleted PDF source file: {pdf_path}")
@@ -1292,12 +1308,13 @@ class PaperSummarizer:
             raise
         except Exception as e:
             logger.error(f"MinerU API parse failed: {e}")
-            # Delete PDF file when parsing exception occurs
-            try:
-                pdf_path.unlink(missing_ok=True)
-                logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
-            except Exception as e2:
-                logger.trace(f"Failed to delete PDF file: {e2}")
+            # Delete PDF file when parsing exception occurs (unless keep_pdf is True)
+            if not keep_pdf:
+                try:
+                    pdf_path.unlink(missing_ok=True)
+                    logger.trace(f"Parse exception, deleted PDF source file: {pdf_path}")
+                except Exception as e2:
+                    logger.trace(f"Failed to delete PDF file: {e2}")
             return None
         finally:
             if lock_fd is not None:
@@ -2187,7 +2204,14 @@ Please output strictly according to the following structure:
             if not pid:
                 return self._build_summary_result("# Error\n\nPaper ID is empty or invalid")
 
-            summary_source = self._normalize_summary_source(source)
+            # Check if this is an uploaded paper (up_ prefix)
+            is_uploaded = pid.startswith("up_")
+
+            # For uploaded papers, force mineru source (no HTML available)
+            if is_uploaded:
+                summary_source = "mineru"
+            else:
+                summary_source = self._normalize_summary_source(source)
 
             if summary_source == "html":
                 markdown_content, html_source, cache_pid = self._get_markdown_from_html(pid)
@@ -2239,6 +2263,12 @@ Please output strictly according to the following structure:
                     return summary
                 else:
                     logger.trace("Existing Markdown file content is empty, re-parsing")
+
+            # For uploaded papers, MinerU cache must already exist (created by process_uploaded_pdf)
+            if is_uploaded:
+                return self._build_summary_result(
+                    "# Error\n\nUploaded paper has not been parsed yet. Please wait for parsing to complete or retry parsing."
+                )
 
             # Step 1: Download paper PDF (use cache_pid for filename)
             backend = self._normalize_mineru_backend()

@@ -100,14 +100,18 @@
 
 /* Action buttons in paper cards */
 .action-btn {
+    font-family: inherit;
+    line-height: 1;
+    -webkit-appearance: none;
+    appearance: none;
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
     padding: 8px 16px;
     background-color: var(--card-bg);
     color: var(--text-color);
     border: 1px solid var(--border-color);
-    border-radius: 6px;
+    border-radius: 20px;
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
@@ -207,6 +211,29 @@ button:disabled {
     border-top: 1px solid var(--border-color);
 }
 
+/*
+ * Normalize the visual size of action buttons in paper cards.
+ * Some buttons use borders while others don't (e.g. gradient links),
+ * which can create 1-2px height differences. We standardize padding,
+ * min-height and use border-box sizing.
+ */
+.paper-actions-footer .summary-trigger-btn,
+.paper-actions-footer .action-btn,
+.paper-actions-footer .rel_more a,
+.paper-actions-footer .rel_inspect a,
+.paper-actions-footer .rel_summary a {
+    box-sizing: border-box;
+    min-height: 36px;
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+}
+
 .rel_more a,
 .rel_inspect a,
 .rel_summary a {
@@ -220,7 +247,8 @@ button:disabled {
     text-decoration: none;
     padding: 8px 16px;
     border-radius: 20px;
-    border: none;
+    /* Keep border for consistent height vs bordered buttons */
+    border: 1px solid transparent;
     font-weight: 500;
     box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
     transition: all var(--transition-fast);
@@ -234,6 +262,22 @@ button:disabled {
     text-decoration: none;
     transform: translateY(-1px);
     box-shadow: 0 4px 10px rgba(179, 27, 27, 0.35);
+}
+
+/* Disabled link style (for uploaded papers before parsing) */
+.rel_more a.disabled-link,
+.rel_inspect a.disabled-link,
+.rel_summary a.disabled-link {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.rel_more a.disabled-link:hover,
+.rel_inspect a.disabled-link:hover,
+.rel_summary a.disabled-link:hover {
+    transform: none;
+    box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
 }
 
 /* alphaXiv - modern pill style */

@@ -17,6 +17,75 @@ function debugLog(category, message, data) {
     const NS = 'ArxivSanityCommon';
 
     // =========================================================================
+    // Toast Notifications (non-blocking replacement for window.alert)
+    // =========================================================================
+
+    const TOAST_CONTAINER_ID = 'as-toast-container';
+
+    function ensureToastContainer() {
+        if (typeof document === 'undefined') return null;
+        const existing = document.getElementById(TOAST_CONTAINER_ID);
+        if (existing) return existing;
+
+        const create = () => {
+            const c = document.createElement('div');
+            c.id = TOAST_CONTAINER_ID;
+            c.className = 'as-toast-container';
+            document.body.appendChild(c);
+            return c;
+        };
+
+        if (document.body) return create();
+        // If called very early, wait until DOM is ready.
+        document.addEventListener(
+            'DOMContentLoaded',
+            () => {
+                if (!document.getElementById(TOAST_CONTAINER_ID) && document.body) create();
+            },
+            { once: true }
+        );
+        return null;
+    }
+
+    /**
+     * Show a transient, non-blocking toast.
+     * @param {string} message
+     * @param {{type?: 'info'|'success'|'warning'|'error', durationMs?: number}} [opts]
+     */
+    function showToast(message, opts) {
+        if (typeof document === 'undefined') return;
+        const o = opts || {};
+        const type = String(o.type || 'info');
+        const durationMs = Number.isFinite(o.durationMs) ? o.durationMs : 2500;
+
+        const container = ensureToastContainer() || document.getElementById(TOAST_CONTAINER_ID);
+        if (!container) return;
+
+        // Keep the UI tidy: cap to last 3 toasts.
+        while (container.children.length >= 3) {
+            container.removeChild(container.firstChild);
+        }
+
+        const el = document.createElement('div');
+        el.className = 'as-toast as-toast--' + type;
+        el.textContent = String(message || '');
+        container.appendChild(el);
+
+        const remove = () => {
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+        };
+
+        // Let CSS animate out if present.
+        setTimeout(
+            () => {
+                el.classList.add('as-toast--hide');
+                setTimeout(remove, 250);
+            },
+            Math.max(250, durationMs)
+        );
+    }
+
+    // =========================================================================
     // CSRF Token Management
     // =========================================================================
 
@@ -51,14 +120,66 @@ function debugLog(category, message, data) {
     }
 
     // =========================================================================
+    // Static URL Helpers
+    // =========================================================================
+
+    /**
+     * Resolve the static base URL (useful when the app is deployed under a URL prefix).
+     * Prefers the injected `window.__arxivSanityStaticBase` from templates/base.html.
+     * @returns {string} Base URL that ends with '/'
+     */
+    function getStaticBaseUrl() {
+        const injected =
+            global && typeof global.__arxivSanityStaticBase === 'string'
+                ? global.__arxivSanityStaticBase
+                : '';
+        if (injected) {
+            return injected.endsWith('/') ? injected : injected + '/';
+        }
+
+        // Best-effort inference from existing asset URLs.
+        try {
+            const el =
+                document.querySelector('link[href*="/static/"]') ||
+                document.querySelector('script[src*="/static/"]');
+            if (el) {
+                const raw = el.getAttribute('href') || el.getAttribute('src') || '';
+                const idx = raw.indexOf('/static/');
+                if (idx >= 0) return raw.slice(0, idx + '/static/'.length);
+            }
+        } catch (e) {}
+
+        return '/static/';
+    }
+
+    /**
+     * Build a full URL to a static file.
+     * @param {string} filename - Path relative to the static root (e.g., 'lib/jszip.min.js')
+     * @returns {string}
+     */
+    function staticUrl(filename) {
+        const base = getStaticBaseUrl();
+        const rel = String(filename || '').replace(/^\/+/, '');
+        return base + rel;
+    }
+
+    // =========================================================================
     // User Event Stream (SSE + Polling fallback)
     // =========================================================================
 
     const USER_EVENT_CHANNEL = 'arxiv-sanity-user-events';
+    const USER_EVENT_LEADER_KEY = 'arxiv-sanity-user-events-leader';
+    const USER_EVENT_LEADER_STALE_MS = 8000;
+    const USER_EVENT_LEADER_HEARTBEAT_MS = 3000;
     let userEventChannel = null;
     let userStatePoller = null;
     let eventSource = null;
     let eventHandlers = [];
+    let eventSourceReconnectTimer = null;
+    let eventSourceConnecting = false;
+    let userStateApplyFns = [];
+    let userEventTabId = null;
+    let userEventLeaderTimer = null;
 
     /**
      * Initialize BroadcastChannel for cross-tab communication
@@ -68,8 +189,83 @@ function debugLog(category, message, data) {
         if (userEventChannel) return userEventChannel;
         if (typeof BroadcastChannel !== 'undefined') {
             userEventChannel = new BroadcastChannel(USER_EVENT_CHANNEL);
+            startUserEventLeaderElection();
         }
         return userEventChannel;
+    }
+
+    function isSseOpen() {
+        try {
+            return (
+                eventSource &&
+                typeof EventSource !== 'undefined' &&
+                eventSource.readyState === EventSource.OPEN
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function getUserEventTabId() {
+        if (userEventTabId) return userEventTabId;
+        userEventTabId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+        return userEventTabId;
+    }
+
+    function readUserEventLeader() {
+        try {
+            if (typeof localStorage === 'undefined') return null;
+            const raw = localStorage.getItem(USER_EVENT_LEADER_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || !parsed.id || !parsed.ts) return null;
+            return parsed;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function leaderIsStale(leader) {
+        if (!leader || !leader.ts) return true;
+        return Date.now() - Number(leader.ts) > USER_EVENT_LEADER_STALE_MS;
+    }
+
+    function writeUserEventLeader(id) {
+        try {
+            if (typeof localStorage === 'undefined') return false;
+            localStorage.setItem(USER_EVENT_LEADER_KEY, JSON.stringify({ id, ts: Date.now() }));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function shouldBroadcastFromThisTab() {
+        // If localStorage is unavailable, keep legacy behavior (best-effort broadcast).
+        if (typeof localStorage === 'undefined') return true;
+
+        const tabId = getUserEventTabId();
+        const leader = readUserEventLeader();
+
+        if (!leader || leaderIsStale(leader)) {
+            // Only a tab with an open SSE connection may (re)claim leadership.
+            if (isSseOpen() && writeUserEventLeader(tabId)) return true;
+        }
+        const current = readUserEventLeader();
+        if (!current) return true;
+        return current.id === tabId;
+    }
+
+    function startUserEventLeaderElection() {
+        if (userEventLeaderTimer) return;
+        userEventLeaderTimer = setInterval(() => {
+            if (!isSseOpen()) return;
+            const tabId = getUserEventTabId();
+            const leader = readUserEventLeader();
+            if (!leader || leaderIsStale(leader) || leader.id === tabId) {
+                writeUserEventLeader(tabId);
+            }
+        }, USER_EVENT_LEADER_HEARTBEAT_MS);
     }
 
     /**
@@ -80,6 +276,22 @@ function debugLog(category, message, data) {
         return fetch('/api/user_state', { credentials: 'same-origin' })
             .then(resp => resp.json())
             .catch(() => null);
+    }
+
+    function addUserStateApplyFn(applyFn) {
+        if (typeof applyFn !== 'function') return;
+        if (userStateApplyFns.includes(applyFn)) return;
+        userStateApplyFns.push(applyFn);
+    }
+
+    function applyUserStateToAll(state) {
+        userStateApplyFns.forEach(fn => {
+            try {
+                fn(state);
+            } catch (e) {
+                console.warn('User state apply error:', e);
+            }
+        });
     }
 
     /**
@@ -97,10 +309,15 @@ function debugLog(category, message, data) {
      * @param {Function} applyFn - Function to apply user state updates
      */
     function startUserStatePolling(applyFn) {
+        addUserStateApplyFn(applyFn);
         if (userStatePoller) return;
+        // Apply once immediately to reduce perceived lag when falling back to polling.
+        fetchUserState().then(state => {
+            applyUserStateToAll(state);
+        });
         userStatePoller = setInterval(() => {
             fetchUserState().then(state => {
-                if (applyFn) applyFn(state);
+                applyUserStateToAll(state);
             });
         }, 15000);
     }
@@ -135,7 +352,7 @@ function debugLog(category, message, data) {
         const opts = options || {};
 
         // Broadcast to other tabs
-        if (!opts.fromBroadcast && userEventChannel) {
+        if (!opts.fromBroadcast && userEventChannel && shouldBroadcastFromThisTab()) {
             userEventChannel.postMessage(event);
         }
 
@@ -156,10 +373,13 @@ function debugLog(category, message, data) {
      */
     function setupUserEventStream(user, applyStateFn) {
         if (!user) return;
+        addUserStateApplyFn(applyStateFn);
 
         const channel = initBroadcastChannel();
         if (channel) {
             channel.onmessage = e => {
+                // If SSE is connected in this tab, ignore broadcast to avoid duplicates.
+                if (isSseOpen()) return;
                 dispatchUserEvent(e.data || {}, { fromBroadcast: true });
             };
         }
@@ -169,10 +389,27 @@ function debugLog(category, message, data) {
             return;
         }
 
+        const scheduleReconnect = () => {
+            if (eventSourceReconnectTimer) return;
+            eventSourceReconnectTimer = setTimeout(() => {
+                eventSourceReconnectTimer = null;
+                connect();
+            }, 8000);
+        };
+
         const connect = () => {
+            if (eventSource || eventSourceConnecting) return;
+            eventSourceConnecting = true;
             eventSource = new EventSource('/api/user_stream');
             eventSource.onopen = () => {
                 stopUserStatePolling();
+                // Prefer an SSE-connected tab to lead BroadcastChannel fanout.
+                startUserEventLeaderElection();
+                eventSourceConnecting = false;
+                if (eventSourceReconnectTimer) {
+                    clearTimeout(eventSourceReconnectTimer);
+                    eventSourceReconnectTimer = null;
+                }
             };
             eventSource.onmessage = evt => {
                 if (!evt || !evt.data) return;
@@ -188,8 +425,9 @@ function debugLog(category, message, data) {
                     eventSource.close();
                     eventSource = null;
                 }
-                startUserStatePolling(applyStateFn);
-                setTimeout(connect, 8000);
+                eventSourceConnecting = false;
+                startUserStatePolling();
+                scheduleReconnect();
             };
         };
         connect();
@@ -843,7 +1081,7 @@ function debugLog(category, message, data) {
         if (!script) {
             script = document.createElement('script');
             script.id = 'MathJax-script';
-            script.src = scriptUrl || '/static/lib/es5/tex-chtml-full.js';
+            script.src = scriptUrl || staticUrl('lib/es5/tex-chtml-full.js');
             script.async = true;
             document.head.appendChild(script);
         }
@@ -989,6 +1227,7 @@ function debugLog(category, message, data) {
     const SUMMARY_PENDING = new Set();
     let summaryStatusPoller = null;
     let summaryStatusCallback = null;
+    let summaryStatusPollInFlight = false;
 
     /**
      * Normalize a paper ID to a consistent string format.
@@ -1064,7 +1303,15 @@ function debugLog(category, message, data) {
      */
     function pollSummaryStatuses() {
         if (SUMMARY_PENDING.size === 0) return;
+        if (summaryStatusPollInFlight) return;
+        summaryStatusPollInFlight = true;
         const model = getSummaryModel();
+        if (!model) {
+            // No summary model configured; avoid spamming the API with 400s.
+            summaryStatusPollInFlight = false;
+            stopSummaryStatusPolling();
+            return;
+        }
         const pids = Array.from(SUMMARY_PENDING);
         csrfFetch('/api/summary_status', {
             method: 'POST',
@@ -1073,7 +1320,23 @@ function debugLog(category, message, data) {
             },
             body: JSON.stringify({ pids, model }),
         })
-            .then(resp => resp.json())
+            .then(resp => {
+                if (!resp) return null;
+                if (resp.status === 403) {
+                    // Likely CSRF token stale (e.g., server restart / session reset).
+                    // Reload once to refresh token and session.
+                    stopSummaryStatusPolling();
+                    try {
+                        if (!window.__arxivSanityCsrfReloaded) {
+                            window.__arxivSanityCsrfReloaded = true;
+                            window.location.reload();
+                        }
+                    } catch (e) {}
+                    return null;
+                }
+                if (!resp.ok) return null;
+                return resp.json().catch(() => null);
+            })
             .then(data => {
                 if (!data || !data.success || !data.statuses) return;
                 const statuses = data.statuses || {};
@@ -1093,6 +1356,9 @@ function debugLog(category, message, data) {
             })
             .catch(err => {
                 console.warn('Failed to poll summary status:', err);
+            })
+            .finally(() => {
+                summaryStatusPollInFlight = false;
             });
     }
 
@@ -1218,6 +1484,9 @@ function debugLog(category, message, data) {
         // CSRF
         getCsrfToken,
         csrfFetch,
+        // Static URL
+        getStaticBaseUrl,
+        staticUrl,
         // User events
         fetchUserState,
         setupUserEventStream,
@@ -1270,5 +1539,7 @@ function debugLog(category, message, data) {
         formatSummaryStatus,
         // Clipboard
         copyTextToClipboard,
+        // Toast
+        showToast,
     };
 })(typeof window !== 'undefined' ? window : this);

@@ -620,18 +620,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # New embedding related parameters
-    parser.add_argument(
+    embeddings_group = parser.add_mutually_exclusive_group()
+    embeddings_group.add_argument(
         "--use_embeddings",
-        action="store_true",
-        default=True,
-        help="Enable embedding vectors (default: on; use --no-embeddings to disable)",
-    )
-    parser.add_argument(
-        "--no-embeddings",
-        action="store_false",
+        "--use-embeddings",
         dest="use_embeddings",
+        action="store_true",
+        help="Enable embedding vectors (default: on)",
+    )
+    embeddings_group.add_argument(
+        "--no-embeddings",
+        dest="use_embeddings",
+        action="store_false",
         help="Disable embedding vectors",
     )
+    parser.set_defaults(use_embeddings=True)
     parser.add_argument(
         "--embed_model",
         type=str,
