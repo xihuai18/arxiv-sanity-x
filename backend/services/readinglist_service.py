@@ -201,6 +201,14 @@ def trigger_summary_async(
         return None
 
     def _run():
+        start_epoch = 0
+        try:
+            # Cooperative cancellation: clear actions bump this epoch to stop in-flight work.
+            if model:
+                start_epoch = SummaryStatusRepository.get_generation_epoch(pid, model)
+        except Exception:
+            start_epoch = 0
+
         try:
             if user and update_readinglist_fn:
                 update_readinglist_fn(user, pid, "running", None)
@@ -209,6 +217,17 @@ def trigger_summary_async(
 
             if generate_summary_fn:
                 generate_summary_fn(pid, model=model, force_refresh=False, cache_only=False)
+
+            # If canceled mid-flight, do not mark ok.
+            try:
+                if model and SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch:
+                    if user and update_readinglist_fn:
+                        update_readinglist_fn(user, pid, "canceled", "Canceled by user", task_id=None)
+                    if update_db_fn:
+                        update_db_fn(pid, model, "canceled", "Canceled by user", task_id=None, task_user=user)
+                    return
+            except Exception:
+                pass
 
             if user and update_readinglist_fn:
                 update_readinglist_fn(user, pid, "ok", None)

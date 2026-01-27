@@ -278,20 +278,32 @@ class SqliteKV:
         if self.autocommit:
             self._commit_with_retry()
 
+    @staticmethod
+    def _escape_like_prefix(prefix: str) -> str:
+        """Escape a raw prefix for use in SQLite LIKE, treating %/_ as literals."""
+        raw = "" if prefix is None else str(prefix)
+        # Escape backslash first since we use it as ESCAPE character.
+        raw = raw.replace("\\", "\\\\")
+        raw = raw.replace("%", "\\%")
+        raw = raw.replace("_", "\\_")
+        return raw
+
     def keys_with_prefix(self, prefix: str):
         """Iterate over keys that start with the given prefix."""
+        escaped = self._escape_like_prefix(prefix)
         cursor = self._execute_with_retry(
-            f"SELECT key FROM {self.tablename} WHERE key LIKE ?",
-            (prefix + "%",),
+            f"SELECT key FROM {self.tablename} WHERE key LIKE ? ESCAPE '\\'",
+            (escaped + "%",),
         )
         for row in cursor:
             yield row[0]
 
     def items_with_prefix(self, prefix: str):
         """Iterate over (key, value) pairs where key starts with the given prefix."""
+        escaped = self._escape_like_prefix(prefix)
         cursor = self._execute_with_retry(
-            f"SELECT key, value FROM {self.tablename} WHERE key LIKE ?",
-            (prefix + "%",),
+            f"SELECT key, value FROM {self.tablename} WHERE key LIKE ? ESCAPE '\\'",
+            (escaped + "%",),
         )
         for row in cursor:
             yield row[0], self._decode(row[1])

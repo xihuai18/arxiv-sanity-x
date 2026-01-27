@@ -1875,7 +1875,7 @@ def api_summary_status():
 def api_clear_model_summary():
     """API endpoint: Clear summary for a specific model only"""
     try:
-        data, err = _parse_api_request(require_pid=True, schema=SummaryClearModelRequest)
+        data, err = _parse_api_request(require_login=True, require_pid=True, schema=SummaryClearModelRequest)
         if err:
             return err
 
@@ -1884,7 +1884,7 @@ def api_clear_model_summary():
         if not model:
             return _api_error("Model name is required", 400)
 
-        _clear_model_summary(pid, model)
+        _clear_model_summary(pid, model, user=getattr(g, "user", None))
         return _api_success(pid=pid, model=model)
 
     except HTTPException:
@@ -1897,12 +1897,12 @@ def api_clear_model_summary():
 def api_clear_paper_cache():
     """API endpoint: Clear all caches for a paper (all models, HTML, MinerU, etc.)"""
     try:
-        data, err = _parse_api_request(require_pid=True, schema=SummaryPidRequest)
+        data, err = _parse_api_request(require_login=True, require_pid=True, schema=SummaryPidRequest)
         if err:
             return err
 
         pid = data.get("pid", "").strip()
-        _clear_paper_cache(pid)
+        _clear_paper_cache(pid, user=getattr(g, "user", None))
         return _api_success(pid=pid)
 
     except HTTPException:
@@ -2085,14 +2085,14 @@ def generate_paper_summary(
     )
 
 
-def _clear_model_summary(pid: str, model: str):
+def _clear_model_summary(pid: str, model: str, user: str | None = None):
     """Clear summary cache for a specific model only."""
-    _clear_model_summary_impl(pid, model, metas_getter=get_metas)
+    _clear_model_summary_impl(pid, model, metas_getter=get_metas, user=user)
 
 
-def _clear_paper_cache(pid: str):
+def _clear_paper_cache(pid: str, user: str | None = None):
     """Clear all caches for a paper."""
-    _clear_paper_cache_impl(pid, metas_getter=get_metas)
+    _clear_paper_cache_impl(pid, metas_getter=get_metas, user=user)
 
 
 def profile():

@@ -93,26 +93,43 @@ class TestTaskStatusApi:
 class TestClearModelSummaryApi:
     """Tests for clear model summary API."""
 
-    def test_clear_model_summary_without_csrf_returns_403(self, client):
-        """Test that clear_model_summary without CSRF returns 403."""
+    def test_clear_model_summary_without_login_returns_401(self, client):
+        """Test that clear_model_summary requires login."""
         resp = client.post(
+            "/api/clear_model_summary",
+            json={"pid": "2301.00001", "model": "test-model"},
+        )
+        assert resp.status_code == 401
+
+    def test_clear_model_summary_with_csrf_but_no_login_returns_401(self, client, csrf_token):
+        """Test that clear_model_summary with CSRF but no login returns 401."""
+        resp = client.post(
+            "/api/clear_model_summary",
+            json={"pid": "2301.00001", "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 401
+
+    def test_clear_model_summary_without_csrf_returns_403(self, logged_in_client):
+        """Test that clear_model_summary without CSRF returns 403 (when logged in)."""
+        resp = logged_in_client.post(
             "/api/clear_model_summary",
             json={"pid": "2301.00001", "model": "test-model"},
         )
         assert resp.status_code == 403
 
-    def test_clear_model_summary_missing_pid_returns_400(self, client, csrf_token):
+    def test_clear_model_summary_missing_pid_returns_400(self, logged_in_client, csrf_token):
         """Test that missing pid returns 400."""
-        resp = client.post(
+        resp = logged_in_client.post(
             "/api/clear_model_summary",
             json={"model": "test-model"},
             headers={"X-CSRF-Token": csrf_token},
         )
         assert resp.status_code == 400
 
-    def test_clear_model_summary_missing_model_returns_400(self, client, csrf_token):
+    def test_clear_model_summary_missing_model_returns_400(self, logged_in_client, csrf_token):
         """Test that missing model returns 400."""
-        resp = client.post(
+        resp = logged_in_client.post(
             "/api/clear_model_summary",
             json={"pid": "2301.00001"},
             headers={"X-CSRF-Token": csrf_token},
@@ -123,9 +140,26 @@ class TestClearModelSummaryApi:
 class TestClearPaperCacheApi:
     """Tests for clear paper cache API."""
 
-    def test_clear_paper_cache_without_csrf_returns_403(self, client):
-        """Test that clear_paper_cache without CSRF returns 403."""
+    def test_clear_paper_cache_without_login_returns_401(self, client):
+        """Test that clear_paper_cache requires login."""
         resp = client.post(
+            "/api/clear_paper_cache",
+            json={"pid": "2301.00001"},
+        )
+        assert resp.status_code == 401
+
+    def test_clear_paper_cache_with_csrf_but_no_login_returns_401(self, client, csrf_token):
+        """Test that clear_paper_cache with CSRF but no login returns 401."""
+        resp = client.post(
+            "/api/clear_paper_cache",
+            json={"pid": "2301.00001"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 401
+
+    def test_clear_paper_cache_without_csrf_returns_403(self, logged_in_client):
+        """Test that clear_paper_cache without CSRF returns 403 (when logged in)."""
+        resp = logged_in_client.post(
             "/api/clear_paper_cache",
             json={"pid": "2301.00001"},
         )
