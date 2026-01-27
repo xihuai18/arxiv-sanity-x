@@ -51,6 +51,8 @@ from aslite.db import (
     get_readinglist_index_db,
     get_summary_status_db,
     get_tags_db,
+    get_uploaded_papers_db,
+    get_uploaded_papers_index_db,
 )
 
 # -----------------------------------------------------------------------------
@@ -1121,14 +1123,23 @@ class SummaryStatusRepository:
             extra: Additional fields to store
         """
         key = f"task::{task_id}"
-        payload = {
-            "status": status,
-            "error": error,
-            "updated_time": time.time(),
-        }
-        payload.update(extra)
         with get_summary_status_db(flag="c") as sdb:
-            sdb[key] = payload
+            existing = sdb.get(key, {})
+            if not isinstance(existing, dict):
+                existing = {}
+            updates = {
+                "status": status,
+                "error": error,
+                "updated_time": time.time(),
+            }
+            if extra:
+                updates.update(extra)
+            for field, value in updates.items():
+                if value is None:
+                    existing.pop(field, None)
+                else:
+                    existing[field] = value
+            sdb[key] = existing
 
 
 # -----------------------------------------------------------------------------
@@ -1176,3 +1187,260 @@ class UserRepository:
         """Get list of all users (from tags database)."""
         with get_tags_db() as tdb:
             return list(tdb.keys())
+
+
+# -----------------------------------------------------------------------------
+# Uploaded Paper Repository
+# -----------------------------------------------------------------------------
+
+
+class UploadedPaperRepository:
+    """Repository for uploaded paper operations."""
+
+    # Store an owner+sha256 -> pid mapping in the same table for atomic duplicate detection.
+    # This avoids introducing a new DB/table and keeps writes transactional.
+    _SHA256_KEY_PREFIX = "sha256::"
+
+    @staticmethod
+    def sha256_mapping_key(owner: str, sha256: str) -> str:
+        """Return the internal mapping key for (owner, sha256)."""
+        return f"{UploadedPaperRepository._SHA256_KEY_PREFIX}{owner}::{sha256}"
+
+    @staticmethod
+    def get(pid: str) -> Optional[dict]:
+        """Get an uploaded paper by PID.
+
+        Args:
+            pid: Upload PID (e.g., up_V1StGXR8_Z5j)
+
+        Returns:
+            Uploaded paper data or None if not found
+        """
+        with get_uploaded_papers_db() as updb:
+            return updb.get(pid)
+
+    @staticmethod
+    def save(pid: str, data: dict):
+        """Save or update an uploaded paper.
+
+        Args:
+            pid: Upload PID
+            data: Paper data dictionary
+        """
+        with get_uploaded_papers_db(flag="c") as updb:
+            updb[pid] = data
+
+    @staticmethod
+    def delete(pid: str) -> bool:
+        """Delete an uploaded paper.
+
+        Args:
+            pid: Upload PID
+
+        Returns:
+            True if deleted, False if not found
+        """
+        with get_uploaded_papers_db(flag="c") as updb:
+            try:
+                del updb[pid]
+                return True
+            except KeyError:
+                return False
+
+    @staticmethod
+    def get_by_owner(owner: str) -> Dict[str, dict]:
+        """Get all uploaded papers for a user.
+
+        Args:
+            owner: Username
+
+        Returns:
+            Dictionary mapping PID to paper data
+        """
+        # Try index first
+        with get_uploaded_papers_index_db() as idx_db:
+            indexed_pids = idx_db.get(owner, [])
+
+        if indexed_pids:
+            with get_uploaded_papers_db() as updb:
+                fetched = updb.get_many(indexed_pids)
+                result = {
+                    pid: data for pid, data in fetched.items() if isinstance(data, dict) and data.get("owner") == owner
+                }
+
+            # Self-heal the index in case it contains stale PIDs (deleted) or
+            # mismatched ownership. This keeps counts/quota checks consistent.
+            try:
+                desired = list(dict.fromkeys([pid for pid in indexed_pids if pid in result]))
+                current = list(dict.fromkeys(indexed_pids))
+                if desired != current:
+                    with get_uploaded_papers_index_db(flag="c") as idx_db:
+                        idx_db[owner] = desired
+            except Exception:
+                pass
+
+            return result
+
+        # Fallback: full scan and rebuild index
+        result = {}
+        pids = []
+        with get_uploaded_papers_db() as updb:
+            for pid, data in updb.items():
+                if isinstance(data, dict) and data.get("owner") == owner:
+                    result[pid] = data
+                    pids.append(pid)
+
+        if pids:
+            try:
+                with get_uploaded_papers_index_db(flag="c") as idx_db:
+                    idx_db[owner] = list(dict.fromkeys(pids))
+            except Exception:
+                pass
+
+        return result
+
+    @staticmethod
+    def get_by_sha256(owner: str, sha256: str) -> Optional[Tuple[str, dict]]:
+        """Find an uploaded paper by SHA256 hash for a specific owner.
+
+        Args:
+            owner: Username
+            sha256: File SHA256 hash
+
+        Returns:
+            Tuple of (pid, data) if found, None otherwise
+        """
+        sha_key = UploadedPaperRepository.sha256_mapping_key(owner, sha256)
+
+        # Fast path: use mapping key if present.
+        try:
+            with get_uploaded_papers_db() as updb:
+                mapped_pid = updb.get(sha_key)
+        except Exception:
+            mapped_pid = None
+
+        if isinstance(mapped_pid, str) and mapped_pid:
+            record = UploadedPaperRepository.get(mapped_pid)
+            if isinstance(record, dict) and record.get("owner") == owner and record.get("sha256") == sha256:
+                return mapped_pid, record
+
+            # Best-effort self-heal: mapping points to missing/mismatched record.
+            try:
+                with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+                    with updb.transaction():
+                        cur = updb.get(sha_key)
+                        if cur == mapped_pid:
+                            del updb[sha_key]
+            except Exception:
+                pass
+
+        # Fallback: scan the owner's uploads (bounded by MAX_UPLOADS_PER_USER).
+        papers = UploadedPaperRepository.get_by_owner(owner)
+        for pid, data in papers.items():
+            if data.get("sha256") == sha256:
+                # Best-effort: write back mapping for future fast path.
+                try:
+                    with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+                        with updb.transaction():
+                            if not updb.get(sha_key):
+                                updb[sha_key] = pid
+                except Exception:
+                    pass
+                return pid, data
+        return None
+
+    @staticmethod
+    def remove_sha256_mapping(owner: str, sha256: str, pid: str | None = None) -> None:
+        """Remove the sha256 mapping key if it currently points to pid (or unconditionally if pid is None)."""
+        sha_key = UploadedPaperRepository.sha256_mapping_key(owner, sha256)
+        try:
+            with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+                with updb.transaction():
+                    cur = updb.get(sha_key)
+                    if cur is None:
+                        return
+                    if pid is None or cur == pid:
+                        del updb[sha_key]
+        except Exception:
+            return
+
+    @staticmethod
+    def add_to_index(owner: str, pid: str):
+        """Add a PID to the user's index.
+
+        Args:
+            owner: Username
+            pid: Upload PID
+        """
+        # Use a transaction to avoid lost updates under concurrent uploads.
+        with get_uploaded_papers_index_db(flag="c", autocommit=False) as idx_db:
+            with idx_db.transaction():
+                indexed_pids = idx_db.get(owner, [])
+                if pid not in indexed_pids:
+                    indexed_pids.append(pid)
+                    idx_db[owner] = indexed_pids
+
+    @staticmethod
+    def remove_from_index(owner: str, pid: str):
+        """Remove a PID from the user's index.
+
+        Args:
+            owner: Username
+            pid: Upload PID
+        """
+        with get_uploaded_papers_index_db(flag="c", autocommit=False) as idx_db:
+            with idx_db.transaction():
+                indexed_pids = idx_db.get(owner, [])
+                if pid in indexed_pids:
+                    indexed_pids.remove(pid)
+                    idx_db[owner] = indexed_pids
+
+    @staticmethod
+    def update(pid: str, updates: dict) -> bool:
+        """Update specific fields in an uploaded paper.
+
+        Only updates existing records - will NOT create new records if pid doesn't exist.
+        This prevents "resurrection" of deleted records during concurrent operations.
+
+        Args:
+            pid: Upload PID
+            updates: Dictionary of fields to update
+
+        Returns:
+            True if record was updated, False if record doesn't exist
+        """
+        with get_uploaded_papers_db(flag="c") as updb:
+            data = updb.get(pid)
+            # Only update if record exists and is a valid dict
+            if not isinstance(data, dict):
+                return False
+            data.update(updates)
+            data["updated_time"] = time.time()
+            updb[pid] = data
+            return True
+
+    @staticmethod
+    def exists(pid: str) -> bool:
+        """Check if an uploaded paper exists.
+
+        Args:
+            pid: Upload PID
+
+        Returns:
+            True if exists
+        """
+        with get_uploaded_papers_db() as updb:
+            return pid in updb
+
+    @staticmethod
+    def count_by_owner(owner: str) -> int:
+        """Count uploaded papers for a user.
+
+        Args:
+            owner: Username
+
+        Returns:
+            Number of uploaded papers
+        """
+        # Count actual existing papers rather than trusting a potentially stale index.
+        return len(UploadedPaperRepository.get_by_owner(owner))

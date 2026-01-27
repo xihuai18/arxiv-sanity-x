@@ -815,6 +815,7 @@ def svm_rank(
     get_tags_fn=None,
     get_neg_tags_fn=None,
     get_metas_fn=None,
+    compute_upload_features_fn=None,
     user: str | None = None,
 ) -> tuple[list[str], list[float], list[dict]]:
     """SVM-based paper ranking using user tags as training signal.
@@ -874,25 +875,91 @@ def svm_rank(
     if not (tags or s_pids):
         return [], [], []
 
-    # Fast path: cache (safe because we key by dict.db/features.p mtime)
+    # Preload tag db for caching and smart time-filter logic
+    tags_db = {}
+    neg_tags_db = {}
+    if tags:
+        try:
+            tags_db = get_tags_fn() or {}
+        except Exception:
+            tags_db = {}
+        try:
+            neg_tags_db = get_neg_tags_fn() or {}
+        except Exception:
+            neg_tags_db = {}
+
+    # Fast path: cache (extend key when upload training samples are involved)
+    cache_key = None
     try:
         dict_mtime = os.path.getmtime(DICT_DB_FILE) if os.path.exists(DICT_DB_FILE) else 0.0
         feat_mtime = os.path.getmtime(FEATURES_FILE) if os.path.exists(FEATURES_FILE) else 0.0
-        cache_key = (
-            "svm",
-            user,
-            tags,
-            s_pids,
-            float(C),
-            logic,
-            time_filter,
-            int(limit) if limit is not None else None,
-            dict_mtime,
-            feat_mtime,
-        )
-        cached = SVM_RANK_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+
+        upload_pids_in_signal = set()
+        if tags:
+            tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
+            for tag in tags_filter_to:
+                for pid in tags_db.get(tag, set()) or ():
+                    if isinstance(pid, str) and pid.startswith("up_"):
+                        upload_pids_in_signal.add(pid)
+                for pid in neg_tags_db.get(tag, set()) or ():
+                    if isinstance(pid, str) and pid.startswith("up_"):
+                        upload_pids_in_signal.add(pid)
+        if s_pids:
+            for pid in map(str.strip, s_pids.split(",")):
+                if pid.startswith("up_"):
+                    upload_pids_in_signal.add(pid)
+
+        upload_fingerprint = None
+        if upload_pids_in_signal:
+            # If any upload feature file is missing, skip caching to avoid staleness.
+            from hashlib import sha1
+
+            try:
+                from backend.services.upload_similarity_service import (
+                    get_upload_features_path,
+                )
+            except Exception:
+                get_upload_features_path = None
+
+            missing = False
+            parts = []
+            if get_upload_features_path is not None:
+                for upid in sorted(upload_pids_in_signal):
+                    try:
+                        fp = get_upload_features_path(upid)
+                        if not fp.exists():
+                            missing = True
+                            break
+                        parts.append(f"{upid}:{fp.stat().st_mtime_ns}")
+                    except Exception:
+                        missing = True
+                        break
+            else:
+                missing = True
+
+            if not missing:
+                h = sha1("|".join(parts).encode("utf-8")).hexdigest()[:12]
+                upload_fingerprint = (len(upload_pids_in_signal), h)
+
+        if upload_pids_in_signal and upload_fingerprint is None:
+            cache_key = None
+        else:
+            cache_key = (
+                "svm",
+                user,
+                tags,
+                s_pids,
+                float(C),
+                logic,
+                time_filter,
+                int(limit) if limit is not None else None,
+                dict_mtime,
+                feat_mtime,
+                upload_fingerprint,
+            )
+            cached = SVM_RANK_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
     except Exception:
         cache_key = None
 
@@ -904,8 +971,6 @@ def svm_rank(
     # Collect all user-tagged paper IDs for smart time filtering
     user_tagged_pids = set()
     if tags:
-        tags_db = get_tags_fn()
-        neg_tags_db = get_neg_tags_fn()
         tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
         for tag in tags_filter_to:
             if tag in tags_db:
@@ -935,7 +1000,6 @@ def svm_rank(
     tags_filter_to = []
 
     if tags:
-        tags_db = get_tags_fn()
         tags_filter_to = list(tags_db.keys()) if tags == "all" else [t.strip() for t in tags.split(",") if t.strip()]
         if logic == "and":
             tag_counts = {}
@@ -954,7 +1018,6 @@ def svm_rank(
                     pos_weights[pid] = max(pos_weights.get(pid, 0.0), 1.0)
 
         # Collect explicit negative samples for these tags
-        neg_tags_db = get_neg_tags_fn()
         for tag in tags_filter_to:
             if tag not in neg_tags_db:
                 continue
@@ -993,24 +1056,115 @@ def svm_rank(
 
     logger.trace(f"feature loading/caching for {e_time - s_time:.5f}s")
 
-    if found == 0:
-        return [], [], []  # there are no positives?
+    # Collect upload training samples (used for training only; candidates remain arXiv pids)
+    upload_pids = set()
+    if pos_weights:
+        upload_pids.update([pid for pid in pos_weights.keys() if isinstance(pid, str) and pid.startswith("up_")])
+    if neg_weights:
+        upload_pids.update([pid for pid in neg_weights.keys() if isinstance(pid, str) and pid.startswith("up_")])
+
+    upload_rows = []
+    upload_y = []
+    upload_sw = []
+    upload_pos_found = 0
+    if upload_pids:
+        logger.info(f"SVM training includes {len(upload_pids)} uploaded paper(s): {sorted(upload_pids)}")
+        if compute_upload_features_fn is None:
+            from backend.services.upload_similarity_service import (
+                compute_upload_features as compute_upload_features_fn,
+            )
+
+        try:
+            import scipy.sparse as sp
+        except Exception:
+            sp = None
+
+        if sp is not None:
+            for upid in sorted(upload_pids):
+                is_pos = upid in pos_weights
+                is_neg = upid in neg_weights and not is_pos
+                if not (is_pos or is_neg):
+                    continue
+
+                try:
+                    feats = compute_upload_features_fn(upid)
+                except Exception as e:
+                    logger.warning(f"Failed to compute upload features for {upid}: {e}")
+                    continue
+                if not feats:
+                    continue
+                x_up = feats.get("x")
+                if x_up is None:
+                    continue
+
+                try:
+                    if not sp.issparse(x_up):
+                        x_up = sp.csr_matrix(x_up)
+                    if x_up.shape[0] != 1:
+                        x_up = x_up[:1]
+                    if x_up.shape[1] != x.shape[1]:
+                        logger.warning(
+                            f"Upload features dim mismatch for {upid}: got {x_up.shape[1]}, expected {x.shape[1]}"
+                        )
+                        continue
+                except Exception:
+                    continue
+
+                upload_rows.append(x_up)
+                if is_pos:
+                    upload_y.append(1)
+                    upload_sw.append(float(pos_weights.get(upid) or 1.0))
+                    upload_pos_found += 1
+                else:
+                    upload_y.append(0)
+                    upload_sw.append(float(max(1.0, float(SVM_NEG_WEIGHT))))
+
+    if upload_rows:
+        logger.info(
+            f"Successfully loaded {len(upload_rows)} upload feature(s) for SVM training ({upload_pos_found} positive)"
+        )
+
+    if found + upload_pos_found == 0:
+        return [], [], []  # there are no positives (even with uploads)
 
     if found == n:
-        scores = sample_weight
-        if limit is not None:
-            k = min(int(limit), len(scores))
-            if k <= 0:
-                return [], [], []
-            top_ix = np.argpartition(-scores, k - 1)[:k]
-            top_ix = top_ix[np.argsort(-scores[top_ix])]
-        else:
-            top_ix = np.argsort(-scores)
-        pids_out = [pids[int(ix)] for ix in top_ix]
-        scores_out = [100 * float(scores[int(ix)]) for ix in top_ix]
-        return pids_out, scores_out, []
+        # If uploads introduce negative samples, we must train to leverage them.
+        has_upload_negative = any(int(v) == 0 for v in (upload_y or []))
+        if not has_upload_negative:
+            scores = sample_weight
+            if limit is not None:
+                k = min(int(limit), len(scores))
+                if k <= 0:
+                    return [], [], []
+                top_ix = np.argpartition(-scores, k - 1)[:k]
+                top_ix = top_ix[np.argsort(-scores[top_ix])]
+            else:
+                top_ix = np.argsort(-scores)
+            pids_out = [pids[int(ix)] for ix in top_ix]
+            scores_out = [100 * float(scores[int(ix)]) for ix in top_ix]
+            return pids_out, scores_out, []
 
     s_time = time.time()
+
+    # If training data contains only one class, fallback to score-by-weight.
+    try:
+        if upload_rows:
+            y_train_preview = np.concatenate([y, np.asarray(upload_y, dtype=np.int8)])
+            if y_train_preview.min() == y_train_preview.max():
+                scores = sample_weight
+                if limit is not None:
+                    k = min(int(limit), len(scores))
+                    if k <= 0:
+                        return [], [], []
+                    top_ix = np.argpartition(-scores, k - 1)[:k]
+                    top_ix = top_ix[np.argsort(-scores[top_ix])]
+                else:
+                    top_ix = np.argsort(-scores)
+                pids_out = [pids[int(ix)] for ix in top_ix]
+                scores_out = [100 * float(scores[int(ix)]) for ix in top_ix]
+                return pids_out, scores_out, []
+    except Exception:
+        pass
 
     # classify - optimize parameters to accelerate training while maintaining accuracy
     clf = sklearn_svm.LinearSVC(
@@ -1025,7 +1179,23 @@ def svm_rank(
         multi_class="ovr",  # One-vs-rest, faster for binary classification
     )
 
-    clf.fit(x, y, sample_weight=sample_weight)
+    x_train = x
+    y_train = y
+    sample_weight_train = sample_weight
+    if upload_rows:
+        try:
+            import scipy.sparse as sp
+
+            x_train = sp.vstack([x] + upload_rows, format="csr")
+            y_train = np.concatenate([y, np.asarray(upload_y, dtype=np.int8)])
+            sample_weight_train = np.concatenate([sample_weight, np.asarray(upload_sw, dtype=np.float32)])
+        except Exception as e:
+            logger.warning(f"Failed to append upload training samples, fallback to in-slice only: {e}")
+            x_train = x
+            y_train = y
+            sample_weight_train = sample_weight
+
+    clf.fit(x_train, y_train, sample_weight=sample_weight_train)
     e_time = time.time()
     logger.trace(f"SVM fitting data for {e_time - s_time:.5f}s")
 

@@ -422,6 +422,22 @@ def paper_exists(pid: str) -> bool:
     """Fast existence check using metas (always cached)."""
     if not pid:
         return False
+
+    # Check for upload pid
+    from backend.utils.upload_utils import is_upload_pid
+
+    if is_upload_pid(pid):
+        from aslite.repositories import UploadedPaperRepository
+
+        # Uploaded papers are private. Avoid leaking existence to anonymous users
+        # or other users.
+        if not g.user:
+            return False
+        record = UploadedPaperRepository.get(pid)
+        if not record or record.get("owner") != g.user:
+            return False
+        return record.get("parse_status") == "ok"
+
     mdb = get_metas()
     return pid in mdb
 
@@ -641,7 +657,12 @@ def _is_title_like_query(parsed: dict) -> bool:
     return is_title_like_query(parsed)
 
 
-def _title_candidate_scan(parsed: dict, max_candidates: int = 500, max_scan: int = 120000, time_budget_s: float = 0.6):
+def _title_candidate_scan(
+    parsed: dict,
+    max_candidates: int = 500,
+    max_scan: int = 120000,
+    time_budget_s: float = 0.6,
+):
     from backend.services.search_service import title_candidate_scan
 
     return title_candidate_scan(
@@ -792,7 +813,10 @@ def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_
 
 
 def enhanced_search_rank(
-    q: str = "", limit=None, search_mode="keyword", semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+    q: str = "",
+    limit=None,
+    search_mode="keyword",
+    semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
 ):
     """Enhanced search - delegates to search_service.enhanced_search_rank."""
     from backend.services.search_service import (
@@ -961,11 +985,17 @@ def main():
         # Use enhanced search function
         if opt_search_mode == "hybrid":
             pids, scores, score_details = enhanced_search_rank(
-                q=opt_q, limit=dynamic_limit, search_mode=opt_search_mode, semantic_weight=semantic_weight
+                q=opt_q,
+                limit=dynamic_limit,
+                search_mode=opt_search_mode,
+                semantic_weight=semantic_weight,
             )
         else:
             pids, scores = enhanced_search_rank(
-                q=opt_q, limit=dynamic_limit, search_mode=opt_search_mode, semantic_weight=semantic_weight
+                q=opt_q,
+                limit=dynamic_limit,
+                search_mode=opt_search_mode,
+                semantic_weight=semantic_weight,
             )
         logger.debug(
             f"User {g.user} {opt_search_mode} search '{opt_q}' weight={semantic_weight}, time {time.time() - t_s:.3f}s"
@@ -973,25 +1003,38 @@ def main():
     elif opt_rank == "tags":
         t_s = time.time()
         pids, scores, words = svm_rank(
-            tags=opt_tags, C=C, logic=opt_logic, time_filter=opt_time_filter, limit=dynamic_limit
+            tags=opt_tags,
+            s_pids=opt_pid,
+            C=C,
+            logic=opt_logic,
+            time_filter=opt_time_filter,
+            limit=dynamic_limit,
         )
         logger.debug(
-            f"User {g.user} tags {opt_tags} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
+            f"User {g.user} tags {opt_tags} pids {opt_pid} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
         )
     elif opt_rank == "pid":
         t_s = time.time()
         pids, scores, words = svm_rank(
-            s_pids=opt_pid, C=C, logic=opt_logic, time_filter=opt_time_filter, limit=dynamic_limit
+            tags=opt_tags,
+            s_pids=opt_pid,
+            C=C,
+            logic=opt_logic,
+            time_filter=opt_time_filter,
+            limit=dynamic_limit,
         )
         logger.debug(
-            f"User {g.user} pid {opt_pid} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
+            f"User {g.user} tags {opt_tags} pids {opt_pid} C {C} logic {opt_logic} time_filter {opt_time_filter}, time {time.time() - t_s:.3f}s"
         )
     elif opt_rank == "time":
         t_s = time.time()
         if opt_q:
             # If there's a search query, first search then sort by time
             search_result = enhanced_search_rank(
-                q=opt_q, limit=dynamic_limit * 2, search_mode=opt_search_mode, semantic_weight=semantic_weight
+                q=opt_q,
+                limit=dynamic_limit * 2,
+                search_mode=opt_search_mode,
+                semantic_weight=semantic_weight,
             )
             # Handle both 2 and 3 return values (hybrid mode returns 3)
             if len(search_result) == 3:
@@ -1101,7 +1144,12 @@ def main():
 
     pid_to_paper = get_papers_bulk(pids)
     papers = [
-        render_pid(pid, pid_to_utags=pid_to_utags, pid_to_ntags=pid_to_ntags, paper=pid_to_paper.get(pid))
+        render_pid(
+            pid,
+            pid_to_utags=pid_to_utags,
+            pid_to_ntags=pid_to_ntags,
+            paper=pid_to_paper.get(pid),
+        )
         for pid in pids
     ]
     for i, p in enumerate(papers):
@@ -1160,7 +1208,7 @@ def main():
     context["show_score_breakdown"] = opt_rank == "search" and opt_search_mode == "hybrid"
     context["default_summary_model"] = LLM_NAME or ""
     logger.trace(
-        f'User: {context["user"]}\ntags {context["tags"]}\nkeys {context["keys"]}\nctags {context["combined_tags"]}'
+        f"User: {context['user']}\ntags {context['tags']}\nkeys {context['keys']}\nctags {context['combined_tags']}"
     )
     return render_template("index.html", **context)
 
@@ -1211,6 +1259,13 @@ def api_user_stream():
 def inspect():
     # fetch the paper of interest based on the pid
     pid = request.args.get("pid", "")
+
+    # Check for upload pid first
+    from backend.utils.upload_utils import is_upload_pid
+
+    if is_upload_pid(pid):
+        return _inspect_uploaded_paper(pid)
+
     if not paper_exists(pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
 
@@ -1251,6 +1306,133 @@ def inspect():
     return render_template("inspect.html", **context)
 
 
+def _inspect_uploaded_paper(pid: str):
+    """Inspect TF-IDF features for an uploaded paper.
+
+    Similar to the arXiv paper inspect, but uses computed upload features.
+    Requires the user to be logged in and own the paper.
+    """
+    import scipy.sparse as sp
+
+    from aslite.repositories import UploadedPaperRepository
+    from backend.services.upload_similarity_service import (
+        compute_upload_features,
+        load_upload_features,
+    )
+
+    # Uploaded papers are private - require login
+    if not g.user:
+        return "<h1>Error</h1><p>Paper not found.</p>", 404
+
+    # Check if paper exists and belongs to user
+    record = UploadedPaperRepository.get(pid)
+    if not record:
+        return f"<h1>Error</h1><p>Uploaded paper with ID '{pid}' not found.</p>", 404
+
+    if record.get("owner") != g.user:
+        return "<h1>Error</h1><p>Paper not found.</p>", 404
+
+    # Check if paper is parsed
+    if record.get("parse_status") != "ok":
+        return "<h1>Error</h1><p>Paper must be parsed before inspection. Please parse the PDF first.</p>", 400
+
+    # Check if metadata has been extracted
+    meta = record.get("meta_extracted", {})
+    override = record.get("meta_override", {})
+    title = override.get("title") or meta.get("title") or ""
+    abstract = override.get("abstract") or meta.get("abstract") or ""
+    if not title and not abstract:
+        return (
+            "<h1>Error</h1><p>Please extract metadata first (click 'Extract Info' button) before inspecting features.</p>",
+            400,
+        )
+
+    try:
+        # Load or compute features
+        features = load_upload_features(pid)
+        if features is None:
+            # Try to compute features on-demand
+            features = compute_upload_features(pid)
+
+        if features is None:
+            return (
+                "<h1>Error</h1><p>Failed to compute features for this paper. Please ensure metadata has been extracted.</p>",
+                500,
+            )
+
+        # Get TF-IDF vector (avoid using `or` with sparse matrices)
+        tfidf_vec = features.get("x_tfidf")
+        if tfidf_vec is None:
+            tfidf_vec = features.get("tfidf")
+        if tfidf_vec is None:
+            return "<h1>Error</h1><p>No TF-IDF features available for this paper.</p>", 500
+
+        # Load global features for vocab and idf
+        global_features = get_features_cached()
+        if not global_features:
+            return "<h1>Error</h1><p>Global features not available.</p>", 500
+
+        vocab = global_features.get("vocab", {})
+        idf = global_features.get("idf")
+        ivocab = {v: k for k, v in vocab.items()}
+
+        # Extract words and weights from TF-IDF vector
+        words = []
+        if sp.issparse(tfidf_vec):
+            tfidf_arr = np.asarray(tfidf_vec.todense()).flatten()
+        else:
+            tfidf_arr = np.asarray(tfidf_vec).flatten()
+
+        wixs = np.flatnonzero(tfidf_arr)
+        for ix in wixs:
+            if ix in ivocab:
+                words.append(
+                    {
+                        "word": ivocab[ix],
+                        "weight": float(tfidf_arr[ix]),
+                        "idf": float(idf[ix]) if idf is not None and ix < len(idf) else 0.0,
+                    }
+                )
+        words.sort(key=lambda w: w["weight"], reverse=True)
+    except Exception as e:
+        logger.error(f"Failed to compute/load features for uploaded paper {pid}: {e}")
+        return f"<h1>Error</h1><p>Failed to process features: {str(e)}</p>", 500
+
+    # Build paper info for display
+    authors = override.get("authors") or meta.get("authors") or []
+    display_title = title or record.get("original_filename", pid)
+
+    # Format upload time for display
+    created_time = record.get("created_time", 0)
+    if created_time:
+        from datetime import datetime
+
+        dt = datetime.fromtimestamp(created_time)
+        time_str = f"Uploaded: {dt.strftime('%Y-%m-%d %H:%M')}"
+    else:
+        time_str = ""
+
+    paper = {
+        "id": pid,
+        "title": display_title,
+        "authors": ", ".join(authors) if isinstance(authors, list) else str(authors),
+        "summary": abstract,
+        "time": time_str,
+        "tags": "",
+        "kind": "upload",
+    }
+
+    context = default_context()
+    context["paper"] = paper
+    context["words"] = words
+    context["words_desc"] = (
+        "The following are the tokens and their (TF-IDF) weight in the uploaded paper vector. "
+        "These features are used to find similar arXiv papers."
+    )
+    context["title"] = f"Paper Inspect - {display_title}"
+    return render_template("inspect.html", **context)
+
+
 def summary():
     """
     Display AI-generated markdown format summary of the paper.
@@ -1261,6 +1443,29 @@ def summary():
     # Get paper ID
     pid = request.args.get("pid", "")
     logger.debug(f"show paper summary page for paper {pid}")
+
+    # Check for upload pid first
+    from backend.utils.upload_utils import is_upload_pid
+
+    if is_upload_pid(pid):
+        from backend.services.upload_service import get_upload_summary_context
+
+        # Uploaded papers are private. Avoid leaking existence to anonymous users.
+        if not g.user:
+            return "<h1>Error</h1><p>Paper not found.</p>", 404
+
+        context = get_upload_summary_context(pid, g.user)
+        if context is None:
+            return "<h1>Error</h1><p>Paper not found.</p>", 404
+
+        # Add common context
+        base_context = default_context()
+        base_context.update(context)
+        base_context["default_summary_model"] = LLM_NAME or ""
+        base_context["tags"] = _build_user_tag_list() if g.user else []
+        base_context["title"] = f"Paper Summary - {context['paper']['title']}"
+        return render_template("summary.html", **base_context)
+
     raw_pid, version = split_pid_version(pid)
 
     # If versioned PID provided, redirect to unversioned URL
@@ -1563,7 +1768,10 @@ def api_summary_status():
 
         for raw_pid in raw_pids:
             if raw_pid not in existing_pids:
-                statuses[raw_pid] = {"status": "not_found", "last_error": "Paper not found"}
+                statuses[raw_pid] = {
+                    "status": "not_found",
+                    "last_error": "Paper not found",
+                }
                 continue
 
             cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(
@@ -1687,6 +1895,16 @@ def api_paper_image(pid: str, filename: str):
 def api_mineru_image(pid: str, filename: str):
     """Serve paper images from MinerU parsed cache."""
     try:
+        # Check upload pid permission
+        from backend.utils.upload_utils import is_upload_pid
+
+        if is_upload_pid(pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(pid)
+            if not record or record.get("owner") != g.user:
+                abort(404)
+
         return _serve_paper_image(pid, filename, Path(DATA_DIR) / "mineru", ["auto", "vlm", "api"])
     except Exception as e:
         if hasattr(e, "code"):
@@ -1805,7 +2023,10 @@ def _sanitize_summary_meta(meta: dict) -> dict:
 
 
 def generate_paper_summary(
-    pid: str, model: Optional[str] = None, force_refresh: bool = False, cache_only: bool = False
+    pid: str,
+    model: Optional[str] = None,
+    force_refresh: bool = False,
+    cache_only: bool = False,
 ):
     """Generate paper summary - delegates to summary_service.generate_paper_summary."""
     from backend.services.summary_service import (
@@ -2029,6 +2250,31 @@ def about():
 # -----------------------------------------------------------------------------
 
 
+def _resolve_time_delta(time_delta, time_filter):
+    """Resolve time_delta from time_filter string or return provided time_delta.
+
+    Args:
+        time_delta: Explicit time delta in days (float or None)
+        time_filter: String filter like 'day', 'week', 'month', 'year', 'all'
+
+    Returns:
+        float: Resolved time delta in days (defaults to 3.0 if neither provided)
+    """
+    if time_delta is not None:
+        return time_delta
+
+    if time_filter:
+        mapping = {"day": 1.0, "week": 7.0, "month": 30.0, "year": 365.0, "all": 0.0}
+        if time_filter in mapping:
+            return mapping[time_filter]
+        # If time_filter is not in mapping, try to use it directly
+        # (for backward compatibility with numeric string values)
+        return time_filter
+
+    # Default to 3 days
+    return 3.0
+
+
 @contextmanager
 def _temporary_user_context(user):
     """Context manager to temporarily set g.user and g._tags for API calls."""
@@ -2051,9 +2297,11 @@ def api_keyword_search():
         if not data:
             return _api_error("No JSON data provided", 400)
 
-        keyword = data.get("keyword", "")
-        time_delta = data.get("time_delta", 3)  # days
+        keyword = (data.get("keyword") or data.get("q") or data.get("search_query") or "").strip()
+        time_delta = data.get("time_delta", None)  # days
+        time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
+        skip_num = data.get("skip_num", 0)
 
         if not keyword:
             return _api_error("Keyword is required", 400)
@@ -2065,6 +2313,12 @@ def api_keyword_search():
             limit = 50
         if limit <= 0:
             return _api_success(pids=[], scores=[], total_count=0)
+        try:
+            skip_num = max(0, int(skip_num))
+        except Exception:
+            skip_num = 0
+
+        time_delta = _resolve_time_delta(time_delta, time_filter)
         try:
             time_delta = float(time_delta)
         except Exception:
@@ -2087,6 +2341,10 @@ def api_keyword_search():
             pids = [pids[i] for i in keep]
             scores = [scores[i] for i in keep]
 
+        if skip_num:
+            pids = pids[skip_num:]
+            scores = scores[skip_num:]
+
         # Limit final result count
         if len(pids) > limit:
             pids = pids[:limit]
@@ -2102,21 +2360,25 @@ def api_keyword_search():
 def api_tag_search():
     """API interface: single tag recommendation"""
     try:
-        data = request.get_json()
-        logger.trace(f"API tag search data: {data}")
-        if not data:
-            return _api_error("No JSON data provided", 400)
+        data, err = _parse_api_request(require_login=True, require_csrf=False)
+        if err:
+            return err
 
-        tag_name = data.get("tag_name", "")  # tag name
-        user = data.get("user", "")  # username
-        time_delta = data.get("time_delta", 3)  # days
+        logger.trace(f"API tag search data: {data}")
+
+        tag_name = (data.get("tag_name") or data.get("tag") or "").strip()  # tag name
+        body_user = data.get("user", "")  # backward-compatible field
+        time_delta = data.get("time_delta", None)  # days
+        time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
+        skip_num = data.get("skip_num", 0)
         C = data.get("C", 0.1)
 
         if not tag_name:
             return _api_error("tag_name is required", 400)
-        if not user:
-            return _api_error("user is required", 400)
+        if body_user and body_user != g.user:
+            logger.warning(f"API tag search user mismatch: body={body_user}, session={g.user}")
+            return _api_error("User mismatch", 403)
         try:
             limit = min(int(limit), MAX_RESULTS)
         except Exception:
@@ -2124,17 +2386,23 @@ def api_tag_search():
         if limit <= 0:
             return _api_success(pids=[], scores=[], total_count=0)
         try:
+            skip_num = max(0, int(skip_num))
+        except Exception:
+            skip_num = 0
+
+        time_delta = _resolve_time_delta(time_delta, time_filter)
+        try:
             time_delta = float(time_delta)
         except Exception:
             return _api_error("time_delta must be a number", 400)
 
-        with _temporary_user_context(user) as user_tags:
+        with _temporary_user_context(g.user) as user_tags:
             # Check if user has this tag
             if tag_name not in user_tags or len(user_tags[tag_name]) == 0:
-                logger.warning(f"User {user} has no papers tagged with '{tag_name}'")
+                logger.warning(f"User {g.user} has no papers tagged with '{tag_name}'")
                 return _api_success(pids=[], scores=[], total_count=0)
 
-            logger.trace(f"User {user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
+            logger.trace(f"User {g.user} has {len(user_tags[tag_name])} papers tagged with '{tag_name}'")
 
             # Use tag name for recommendation
             try:
@@ -2143,7 +2411,12 @@ def api_tag_search():
                 svm_limit = MAX_RESULTS
 
             rec_pids, rec_scores, _ = svm_rank(
-                tags=tag_name, s_pids="", C=C, logic="and", time_filter=str(time_delta), limit=svm_limit
+                tags=tag_name,
+                s_pids="",
+                C=C,
+                logic="and",
+                time_filter=str(time_delta),
+                limit=svm_limit,
             )
 
             logger.trace(f"svm_rank returned {len(rec_pids)} results before filtering")
@@ -2155,6 +2428,10 @@ def api_tag_search():
                 keep = [i for i, pid in enumerate(rec_pids) if pid not in exclude_set]
                 rec_pids = [rec_pids[i] for i in keep]
                 rec_scores = [rec_scores[i] for i in keep]
+
+        if skip_num:
+            rec_pids = rec_pids[skip_num:]
+            rec_scores = rec_scores[skip_num:]
 
         # Limit result count
         if len(rec_pids) > limit:
@@ -2171,22 +2448,29 @@ def api_tag_search():
 def api_tags_search():
     """API interface: joint tag recommendation"""
     try:
-        data = request.get_json()
+        data, err = _parse_api_request(require_login=True, require_csrf=False)
+        if err:
+            return err
+
         logger.trace(f"API combined tags search data: {data}")
-        if not data:
-            return _api_error("No JSON data provided", 400)
 
         tags_list = data.get("tags", [])  # List[tag_name]
-        user = data.get("user", "")  # username
+        body_user = data.get("user", "")  # backward-compatible field
         logic = data.get("logic", "and")  # and|or
-        time_delta = data.get("time_delta", 3)  # days
+        time_delta = data.get("time_delta", None)  # days
+        time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
+        skip_num = data.get("skip_num", 0)
         C = data.get("C", 0.1)
+
+        if isinstance(tags_list, str):
+            tags_list = [t.strip() for t in tags_list.split(",") if t.strip()]
 
         if not tags_list:
             return _api_error("Tags list is required", 400)
-        if not user:
-            return _api_error("user is required", 400)
+        if body_user and body_user != g.user:
+            logger.warning(f"API tags search user mismatch: body={body_user}, session={g.user}")
+            return _api_error("User mismatch", 403)
         try:
             limit = min(int(limit), MAX_RESULTS)
         except Exception:
@@ -2194,15 +2478,21 @@ def api_tags_search():
         if limit <= 0:
             return _api_success(pids=[], scores=[], total_count=0)
         try:
+            skip_num = max(0, int(skip_num))
+        except Exception:
+            skip_num = 0
+
+        time_delta = _resolve_time_delta(time_delta, time_filter)
+        try:
             time_delta = float(time_delta)
         except Exception:
             return _api_error("time_delta must be a number", 400)
 
-        with _temporary_user_context(user) as user_tags:
+        with _temporary_user_context(g.user) as user_tags:
             # Check if user has any of the tags
             valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
             if not valid_tags:
-                logger.warning(f"User {user} has no papers tagged with any of {tags_list}")
+                logger.warning(f"User {g.user} has no papers tagged with any of {tags_list}")
                 return _api_success(pids=[], scores=[], total_count=0)
 
             # Convert tag list to comma-separated string
@@ -2214,7 +2504,12 @@ def api_tags_search():
                 svm_limit = MAX_RESULTS
 
             rec_pids, rec_scores, _ = svm_rank(
-                tags=tags_str, s_pids="", C=C, logic=logic, time_filter=str(time_delta), limit=svm_limit
+                tags=tags_str,
+                s_pids="",
+                C=C,
+                logic=logic,
+                time_filter=str(time_delta),
+                limit=svm_limit,
             )
 
             # Exclude papers already tagged by the user under any of the involved tags (positive or negative)
@@ -2227,6 +2522,10 @@ def api_tags_search():
             keep = [i for i, pid in enumerate(rec_pids) if pid not in all_tagged]
             rec_pids = [rec_pids[i] for i in keep]
             rec_scores = [rec_scores[i] for i in keep]
+
+        if skip_num:
+            rec_pids = rec_pids[skip_num:]
+            rec_scores = rec_scores[skip_num:]
 
         # Limit result count
         if len(rec_pids) > limit:
@@ -2602,6 +2901,7 @@ def login():
     """Log in user - delegates to auth_service."""
     from backend.services.auth_service import login_user
 
+    _csrf_protect()
     username = (request.form.get("username") or "").strip()
     return redirect(login_user(username))
 
@@ -2610,6 +2910,7 @@ def logout():
     """Log out user - delegates to auth_service."""
     from backend.services.auth_service import logout_user
 
+    _csrf_protect()
     return redirect(logout_user())
 
 
@@ -2621,6 +2922,7 @@ def register_email():
     """Register email - delegates to auth_service."""
     from backend.services.auth_service import register_user_email
 
+    _csrf_protect()
     email = (request.form.get("email") or "").strip()
     return redirect(register_user_email(email))
 
@@ -2673,7 +2975,10 @@ def _update_summary_status_db(
 
 
 def _trigger_summary_async(
-    user: Optional[str], pid: str, model: Optional[str] = None, priority: Optional[int] = None
+    user: Optional[str],
+    pid: str,
+    model: Optional[str] = None,
+    priority: Optional[int] = None,
 ) -> Optional[str]:
     """Trigger summary generation - delegates to readinglist_service."""
     from backend.services.readinglist_service import trigger_summary_async
@@ -2737,7 +3042,13 @@ def readinglist_page():
             pos_n = len(tags_db.get(t, set()))
             neg_n = len(neg_tags_db.get(t, set()))
             rtags.append(
-                {"name": t, "n": pos_n + neg_n, "pos_n": pos_n, "neg_n": neg_n, "neg_only": pos_n == 0 and neg_n > 0}
+                {
+                    "name": t,
+                    "n": pos_n + neg_n,
+                    "pos_n": pos_n,
+                    "neg_n": neg_n,
+                    "neg_only": pos_n == 0 and neg_n > 0,
+                }
             )
         if rtags:
             rtags.append({"name": "all"})

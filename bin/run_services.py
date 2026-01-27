@@ -693,13 +693,14 @@ def main() -> int:
         if huey_worker_type not in {"thread", "process", "greenlet"}:
             huey_worker_type = "thread"
 
+        # Use wrapper script for memory limit support
+        huey_consumer_script = bin_dir / "huey_consumer.py"
         services.append(
             ServiceSpec(
                 name="huey",
                 cmd=[
                     sys.executable,
-                    "-m",
-                    "huey.bin.huey_consumer",
+                    str(huey_consumer_script),
                     "tasks.huey",
                     "-w",
                     str(huey_workers),

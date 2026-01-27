@@ -11,16 +11,20 @@ from unittest.mock import MagicMock, patch
 class TestWarmupDataCache:
     """Tests for _warmup_data_cache function."""
 
-    @patch("backend.services.background.logger")
-    def test_warmup_data_cache_success(self, mock_logger):
-        """Test successful data cache warmup."""
-        with patch("backend.services.background._warmup_data_cache") as mock_warmup:
-            mock_warmup()
-            mock_warmup.assert_called_once()
-
+    @patch("backend.services.background._is_data_cache_loaded", return_value=False)
     @patch("backend.services.data_service.warmup_data_cache")
     @patch("backend.services.background.logger")
-    def test_warmup_data_cache_handles_exception(self, mock_logger, mock_warmup):
+    def test_warmup_data_cache_success(self, mock_logger, mock_warmup, mock_is_loaded):
+        """Test successful data cache warmup."""
+        from backend.services.background import _warmup_data_cache
+
+        _warmup_data_cache()
+        mock_warmup.assert_called_once()
+
+    @patch("backend.services.background._is_data_cache_loaded", return_value=False)
+    @patch("backend.services.data_service.warmup_data_cache")
+    @patch("backend.services.background.logger")
+    def test_warmup_data_cache_handles_exception(self, mock_logger, mock_warmup, mock_is_loaded):
         """Test that warmup handles exceptions gracefully."""
         from backend.services.background import _warmup_data_cache
 
@@ -34,12 +38,21 @@ class TestWarmupDataCache:
 class TestWarmupMlCache:
     """Tests for _warmup_ml_cache function."""
 
+    @patch("backend.services.background._is_features_cache_loaded", return_value=False)
+    @patch("backend.services.semantic_service.get_semantic_model")
+    @patch("backend.services.semantic_service.get_paper_embeddings")
+    @patch("backend.services.data_service.get_features_cached")
     @patch("backend.services.background.logger")
-    def test_warmup_ml_cache_success(self, mock_logger):
+    def test_warmup_ml_cache_success(
+        self, mock_logger, mock_get_features_cached, mock_get_paper_embeddings, mock_get_semantic_model, mock_is_loaded
+    ):
         """Test successful ML cache warmup."""
-        with patch("backend.services.background._warmup_ml_cache") as mock_warmup:
-            mock_warmup()
-            mock_warmup.assert_called_once()
+        from backend.services.background import _warmup_ml_cache
+
+        _warmup_ml_cache()
+        mock_get_features_cached.assert_called_once()
+        mock_get_paper_embeddings.assert_called_once()
+        mock_get_semantic_model.assert_called_once()
 
 
 class TestIsSchedulerRunning:

@@ -14,8 +14,33 @@ _SCHEDULER = None
 _SUMMARY_REPAIR_JOB = False
 
 
+def _is_data_cache_loaded() -> bool:
+    """Check if data cache (metas/pids) is already loaded."""
+    try:
+        from .data_service import _METAS_CACHE, _PIDS_CACHE
+
+        return _METAS_CACHE is not None and _PIDS_CACHE is not None
+    except Exception:
+        return False
+
+
+def _is_features_cache_loaded() -> bool:
+    """Check if features cache is already loaded."""
+    try:
+        from .data_service import _FEATURES_CACHE
+
+        return _FEATURES_CACHE is not None
+    except Exception:
+        return False
+
+
 def _warmup_data_cache():
     """Warm up data cache in background."""
+    # Skip if already loaded (e.g., by preload in master process)
+    if _is_data_cache_loaded():
+        logger.debug("Data cache already loaded, skipping warmup")
+        return
+
     try:
         from .data_service import warmup_data_cache
 
@@ -27,6 +52,11 @@ def _warmup_data_cache():
 
 def _warmup_ml_cache():
     """Warm up ML-related caches in background."""
+    # Skip if already loaded (e.g., by preload in master process)
+    if _is_features_cache_loaded():
+        logger.debug("Features cache already loaded, skipping warmup")
+        return
+
     try:
         from .data_service import get_features_cached
         from .semantic_service import get_paper_embeddings, get_semantic_model

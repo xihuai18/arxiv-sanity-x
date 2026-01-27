@@ -250,6 +250,11 @@
         async function applyRemote(tagName, label) {
             if (!pid) throw new Error('pid is required for tag dropdown');
             const t = String(tagName || '').trim();
+            const prevSelected = state.selectedTags.slice();
+            const prevNegative = state.negativeTags.slice();
+            ensureAvailable(t);
+            applyLocal(t, label);
+            render();
             const resp = await csrfFetch('/api/tag_feedback', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -257,10 +262,12 @@
             });
             const data = await resp.json().catch(() => null);
             if (!data || !data.success) {
+                state.selectedTags = prevSelected;
+                state.negativeTags = prevNegative;
+                render();
+                emit();
                 throw new Error(data && data.error ? data.error : 'Failed to update tag');
             }
-            ensureAvailable(t);
-            applyLocal(t, label);
         }
 
         function render() {
@@ -276,6 +283,17 @@
                             state.searchValue = '';
                             state.newTagValue = '';
                         }
+                        const dropdown = document.getElementById(dropdownId);
+                        if (dropdown) {
+                            const paperCard = dropdown.closest('.rel_paper');
+                            if (paperCard) {
+                                if (state.open) {
+                                    paperCard.classList.add('dropdown-open');
+                                } else {
+                                    paperCard.classList.remove('dropdown-open');
+                                }
+                            }
+                        }
                         render();
                         emit();
                     },
@@ -285,19 +303,23 @@
                         const next = isPos ? -1 : isNeg ? 0 : 1;
                         applyRemote(tag, next).catch(err => {
                             console.error('Failed to update tag feedback:', err);
-                            alert(
+                            const msg =
                                 'Failed to update tag feedback: ' +
-                                    (err && err.message ? err.message : String(err))
-                            );
+                                (err && err.message ? err.message : String(err));
+                            const c = (window && window.ArxivSanityCommon) || {};
+                            if (typeof c.showToast === 'function')
+                                c.showToast(msg, { type: 'error' });
                         });
                     },
                     onClearTag: tag => {
                         applyRemote(tag, 0).catch(err => {
                             console.error('Failed to clear tag:', err);
-                            alert(
+                            const msg =
                                 'Failed to clear tag: ' +
-                                    (err && err.message ? err.message : String(err))
-                            );
+                                (err && err.message ? err.message : String(err));
+                            const c = (window && window.ArxivSanityCommon) || {};
+                            if (typeof c.showToast === 'function')
+                                c.showToast(msg, { type: 'error' });
                         });
                     },
                     newTagValue: state.newTagValue,
@@ -317,10 +339,12 @@
                             })
                             .catch(err => {
                                 console.error('Failed to add new tag:', err);
-                                alert(
+                                const msg =
                                     'Failed to add new tag: ' +
-                                        (err && err.message ? err.message : String(err))
-                                );
+                                    (err && err.message ? err.message : String(err));
+                                const c = (window && window.ArxivSanityCommon) || {};
+                                if (typeof c.showToast === 'function')
+                                    c.showToast(msg, { type: 'error' });
                             });
                     },
                     dropdownId: dropdownId,
@@ -343,6 +367,13 @@
                 state.open = false;
                 state.searchValue = '';
                 state.newTagValue = '';
+                const dropdown = document.getElementById(dropdownId);
+                if (dropdown) {
+                    const paperCard = dropdown.closest('.rel_paper');
+                    if (paperCard) {
+                        paperCard.classList.remove('dropdown-open');
+                    }
+                }
                 render();
                 emit();
             },

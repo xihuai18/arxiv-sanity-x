@@ -615,14 +615,20 @@ class PaperComponent extends React.Component {
 
         this.applyTagFeedback(tagName, nextLabel).catch(error => {
             console.error('Error updating tag feedback:', error);
-            alert('Failed to update tag feedback: ' + error.message);
+            const c = (window && window.ArxivSanityCommon) || {};
+            if (typeof c.showToast === 'function') {
+                c.showToast('Failed to update tag feedback: ' + error.message, { type: 'error' });
+            }
         });
     }
 
     handleClearTag(tagName) {
         this.applyTagFeedback(tagName, 0).catch(error => {
             console.error('Error clearing tag feedback:', error);
-            alert('Failed to clear tag feedback: ' + error.message);
+            const c = (window && window.ArxivSanityCommon) || {};
+            if (typeof c.showToast === 'function') {
+                c.showToast('Failed to clear tag feedback: ' + error.message, { type: 'error' });
+            }
         });
     }
 
@@ -654,7 +660,10 @@ class PaperComponent extends React.Component {
             })
             .catch(error => {
                 console.error('Error adding new tag:', error);
-                alert('Failed to add new tag: ' + error.message);
+                const c = (window && window.ArxivSanityCommon) || {};
+                if (typeof c.showToast === 'function') {
+                    c.showToast('Failed to add new tag: ' + error.message, { type: 'error' });
+                }
             });
     }
 
@@ -1165,22 +1174,18 @@ const TagList = props => {
                                                 <button
                                                     class={
                                                         'tag-manage-label ' +
-                                                        (it.label === 1
-                                                            ? 'pos'
-                                                            : it.label === -1
-                                                              ? 'neg'
-                                                              : 'none')
+                                                        (it.label === 0
+                                                            ? 'removed'
+                                                            : it.label === 1
+                                                              ? 'pos'
+                                                              : 'neg')
                                                     }
                                                     onClick={() =>
-                                                        props.onManageCyclePid(it.pid, it.label)
+                                                        props.onManageTogglePid(it.pid, it.label)
                                                     }
-                                                    title="Cycle label"
+                                                    title="Toggle positive/negative"
                                                 >
-                                                    {it.label === 1
-                                                        ? '+'
-                                                        : it.label === -1
-                                                          ? '−'
-                                                          : '·'}
+                                                    {it.label === -1 ? '−' : '+'}
                                                 </button>
                                                 <div class="tag-manage-main">
                                                     <div class="tag-manage-title">
@@ -1190,7 +1195,7 @@ const TagList = props => {
                                                                 encodeURIComponent(it.pid)
                                                             }
                                                             target="_blank"
-                                                            rel="noreferrer"
+                                                            rel="noopener noreferrer"
                                                         >
                                                             {it.title || it.pid}
                                                         </a>
@@ -1214,6 +1219,7 @@ const TagList = props => {
                                                 <button
                                                     class="btn btn-cancel tag-manage-remove"
                                                     onClick={() => props.onManageSetPid(it.pid, 0)}
+                                                    disabled={it.label === 0}
                                                 >
                                                     Remove
                                                 </button>
@@ -1298,7 +1304,7 @@ class TagListComponent extends React.Component {
         this.handleManageSearchChange = this.handleManageSearchChange.bind(this);
         this.handleManagePrevPage = this.handleManagePrevPage.bind(this);
         this.handleManageNextPage = this.handleManageNextPage.bind(this);
-        this.handleManageCyclePid = this.handleManageCyclePid.bind(this);
+        this.handleManageTogglePid = this.handleManageTogglePid.bind(this);
         this.handleManageSetPid = this.handleManageSetPid.bind(this);
         this.handleManageAddPidsChange = this.handleManageAddPidsChange.bind(this);
         this.handleManageAddPids = this.handleManageAddPids.bind(this);
@@ -1635,9 +1641,10 @@ class TagListComponent extends React.Component {
         }
     }
 
-    handleManageCyclePid(pid, currentLabel) {
-        const cur = Number(currentLabel || 0);
-        const next = cur === 1 ? -1 : cur === -1 ? 0 : 1;
+    handleManageTogglePid(pid, currentLabel) {
+        const cur = Number(currentLabel);
+        const normalized = cur === -1 ? -1 : cur === 1 ? 1 : 0;
+        const next = normalized === 1 ? -1 : 1;
         this.handleManageSetPid(pid, next);
     }
 
@@ -1820,7 +1827,7 @@ class TagListComponent extends React.Component {
                 onManageSearchChange={this.handleManageSearchChange}
                 onManagePrevPage={this.handleManagePrevPage}
                 onManageNextPage={this.handleManageNextPage}
-                onManageCyclePid={this.handleManageCyclePid}
+                onManageTogglePid={this.handleManageTogglePid}
                 onManageSetPid={this.handleManageSetPid}
                 onManageAddPidsChange={this.handleManageAddPidsChange}
                 onManageAddPids={this.handleManageAddPids}

@@ -83,6 +83,32 @@ var defaultSummaryModel = {{ default_summary_model | tojson }};
         <h3>No papers in reading list</h3>
         <p>Add papers from the main page by clicking the bookmark icon.</p>
     </div>
+
+    <!-- Uploaded Papers Section -->
+    <div class="rl-section-divider"></div>
+    <div class="rl-header rl-uploaded-header">
+        <h2>📤 Uploaded Papers</h2>
+        <p>Your private uploaded PDFs.</p>
+    </div>
+
+    <div class="rl-upload-area" id="upload-area">
+        <input type="file" id="pdf-upload-input" accept=".pdf" style="display: none;">
+        <button type="button" class="upload-btn" id="upload-btn">
+            <span class="upload-icon">📄</span>
+            <span>Upload PDF</span>
+        </button>
+        <div class="upload-progress" id="upload-progress" style="display: none;">
+            <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+            <span class="progress-text" id="progress-text">Uploading...</span>
+        </div>
+    </div>
+
+    <div id="uploaded-papers"></div>
+
+    <div id="uploaded-empty-state">
+        <h3>No uploaded papers</h3>
+        <p>Upload a PDF to get started. Your papers are private and only visible to you.</p>
+    </div>
     {% endif %}
 </div>
 {% endblock %}

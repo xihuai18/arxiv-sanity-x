@@ -20,6 +20,8 @@
             if (!url) return false;
             const s = String(url).trim();
             if (!s) return false;
+            // Block scheme-relative URLs like //evil.com
+            if (s.startsWith('//')) return false;
 
             if (allowHash && s.startsWith('#')) return true;
             if (allowRelative && s.startsWith('/')) return true;

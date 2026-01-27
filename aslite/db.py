@@ -59,7 +59,12 @@ class SqliteKV:
     """
 
     def __init__(
-        self, db_path: str, tablename: str, flag: str = "r", autocommit: bool = True, compressed: bool = False
+        self,
+        db_path: str,
+        tablename: str,
+        flag: str = "r",
+        autocommit: bool = True,
+        compressed: bool = False,
     ):
         """
         Args:
@@ -113,7 +118,10 @@ class SqliteKV:
                 self._conn.commit()
         elif flag == "r":
             # Verify table exists for read-only mode
-            cursor = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tablename,))
+            cursor = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (tablename,),
+            )
             if cursor.fetchone() is None:
                 self._conn.close()
                 raise sqlite3.OperationalError(f"no such table: {tablename}")
@@ -315,6 +323,32 @@ class SqliteKV:
     def __exit__(self, *args):
         self.close()
 
+    @contextmanager
+    def transaction(self, mode: str = "IMMEDIATE"):
+        """Execute multiple operations in a single SQLite transaction.
+
+        This is useful for read-modify-write updates on a single key where we
+        want to avoid lost updates under concurrency.
+        """
+        if self.flag == "r":
+            raise RuntimeError("Cannot start a transaction on read-only database")
+
+        mode_u = (mode or "IMMEDIATE").upper()
+        if mode_u not in ("DEFERRED", "IMMEDIATE", "EXCLUSIVE"):
+            raise ValueError(f"Invalid transaction mode: {mode}")
+
+        self._execute_with_retry(f"BEGIN {mode_u}")
+        try:
+            yield self
+        except Exception:
+            try:
+                self._execute_with_retry("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        else:
+            self._commit_with_retry()
+
     def __del__(self):
         """Ensure connection is closed when object is garbage collected."""
         self.close()
@@ -394,42 +428,104 @@ def _safe_open_db(
             # Table or DB doesn't exist, create it first
             with SqliteKV(db_path, tablename, flag="c", autocommit=True, compressed=compressed):
                 pass  # Just create and close
-            return SqliteKV(db_path, tablename, flag=flag, autocommit=autocommit, compressed=compressed)
+            return SqliteKV(
+                db_path,
+                tablename,
+                flag=flag,
+                autocommit=autocommit,
+                compressed=compressed,
+            )
         raise
 
 
 def get_papers_db(flag="r", autocommit=True):
     """Get papers database (compressed)."""
-    return _safe_open_db(PAPERS_DB_FILE, "papers", flag, autocommit, compressed=True, allow_create_on_read=False)
+    return _safe_open_db(
+        PAPERS_DB_FILE,
+        "papers",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=False,
+    )
 
 
 def get_metas_db(flag="r", autocommit=True):
     """Get metas database (not compressed, for faster access)."""
-    return _safe_open_db(PAPERS_DB_FILE, "metas", flag, autocommit, compressed=False, allow_create_on_read=False)
+    return _safe_open_db(
+        PAPERS_DB_FILE,
+        "metas",
+        flag,
+        autocommit,
+        compressed=False,
+        allow_create_on_read=False,
+    )
 
 
 def get_tags_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "tags", flag, autocommit, compressed=True, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "tags",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
 
 
 def get_neg_tags_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "neg_tags", flag, autocommit, compressed=True, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "neg_tags",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
 
 
 def get_combined_tags_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "combined_tags", flag, autocommit, compressed=True, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "combined_tags",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
 
 
 def get_keywords_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "keywords", flag, autocommit, compressed=True, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "keywords",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
 
 
 def get_last_active_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "last_active", flag, autocommit, compressed=False, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "last_active",
+        flag,
+        autocommit,
+        compressed=False,
+        allow_create_on_read=True,
+    )
 
 
 def get_email_db(flag="r", autocommit=True):
-    return _safe_open_db(DICT_DB_FILE, "email", flag, autocommit, compressed=False, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "email",
+        flag,
+        autocommit,
+        compressed=False,
+        allow_create_on_read=True,
+    )
 
 
 def get_readinglist_db(flag="r", autocommit=True):
@@ -438,19 +534,70 @@ def get_readinglist_db(flag="r", autocommit=True):
     Key format: "user::pid" (e.g., "alice::2301.00001")
     Value: {added_time, top_tags, summary_triggered}
     """
-    return _safe_open_db(DICT_DB_FILE, "readinglist", flag, autocommit, compressed=True, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "readinglist",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
 
 
 def get_readinglist_index_db(flag="r", autocommit=True):
     """Per-user reading list index to avoid full scans."""
     return _safe_open_db(
-        DICT_DB_FILE, "readinglist_index", flag, autocommit, compressed=True, allow_create_on_read=True
+        DICT_DB_FILE,
+        "readinglist_index",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
+
+
+def get_uploaded_papers_db(flag="r", autocommit=True):
+    """
+    Uploaded papers database.
+    Key format: pid (e.g., "up_V1StGXR8_Z5j")
+    Value: UploadedPaper dict with metadata, parse status, etc.
+    """
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "uploaded_papers",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
+    )
+
+
+def get_uploaded_papers_index_db(flag="r", autocommit=True):
+    """
+    Per-user uploaded papers index to avoid full scans.
+    Key format: user
+    Value: list of pids
+    """
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "uploaded_papers_index",
+        flag,
+        autocommit,
+        compressed=True,
+        allow_create_on_read=True,
     )
 
 
 def get_summary_status_db(flag="r", autocommit=True):
     """Summary status store."""
-    return _safe_open_db(DICT_DB_FILE, "summary_status", flag, autocommit, compressed=False, allow_create_on_read=True)
+    return _safe_open_db(
+        DICT_DB_FILE,
+        "summary_status",
+        flag,
+        autocommit,
+        compressed=False,
+        allow_create_on_read=True,
+    )
 
 
 def readinglist_key(user: str, pid: str) -> str:

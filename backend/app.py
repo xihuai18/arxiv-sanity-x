@@ -18,6 +18,7 @@ from .blueprints import (
     api_sse,
     api_summary,
     api_tags,
+    api_uploads,
     api_user,
     web,
 )
@@ -98,8 +99,8 @@ def create_app() -> Flask:
             is_localhost = host in ("localhost", "127.0.0.1", "::1")
             if request.is_secure or is_localhost:
                 resp.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to set COOP header: {e}")
         resp.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
         resp.headers.setdefault(
             "Permissions-Policy",
@@ -118,6 +119,16 @@ def create_app() -> Flask:
             else:
                 # Short cache for non-hashed files (fallback)
                 resp.headers.setdefault("Cache-Control", "public, max-age=3600")
+        else:
+            # HTML pages must not be cached:
+            # - prevents stale CSRF meta after server restart
+            # - prevents stale hashed asset references after deploy
+            try:
+                if resp.mimetype == "text/html":
+                    resp.headers.setdefault("Cache-Control", "no-store")
+                    resp.headers.setdefault("Pragma", "no-cache")
+            except Exception as e:
+                logger.debug(f"Failed to set cache headers for HTML: {e}")
 
         return resp
 
@@ -146,6 +157,7 @@ def create_app() -> Flask:
     app.register_blueprint(api_tags.bp)
     app.register_blueprint(api_papers.bp)
     app.register_blueprint(api_readinglist.bp)
+    app.register_blueprint(api_uploads.bp)
 
     from . import legacy
 

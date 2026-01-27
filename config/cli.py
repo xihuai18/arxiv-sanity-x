@@ -59,7 +59,15 @@ def cmd_show(args):
         print(f"  summary_lang: {settings.llm.summary_lang}")
         print(f"  fallback:     {settings.llm.fallback_models}")
 
-        print("\n🔢 Embedding Configuration:")
+        print("\n� Extract Info LLM Configuration:")
+        print(f"  model_name:   {settings.extract_info.model_name}")
+        print(f"  base_url:     {settings.extract_info.base_url or '(uses LLM base_url)'}")
+        print(f"  api_key:      {'*' * 8 if settings.extract_info.api_key else '(uses LLM api_key)'}")
+        print(f"  temperature:  {settings.extract_info.temperature}")
+        print(f"  max_tokens:   {settings.extract_info.max_tokens}")
+        print(f"  timeout:      {settings.extract_info.timeout}s")
+
+        print("\n�🔢 Embedding Configuration:")
         print(f"  port:         {settings.embedding.port}")
         print(f"  use_llm_api:  {settings.embedding.use_llm_api}")
         print(f"  model_name:   {settings.embedding.model_name}")
@@ -167,7 +175,10 @@ def cmd_validate(args):
     # Check MinerU configuration
     if settings.mineru.enabled and settings.mineru.backend == "api":
         if not settings.mineru.api_key:
-            errors.append("MinerU is enabled and using API backend, but API key is not set")
+            errors.append(
+                "MinerU is enabled and using API backend, but API key is not set "
+                "(set MINERU_API_KEY / ARXIV_SANITY_MINERU_API_KEY, or disable MinerU via ARXIV_SANITY_MINERU_ENABLED=false)"
+            )
 
     # Check email configuration
     if settings.email.from_email and not settings.email.smtp_server:

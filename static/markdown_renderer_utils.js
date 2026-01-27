@@ -5,7 +5,9 @@
 
 (function (global) {
     const NS = 'ArxivSanityMarkdownRenderer';
-    const Sanitizer = global.ArxivSanityMarkdownSanitizer;
+    function _getSanitizer() {
+        return global.ArxivSanityMarkdownSanitizer || null;
+    }
 
     function createMarkdownIt(options) {
         if (typeof global.markdownit === 'undefined') return null;
@@ -13,12 +15,14 @@
     }
 
     function setSafeLinkValidator(md, options) {
+        const Sanitizer = _getSanitizer();
         if (!md || !Sanitizer) return md;
         md.validateLink = Sanitizer.buildLinkValidator(options);
         return md;
     }
 
     function applyTextEscapeRenderer(md) {
+        const Sanitizer = _getSanitizer();
         if (!md || !Sanitizer) return md;
         md.renderer.rules.text = function (tokens, idx) {
             return Sanitizer.escapeText(tokens[idx].content);

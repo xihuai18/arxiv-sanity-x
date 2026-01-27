@@ -7,12 +7,34 @@
     if (typeof window === 'undefined') return;
 
     const NS = 'ArxivSanitySummaryMarkdown';
-    const CommonUtils = global.ArxivSanityCommon;
-    const Renderer = global.ArxivSanityMarkdownRenderer;
-    const Sanitizer = global.ArxivSanityMarkdownSanitizer;
-    const DomUtils = global.ArxivSanitySummaryMarkdownDom;
-    const escapeHtml = CommonUtils.escapeHtml;
-    const isSafeUrl = CommonUtils.isSafeUrl;
+    function _getCommonUtils() {
+        return global.ArxivSanityCommon || null;
+    }
+    function _getRenderer() {
+        return global.ArxivSanityMarkdownRenderer || null;
+    }
+    function _getDomUtils() {
+        return global.ArxivSanitySummaryMarkdownDom || null;
+    }
+
+    function escapeHtml(text) {
+        const CommonUtils = _getCommonUtils();
+        if (CommonUtils && typeof CommonUtils.escapeHtml === 'function')
+            return CommonUtils.escapeHtml(text);
+        return String(text || '');
+    }
+
+    function isSafeUrl(href) {
+        const CommonUtils = _getCommonUtils();
+        if (CommonUtils && typeof CommonUtils.isSafeUrl === 'function')
+            return CommonUtils.isSafeUrl(href);
+        try {
+            const u = new URL(String(href || ''), window.location.href);
+            return u.protocol === 'http:' || u.protocol === 'https:' || u.protocol === 'mailto:';
+        } catch (e) {
+            return false;
+        }
+    }
 
     // Whitelist of safe HTML tags allowed in markdown content
     // These are commonly used for formatting and don't pose security risks
@@ -864,6 +886,7 @@ ${qed}</div>`;
     let markdownRenderer = null;
     function getMarkdownRenderer() {
         if (markdownRenderer) return markdownRenderer;
+        const Renderer = _getRenderer();
         if (!Renderer) return null;
 
         const md = Renderer.createMarkdownIt({
@@ -1040,6 +1063,7 @@ ${qed}</div>`;
         }
 
         try {
+            const DomUtils = _getDomUtils();
             let normalizedText = normalizeIndentedDisplayMath(text);
             normalizedText = fixHardWrappedDisplayMath(normalizedText);
             normalizedText = fixAlignedTags(normalizedText);
@@ -1054,19 +1078,25 @@ ${qed}</div>`;
             const slugCounts = {};
             const tocItems = [];
 
-            for (let i = 0; i < tokens.length; i += 1) {
-                const token = tokens[i];
-                if (token.type !== 'heading_open') continue;
-                const level = Number(token.tag.slice(1));
-                if (Number.isNaN(level) || level > 4) continue;
+            if (
+                DomUtils &&
+                typeof DomUtils.extractHeadingText === 'function' &&
+                typeof DomUtils.slugifyHeading === 'function'
+            ) {
+                for (let i = 0; i < tokens.length; i += 1) {
+                    const token = tokens[i];
+                    if (token.type !== 'heading_open') continue;
+                    const level = Number(token.tag.slice(1));
+                    if (Number.isNaN(level) || level > 4) continue;
 
-                const inlineToken = tokens[i + 1];
-                const title = DomUtils.extractHeadingText(inlineToken);
-                if (!title) continue;
+                    const inlineToken = tokens[i + 1];
+                    const title = DomUtils.extractHeadingText(inlineToken);
+                    if (!title) continue;
 
-                const slug = DomUtils.slugifyHeading(title, slugCounts);
-                token.attrSet('id', slug);
-                tocItems.push({ level, title, slug });
+                    const slug = DomUtils.slugifyHeading(title, slugCounts);
+                    token.attrSet('id', slug);
+                    tocItems.push({ level, title, slug });
+                }
             }
 
             markdownContainer.innerHTML = md.renderer.render(tokens, md.options, env);
@@ -1079,15 +1109,23 @@ ${qed}</div>`;
                 }
             } catch (e) {}
 
-            DomUtils.wrapMarkdownTables(markdownContainer);
-            DomUtils.setupImageZoom(markdownContainer);
+            if (DomUtils) {
+                try {
+                    if (typeof DomUtils.wrapMarkdownTables === 'function')
+                        DomUtils.wrapMarkdownTables(markdownContainer);
+                } catch (e) {}
+                try {
+                    if (typeof DomUtils.setupImageZoom === 'function')
+                        DomUtils.setupImageZoom(markdownContainer);
+                } catch (e) {}
+            }
 
             // Typeset math placeholders explicitly (more reliable than delimiter scanning in dynamic HTML).
             try {
                 typesetMathPlaceholders(markdownContainer);
             } catch (e) {}
 
-            if (tocContainer) {
+            if (tocContainer && DomUtils && typeof DomUtils.buildTocHtml === 'function') {
                 const tocHtml = DomUtils.buildTocHtml(tocItems);
                 tocContainer.innerHTML = tocHtml;
                 tocContainer.classList.toggle('is-empty', !tocHtml);
@@ -1102,14 +1140,19 @@ ${qed}</div>`;
                         if (legacy) legacy.remove();
                     } catch (e) {}
 
-                    DomUtils.setupTocToggle(tocContainer);
+                    if (typeof DomUtils.setupTocToggle === 'function')
+                        DomUtils.setupTocToggle(tocContainer);
                     if (typeof DomUtils.setupTocBackToTop === 'function') {
                         DomUtils.setupTocBackToTop(tocContainer);
                     }
-                    DomUtils.setupTocObserver(tocContainer, markdownContainer);
+                    if (typeof DomUtils.setupTocObserver === 'function') {
+                        DomUtils.setupTocObserver(tocContainer, markdownContainer);
+                    }
                     const firstLink = tocContainer.querySelector('.toc-item a');
                     if (firstLink) {
-                        DomUtils.setActiveTocLink(tocContainer, firstLink);
+                        if (typeof DomUtils.setActiveTocLink === 'function') {
+                            DomUtils.setActiveTocLink(tocContainer, firstLink);
+                        }
                     }
                 }
             }

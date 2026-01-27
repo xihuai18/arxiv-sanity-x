@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 from urllib.parse import urlparse
 
-from flask import abort, request, session
+from flask import abort, jsonify, request, session
 
 from tools.paper_summarizer import split_pid_version
 
@@ -43,6 +43,13 @@ def _is_same_origin_request() -> bool:
     return False
 
 
+def _csrf_error(message: str):
+    """Return a JSON error response for CSRF failures."""
+    resp = jsonify({"success": False, "error": message})
+    resp.status_code = 403
+    abort(resp)
+
+
 def csrf_protect() -> None:
     """
     CSRF protection for state-changing endpoints.
@@ -57,7 +64,7 @@ def csrf_protect() -> None:
             return
         if _is_same_origin_request():
             return
-        abort(403, description="CSRF blocked (cross-site GET)")
+        _csrf_error("CSRF blocked (cross-site GET)")
 
     token = (request.headers.get("X-CSRF-Token") or "").strip()
     if not token:
@@ -67,7 +74,7 @@ def csrf_protect() -> None:
         token = (data.get("csrf_token") or "").strip()
 
     if not token or token != tok:
-        abort(403, description="CSRF token missing/invalid")
+        _csrf_error("CSRF token missing/invalid")
 
 
 # Import from api_helpers to avoid duplication

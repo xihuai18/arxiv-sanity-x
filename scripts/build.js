@@ -14,7 +14,6 @@ const path = require('path');
 
 const STATIC_DIR = path.join(__dirname, '..', 'static');
 const DIST_DIR = path.join(STATIC_DIR, 'dist');
-const MANIFEST_PATH = path.join(DIST_DIR, 'manifest.json');
 
 // JS entry points list
 const JS_ENTRY_POINTS = [
@@ -37,30 +36,61 @@ const JS_ENTRY_POINTS = [
 // CSS entry points list
 const CSS_ENTRY_POINTS = ['css/main.css'].map(f => path.join(STATIC_DIR, f));
 
-async function build() {
-    // Clean old dist files (keep lib directory)
-    if (fs.existsSync(DIST_DIR)) {
-        const files = fs.readdirSync(DIST_DIR);
-        for (const file of files) {
-            if (file !== 'lib' && !file.startsWith('.')) {
-                const filePath = path.join(DIST_DIR, file);
-                const stat = fs.statSync(filePath);
-                if (stat.isFile()) {
-                    fs.unlinkSync(filePath);
-                }
-            }
-        }
-    } else {
-        fs.mkdirSync(DIST_DIR, { recursive: true });
-    }
+function _safeMkdir(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+}
 
+function _cleanDistKeepLib() {
+    if (!fs.existsSync(DIST_DIR)) return;
+    const files = fs.readdirSync(DIST_DIR);
+    for (const file of files) {
+        if (file === 'lib' || file.startsWith('.')) continue;
+        const filePath = path.join(DIST_DIR, file);
+        fs.rmSync(filePath, { recursive: true, force: true });
+    }
+}
+
+function _copyDirRecursive(srcDir, dstDir) {
+    _safeMkdir(dstDir);
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const ent of entries) {
+        if (!ent || !ent.name || ent.name.startsWith('.')) continue;
+        const srcPath = path.join(srcDir, ent.name);
+        const dstPath = path.join(dstDir, ent.name);
+        if (ent.isDirectory()) {
+            _copyDirRecursive(srcPath, dstPath);
+        } else if (ent.isFile()) {
+            fs.copyFileSync(srcPath, dstPath);
+        }
+    }
+}
+
+function _rmDirRecursive(dir) {
+    if (!fs.existsSync(dir)) return;
+    fs.rmSync(dir, { recursive: true, force: true });
+}
+
+async function build() {
     const isWatch = process.argv.includes('--watch');
     const isDev = process.argv.includes('--dev');
+
+    _safeMkdir(DIST_DIR);
+
+    // For non-watch builds, write into a temporary directory first and only
+    // replace dist/ files after the build succeeded. This prevents dist/ from
+    // becoming empty when the build fails (e.g. syntax error, missing deps).
+    const outDir = isWatch
+        ? DIST_DIR
+        : path.join(DIST_DIR, `.tmp-build-${process.pid}-${Date.now()}`);
+    if (!isWatch) {
+        _rmDirRecursive(outDir);
+        _safeMkdir(outDir);
+    }
 
     // JS build options
     const jsBuildOptions = {
         entryPoints: JS_ENTRY_POINTS,
-        outdir: DIST_DIR,
+        outdir: outDir,
         bundle: false, // Don't bundle, keep files separate
         minify: !isDev,
         sourcemap: true, // Always generate sourcemap
@@ -77,7 +107,7 @@ async function build() {
     // CSS build options
     const cssBuildOptions = {
         entryPoints: CSS_ENTRY_POINTS,
-        outdir: DIST_DIR,
+        outdir: outDir,
         bundle: true, // CSS needs bundling to process @import
         minify: !isDev,
         sourcemap: true,
@@ -110,17 +140,25 @@ async function build() {
         // Initial build
         const jsResult = await jsCtx.rebuild();
         const cssResult = await cssCtx.rebuild();
-        generateManifest(jsResult.metafile, cssResult.metafile);
+        generateManifest(jsResult.metafile, cssResult.metafile, outDir);
         console.log('✅ Initial build complete');
     } else {
-        const jsResult = await esbuild.build(jsBuildOptions);
-        const cssResult = await esbuild.build(cssBuildOptions);
-        generateManifest(jsResult.metafile, cssResult.metafile);
-        console.log('✅ Build complete');
+        try {
+            const jsResult = await esbuild.build(jsBuildOptions);
+            const cssResult = await esbuild.build(cssBuildOptions);
+            generateManifest(jsResult.metafile, cssResult.metafile, outDir);
+
+            _cleanDistKeepLib();
+            _copyDirRecursive(outDir, DIST_DIR);
+
+            console.log('✅ Build complete');
+        } finally {
+            _rmDirRecursive(outDir);
+        }
     }
 }
 
-function generateManifest(jsMetafile, cssMetafile) {
+function generateManifest(jsMetafile, cssMetafile, outDir) {
     const manifest = {};
 
     // Process JS files
@@ -154,7 +192,8 @@ function generateManifest(jsMetafile, cssMetafile) {
     }
 
     // Write manifest.json
-    fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+    const manifestPath = path.join(outDir, 'manifest.json');
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
     console.log(`📝 Generated manifest.json with ${Object.keys(manifest).length} entries`);
 }
 

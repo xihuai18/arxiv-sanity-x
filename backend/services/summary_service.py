@@ -706,6 +706,18 @@ def clear_paper_cache(pid: str, metas_getter=None):
             logger.debug(f"Cleared HTML cache for {paper_id}")
         if safe_rmtree(Path(DATA_DIR) / "mineru" / paper_id):
             logger.debug(f"Cleared MinerU cache for {paper_id}")
+            # For uploaded papers, reset parse_status since MinerU cache is required
+            if paper_id.startswith("up_"):
+                try:
+                    from aslite.repositories import UploadedPaperRepository
+
+                    UploadedPaperRepository.update(
+                        paper_id,
+                        {"parse_status": "pending", "parse_error": "Cache cleared, re-parsing required"},
+                    )
+                    logger.debug(f"Reset parse_status for uploaded paper {paper_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to reset parse_status for {paper_id}: {e}")
 
     # Best-effort decrement based on collected meta files.
     try:

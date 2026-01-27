@@ -1466,6 +1466,12 @@
     color: #dc3545;
 }
 
+.tag-manage-label.removed {
+    background: rgba(148, 163, 184, 0.15);
+    border-color: rgba(148, 163, 184, 0.4);
+    color: var(--text-muted);
+}
+
 .tag-manage-main {
     flex: 1;
     min-width: 0;

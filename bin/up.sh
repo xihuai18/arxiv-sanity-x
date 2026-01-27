@@ -5,7 +5,11 @@
 # Build static assets (fast, ensures latest JS with cache-busting hashes)
 echo "[build] Building static assets..." 1>&2
 npm run build:static --silent || {
-  echo "[build] Warning: npm build failed, continuing with existing dist files" 1>&2
+  echo "[build] Warning: npm build failed, continuing with existing dist files if present" 1>&2
+  if [ ! -f "static/dist/manifest.json" ]; then
+    echo "[build] Warning: manifest.json not found, will use fallback resolution (may be slower)" 1>&2
+    echo "[build] For optimal performance, fix the build: npm install && npm run build:static" 1>&2
+  fi
 }
 
 # Get configuration from config.settings
@@ -14,6 +18,7 @@ GUNICORN_WORKERS_CFG=$(python3 -c "from config import settings; print(settings.g
 GUNICORN_THREADS_CFG=$(python3 -c "from config import settings; print(settings.gunicorn.threads)")
 GUNICORN_PRELOAD_CFG=$(python3 -c "from config import settings; print('1' if settings.gunicorn.preload else '0')")
 GUNICORN_EXTRA_ARGS_CFG=$(python3 -c "from config import settings; print(settings.gunicorn.extra_args)")
+GUNICORN_MAX_MEMORY_CFG=$(python3 -c "from config import settings; print(settings.gunicorn.max_memory_mb)")
 
 # Tunables (safe defaults)
 #
@@ -67,6 +72,29 @@ esac
 
 EXTRA_ARGS="${GUNICORN_EXTRA_ARGS:-$GUNICORN_EXTRA_ARGS_CFG}"
 
+# Debug/dev convenience: if Flask/web reload is enabled, also enable gunicorn --reload
+# unless the user explicitly provided it already.
+WEB_RELOAD_CFG=$(python3 -c "from config import settings; print('1' if settings.web.reload else '0')")
+if [ "${WEB_RELOAD_CFG}" = "1" ]; then
+  case " ${EXTRA_ARGS} " in
+    *" --reload "*) : ;; # already set
+    *) EXTRA_ARGS="${EXTRA_ARGS} --reload" ;;
+  esac
+fi
+
+# Memory limit: use --max-requests to restart workers periodically (helps with memory leaks)
+# and set RLIMIT via Python if max_memory_mb is configured
+MAX_MEMORY="${ARXIV_SANITY_GUNICORN_MAX_MEMORY_MB:-$GUNICORN_MAX_MEMORY_CFG}"
+MEMORY_ARGS=""
+if [ "$MAX_MEMORY" -gt 0 ] 2>/dev/null; then
+  # Restart workers after 1000 requests (with jitter) to prevent memory accumulation
+  MEMORY_ARGS="--max-requests 1000 --max-requests-jitter 100"
+  echo "[gunicorn] Memory limit: ${MAX_MEMORY}MB per worker (with periodic restart)" 1>&2
+fi
+
 echo "[gunicorn] port=${SERVE_PORT} workers=${WORKERS} threads=${THREADS} preload=${PRELOAD_ARG:-0} extra_args='${EXTRA_ARGS}'" 1>&2
 
-gunicorn -w "${WORKERS}" --threads "${THREADS}" -k gthread ${PRELOAD_ARG} ${EXTRA_ARGS} -b 0.0.0.0:${SERVE_PORT} serve:app
+# Set memory limit environment variable for serve.py to apply
+export ARXIV_SANITY_GUNICORN_MAX_MEMORY_MB="${MAX_MEMORY}"
+
+gunicorn -w "${WORKERS}" --threads "${THREADS}" -k gthread ${PRELOAD_ARG} ${MEMORY_ARGS} ${EXTRA_ARGS} -b 0.0.0.0:${SERVE_PORT} serve:app

@@ -5,9 +5,12 @@
 
 (function (global) {
     const NS = 'ArxivSanityTldr';
-    const MarkdownCore = global.ArxivSanityMarkdownCore;
-    const Renderer = global.ArxivSanityMarkdownRenderer;
-    const Sanitizer = global.ArxivSanityMarkdownSanitizer;
+    function _getRenderer() {
+        return global.ArxivSanityMarkdownRenderer || null;
+    }
+    function _getSanitizer() {
+        return global.ArxivSanityMarkdownSanitizer || null;
+    }
 
     const state = {
         renderer: null,
@@ -240,6 +243,7 @@
     }
 
     function buildRenderer() {
+        const Renderer = _getRenderer();
         if (!Renderer) return null;
         const md = Renderer.createMarkdownIt({
             html: true, // Enable HTML to allow our converted tags (safe because we escape first)
@@ -255,12 +259,14 @@
 
     function getRenderer() {
         if (state.renderer) return state.renderer;
-        state.renderer = buildRenderer();
+        const next = buildRenderer();
+        if (next) state.renderer = next;
         return state.renderer;
     }
 
     function render(text) {
         if (!text) return '';
+        const Sanitizer = _getSanitizer();
         let s = Sanitizer ? Sanitizer.stripMarkdownImages(text) : String(text);
 
         // First escape HTML for security, then process LaTeX commands

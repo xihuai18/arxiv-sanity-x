@@ -110,3 +110,137 @@ class TestSearchCaches:
         from backend.services.search_service import SEARCH_RANK_CACHE
 
         assert SEARCH_RANK_CACHE is not None
+
+
+class TestSvmRankWithUploads:
+    """Tests for svm_rank behavior with uploaded paper training samples."""
+
+    def test_svm_rank_allows_upload_positive_only(self):
+        """Upload-tagged positives should enable ranking even without in-slice positives."""
+        import scipy.sparse as sp
+
+        from backend.services.search_service import svm_rank
+
+        pids = ["p1", "p2", "p3"]
+        x = sp.csr_matrix(
+            [
+                [1.0, 0.0],  # p1
+                [0.0, 1.0],  # p2 (closest to upload positive)
+                [0.2, 0.2],  # p3
+            ],
+            dtype=float,
+        )
+
+        def get_features():
+            return {"x": x, "pids": pids, "vocab": {}}
+
+        def get_tags():
+            return {"t": {"up_abcdefghijkl"}}
+
+        def get_neg_tags():
+            return {}
+
+        def get_metas():
+            return {}
+
+        def compute_upload_features(_pid: str):
+            return {"x": sp.csr_matrix([[0.0, 1.0]], dtype=float)}
+
+        out_pids, scores, words = svm_rank(
+            tags="t",
+            limit=3,
+            get_features_fn=get_features,
+            get_tags_fn=get_tags,
+            get_neg_tags_fn=get_neg_tags,
+            get_metas_fn=get_metas,
+            compute_upload_features_fn=compute_upload_features,
+            user="u",
+        )
+
+        assert out_pids
+        assert out_pids[0] == "p2"
+        assert len(out_pids) == len(scores)
+        assert isinstance(words, list)
+
+    def test_svm_rank_skips_missing_upload_features(self):
+        """If upload features cannot be computed, svm_rank should safely degrade."""
+        import scipy.sparse as sp
+
+        from backend.services.search_service import svm_rank
+
+        pids = ["p1", "p2"]
+        x = sp.csr_matrix([[1.0, 0.0], [0.0, 1.0]], dtype=float)
+
+        def get_features():
+            return {"x": x, "pids": pids, "vocab": {}}
+
+        def get_tags():
+            return {"t": {"up_abcdefghijkl"}}
+
+        def get_neg_tags():
+            return {}
+
+        def get_metas():
+            return {}
+
+        def compute_upload_features(_pid: str):
+            return None
+
+        out_pids, scores, words = svm_rank(
+            tags="t",
+            limit=10,
+            get_features_fn=get_features,
+            get_tags_fn=get_tags,
+            get_neg_tags_fn=get_neg_tags,
+            get_metas_fn=get_metas,
+            compute_upload_features_fn=compute_upload_features,
+            user="u",
+        )
+
+        assert out_pids == []
+        assert scores == []
+        assert words == []
+
+    def test_svm_rank_does_not_bypass_when_upload_adds_negative(self):
+        """When all in-slice are positive, upload negatives should still affect ranking."""
+        import scipy.sparse as sp
+
+        from backend.services.search_service import svm_rank
+
+        # p2 is closer to upload negative; training should push p1 above p2.
+        pids = ["p2", "p1"]
+        x = sp.csr_matrix(
+            [
+                [0.0, 1.0],  # p2
+                [1.0, 0.0],  # p1
+            ],
+            dtype=float,
+        )
+
+        def get_features():
+            return {"x": x, "pids": pids, "vocab": {}}
+
+        def get_tags():
+            return {"t": {"p1", "p2"}}
+
+        def get_neg_tags():
+            return {"t": {"up_abcdefghijkl"}}
+
+        def get_metas():
+            return {}
+
+        def compute_upload_features(_pid: str):
+            return {"x": sp.csr_matrix([[0.0, 1.0]], dtype=float)}
+
+        out_pids, _scores, _words = svm_rank(
+            tags="t",
+            limit=2,
+            get_features_fn=get_features,
+            get_tags_fn=get_tags,
+            get_neg_tags_fn=get_neg_tags,
+            get_metas_fn=get_metas,
+            compute_upload_features_fn=compute_upload_features,
+            user="u",
+        )
+
+        assert out_pids[0] == "p1"

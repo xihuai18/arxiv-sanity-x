@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 
@@ -10,6 +11,8 @@ from loguru import logger
 _MANIFEST_PATH: str | None = None
 _MANIFEST_MTIME: float = 0.0
 _MANIFEST_CACHE: dict[str, str] = {}
+_DIST_DIR_MTIME: float = 0.0
+_FALLBACK_CACHE: dict[str, str] = {}
 
 
 def _get_manifest_path() -> str:
@@ -30,6 +33,7 @@ def _load_manifest() -> dict[str, str]:
 
     if not os.path.isfile(manifest_path):
         # Fallback: no manifest, return empty dict (use original filenames)
+        logger.debug(f"Manifest file not found at {manifest_path}, using fallback resolution")
         return {}
 
     try:
@@ -46,6 +50,81 @@ def _load_manifest() -> dict[str, str]:
     return _MANIFEST_CACHE
 
 
+def _get_dist_dir() -> str:
+    manifest_path = _get_manifest_path()
+    return os.path.dirname(manifest_path)
+
+
+def _refresh_dist_fallback_cache() -> None:
+    """Refresh fallback cache for dist/ based on dist dir mtime."""
+    global _DIST_DIR_MTIME, _FALLBACK_CACHE
+    dist_dir = _get_dist_dir()
+    try:
+        current_mtime = os.path.getmtime(dist_dir)
+    except Exception as exc:
+        logger.debug(f"Failed to get mtime for dist directory {dist_dir}: {exc}")
+        return
+    if current_mtime != _DIST_DIR_MTIME:
+        _DIST_DIR_MTIME = current_mtime
+        _FALLBACK_CACHE = {}
+        logger.debug(f"Cleared fallback cache due to dist directory mtime change")
+
+
+def _fallback_hashed_filename(original_name: str) -> str | None:
+    """Best-effort hashed filename lookup when manifest is missing/outdated.
+
+    Looks for dist/<stem>-<hash>.<ext>. Returns the most recently modified match.
+    """
+    if not original_name:
+        return None
+
+    _refresh_dist_fallback_cache()
+    cached = _FALLBACK_CACHE.get(original_name)
+    if cached:
+        return cached
+
+    dist_dir = _get_dist_dir()
+    try:
+        direct_path = os.path.join(dist_dir, original_name)
+        if os.path.isfile(direct_path):
+            _FALLBACK_CACHE[original_name] = original_name
+            return original_name
+    except Exception as exc:
+        logger.debug(f"Failed to check direct path for {original_name}: {exc}")
+
+    stem, ext = os.path.splitext(original_name)
+    if not stem or not ext:
+        return None
+
+    pattern = os.path.join(dist_dir, f"{stem}-*{ext}")
+    try:
+        matches = glob.glob(pattern)
+    except Exception:
+        matches = []
+    if not matches:
+        return None
+
+    best = None
+    best_mtime = -1.0
+    for path in matches:
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            continue
+        if mtime > best_mtime:
+            best_mtime = mtime
+            best = path
+        elif mtime == best_mtime and best is not None and path > best:
+            best = path
+
+    if not best:
+        return None
+
+    name = os.path.basename(best)
+    _FALLBACK_CACHE[original_name] = name
+    return name
+
+
 def get_hashed_filename(original_name: str) -> str:
     """
     Get the hashed filename for a static asset.
@@ -57,7 +136,12 @@ def get_hashed_filename(original_name: str) -> str:
         Hashed filename (e.g., 'paper_list-ABC123.js') or original if not found
     """
     manifest = _load_manifest()
-    return manifest.get(original_name, original_name)
+    resolved = manifest.get(original_name)
+    if resolved:
+        return resolved
+
+    fallback = _fallback_hashed_filename(original_name)
+    return fallback or original_name
 
 
 def static_url(filename: str) -> str:
@@ -84,6 +168,8 @@ def static_url(filename: str) -> str:
 
 def clear_manifest_cache() -> None:
     """Clear the manifest cache (useful for testing or hot-reload)."""
-    global _MANIFEST_MTIME, _MANIFEST_CACHE
+    global _MANIFEST_MTIME, _MANIFEST_CACHE, _DIST_DIR_MTIME, _FALLBACK_CACHE
     _MANIFEST_MTIME = 0.0
     _MANIFEST_CACHE = {}
+    _DIST_DIR_MTIME = 0.0
+    _FALLBACK_CACHE = {}

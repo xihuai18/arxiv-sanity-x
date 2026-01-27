@@ -114,6 +114,20 @@ class TestSecurityHeaders:
         assert resp.headers.get("Cross-Origin-Resource-Policy") == "same-origin"
 
 
+class TestHtmlCacheHeaders:
+    """Tests for HTML cache headers.
+
+    HTML must not be cached to avoid stale CSRF tokens and stale hashed asset references.
+    """
+
+    @pytest.mark.parametrize("path", ["/", "/about", "/stats", "/profile", "/readinglist"])
+    def test_html_pages_are_not_cached(self, client, path):
+        resp = client.get(path)
+        assert resp.mimetype == "text/html"
+        cache_control = resp.headers.get("Cache-Control", "")
+        assert "no-store" in cache_control
+
+
 class TestPageRoutes:
     """Tests for page routes."""
 
@@ -141,6 +155,14 @@ class TestPageRoutes:
         """Test that summary page with pid parameter returns 200."""
         resp = client.get("/summary?pid=2301.00001")
         assert resp.status_code == 200
+
+    def test_summary_page_upload_pid_anonymous_no_leak(self, client):
+        """Anonymous users should not learn whether an uploaded PID exists."""
+        pid = "up_aaaaaaaaaaaa"
+        resp = client.get(f"/summary?pid={pid}")
+        assert resp.status_code == 404
+        body = resp.get_data(as_text=True)
+        assert pid not in body
 
 
 class TestCsrfTokenInjection:
