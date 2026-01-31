@@ -593,9 +593,12 @@ def lexical_rank_fullscan(
     limit: int | None = None,
 ) -> tuple[list[str], list[float]]:
     """Lexical ranking by scanning the whole corpus."""
+    t_start = time.time()
     all_pids = list(get_pids_fn() or [])
     if not all_pids:
         return [], []
+
+    logger.trace(f"[BLOCKING] lexical_rank_fullscan: scanning {len(all_pids)} papers...")
 
     try:
         k = int(limit) if limit is not None else 200
@@ -656,6 +659,9 @@ def lexical_rank_fullscan(
     heap.sort(reverse=True)
     out_pids = [pid for _, pid in heap]
     out_scores = [float(s) for s, _ in heap]
+    logger.trace(
+        f"[BLOCKING] lexical_rank_fullscan: completed in {time.time() - t_start:.2f}s, found {len(out_pids)} results"
+    )
     return out_pids, out_scores
 
 
@@ -965,7 +971,9 @@ def svm_rank(
 
     # Use intelligent cache to load features
     s_time = time.time()
+    logger.trace("[BLOCKING] svm_rank: starting to load features...")
     features = get_features_fn()
+    logger.trace(f"[BLOCKING] svm_rank: features loaded in {time.time() - s_time:.2f}s")
     x, pids = features["x"], features["pids"]
 
     # Collect all user-tagged paper IDs for smart time filtering
@@ -1186,6 +1194,7 @@ def svm_rank(
         try:
             import scipy.sparse as sp
 
+            logger.trace(f"[BLOCKING] svm_rank: stacking {len(upload_rows)} upload features...")
             x_train = sp.vstack([x] + upload_rows, format="csr")
             y_train = np.concatenate([y, np.asarray(upload_y, dtype=np.int8)])
             sample_weight_train = np.concatenate([sample_weight, np.asarray(upload_sw, dtype=np.float32)])
@@ -1195,9 +1204,12 @@ def svm_rank(
             y_train = y
             sample_weight_train = sample_weight
 
+    logger.trace(
+        f"[BLOCKING] svm_rank: starting SVM fit with {x_train.shape[0]} samples, {x_train.shape[1]} features..."
+    )
     clf.fit(x_train, y_train, sample_weight=sample_weight_train)
     e_time = time.time()
-    logger.trace(f"SVM fitting data for {e_time - s_time:.5f}s")
+    logger.trace(f"[BLOCKING] svm_rank: SVM fitting completed in {e_time - s_time:.2f}s")
 
     s = clf.decision_function(x)
     if getattr(s, "ndim", 1) > 1:
@@ -1381,7 +1393,11 @@ def search_rank(
     Returns:
         Tuple of (pids, scores)
     """
+    time.time()
     from tools.paper_summarizer import split_pid_version
+
+    q = (q or "").strip()
+    logger.trace(f"[BLOCKING] search_rank: starting keyword search for q='{q[:50]}...'")
 
     # Default dependency injection
     if get_features_fn is None:
@@ -1411,7 +1427,6 @@ def search_rank(
 
         paper_text_fields_fn = build_paper_text_fields
 
-    q = (q or "").strip()
     if not q:
         return [], []
 
@@ -1724,23 +1739,33 @@ def enhanced_search_rank(
     Returns:
         (paper_ids, scores) tuple
     """
+    t_start = time.time()
+    q = (q or "").strip()
+    logger.trace(f"[API] enhanced_search_rank: q='{q[:50]}...', mode={search_mode}, limit={limit}")
+
     if semantic_weight is None:
         semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
     if not q:
         return [], []
 
+    result = None
     if search_mode == "keyword":
-        return search_rank(q, limit)
+        result = search_rank(q, limit)
 
     elif search_mode == "semantic":
         from backend.services.semantic_service import semantic_search_rank
 
-        return semantic_search_rank(q, limit)
+        result = semantic_search_rank(q, limit)
 
     elif search_mode == "hybrid":
         pids, scores, _ = hybrid_search_rank(q, limit, semantic_weight)
-        return pids, scores
+        result = pids, scores
 
     else:
         raise ValueError(f"Unknown search mode: {search_mode}")
+
+    logger.trace(
+        f"[API] enhanced_search_rank: completed in {time.time() - t_start:.2f}s, found {len(result[0]) if result else 0} results"
+    )
+    return result

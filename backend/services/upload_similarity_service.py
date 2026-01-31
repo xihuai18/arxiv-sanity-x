@@ -165,6 +165,11 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
     Returns:
         Dict with computed features, or None if failed
     """
+    import time as time_module
+
+    t_start = time_module.time()
+    logger.trace(f"[BLOCKING] compute_upload_features: starting for pid={pid}, force={force}")
+
     from backend.services.data_service import (
         get_features_cached,
         get_features_file_mtime,
@@ -173,7 +178,9 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
     features_path = get_upload_features_path(pid)
 
     # Load global features (used for cache invalidation + tfidf params + feature type)
+    logger.trace(f"[BLOCKING] compute_upload_features: loading global features...")
     global_features = get_features_cached()
+    logger.trace(f"[BLOCKING] compute_upload_features: global features loaded in {time_module.time() - t_start:.2f}s")
     if not global_features:
         logger.error("Global features not available")
         return None
@@ -188,11 +195,19 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
                 cached_mtime = float(cached.get("global_features_mtime") or 0.0)
                 # Invalidate cache if global features changed
                 if cached_mtime > 0 and global_feat_mtime > 0 and cached_mtime == global_feat_mtime:
+                    logger.trace(
+                        f"[BLOCKING] compute_upload_features: using cached features (mtime ok) for {pid} "
+                        f"in {time_module.time() - t_start:.2f}s"
+                    )
                     return cached
                 # If metadata missing, keep old behavior (best effort), but log to help migration
                 if cached_mtime <= 0 or global_feat_mtime <= 0:
                     logger.debug(
                         f"Using cached upload features for {pid} without mtime check (cached_mtime={cached_mtime}, global_mtime={global_feat_mtime})"
+                    )
+                    logger.trace(
+                        f"[BLOCKING] compute_upload_features: using cached features (mtime missing) for {pid} "
+                        f"in {time_module.time() - t_start:.2f}s"
                     )
                     return cached
         except Exception as e:
@@ -213,7 +228,9 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
         return None
 
     # Compute TF-IDF vector using the same logic as global features
+    t_tfidf = time_module.time()
     tfidf_vec = compute_tfidf_vector(text, global_features)
+    logger.trace(f"[BLOCKING] compute_upload_features: TF-IDF computed in {time_module.time() - t_tfidf:.2f}s")
     if tfidf_vec is None:
         logger.warning(f"Failed to compute TF-IDF for {pid}, will try embedding only")
 
@@ -227,7 +244,12 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
             if not embed_text:
                 logger.warning(f"No embedding text available for {pid}")
             else:
+                t_emb = time_module.time()
                 embedding_vec = compute_embedding_vector(embed_text, embed_dim)
+                logger.trace(
+                    f"[BLOCKING] compute_upload_features: embedding computed in {time_module.time() - t_emb:.2f}s "
+                    f"(dim={embed_dim}, text_len={len(embed_text)})"
+                )
 
     # Check if we have at least one feature type available
     if tfidf_vec is None and embedding_vec is None:
@@ -257,6 +279,10 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
     except Exception as e:
         logger.warning(f"Failed to save features for {pid}: {e}")
 
+    logger.trace(
+        f"[BLOCKING] compute_upload_features: completed for {pid} in {time_module.time() - t_start:.2f}s "
+        f"(tfidf={'ok' if tfidf_vec is not None else 'none'}, emb={'ok' if embedding_vec is not None else 'none'})"
+    )
     return result
 
 
@@ -276,6 +302,9 @@ def compute_tfidf_vector(text: str, global_features: dict) -> sp.csr_matrix | No
     from backend.services.search_service import get_query_vectorizer
 
     try:
+        import time as time_module
+
+        t_start = time_module.time()
         # Get the query vectorizer (reuses cached instance)
         vectorizer = get_query_vectorizer(global_features)
         if vectorizer is None:
@@ -284,6 +313,7 @@ def compute_tfidf_vector(text: str, global_features: dict) -> sp.csr_matrix | No
 
         # Transform text to TF-IDF vector
         vec = vectorizer.transform([text])
+        logger.trace(f"[BLOCKING] compute_tfidf_vector: transform completed in {time_module.time() - t_start:.2f}s")
 
         if vec.nnz == 0:
             # Zero matches is valid (e.g., non-English text, short text).
@@ -452,17 +482,27 @@ def find_similar_papers(
     Returns:
         List of similar papers with scores
     """
+    import time as time_module
+
+    t_start = time_module.time()
+    logger.trace(f"[BLOCKING] find_similar_papers: starting for pid={pid}, limit={limit}")
+
     from backend.services.data_service import get_features_cached
 
     try:
         # Compute or load features for uploaded paper
+        logger.trace(f"[BLOCKING] find_similar_papers: computing upload features...")
         upload_features = compute_upload_features(pid)
+        logger.trace(f"[BLOCKING] find_similar_papers: upload features computed in {time_module.time() - t_start:.2f}s")
         if not upload_features:
             logger.error(f"Failed to get features for {pid}")
             return []
 
         # Load global features
+        logger.trace(f"[BLOCKING] find_similar_papers: loading global features...")
+        t_global = time_module.time()
         global_features = get_features_cached()
+        logger.trace(f"[BLOCKING] find_similar_papers: global features loaded in {time_module.time() - t_global:.2f}s")
         if not global_features:
             logger.error("Global features not available")
             return []
@@ -480,7 +520,15 @@ def find_similar_papers(
         x_global = global_features.get("x")
         if upload_x is not None and x_global is not None:
             try:
+                t_sim = time_module.time()
+                logger.trace(
+                    f"[BLOCKING] find_similar_papers: unified similarity (x_global={getattr(x_global, 'shape', None)}, "
+                    f"upload_x={getattr(upload_x, 'shape', None)})"
+                )
                 scores = (x_global @ upload_x.T).toarray().flatten()
+                logger.trace(
+                    f"[BLOCKING] find_similar_papers: unified similarity computed in {time_module.time() - t_sim:.2f}s"
+                )
                 scores_computed = np.any(scores != 0)
             except Exception as e:
                 logger.warning(f"Unified feature-space similarity failed, fallback to component scoring: {e}")
@@ -494,7 +542,11 @@ def find_similar_papers(
             if use_tfidf and upload_tfidf is not None:
                 x_tfidf = global_features.get("x_tfidf")
                 if x_tfidf is not None:
+                    t_sim = time_module.time()
                     tfidf_scores = (x_tfidf @ upload_tfidf.T).toarray().flatten()
+                    logger.trace(
+                        f"[BLOCKING] find_similar_papers: TF-IDF similarity computed in {time_module.time() - t_sim:.2f}s"
+                    )
                     scores += tfidf_weight * tfidf_scores
 
             # Embedding similarity (use normalized embeddings from semantic_service to avoid drift)
@@ -509,7 +561,11 @@ def find_similar_papers(
                 if x_embeddings is None:
                     x_embeddings = global_features.get("x_embeddings")
                 if x_embeddings is not None:
+                    t_sim = time_module.time()
                     emb_scores = (x_embeddings @ upload_emb).flatten()
+                    logger.trace(
+                        f"[BLOCKING] find_similar_papers: embedding similarity computed in {time_module.time() - t_sim:.2f}s"
+                    )
                     scores += (1 - tfidf_weight) * emb_scores
 
         # Get top results
@@ -571,6 +627,7 @@ def find_similar_papers(
             )
 
         logger.info(f"Found {len(results)} similar papers for {pid}")
+        logger.trace(f"[BLOCKING] find_similar_papers: completed in {time_module.time() - t_start:.2f}s")
         return results
     except Exception as e:
         logger.error(f"Error in find_similar_papers for {pid}: {e}")

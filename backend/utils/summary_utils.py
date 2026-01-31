@@ -3,6 +3,7 @@ Summary utilities for extracting TL;DR and other structured content from summary
 """
 
 import re
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -630,7 +631,19 @@ def read_tldr_from_summary_file(pid: str) -> str:
         return ""
 
     try:
+        size_b = None
+        try:
+            size_b = int(summary_file.stat().st_size)
+        except Exception:
+            size_b = None
+
+        t0 = time.time()
         content = summary_file.read_text(encoding="utf-8")
+        dt = time.time() - t0
+        if dt >= 0.1 or (size_b is not None and size_b >= 2 * 1024 * 1024):
+            logger.trace(
+                f"[BLOCKING] read_tldr_from_summary_file: pid={pid}, size={size_b}, read_time={dt:.2f}s, file={summary_file}"
+            )
         return extract_tldr_from_content(content)
     except Exception as e:
         logger.debug(f"Failed to extract TL;DR for {pid}: {e}")

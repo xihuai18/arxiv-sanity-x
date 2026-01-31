@@ -330,6 +330,58 @@ def _wait_for_http(url: str, timeout_s: float, name: str, verbose: bool = False)
     return False
 
 
+def _wait_for_all_services(
+    services_to_wait: list[tuple[str, str]],  # [(name, health_url), ...]
+    timeout_s: float,
+    verbose: bool = False,
+) -> dict[str, bool]:
+    """Wait for all services to become ready.
+
+    Args:
+        services_to_wait: List of (name, health_url) tuples
+        timeout_s: Maximum time to wait for each service
+        verbose: Whether to show verbose output
+
+    Returns:
+        Dict mapping service name to ready status
+    """
+    if not services_to_wait:
+        return {}
+
+    deadline = time.time() + timeout_s
+    status: dict[str, bool] = {name: False for name, _ in services_to_wait}
+
+    try:
+        while time.time() < deadline:
+            # Check all pending services
+            all_ready = True
+            for name, url in services_to_wait:
+                if status[name]:
+                    continue
+                if _http_ok(url, timeout_s=0.5):
+                    status[name] = True
+                    ready_count = sum(1 for ready in status.values() if ready)
+                    total = len(status)
+                    print(f"[launcher] ({ready_count}/{total}) {name} ready", flush=True)
+                else:
+                    all_ready = False
+
+            if all_ready:
+                break
+
+            time.sleep(0.5)
+
+        # Final status for any services that didn't become ready
+        for name, url in services_to_wait:
+            if not status[name]:
+                print(f"[launcher] {name} not ready after {timeout_s:.1f}s: {url}", flush=True)
+
+    except KeyboardInterrupt:
+        raise
+
+    return status
+
+
 def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
     """Check if MinerU API is available and key is valid."""
     if not api_key or not api_key.strip():
@@ -666,7 +718,7 @@ def main() -> int:
                 name="web",
                 cmd=[sys.executable, str(repo_root / "serve.py")],
                 cwd=repo_root,
-                health_url=f"http://localhost:{SERVE_PORT}/",
+                health_url=f"http://localhost:{SERVE_PORT}/health",
             )
         )
     elif args.web == "gunicorn":
@@ -675,7 +727,7 @@ def main() -> int:
                 name="web",
                 cmd=["bash", str(bin_dir / "up.sh")],
                 cwd=repo_root,
-                health_url=f"http://localhost:{SERVE_PORT}/",
+                health_url=f"http://localhost:{SERVE_PORT}/health",
             )
         )
 
@@ -729,14 +781,34 @@ def main() -> int:
             procs.append((spec, _start_service(spec)))
 
         if not args.no_wait:
-            for spec, proc in procs:
-                if spec.health_url:
-                    _wait_for_http(spec.health_url, timeout_s=args.wait_timeout, name=spec.name, verbose=verbose)
-                    # After ready, log runtime-discovered info that helps debugging.
-                    if spec.name == "litellm":
-                        _log_litellm_models(LITELLM_PORT, verbose=verbose)
-                    elif spec.name == "embed":
-                        _log_ollama_models(EMBED_PORT, verbose=verbose)
+            # Collect all services that need health checks
+            services_to_wait = [(spec.name, spec.health_url) for spec, _ in procs if spec.health_url]
+
+            if services_to_wait:
+                print(f"[launcher] Waiting for {len(services_to_wait)} service(s)...", flush=True)
+                status = _wait_for_all_services(services_to_wait, timeout_s=args.wait_timeout, verbose=verbose)
+
+                # Log additional info for ready services
+                for spec, _ in procs:
+                    if spec.health_url and status.get(spec.name):
+                        if spec.name == "litellm":
+                            _log_litellm_models(LITELLM_PORT, verbose=verbose)
+                        elif spec.name == "embed":
+                            _log_ollama_models(EMBED_PORT, verbose=verbose)
+
+                # Check if all services are ready
+                all_ready = all(status.values())
+                if all_ready:
+                    # Find web service URL for final message
+                    web_url = None
+                    for spec, _ in procs:
+                        if spec.name == "web" and spec.health_url:
+                            web_url = spec.health_url.replace("/health", "/")
+                            break
+                    if web_url:
+                        print(f"[launcher] All services ready: {web_url}", flush=True)
+                    else:
+                        print("[launcher] All services ready", flush=True)
 
         # main loop
         while True:

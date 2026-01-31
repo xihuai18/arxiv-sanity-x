@@ -10,7 +10,6 @@ Features:
 """
 
 import argparse
-import heapq
 import os
 import sys
 import threading
@@ -234,20 +233,9 @@ class BatchProcessor:
         if n <= 0:
             return []
 
-        # Get top-n paper metadata without loading everything into memory
-        heap = []
-        with tqdm(desc="Loading paper data", unit="papers", leave=False, ncols=100, file=sys.stderr) as pbar:
-            for k, v in MetaRepository.iter_all_metas():
-                t = v.get("_time", 0)
-                if len(heap) < n:
-                    heapq.heappush(heap, (t, k, v))
-                elif t > heap[0][0]:
-                    heapq.heapreplace(heap, (t, k, v))
-                pbar.update(1)
-
-        # Sort by time in descending order (newest first)
-        logger.debug("Sorting papers...")
-        latest_papers = sorted([(pid, meta) for _t, pid, meta in heap], key=lambda kv: kv[1]["_time"], reverse=True)
+        # Use the optimized MetaRepository.get_latest_n() method
+        # which uses the time index table for efficient queries
+        latest_papers = MetaRepository.get_latest_n(n, use_index=True)
 
         logger.debug(f"Successfully fetched {len(latest_papers)} latest papers")
 

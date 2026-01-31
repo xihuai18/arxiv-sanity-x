@@ -28,15 +28,28 @@
             </p>
             <div class="profile-note">
                 <span class="note-icon">ℹ️</span>
-                <span>This feature is in beta. Remove your email to unsubscribe.</span>
+                <span>This feature is in beta. Clear all emails to unsubscribe.</span>
             </div>
             <form id="email-form" action="{{ url_for('user.register_email') }}" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" id="email-hidden" name="email" value="{{ emails_text }}">
                 <div class="form-group">
-                    <label for="email-input">Email Address</label>
-                    <input type="email" id="email-input" class="form-control" name="email" placeholder="your@email.com" value="{{ email }}" autocomplete="email" inputmode="email" spellcheck="false">
+                    <label>Email Addresses</label>
+                    <div class="email-list" id="email-list">
+                        {% for email in emails %}
+                        <div class="email-tag" data-email="{{ email }}">
+                            <span class="email-text">{{ email }}</span>
+                            <button type="button" class="email-remove" title="Remove">&times;</button>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div class="email-input-row">
+                        <input type="email" id="email-input" class="form-control" placeholder="Enter email address" autocomplete="email" inputmode="email" spellcheck="false">
+                        <button type="button" id="email-add-btn" class="btn-add" title="Add email">+</button>
+                    </div>
+                    <span class="form-hint" id="email-hint">Press Enter or click + to add email</span>
                 </div>
-                <button type="submit" class="btn btn-primary">Update Email</button>
+                <button type="submit" class="btn btn-primary">Update Emails</button>
             </form>
         </div>
 
@@ -93,16 +106,17 @@
 {% block elements %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    // Username input validation
     var usernameInput = document.getElementById('username-input');
     if (usernameInput) {
         usernameInput.addEventListener('input', function() {
             var value = this.value.trim();
-            var hint = document.querySelector('.form-hint');
+            var hint = this.parentElement.querySelector('.form-hint');
             if (value.length > 0 && value.length < 3) {
                 hint.textContent = 'Username should be at least 3 characters';
                 hint.style.color = 'var(--warning-color)';
             } else if (value.length >= 3) {
-                hint.textContent = '✓ Looks good!';
+                hint.textContent = 'Looks good!';
                 hint.style.color = 'var(--success-color)';
             } else {
                 hint.textContent = 'Letters, numbers, and underscores allowed';
@@ -110,6 +124,116 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
+
+    // Email list management
+    var emailList = document.getElementById('email-list');
+    var emailInput = document.getElementById('email-input');
+    var emailAddBtn = document.getElementById('email-add-btn');
+    var emailHidden = document.getElementById('email-hidden');
+    var emailHint = document.getElementById('email-hint');
+
+    if (!emailList || !emailInput) return;
+
+    var emailRegex = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$/i;
+
+    function getEmails() {
+        var tags = emailList.querySelectorAll('.email-tag');
+        var emails = [];
+        tags.forEach(function(tag) {
+            emails.push(tag.getAttribute('data-email'));
+        });
+        return emails;
+    }
+
+    function updateHiddenField() {
+        emailHidden.value = getEmails().join('\n');
+    }
+
+    function showHint(message, type) {
+        emailHint.textContent = message;
+        emailHint.className = 'form-hint' + (type ? ' ' + type : '');
+    }
+
+    function addEmail(email) {
+        email = email.trim().toLowerCase();
+        if (!email) return false;
+
+        if (!emailRegex.test(email)) {
+            showHint('Invalid email format', 'error');
+            return false;
+        }
+
+        var existing = getEmails();
+        if (existing.indexOf(email) !== -1) {
+            showHint('Email already added', 'error');
+            return false;
+        }
+
+        var tag = document.createElement('div');
+        tag.className = 'email-tag';
+        tag.setAttribute('data-email', email);
+        tag.innerHTML = '<span class="email-text">' + escapeHtml(email) + '</span>' +
+                        '<button type="button" class="email-remove" title="Remove">&times;</button>';
+
+        emailList.appendChild(tag);
+        updateHiddenField();
+        showHint('Email added', 'success');
+        return true;
+    }
+
+    function removeEmail(tag) {
+        tag.style.animation = 'fadeIn 0.2s ease-out reverse';
+        setTimeout(function() {
+            tag.remove();
+            updateHiddenField();
+            showHint('Press Enter or click + to add email', '');
+        }, 150);
+    }
+
+    function escapeHtml(text) {
+        var div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Add email on button click
+    emailAddBtn.addEventListener('click', function() {
+        if (addEmail(emailInput.value)) {
+            emailInput.value = '';
+            emailInput.focus();
+        }
+    });
+
+    // Add email on Enter key
+    emailInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            if (addEmail(emailInput.value)) {
+                emailInput.value = '';
+            }
+        }
+    });
+
+    // Real-time validation
+    emailInput.addEventListener('input', function() {
+        var value = this.value.trim();
+        if (!value) {
+            showHint('Press Enter or click + to add email', '');
+        } else if (!emailRegex.test(value)) {
+            showHint('Enter a valid email address', 'error');
+        } else if (getEmails().indexOf(value.toLowerCase()) !== -1) {
+            showHint('Email already added', 'error');
+        } else {
+            showHint('Press Enter or click + to add', 'success');
+        }
+    });
+
+    // Remove email on X click (event delegation)
+    emailList.addEventListener('click', function(e) {
+        if (e.target.classList.contains('email-remove')) {
+            removeEmail(e.target.parentElement);
+        }
+    });
 });
 </script>
 {% endblock %}

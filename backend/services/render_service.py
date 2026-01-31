@@ -74,10 +74,13 @@ def render_pid(
     get_paper_fn=None,
     get_tags_fn=None,
     get_neg_tags_fn=None,
+    *,
+    include_tldr: bool = True,
+    include_summary_status: bool = True,
 ) -> dict[str, Any]:
     """Render a single paper for the UI."""
     thumb_url = get_thumb_url(pid)
-    tldr = extract_tldr_from_summary(pid)
+    tldr = extract_tldr_from_summary(pid) if include_tldr else ""
 
     d = paper if paper is not None else (get_paper_fn(pid) if get_paper_fn else None)
     if d is None:
@@ -93,6 +96,8 @@ def render_pid(
             summary="",
             tldr="",
             thumb_url=thumb_url,
+            summary_status="",
+            summary_last_error="",
         )
 
     if pid_to_utags is not None:
@@ -111,7 +116,9 @@ def render_pid(
     else:
         ntags = []
 
-    summary_status, summary_last_error = get_summary_status(pid)
+    summary_status, summary_last_error = "", ""
+    if include_summary_status:
+        summary_status, summary_last_error = get_summary_status(pid)
 
     return dict(
         weight=0.0,
@@ -126,7 +133,7 @@ def render_pid(
         tldr=tldr,
         thumb_url=thumb_url,
         summary_status=summary_status,
-        summary_last_error=summary_last_error,
+        summary_last_error=summary_last_error or "",
     )
 
 

@@ -8,9 +8,16 @@ import time
 from threading import Lock
 from typing import Any
 
+from loguru import logger
+
 from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, PAPERS_DB_FILE, load_features
 from aslite.repositories import MetaRepository, PaperRepository
 from config import settings
+
+# Lock ordering notes (to prevent deadlocks):
+# - Avoid nesting _DATA_LOCK, _FEATURES_LOCK, and semantic_service._EMBEDDINGS_LOCK.
+# - semantic_service.get_paper_embeddings() is implemented to avoid holding _EMBEDDINGS_LOCK while
+#   calling get_features_cached(); keep it that way to prevent FEATURES_LOCK <-> _EMBEDDINGS_LOCK cycles.
 
 # Data cache (mtime-based invalidation, shared across warmup + request path)
 _DATA_LOCK = Lock()
@@ -53,6 +60,8 @@ def get_features_cached() -> dict[str, Any]:
             need_reload = _FEATURES_CACHE is None or current_mtime > _FEATURES_FILE_MTIME
 
             if need_reload:
+                t0 = time.time()
+                logger.trace("[BLOCKING] get_features_cached: starting to load features.p file...")
                 try:
                     features = load_features()
                 except (EOFError, pickle.UnpicklingError):
@@ -75,6 +84,7 @@ def get_features_cached() -> dict[str, Any]:
                 _FEATURES_CACHE = features
                 _FEATURES_FILE_MTIME = current_mtime
                 _FEATURES_CACHE_TIME = time.time()
+                logger.trace(f"[BLOCKING] get_features_cached: loaded features.p in {time.time() - t0:.2f}s")
 
     return _FEATURES_CACHE or {}
 
@@ -128,14 +138,24 @@ def get_data_cached() -> dict[str, Any]:
             need_reload = need_reload_metas or need_reload_papers
 
             if need_reload:
+                t0 = time.time()
                 # Papers cache is optional
                 if cache_papers:
+                    logger.trace("[BLOCKING] get_data_cached: starting to load all papers from papers.db...")
                     _PAPERS_CACHE = {pid: paper for pid, paper in PaperRepository.iter_all_papers()}
+                    logger.trace(
+                        f"[BLOCKING] get_data_cached: loaded {len(_PAPERS_CACHE)} papers in {time.time() - t0:.2f}s"
+                    )
                 else:
                     _PAPERS_CACHE = None
 
+                t1 = time.time()
+                logger.trace("[BLOCKING] get_data_cached: starting to load all metas from papers.db...")
                 _METAS_CACHE = {pid: meta for pid, meta in MetaRepository.iter_all_metas()}
                 _PIDS_CACHE = list(_METAS_CACHE.keys())
+                logger.trace(
+                    f"[BLOCKING] get_data_cached: loaded {len(_METAS_CACHE)} metas in {time.time() - t1:.2f}s, total {time.time() - t0:.2f}s"
+                )
 
                 _PAPERS_DB_FILE_MTIME = current_mtime
                 _PAPERS_DB_CACHE_TIME = time.time()

@@ -429,3 +429,128 @@
     font-size: 15px;
     line-height: 1.7;
 }
+
+/* ===== Email List Styles ===== */
+.email-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 40px;
+    padding: 12px;
+    background: var(--body-bg);
+    border: 2px solid var(--border-color);
+    border-radius: 10px;
+    margin-bottom: 12px;
+}
+
+.email-list:empty::before {
+    content: 'No emails added yet';
+    color: var(--text-muted);
+    font-size: 14px;
+    font-style: italic;
+}
+
+.email-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: linear-gradient(135deg, var(--primary-bg) 0%, #c02f2f 100%);
+    color: white;
+    border-radius: 20px;
+    font-size: 13px;
+    animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.email-text {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.email-remove {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: rgba(255, 255, 255, 0.2);
+    border: none;
+    border-radius: 50%;
+    color: white;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.email-remove:hover {
+    background: rgba(255, 255, 255, 0.4);
+}
+
+.email-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+
+.email-input-row .form-control {
+    flex: 1;
+    margin: 0;
+    height: 44px;
+}
+
+.btn-add {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: linear-gradient(135deg, var(--success-color) 0%, #16a34a 100%);
+    border: none;
+    border-radius: 10px;
+    color: white;
+    font-size: 24px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    box-shadow: 0 2px 6px rgba(22, 163, 74, 0.3);
+}
+
+.btn-add:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(22, 163, 74, 0.4);
+}
+
+.btn-add:active {
+    transform: translateY(0);
+}
+
+.btn-add:disabled {
+    background: var(--text-muted);
+    cursor: not-allowed;
+    box-shadow: none;
+    transform: none;
+}
+
+#email-hint.error {
+    color: var(--danger-color);
+}
+
+#email-hint.success {
+    color: var(--success-color);
+}

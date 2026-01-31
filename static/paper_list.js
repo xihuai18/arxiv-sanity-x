@@ -236,7 +236,8 @@ const Paper = props => {
     }
 
     // Render TL;DR if available (with markdown and LaTeX support)
-    const tldr_section = p.tldr ? (
+    const has_tldr = Boolean(p.tldr && String(p.tldr).trim());
+    const tldr_section = has_tldr ? (
         <div class="rel_tldr">
             <div class="tldr_label">💡 TL;DR</div>
             <div
@@ -245,6 +246,31 @@ const Paper = props => {
             ></div>
         </div>
     ) : null;
+
+    // Abstract: show only when no TL;DR; when TL;DR exists, keep abstract collapsed and expandable.
+    const abstract_section = has_tldr ? (
+        <details
+            class="rel_abs_details"
+            onToggle={e => {
+                try {
+                    if (e && e.target && e.target.open) {
+                        triggerMathJax(e.target);
+                    }
+                } catch (err) {}
+            }}
+        >
+            <summary class="rel_abs_summary">Abstract</summary>
+            <div
+                class="rel_abs"
+                dangerouslySetInnerHTML={{ __html: renderAbstractMarkdown(p.summary) }}
+            ></div>
+        </details>
+    ) : (
+        <div
+            class="rel_abs"
+            dangerouslySetInnerHTML={{ __html: renderAbstractMarkdown(p.summary) }}
+        ></div>
+    );
 
     const statusText = formatSummaryStatus(props.summaryStatus);
     const queueRankText =
@@ -323,10 +349,7 @@ const Paper = props => {
             {statusBadge}
             {tldr_section}
             {thumb_img}
-            <div
-                class="rel_abs"
-                dangerouslySetInnerHTML={{ __html: renderAbstractMarkdown(p.summary) }}
-            ></div>
+            {abstract_section}
             {utag_controls}
             <div class="paper-actions-footer">
                 <div class="rel_summary">{triggerBtn}</div>

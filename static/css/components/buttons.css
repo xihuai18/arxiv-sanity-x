@@ -280,6 +280,11 @@ button:disabled {
     box-shadow: 0 2px 6px rgba(179, 27, 27, 0.25);
 }
 
+/* Push Extract Info button to the right (for uploaded papers) */
+.rel_extract {
+    margin-left: auto;
+}
+
 /* alphaXiv - modern pill style */
 .rel_alphaxiv {
     margin-left: auto; /* Push alphaXiv and Cool to the right */

@@ -93,7 +93,125 @@
                 ui.state.queueTotal
             );
             ui.syncTriggerState();
+
+            // When summary is ready, fetch and display TL;DR for uploaded papers
+            if (status === 'ok' && ui.card && pid.startsWith('up_')) {
+                fetchAndDisplayTldr(pid, ui);
+            }
         });
+    }
+
+    // Fetch TL;DR from server and update display
+    function fetchAndDisplayTldr(pid, ui) {
+        fetch(`/api/uploaded_papers/tldr/${encodeURIComponent(pid)}`)
+            .then(resp => resp.json())
+            .then(data => {
+                if (data && data.success && data.tldr) {
+                    updateTldrDisplay(ui, data.tldr);
+                }
+            })
+            .catch(err => {
+                console.error('Failed to fetch TL;DR:', err);
+            });
+    }
+
+    // Update TL;DR display in the card
+    function updateTldrDisplay(ui, tldr) {
+        if (!ui || !ui.card || !tldr) return;
+
+        const card = ui.card;
+        const existingDetails = card.querySelector('.rel_abs_details');
+        const existingAbs = card.querySelector('.rel_abs');
+        const existingAbsHtml = existingAbs ? existingAbs.innerHTML : '';
+
+        // Check if TL;DR already exists
+        let tldrDiv = card.querySelector('.rel_tldr');
+        if (tldrDiv) {
+            // Update existing TL;DR
+            const tldrText = tldrDiv.querySelector('.tldr_text');
+            if (tldrText) {
+                tldrText.innerHTML = renderTldrMarkdown(tldr);
+                triggerMathJax(tldrDiv);
+            }
+        } else {
+            // Create new TL;DR element
+            tldrDiv = document.createElement('div');
+            tldrDiv.className = 'rel_tldr';
+            const tldrLabel = document.createElement('div');
+            tldrLabel.className = 'tldr_label';
+            tldrLabel.textContent = '💡 TL;DR';
+            const tldrText = document.createElement('div');
+            tldrText.className = 'tldr_text';
+            tldrText.innerHTML = renderTldrMarkdown(tldr);
+            tldrDiv.appendChild(tldrLabel);
+            tldrDiv.appendChild(tldrText);
+
+            // Insert before tags section
+            const utagsWrap = card.querySelector('.rel_utags');
+            if (utagsWrap) {
+                utagsWrap.insertAdjacentElement('beforebegin', tldrDiv);
+            } else {
+                // Fallback: append to card
+                card.appendChild(tldrDiv);
+            }
+            triggerMathJax(tldrDiv);
+        }
+
+        // Ensure abstract stays accessible (collapsed) when TL;DR exists.
+        // For uploaded papers, TL;DR can arrive asynchronously via live updates.
+        const hasAbstractHtml = Boolean(existingAbsHtml && existingAbsHtml.trim());
+        const hasAbstractText = Boolean(
+            ui.paperData && ui.paperData.summary && String(ui.paperData.summary).trim()
+        );
+        if (hasAbstractHtml || hasAbstractText) {
+            const utagsWrap = card.querySelector('.rel_utags');
+            let details = existingDetails;
+            if (!details) {
+                details = document.createElement('details');
+                details.className = 'rel_abs_details';
+                const summaryEl = document.createElement('summary');
+                summaryEl.className = 'rel_abs_summary';
+                summaryEl.textContent = 'Abstract';
+                details.appendChild(summaryEl);
+                details.dataset.mathjaxBound = '1';
+                details.addEventListener('toggle', function () {
+                    if (details.open) triggerMathJax(details);
+                });
+
+                if (tldrDiv) {
+                    tldrDiv.insertAdjacentElement('afterend', details);
+                } else if (utagsWrap) {
+                    utagsWrap.insertAdjacentElement('beforebegin', details);
+                } else {
+                    card.appendChild(details);
+                }
+            } else if (!details.dataset.mathjaxBound) {
+                details.dataset.mathjaxBound = '1';
+                details.addEventListener('toggle', function () {
+                    if (details.open) triggerMathJax(details);
+                });
+            }
+
+            let absDiv = details.querySelector('.rel_abs');
+            if (!absDiv) {
+                absDiv = document.createElement('div');
+                absDiv.className = 'rel_abs';
+                details.appendChild(absDiv);
+            }
+            if (existingAbs && !details.contains(existingAbs)) {
+                absDiv.innerHTML = existingAbsHtml;
+                existingAbs.remove();
+            } else if (!existingAbsHtml && hasAbstractText) {
+                absDiv.innerHTML = renderAbstractMarkdown(ui.paperData.summary);
+            } else if (existingAbsHtml) {
+                absDiv.innerHTML = existingAbsHtml;
+            }
+        }
+
+        // Update paper data reference
+        if (ui.paperData) {
+            ui.paperData.tldr = tldr;
+        }
     }
 
     function handleReadingListEvent(event) {
@@ -168,6 +286,10 @@
             updateSummaryStatusFromEvent(event.pid, event.status, event.error, event);
         } else if (event.type === 'readinglist_changed') {
             handleReadingListEvent(event);
+        } else if (event.type === 'upload_parse_status') {
+            handleUploadParseStatusEvent(event);
+        } else if (event.type === 'upload_extract_status') {
+            handleUploadExtractStatusEvent(event);
         }
         void options;
     }
@@ -614,7 +736,8 @@
         card.appendChild(statusBadge);
 
         // TL;DR section (prioritize over abstract)
-        if (p.tldr) {
+        const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
+        if (hasTldr) {
             const tldrDiv = document.createElement('div');
             tldrDiv.className = 'rel_tldr';
             const tldrLabel = document.createElement('div');
@@ -627,6 +750,24 @@
             tldrDiv.appendChild(tldrText);
             card.appendChild(tldrDiv);
             triggerMathJax(tldrDiv);
+
+            // Abstract: collapsed by default when TL;DR exists
+            if (p.summary) {
+                const details = document.createElement('details');
+                details.className = 'rel_abs_details';
+                const summaryEl = document.createElement('summary');
+                summaryEl.className = 'rel_abs_summary';
+                summaryEl.textContent = 'Abstract';
+                const absDiv = document.createElement('div');
+                absDiv.className = 'rel_abs';
+                absDiv.innerHTML = renderAbstractMarkdown(p.summary);
+                details.appendChild(summaryEl);
+                details.appendChild(absDiv);
+                details.addEventListener('toggle', function () {
+                    if (details.open) triggerMathJax(details);
+                });
+                card.appendChild(details);
+            }
         } else if (p.summary) {
             // Abstract (only show if no TL;DR) - now with markdown rendering
             const absDiv = document.createElement('div');
@@ -909,6 +1050,177 @@
         if (added) startUploadedPendingPolling();
     }
 
+    // Handle upload_parse_status SSE event
+    function handleUploadParseStatusEvent(event) {
+        if (!event || !event.pid) return;
+        const ui = uploadedSummaryUI.get(event.pid);
+        if (!ui) return;
+
+        const status = event.status || '';
+        const error = event.error || '';
+
+        // Update paper data reference
+        if (ui.paperData) {
+            ui.paperData.parse_status = status;
+            if (error) ui.paperData.parse_error = error;
+        }
+
+        // Update parse status badge
+        if (ui.parseStatusBadge) {
+            ui.parseStatusBadge.className = 'parse-status-badge';
+            if (status === 'ok') {
+                ui.parseStatusBadge.textContent = '✓ Parsed';
+                ui.parseStatusBadge.classList.add('ok');
+                ui.parseStatusBadge.title = '';
+            } else if (status === 'running' || status === 'queued') {
+                ui.parseStatusBadge.textContent = '⏳ Parsing...';
+                ui.parseStatusBadge.classList.add('running');
+                ui.parseStatusBadge.title = '';
+            } else if (status === 'failed') {
+                ui.parseStatusBadge.textContent = '✗ Parse Failed';
+                ui.parseStatusBadge.classList.add('failed');
+                ui.parseStatusBadge.title = error;
+            }
+        }
+
+        // Update parse button
+        if (ui.parseBtn) {
+            if (status === 'ok') {
+                ui.parseBtn.disabled = true;
+                ui.parseBtn.classList.add('disabled');
+                ui.parseBtn.textContent = '📄 Parse';
+                ui.parseBtn.title = 'Already parsed';
+            } else if (status === 'running' || status === 'queued') {
+                ui.parseBtn.disabled = true;
+                ui.parseBtn.classList.add('disabled');
+                ui.parseBtn.textContent = '⏳ Parsing...';
+            } else if (status === 'failed') {
+                ui.parseBtn.disabled = false;
+                ui.parseBtn.classList.remove('disabled');
+                ui.parseBtn.textContent = '📄 Parse';
+                ui.parseBtn.title = 'Parse PDF to Markdown with MinerU';
+            }
+        }
+
+        // Update dependent buttons via updateParseStatus
+        if (typeof ui.updateParseStatus === 'function') {
+            ui.updateParseStatus(status);
+        }
+
+        // Remove from pending ops if completed
+        if (status === 'ok' || status === 'failed') {
+            uploadedPendingOps.delete(event.pid);
+            if (!uploadedPendingOps.size) {
+                stopUploadedPendingPolling();
+            }
+        }
+    }
+
+    // Handle upload_extract_status SSE event
+    function handleUploadExtractStatusEvent(event) {
+        if (!event || !event.pid) return;
+        const ui = uploadedSummaryUI.get(event.pid);
+        if (!ui) return;
+
+        const status = event.status || '';
+
+        // Update extract button
+        if (ui.extractBtn) {
+            if (status === 'ok') {
+                ui.extractBtn.disabled = true;
+                ui.extractBtn.classList.add('disabled');
+                ui.extractBtn.textContent = '🔍 Extract Info';
+                ui.extractBtn.title = 'Metadata already extracted';
+            } else if (status === 'running') {
+                ui.extractBtn.disabled = true;
+                ui.extractBtn.classList.add('disabled');
+                ui.extractBtn.textContent = '⏳ Extracting...';
+            } else if (status === 'failed') {
+                ui.extractBtn.disabled = false;
+                ui.extractBtn.classList.remove('disabled');
+                ui.extractBtn.textContent = '🔍 Extract Info';
+                ui.extractBtn.title = 'Extract metadata with LLM';
+            }
+        }
+
+        // Update paper data and UI if extraction succeeded
+        if (status === 'ok' && event.meta_extracted_ok) {
+            // Update paper data reference
+            if (ui.paperData) {
+                ui.paperData.meta_extracted_ok = true;
+                if (event.title) ui.paperData.title = event.title;
+                if (event.authors) ui.paperData.authors = event.authors;
+                if (event.abstract) ui.paperData.summary = event.abstract;
+            }
+
+            // Update title display
+            if (ui.titleLink && event.title) {
+                ui.titleLink.textContent = event.title;
+            }
+
+            // Update authors display
+            if (ui.authorsEl && event.authors) {
+                ui.authorsEl.textContent = event.authors;
+            } else if (!ui.authorsEl && event.authors && ui.card) {
+                // Create authors element if it doesn't exist
+                const titleDiv = ui.card.querySelector('.rel_title');
+                if (titleDiv) {
+                    const authorsEl = document.createElement('div');
+                    authorsEl.className = 'rel_authors';
+                    authorsEl.textContent = event.authors;
+                    titleDiv.insertAdjacentElement('afterend', authorsEl);
+                    ui.authorsEl = authorsEl;
+                }
+            }
+
+            // Update abstract display (only if no TL;DR)
+            if (event.abstract && ui.card) {
+                const tldrDiv = ui.card.querySelector('.rel_tldr');
+                if (!tldrDiv) {
+                    let absDiv = ui.card.querySelector('.rel_abs');
+                    if (!absDiv) {
+                        // Create abstract element if it doesn't exist
+                        absDiv = document.createElement('div');
+                        absDiv.className = 'rel_abs';
+                        const utagsWrap = ui.card.querySelector('.rel_utags');
+                        if (utagsWrap) {
+                            utagsWrap.insertAdjacentElement('beforebegin', absDiv);
+                        }
+                    }
+                    absDiv.innerHTML = renderAbstractMarkdown(event.abstract);
+                    triggerMathJax(absDiv);
+                }
+            }
+
+            // Update Similar and Inspect buttons (now enabled if parse is also ok)
+            // Check parse_status from paperData for robustness
+            const parseOk = ui.paperData && ui.paperData.parse_status === 'ok';
+            if (parseOk) {
+                if (ui.similarBtn) {
+                    ui.similarBtn.disabled = false;
+                    ui.similarBtn.classList.remove('disabled');
+                    ui.similarBtn.title = 'Find similar arXiv papers';
+                }
+                if (ui.inspectLink) {
+                    ui.inspectLink.classList.remove('disabled-link');
+                    ui.inspectLink.title = 'Inspect TF-IDF features';
+                }
+                if (ui.summaryLink) {
+                    ui.summaryLink.classList.remove('disabled-link');
+                    ui.summaryLink.title = 'View summary';
+                }
+            }
+        }
+
+        // Remove from pending ops if completed
+        if (status === 'ok' || status === 'failed') {
+            uploadedPendingOps.delete(event.pid);
+            if (!uploadedPendingOps.size) {
+                stopUploadedPendingPolling();
+            }
+        }
+    }
+
     function updateUploadedEmptyState() {
         const container = document.getElementById('uploaded-papers');
         const emptyState = document.getElementById('uploaded-empty-state');
@@ -1046,7 +1358,8 @@
         }
 
         // TL;DR section (prioritize over abstract if available)
-        if (p.tldr) {
+        const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
+        if (hasTldr) {
             const tldrDiv = document.createElement('div');
             tldrDiv.className = 'rel_tldr';
             const tldrLabel = document.createElement('div');
@@ -1059,6 +1372,24 @@
             tldrDiv.appendChild(tldrText);
             card.appendChild(tldrDiv);
             triggerMathJax(tldrDiv);
+
+            // Abstract: collapsed by default when TL;DR exists
+            if (p.summary) {
+                const details = document.createElement('details');
+                details.className = 'rel_abs_details';
+                const summaryEl = document.createElement('summary');
+                summaryEl.className = 'rel_abs_summary';
+                summaryEl.textContent = 'Abstract';
+                const absDiv = document.createElement('div');
+                absDiv.className = 'rel_abs';
+                absDiv.innerHTML = renderAbstractMarkdown(p.summary);
+                details.appendChild(summaryEl);
+                details.appendChild(absDiv);
+                details.addEventListener('toggle', function () {
+                    if (details.open) triggerMathJax(details);
+                });
+                card.appendChild(details);
+            }
         } else if (p.summary) {
             // Fallback to abstract if no TL;DR
             const absDiv = document.createElement('div');
@@ -1139,9 +1470,25 @@
         // Summary link
         const summaryWrap = document.createElement('div');
         summaryWrap.className = 'rel_summary';
-        summaryWrap.appendChild(
-            createLinkElement('/summary?pid=' + encodeURIComponent(p.id), null, 'Summary', '_blank')
+        const summaryLink = createLinkElement(
+            '/summary?pid=' + encodeURIComponent(p.id),
+            null,
+            'Summary',
+            '_blank'
         );
+        if (featureDisabled) {
+            summaryLink.classList.add('disabled-link');
+            summaryLink.title =
+                p.parse_status !== 'ok'
+                    ? 'Parse PDF first to view summary'
+                    : 'Extract metadata first to view summary';
+            summaryLink.addEventListener('click', function (e) {
+                e.preventDefault();
+            });
+        } else {
+            summaryLink.title = 'View summary';
+        }
+        summaryWrap.appendChild(summaryLink);
 
         // Summary state management (similar to regular papers)
         const summaryState = {
@@ -1213,6 +1560,18 @@
             } else {
                 inspectLink.classList.remove('disabled-link');
                 inspectLink.title = 'Inspect TF-IDF features';
+            }
+
+            // Update Summary link state
+            if (featureDisabled) {
+                summaryLink.classList.add('disabled-link');
+                summaryLink.title =
+                    currentParseStatus !== 'ok'
+                        ? 'Parse PDF first to view summary'
+                        : 'Extract metadata first to view summary';
+            } else {
+                summaryLink.classList.remove('disabled-link');
+                summaryLink.title = 'View summary';
             }
 
             // Update Extract Info button state
@@ -1307,14 +1666,6 @@
 
         syncTriggerState();
 
-        uploadedSummaryUI.set(p.id, {
-            badge: statusBadge,
-            state: summaryState,
-            syncTriggerState,
-            updateParseStatus,
-            card: card,
-        });
-
         actions.appendChild(triggerWrap);
         actions.appendChild(summaryWrap);
         actions.appendChild(similarWrap);
@@ -1383,6 +1734,28 @@
         }
 
         card.appendChild(actions);
+
+        // Store UI references for SSE event handling
+        // Find authorsEl if it exists
+        const authorsEl = card.querySelector('.rel_authors');
+
+        uploadedSummaryUI.set(p.id, {
+            badge: statusBadge,
+            state: summaryState,
+            syncTriggerState,
+            updateParseStatus,
+            card: card,
+            parseStatusBadge: parseStatusBadge,
+            parseBtn: parseBtn,
+            extractBtn: extractBtn,
+            similarBtn: similarBtn,
+            inspectLink: inspectLink,
+            summaryLink: summaryLink,
+            titleLink: titleLink,
+            authorsEl: authorsEl,
+            paperData: p,
+        });
+
         container.appendChild(card);
     }
 
@@ -1488,7 +1861,14 @@
             method: 'POST',
             body: JSON.stringify({ pid: pid }),
         })
-            .then(resp => resp.json())
+            .then(resp => {
+                if (!resp.ok) {
+                    return resp.text().then(text => {
+                        throw new Error(`HTTP ${resp.status}: ${text}`);
+                    });
+                }
+                return resp.json();
+            })
             .then(data => {
                 if (data.success) {
                     const dropdownApi = uploadedDropdowns.get(pid);
@@ -1513,7 +1893,7 @@
             })
             .catch(err => {
                 console.error('Error deleting uploaded paper:', err);
-                alert('Failed to delete paper');
+                alert('Failed to delete paper: ' + err.message);
             });
     }
 

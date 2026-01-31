@@ -98,6 +98,9 @@ class SummaryState {
         this.defaultModel = '';
         this.pendingConfirm = null; // 'clearModel' or 'clearAll'
 
+        // Available summaries for this paper (model cache keys that have summaries)
+        this.availableSummaries = [];
+
         this.queueRank = 0;
         this.queueTotal = 0;
         this.lastTaskId = '';
@@ -255,6 +258,8 @@ class SummaryState {
 
     renderModelOptions() {
         const current = this.getCurrentModel();
+        const availableSummaries = this.availableSummaries || [];
+
         if (!Array.isArray(this.models) || this.models.length === 0) {
             const fallbackLabel = current
                 ? `${escapeHtml(current)}`
@@ -268,14 +273,20 @@ class SummaryState {
                 const rawId = String(model.id || '');
                 const id = escapeHtml(rawId);
                 const selected = rawId === String(current || '') ? ' selected' : '';
-                return `<option value="${id}"${selected}>${id}</option>`;
+                const key = modelCacheKey(rawId);
+                const hasSummary = key && availableSummaries.includes(key);
+                const checkmark = hasSummary ? '✓ ' : '';
+                return `<option value="${id}"${selected}>${checkmark}${id}</option>`;
             })
             .join('');
 
         const hasCurrent = this.models.some(m => String(m.id || '') === String(current || ''));
         if (current && !hasCurrent) {
             const value = escapeHtml(current);
-            options += `<option value="${value}" selected>${value}</option>`;
+            const key = modelCacheKey(current);
+            const hasSummary = key && availableSummaries.includes(key);
+            const checkmark = hasSummary ? '✓ ' : '';
+            options += `<option value="${value}" selected>${checkmark}${value}</option>`;
         }
 
         return options;
@@ -517,7 +528,7 @@ class SummaryState {
                             ${abstractHtml}
                         </div>
                         ${
-                            isLoggedIn && !isUploadedPaper
+                            isLoggedIn
                                 ? `
                         <div class="paper-user-tags-section">
                             <div class="rel_utags" id="summary-tag-dropdown"></div>
@@ -859,6 +870,13 @@ summaryApp.confirmClearModel = async function () {
             this.inflightModels[currentModel] = false;
         }
         this.pendingGenerationModel = '';
+
+        // Remove the cleared model from availableSummaries
+        const clearedKey = modelCacheKey(currentModel);
+        if (clearedKey) {
+            this.availableSummaries = this.availableSummaries.filter(k => k !== clearedKey);
+        }
+
         this.setState({
             clearing: false,
             content: null,
@@ -1012,6 +1030,10 @@ summaryApp.confirmClearAll = async function () {
         // Cancel local in-flight UI state for all models.
         this.inflightModels = Object.create(null);
         this.pendingGenerationModel = '';
+
+        // Clear all available summaries since we cleared everything
+        this.availableSummaries = [];
+
         this.setState({
             clearing: false,
             content: null,
@@ -1612,6 +1634,13 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                 if (chosenModelStr) {
                     this.inflightModels[chosenModelStr] = false;
                 }
+
+                // Update availableSummaries to include the newly generated model
+                const newModelKey = modelCacheKey(selectedModel);
+                if (newModelKey && !this.availableSummaries.includes(newModelKey)) {
+                    this.availableSummaries = [...this.availableSummaries, newModelKey];
+                }
+
                 this.setState({
                     loading: false,
                     regenerating: false,
@@ -1724,6 +1753,9 @@ summaryApp.selectInitialModel = async function (pid) {
     try {
         // Get available summaries for this paper
         const availableSummaries = await fetchAvailableSummaries(pid);
+
+        // Store available summaries in state for UI rendering
+        this.availableSummaries = availableSummaries;
 
         let selectedModel = '';
 

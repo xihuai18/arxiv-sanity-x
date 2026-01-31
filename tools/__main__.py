@@ -19,6 +19,7 @@ _COMMANDS: dict[str, str] = {
     "batch_paper_summarizer": "tools.batch_paper_summarizer",
     "send_emails": "tools.send_emails",
     "daemon": "tools.daemon",
+    "rebuild_time_index": "tools.rebuild_time_index",
 }
 
 

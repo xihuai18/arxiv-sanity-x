@@ -8,6 +8,8 @@ while delegating all functionality to the modular backend package.
 import os
 import sys
 
+os.environ.setdefault("ARXIV_SANITY_PROCESS_ROLE", "web")
+
 from backend.app import create_app
 
 

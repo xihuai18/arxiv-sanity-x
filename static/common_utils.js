@@ -171,6 +171,7 @@ function debugLog(category, message, data) {
     const USER_EVENT_LEADER_KEY = 'arxiv-sanity-user-events-leader';
     const USER_EVENT_LEADER_STALE_MS = 8000;
     const USER_EVENT_LEADER_HEARTBEAT_MS = 3000;
+    const USER_EVENT_LEADER_MONITOR_MS = 2000;
     let userEventChannel = null;
     let userStatePoller = null;
     let eventSource = null;
@@ -180,6 +181,10 @@ function debugLog(category, message, data) {
     let userStateApplyFns = [];
     let userEventTabId = null;
     let userEventLeaderTimer = null;
+    let userEventLeaderMonitorTimer = null;
+    let userEventLeaderMonitorFn = null;
+    let userEventUnloadBound = false;
+    let userEventStorageAvailable = true;
 
     /**
      * Initialize BroadcastChannel for cross-tab communication
@@ -221,6 +226,7 @@ function debugLog(category, message, data) {
             if (!parsed || !parsed.id || !parsed.ts) return null;
             return parsed;
         } catch (e) {
+            userEventStorageAvailable = false;
             return null;
         }
     }
@@ -236,13 +242,14 @@ function debugLog(category, message, data) {
             localStorage.setItem(USER_EVENT_LEADER_KEY, JSON.stringify({ id, ts: Date.now() }));
             return true;
         } catch (e) {
+            userEventStorageAvailable = false;
             return false;
         }
     }
 
     function shouldBroadcastFromThisTab() {
         // If localStorage is unavailable, keep legacy behavior (best-effort broadcast).
-        if (typeof localStorage === 'undefined') return true;
+        if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return true;
 
         const tabId = getUserEventTabId();
         const leader = readUserEventLeader();
@@ -256,8 +263,44 @@ function debugLog(category, message, data) {
         return current.id === tabId;
     }
 
+    function isCurrentTabLeader() {
+        try {
+            if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return true;
+            const tabId = getUserEventTabId();
+            const leader = readUserEventLeader();
+            if (!leader || leaderIsStale(leader)) return false;
+            return leader.id === tabId;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function relinquishLeadershipIfOwned() {
+        try {
+            if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return;
+            if (isCurrentTabLeader()) {
+                localStorage.removeItem(USER_EVENT_LEADER_KEY);
+            }
+        } catch (e) {}
+    }
+
+    function tryClaimUserEventLeadership() {
+        // If localStorage is unavailable, keep legacy behavior (allow every tab to connect SSE).
+        if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return true;
+        const tabId = getUserEventTabId();
+        const leader = readUserEventLeader();
+        if (!leader || leaderIsStale(leader) || leader.id === tabId) {
+            // Try claim (last writer wins).
+            if (!writeUserEventLeader(tabId)) return true;
+        }
+        const current = readUserEventLeader();
+        if (!current || !current.id) return true;
+        return current.id === tabId;
+    }
+
     function startUserEventLeaderElection() {
         if (userEventLeaderTimer) return;
+        if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return;
         userEventLeaderTimer = setInterval(() => {
             if (!isSseOpen()) return;
             const tabId = getUserEventTabId();
@@ -266,6 +309,17 @@ function debugLog(category, message, data) {
                 writeUserEventLeader(tabId);
             }
         }, USER_EVENT_LEADER_HEARTBEAT_MS);
+    }
+
+    function startUserEventLeaderMonitor(fn) {
+        userEventLeaderMonitorFn = fn;
+        if (userEventLeaderMonitorTimer) return;
+        userEventLeaderMonitorTimer = setInterval(() => {
+            if (typeof userEventLeaderMonitorFn !== 'function') return;
+            try {
+                userEventLeaderMonitorFn();
+            } catch (e) {}
+        }, USER_EVENT_LEADER_MONITOR_MS);
     }
 
     /**
@@ -393,12 +447,17 @@ function debugLog(category, message, data) {
             if (eventSourceReconnectTimer) return;
             eventSourceReconnectTimer = setTimeout(() => {
                 eventSourceReconnectTimer = null;
-                connect();
+                connectAsLeaderIfNeeded();
             }, 8000);
         };
 
         const connect = () => {
             if (eventSource || eventSourceConnecting) return;
+            // Avoid opening SSE in every tab: only the leader tab should connect.
+            if (!tryClaimUserEventLeadership()) {
+                startUserStatePolling();
+                return;
+            }
             eventSourceConnecting = true;
             eventSource = new EventSource('/api/user_stream');
             eventSource.onopen = () => {
@@ -426,11 +485,61 @@ function debugLog(category, message, data) {
                     eventSource = null;
                 }
                 eventSourceConnecting = false;
+                // If we were the leader, relinquish so another tab can take over quickly.
+                relinquishLeadershipIfOwned();
                 startUserStatePolling();
                 scheduleReconnect();
             };
         };
-        connect();
+
+        const connectAsLeaderIfNeeded = () => {
+            // If another tab is the leader, don't connect; rely on broadcast + polling.
+            if (!tryClaimUserEventLeadership()) {
+                if (isSseOpen()) {
+                    try {
+                        eventSource.close();
+                    } catch (e) {}
+                    eventSource = null;
+                }
+                startUserStatePolling();
+                return;
+            }
+            connect();
+        };
+
+        // Periodically monitor leader staleness and avoid multiple SSE connections per user.
+        startUserEventLeaderMonitor(() => {
+            // If SSE is open but leadership moved elsewhere, close to free server resources.
+            if (isSseOpen() && !isCurrentTabLeader()) {
+                try {
+                    eventSource.close();
+                } catch (e) {}
+                eventSource = null;
+                startUserStatePolling();
+                return;
+            }
+            // If SSE is not open, try to become leader when the current leader is stale.
+            if (!isSseOpen()) {
+                const leader = readUserEventLeader();
+                if (!leader || leaderIsStale(leader) || leader.id === getUserEventTabId()) {
+                    connectAsLeaderIfNeeded();
+                } else {
+                    startUserStatePolling();
+                }
+            }
+        });
+
+        // Best-effort: on tab close, release leadership so other tabs can connect immediately.
+        if (!userEventUnloadBound) {
+            userEventUnloadBound = true;
+            try {
+                window.addEventListener('beforeunload', () => {
+                    relinquishLeadershipIfOwned();
+                });
+            } catch (e) {}
+        }
+
+        connectAsLeaderIfNeeded();
     }
 
     // =========================================================================
@@ -487,6 +596,37 @@ function debugLog(category, message, data) {
     // Error Handling
     // =========================================================================
 
+    function tryReloadForCsrf() {
+        // Reload at most once per tab session (with a cooldown) to prevent reload storms
+        // when the server keeps returning CSRF-related 403 responses.
+        let didReload = false;
+        try {
+            const key = '__arxivSanityCsrfReloadedAt';
+            const now = Date.now();
+            const last = Number(sessionStorage.getItem(key) || 0);
+            const cooldownMs = 60 * 1000;
+            const canReload =
+                !global.__arxivSanityCsrfReloaded && (!last || now - last > cooldownMs);
+            if (canReload) {
+                global.__arxivSanityCsrfReloaded = true;
+                sessionStorage.setItem(key, String(now));
+                didReload = true;
+            }
+        } catch (e) {
+            // Fallback: only guard within the current page instance.
+            if (!global.__arxivSanityCsrfReloaded) {
+                global.__arxivSanityCsrfReloaded = true;
+                didReload = true;
+            }
+        }
+        if (didReload) {
+            try {
+                global.location.reload();
+            } catch (e) {}
+        }
+        return didReload;
+    }
+
     /**
      * Handle API errors and return user-friendly error messages
      * @param {Error|string} error - Error object or message
@@ -511,9 +651,11 @@ function debugLog(category, message, data) {
         if (msg.includes('403') || msg.includes('Forbidden')) {
             // CSRF token mismatch after server restart - auto reload page
             if (msg.includes('CSRF') || msg.includes('csrf')) {
-                console.warn('CSRF token invalid, reloading page...');
-                window.location.reload();
-                return 'Session expired. Reloading page...';
+                if (tryReloadForCsrf()) {
+                    console.warn('CSRF token invalid, reloading page...');
+                    return 'Session expired. Reloading page...';
+                }
+                return 'Session expired. Please refresh the page.';
             }
             return 'Access denied. You do not have permission for this operation.';
         }
@@ -1327,10 +1469,7 @@ function debugLog(category, message, data) {
                     // Reload once to refresh token and session.
                     stopSummaryStatusPolling();
                     try {
-                        if (!window.__arxivSanityCsrfReloaded) {
-                            window.__arxivSanityCsrfReloaded = true;
-                            window.location.reload();
-                        }
+                        tryReloadForCsrf();
                     } catch (e) {}
                     return null;
                 }

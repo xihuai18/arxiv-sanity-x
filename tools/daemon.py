@@ -1,7 +1,9 @@
 import datetime
+import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import holidays
@@ -34,16 +36,24 @@ PRIORITY_DAYS = settings.daemon.priority_days
 PRIORITY_LIMIT = settings.daemon.priority_limit
 
 
-def _run_cmd(cmd, name: str) -> bool:
+def _run_cmd(cmd, name: str, fail_level: str = "error") -> bool:
     logger.debug(f"{name}: {' '.join(cmd)}")
+    log_fn = getattr(logger, fail_level, logger.error)
     try:
+        t0 = time.time()
+        logger.trace(f"[BLOCKING] daemon._run_cmd: starting {name}")
         subprocess.run(cmd, check=True)
+        logger.trace(f"[BLOCKING] daemon._run_cmd: completed {name} in {time.time() - t0:.2f}s")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"{name} failed with code {e.returncode}")
+        # arxiv_daemon returns exit code 1 if no new papers (not a real error).
+        if name == "fetch" and e.returncode == 1:
+            logger.info("[BLOCKING] daemon._run_cmd: fetch returned code 1 (no new papers)")
+            return False
+        log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed with code {e.returncode}")
         return False
     except Exception as e:
-        logger.error(f"{name} failed: {e}")
+        log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed: {e}")
         return False
 
 
@@ -144,6 +154,8 @@ def send_email():
         holiday_duration = count_holiday_duration(now)
         time_param = str(float(time_param) + holiday_duration)
 
+    t0 = time.time()
+    logger.trace("[BLOCKING] daemon.send_email: starting send_emails.py ...")
     subprocess.call(
         [
             PYTHON,
@@ -153,6 +165,7 @@ def send_email():
             *(["--dry-run"] if settings.daemon.email_dry_run else []),
         ]
     )
+    logger.trace(f"[BLOCKING] daemon.send_email: completed in {time.time() - t0:.2f}s")
 
 
 def backup_user_data():
@@ -168,7 +181,8 @@ def backup_user_data():
     data_repo_dir = PROJECT_ROOT / "data-repo"
     dst_file = data_repo_dir / "dict.db"
 
-    if not src_file.is_file():
+    # NOTE: Use os.path.isfile so unit tests can patch tools.daemon.os reliably.
+    if not os.path.isfile(src_file):
         logger.warning(f"Source dict.db not found: {src_file}")
         return
 
@@ -184,13 +198,18 @@ def backup_user_data():
         return
 
     # Stage dict.db in submodule
+    t0 = time.time()
+    logger.trace("[BLOCKING] daemon.backup_user_data: git add dict.db ...")
     add_result = subprocess.run(["git", "add", "dict.db"], cwd=data_repo_dir, capture_output=True, text=True)
+    logger.trace(f"[BLOCKING] daemon.backup_user_data: git add completed in {time.time() - t0:.2f}s")
     if add_result.returncode != 0:
         logger.warning(f"git add failed in submodule: {add_result.stderr.strip()}")
         return
 
     # Check if there are staged changes
+    t0 = time.time()
     diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "dict.db"], cwd=data_repo_dir)
+    logger.trace(f"[BLOCKING] daemon.backup_user_data: git diff completed in {time.time() - t0:.2f}s")
     if diff_result.returncode == 0:
         logger.debug("No changes to back up")
         return
@@ -200,18 +219,22 @@ def backup_user_data():
 
     # Commit in submodule
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    t0 = time.time()
     commit_result = subprocess.run(
         ["git", "commit", "-m", f"backup dict.db ({timestamp})"],
         cwd=data_repo_dir,
         capture_output=True,
         text=True,
     )
+    logger.trace(f"[BLOCKING] daemon.backup_user_data: git commit completed in {time.time() - t0:.2f}s")
     if commit_result.returncode != 0:
         logger.warning(f"git commit failed in submodule: {commit_result.stderr.strip()}")
         return
 
     # Push submodule
+    t0 = time.time()
     push_result = subprocess.run(["git", "push"], cwd=data_repo_dir, capture_output=True, text=True)
+    logger.trace(f"[BLOCKING] daemon.backup_user_data: git push completed in {time.time() - t0:.2f}s")
     if push_result.returncode != 0:
         logger.warning(f"git push failed in submodule: {push_result.stderr.strip()}")
 

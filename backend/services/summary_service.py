@@ -445,7 +445,11 @@ def extract_tldr_from_summary(pid: str) -> str:
     if cached is not None:
         return cached
 
+    t0 = time.time()
     tldr = read_tldr_from_summary_file(pid)
+    dt = time.time() - t0
+    if dt >= 0.1:
+        logger.trace(f"[BLOCKING] extract_tldr_from_summary: pid={pid} read in {dt:.2f}s")
     if tldr:
         TLDR_CACHE.set(pid, tldr)
     return tldr
@@ -453,6 +457,8 @@ def extract_tldr_from_summary(pid: str) -> str:
 
 def compute_summary_cache_stats() -> dict:
     """Compute summary cache statistics."""
+    t0 = time.time()
+    logger.trace("[BLOCKING] compute_summary_cache_stats: starting to scan summary directory...")
     cache_models = defaultdict(int)
     pid_counts = defaultdict(int)
     cache_total = 0
@@ -481,6 +487,9 @@ def compute_summary_cache_stats() -> dict:
 
     model_counts = dict(cache_models)
     pid_counts_dict = dict(pid_counts)
+    logger.trace(
+        f"[BLOCKING] compute_summary_cache_stats: scanned {cache_total} summaries in {len(pid_counts_dict)} papers, took {time.time() - t0:.2f}s"
+    )
 
     return {
         "summary_cache_total": int(cache_total),
@@ -901,7 +910,10 @@ def generate_paper_summary(
                 pass
             raise SummaryCacheMiss("Summary cache not found")
 
+        logger.trace(f"[BLOCKING] generate_paper_summary: acquiring lock for {pid}, timeout=300s...")
+        t_lock_start = time.time()
         lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
+        logger.trace(f"[BLOCKING] generate_paper_summary: lock acquired for {pid} in {time.time() - t_lock_start:.2f}s")
         if lock_fd is None:
             if cached_summary and not force_refresh:
                 return cached_summary, sanitize_summary_meta(cached_meta)
@@ -933,7 +945,14 @@ def generate_paper_summary(
             else:
                 pid_for_summary = pid if has_explicit_version else raw_pid
 
+            logger.trace(
+                f"[BLOCKING] generate_paper_summary: calling LLM for {pid}, source={summary_source}, model={model}..."
+            )
+            t_llm_start = time.time()
             summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
+            logger.trace(
+                f"[BLOCKING] generate_paper_summary: LLM call completed for {pid} in {time.time() - t_llm_start:.2f}s"
+            )
             summary_content, summary_meta = normalize_summary_result(summary_result)
             summary_meta = summary_meta if isinstance(summary_meta, dict) else {}
             response_meta = sanitize_summary_meta(summary_meta)

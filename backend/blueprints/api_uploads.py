@@ -533,3 +533,41 @@ def api_uploaded_papers_similar(pid: str):
     except Exception as e:
         logger.error(f"Failed to find similar papers for {pid}: {e}")
         return _api_error("Failed to find similar papers. Please try again.", 500)
+
+
+@bp.route("/uploaded_papers/tldr/<pid>", methods=["GET"])
+def api_uploaded_paper_tldr(pid):
+    """Get TL;DR for an uploaded paper.
+
+    Returns the TL;DR extracted from the summary if available.
+    Used for real-time updates after summary generation completes.
+    """
+    if g.user is None:
+        return _api_error("Not logged in", 401)
+
+    if not pid or not validate_upload_pid(pid):
+        return _api_error("Invalid paper ID", 400)
+
+    try:
+        from aslite.repositories import UploadedPaperRepository
+        from backend.services.summary_service import (
+            extract_tldr_from_summary,
+            get_summary_status,
+        )
+
+        # Verify ownership
+        data = UploadedPaperRepository.get(pid)
+        if not data or data.get("owner") != g.user:
+            return _api_error("Paper not found or access denied", 404)
+
+        # Get summary status and TL;DR
+        summary_status, _ = get_summary_status(pid)
+        tldr = ""
+        if summary_status == "ok":
+            tldr = extract_tldr_from_summary(pid) or ""
+
+        return _api_success(pid=pid, tldr=tldr, summary_status=summary_status)
+
+    except Exception as e:
+        logger.error(f"Failed to get TL;DR for {pid}: {e}")
+        return _api_error("Failed to get TL;DR. Please try again.", 500)
