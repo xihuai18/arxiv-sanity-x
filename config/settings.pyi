@@ -27,9 +27,18 @@ class LLMSettings(BaseSettings):
     name: str
     summary_lang: str
     fallback_models: str
+    timeout: int
     litellm_verbose: bool
     @property
     def fallback_model_list(self) -> list[str]: ...
+
+class ExtractInfoSettings(BaseSettings):
+    model_name: str
+    base_url: str
+    api_key: str
+    temperature: float
+    max_tokens: int
+    timeout: int
 
 class EmbeddingSettings(BaseSettings):
     port: int
@@ -83,6 +92,7 @@ class HueySettings(BaseSettings):
     db_path: str
     workers: int
     worker_type: str
+    max_memory_mb: int
     summary_priority_high: int
     summary_priority_low: int
     summary_repair_on_start: bool
@@ -92,6 +102,9 @@ class HueySettings(BaseSettings):
     summary_repair_interval: int
     force_repair: bool
     tasks_sse_enabled: bool
+    sqlite_timeout_web: float
+    sqlite_timeout_worker: float
+    allow_thread_fallback: bool
 
 class WebSettings(BaseSettings):
     cache_papers: bool
@@ -115,6 +128,10 @@ class DatabaseSettings(BaseSettings):
     timeout: int
     max_retries: int
     retry_base_sleep: float
+    timeout_web: int
+    timeout_worker: int
+    max_retries_web: int
+    max_retries_worker: int
 
 class SearchSettings(BaseSettings):
     ret_num: int
@@ -122,6 +139,7 @@ class SearchSettings(BaseSettings):
 
 class RecommendationSettings(BaseSettings):
     api_base_url: str
+    api_key: str
     api_timeout: float
     api_limit: int
     model_c: float
@@ -135,6 +153,7 @@ class ArxivSettings(BaseSettings):
     agent_tags: str
     app_tags: str
     empty_response_fallback: int
+    api_timeout: int
     @property
     def all_tags(self) -> list[str]: ...
 
@@ -154,6 +173,7 @@ class Settings(BaseSettings):
     # Nested configuration - explicit types
     email: EmailSettings
     llm: LLMSettings
+    extract_info: ExtractInfoSettings
     embedding: EmbeddingSettings
     mineru: MinerUSettings
     summary: SummarySettings

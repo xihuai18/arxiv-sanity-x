@@ -65,6 +65,7 @@ class LLMSettings(BaseSettings):
     name: str = Field(default="deepseek-v3.2", description="Default LLM model name")
     summary_lang: str = Field(default="zh", description="Summary language (zh/en)")
     fallback_models: str = Field(default="glm-4.7", description="Fallback models (comma-separated)")
+    timeout: int = Field(default=600, description="LLM request timeout (seconds)")
     # LiteLLM verbose logging switch (for bin/litellm.sh)
     litellm_verbose: bool = Field(default=False, description="LiteLLM verbose logging mode")
 
@@ -93,7 +94,7 @@ class ExtractInfoSettings(BaseSettings):
     temperature: float = Field(default=0.1, description="LLM temperature for extraction")
     # Reasoning models need more tokens for their thinking process
     max_tokens: int = Field(default=8192, description="Max tokens for extraction response (8192 for reasoning models)")
-    timeout: int = Field(default=60, description="Request timeout in seconds")
+    timeout: int = Field(default=600, description="Request timeout in seconds")
 
 
 class EmbeddingSettings(BaseSettings):
@@ -148,7 +149,7 @@ class MinerUSettings(BaseSettings):
         ),
     )
     api_timeout: int = Field(
-        default=600,
+        default=900,
         description="API timeout in seconds",
         validation_alias=AliasChoices(
             "ARXIV_SANITY_MINERU_API_TIMEOUT",
@@ -282,8 +283,8 @@ class HueySettings(BaseSettings):
 
     # SQLite storage tuning (Huey uses SQLite transactions for enqueue/dequeue).
     # Web requests should fail fast to avoid tying up gunicorn threads.
-    sqlite_timeout_web: float = Field(default=1.0, description="Huey SQLite timeout for web process (seconds)")
-    sqlite_timeout_worker: float = Field(default=5.0, description="Huey SQLite timeout for Huey consumer (seconds)")
+    sqlite_timeout_web: float = Field(default=2.0, description="Huey SQLite timeout for web process (seconds)")
+    sqlite_timeout_worker: float = Field(default=10.0, description="Huey SQLite timeout for Huey consumer (seconds)")
 
     # Fallback behavior
     allow_thread_fallback: bool = Field(
@@ -361,7 +362,7 @@ class LockSettings(BaseSettings):
         extra="ignore",
     )
 
-    summary_lock_stale_sec: float = Field(default=600, description="Summary lock stale time (seconds)")
+    summary_lock_stale_sec: float = Field(default=3600, description="Summary lock stale time (seconds)")
     mineru_lock_stale_sec: float = Field(default=3600, description="MinerU lock stale time (seconds)")
 
 
@@ -380,9 +381,9 @@ class DatabaseSettings(BaseSettings):
     retry_base_sleep: float = Field(default=0.2, description="Retry base sleep time (seconds)")
 
     # Split web/worker settings to avoid tying up gunicorn threads on DB lock contention.
-    timeout_web: int = Field(default=5, description="SQLite timeout for web process (seconds)")
+    timeout_web: int = Field(default=2, description="SQLite timeout for web process (seconds)")
     timeout_worker: int = Field(default=120, description="SQLite timeout for worker process (seconds)")
-    max_retries_web: int = Field(default=2, description="Database operation max retries for web process")
+    max_retries_web: int = Field(default=3, description="Database operation max retries for web process")
     max_retries_worker: int = Field(default=5, description="Database operation max retries for worker process")
 
     @model_validator(mode="after")
@@ -442,7 +443,7 @@ class RecommendationSettings(BaseSettings):
         default="",
         description="Internal API key for service-to-service calls (e.g. send_emails.py -> /api/tag_search)",
     )
-    api_timeout: float = Field(default=120.0, description="Recommendation API timeout (seconds)")
+    api_timeout: float = Field(default=45.0, description="Recommendation API timeout (seconds)")
     api_limit: int = Field(default=1000, description="Candidate papers limit per query")
     model_c: float = Field(default=0.1, description="Recommendation model C parameter")
     num_threads: int = Field(default=0, description="Thread count (0=auto)")
@@ -467,7 +468,7 @@ class ArxivSettings(BaseSettings):
     app_tags: str = Field(default="cs.SE,cs.CY", description="Application tags (comma-separated)")
     empty_response_fallback: int = Field(default=3, description="Empty response fallback count")
     # API request configuration
-    api_timeout: int = Field(default=20, description="arXiv API request timeout (seconds)")
+    api_timeout: int = Field(default=30, description="arXiv API request timeout (seconds)")
 
     @property
     def all_tags(self) -> list[str]:

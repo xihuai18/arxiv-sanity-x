@@ -3,7 +3,9 @@ Utils for dealing with arxiv API and related processing
 """
 
 import logging
+import random
 import time
+import urllib.error
 import urllib.request
 from collections import OrderedDict
 
@@ -12,6 +14,17 @@ import feedparser
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+_ARXIV_RETRY_MAX_TRIES = 3
+
+
+def _sleep_backoff(attempt: int, base_s: float = 1.0, cap_s: float = 10.0) -> None:
+    """Sleep with exponential backoff and jitter."""
+
+    sleep_s = min(cap_s, base_s * (2**attempt))
+    # Add small jitter to reduce thundering herd.
+    jitter_s = sleep_s * 0.15 * random.random()
+    time.sleep(sleep_s + jitter_s)
 
 
 def get_response(search_query, start_index=0, max_r=100):
@@ -33,12 +46,27 @@ def get_response(search_query, start_index=0, max_r=100):
             "User-Agent": "arxiv-sanity-x (+https://github.com/karpathy/arxiv-sanity-lite)",
         },
     )
-    with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as url:
-        response = url.read()
-        if getattr(url, "status", 200) != 200:
-            logger.error("arxiv did not return status 200 response")
+    last_exc: Exception | None = None
+    for attempt in range(_ARXIV_RETRY_MAX_TRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as url:
+                response = url.read()
+                if getattr(url, "status", 200) != 200:
+                    logger.error("arxiv did not return status 200 response")
+                return response
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            last_exc = e
+            if attempt >= _ARXIV_RETRY_MAX_TRIES - 1:
+                break
+            logger.warning(f"arxiv API request failed (attempt {attempt+1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
+            _sleep_backoff(attempt)
 
-    return response
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("arxiv API request failed")
+
+    # Unreachable: kept to satisfy type checkers.
+    return b""
 
 
 def encode_feedparser_dict(d):

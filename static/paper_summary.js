@@ -620,7 +620,7 @@ async function fetchSummary(pid, options = {}) {
     try {
         // Create AbortController for timeout control
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minute timeout
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout (cache-only fetch should be fast)
 
         const response = await fetch('/api/get_paper_summary', {
             method: 'POST',
