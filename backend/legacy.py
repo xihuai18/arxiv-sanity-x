@@ -21,6 +21,7 @@ import queue
 import re
 import secrets
 import sys
+import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -171,6 +172,16 @@ MAX_RESULTS = settings.search.max_results  # Process at most 10 pages of results
 # Override at runtime with ARXIV_SANITY_CACHE_PAPERS=1 if you have ample RAM and want
 # maximum per-request throughput.
 CACHE_PAPERS_IN_MEMORY = settings.web.cache_papers
+
+# LLM model list cache: avoid blocking the web threads on slow/unavailable LLM endpoints.
+_LLM_MODELS_CACHE_LOCK = threading.Lock()
+_LLM_MODELS_CACHE = {
+    "updated_time": 0.0,
+    "models": [],
+    "warning": None,
+    "in_progress": False,
+}
+_LLM_MODELS_CACHE_TTL_S = 300.0
 
 
 # set the secret key so we can cryptographically sign cookies and maintain sessions
@@ -584,7 +595,15 @@ def _get_thumb_url(pid: str) -> str:
 # TLDR_CACHE = _LRUCacheTTL(maxsize=2000, ttl_s=600.0)  # Moved to summary_service
 
 
-def render_pid(pid, pid_to_utags=None, pid_to_ntags=None, paper=None):
+def render_pid(
+    pid,
+    pid_to_utags=None,
+    pid_to_ntags=None,
+    paper=None,
+    *,
+    include_tldr: bool = True,
+    include_summary_status: bool = True,
+):
     """Render a single paper for the UI - delegates to render_service."""
     from backend.services.render_service import render_pid as _render_pid
 
@@ -596,6 +615,8 @@ def render_pid(pid, pid_to_utags=None, pid_to_ntags=None, paper=None):
         get_paper_fn=get_paper,
         get_tags_fn=get_tags,
         get_neg_tags_fn=get_neg_tags,
+        include_tldr=include_tldr,
+        include_summary_status=include_summary_status,
     )
 
 
@@ -866,6 +887,8 @@ def default_context():
 
 
 def main():
+    t_request_start = time.time()
+    logger.trace(f"[API] main(): request started, args={dict(request.args)}")
     # default settings
     default_rank = "time"
     default_tags = ""
@@ -1232,18 +1255,23 @@ def main():
     logger.trace(
         f"User: {context['user']}\ntags {context['tags']}\nkeys {context['keys']}\nctags {context['combined_tags']}"
     )
+    logger.trace(f"[API] main(): completed in {time.time() - t_request_start:.2f}s, returned {len(papers)} papers")
     return render_template("index.html", **context)
 
 
 def api_user_state():
+    t_start = time.time()
+    logger.trace(f"[API] api_user_state: request started, user={g.user}")
     if g.user is None:
         return _api_error("Not logged in", 401)
     try:
-        return _api_success(
+        result = _api_success(
             tags=_build_user_tag_list(),
             keys=_build_user_key_list(),
             combined_tags=_build_user_combined_tag_list(),
         )
+        logger.trace(f"[API] api_user_state: completed in {time.time() - t_start:.2f}s")
+        return result
     except Exception as e:
         logger.error(f"Failed to build user state: {e}")
         return _api_error("Server error", 500)
@@ -1279,8 +1307,10 @@ def api_user_stream():
 
 
 def inspect():
+    t_start = time.time()
     # fetch the paper of interest based on the pid
     pid = request.args.get("pid", "")
+    logger.trace(f"[API] inspect: pid={pid}")
 
     # Check for upload pid first
     from backend.utils.upload_utils import is_upload_pid
@@ -1316,7 +1346,8 @@ def inspect():
     words.sort(key=lambda w: w["weight"], reverse=True)
 
     # package everything up and render
-    paper = render_pid(pid)
+    # Inspect page doesn't need TL;DR or summary status; skip extra disk/DB lookups.
+    paper = render_pid(pid, include_tldr=False, include_summary_status=False)
     context = default_context()
     context["paper"] = paper
     context["words"] = words
@@ -1325,6 +1356,7 @@ def inspect():
     )
     # Add paper name to page title
     context["title"] = f"Paper Inspect - {paper['title']}"
+    logger.trace(f"[API] inspect: completed in {time.time() - t_start:.2f}s")
     return render_template("inspect.html", **context)
 
 
@@ -1334,6 +1366,8 @@ def _inspect_uploaded_paper(pid: str):
     Similar to the arXiv paper inspect, but uses computed upload features.
     Requires the user to be logged in and own the paper.
     """
+    t_start = time.time()
+    logger.trace(f"[API] _inspect_uploaded_paper: pid={pid}")
     import scipy.sparse as sp
 
     from aslite.repositories import UploadedPaperRepository
@@ -1452,6 +1486,7 @@ def _inspect_uploaded_paper(pid: str):
         "These features are used to find similar arXiv papers."
     )
     context["title"] = f"Paper Inspect - {display_title}"
+    logger.trace(f"[API] _inspect_uploaded_paper: completed in {time.time() - t_start:.2f}s")
     return render_template("inspect.html", **context)
 
 
@@ -1462,9 +1497,11 @@ def summary():
     If a versioned PID is provided (e.g., 2512.21789v1), redirect to the
     unversioned URL (/summary?pid=2512.21789) since we only cache the latest version.
     """
+    t_start = time.time()
     # Get paper ID
     pid = request.args.get("pid", "")
     logger.debug(f"show paper summary page for paper {pid}")
+    logger.trace(f"[API] summary: pid={pid}")
 
     # Check for upload pid first
     from backend.utils.upload_utils import is_upload_pid
@@ -1516,7 +1553,14 @@ def summary():
             pid_to_utags = None
             pid_to_ntags = None
 
-    paper = render_pid(raw_pid, pid_to_utags=pid_to_utags, pid_to_ntags=pid_to_ntags)
+    # Summary page renders the full summary; skip TL;DR extraction and per-paper status lookups.
+    paper = render_pid(
+        raw_pid,
+        pid_to_utags=pid_to_utags,
+        pid_to_ntags=pid_to_ntags,
+        include_tldr=False,
+        include_summary_status=False,
+    )
 
     # Build the current tags for the user (same shape as main page: pos+neg, includes neg-only)
     rtags = _build_user_tag_list() if g.user else []
@@ -1529,11 +1573,13 @@ def summary():
     context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
     # Add paper name to page title
     context["title"] = f"Paper Summary - {paper['title']}"
+    logger.trace(f"[API] summary: completed in {time.time() - t_start:.2f}s")
     return render_template("summary.html", **context)
 
 
 def api_get_paper_summary():
     """API endpoint: Get paper summary asynchronously"""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_pid=True, schema=SummaryGetRequest)
         if err:
@@ -1547,12 +1593,15 @@ def api_get_paper_summary():
         force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
         cache_only = bool(data.get("cache_only", False))
 
-        logger.debug(f"Getting paper summary for: {pid}")
+        logger.trace(
+            f"[API] api_get_paper_summary: pid={pid}, model={model}, force={force_regen}, cache_only={cache_only}"
+        )
 
         summary_content, summary_meta = generate_paper_summary(
             pid, model=model, force_refresh=force_regen, cache_only=cache_only
         )
 
+        logger.trace(f"[API] api_get_paper_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(
             pid=pid,
             summary_content=summary_content,
@@ -1576,6 +1625,7 @@ def api_get_paper_summary():
 
 def api_trigger_paper_summary():
     """Trigger summary generation without returning content."""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_pid=True, schema=SummaryTriggerRequest)
         if err:
@@ -1583,6 +1633,7 @@ def api_trigger_paper_summary():
 
         raw_pid = data["_raw_pid"]
         model = (data.get("model") or LLM_NAME or "").strip()
+        logger.trace(f"[API] api_trigger_paper_summary: pid={raw_pid}, model={model}")
         if not model:
             return _api_error("Model is required", 400)
 
@@ -1635,6 +1686,7 @@ def api_trigger_paper_summary():
         if task_id == "":
             task_id = None
 
+        logger.trace(f"[API] api_trigger_paper_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=raw_pid, status="queued", last_error=None, task_id=task_id)
 
     except HTTPException:
@@ -1651,6 +1703,8 @@ def api_task_status(task_id: str):
     - status, updated_time, queue_rank, queue_total are always returned
     - pid, model, error are only returned if user owns the task or is admin
     """
+    t_start = time.time()
+    logger.trace(f"[API] api_task_status: task_id={task_id}")
     if not task_id:
         return _api_error("Task ID is required", 400)
     try:
@@ -1714,6 +1768,7 @@ def api_task_status(task_id: str):
                         break
         except Exception as rank_exc:
             logger.warning(f"Failed to compute queue rank for {task_id}: {rank_exc}")
+        logger.trace(f"[API] api_task_status: completed in {time.time() - t_start:.2f}s")
         return _api_success(task_id=task_id, **payload)
     except Exception as e:
         logger.error(f"Task status API error: {e}")
@@ -1722,6 +1777,8 @@ def api_task_status(task_id: str):
 
 def api_queue_stats():
     """Return global queue statistics (queued count, running count)."""
+    t_start = time.time()
+    logger.trace("[API] api_queue_stats: starting")
     try:
         queued_count = 0
         running_count = 0
@@ -1757,6 +1814,7 @@ def api_queue_stats():
                 queued_count = summary_queued
                 running_count = summary_running
 
+        logger.trace(f"[API] api_queue_stats: completed in {time.time() - t_start:.2f}s")
         return _api_success(queued=queued_count, running=running_count)
     except Exception as e:
         logger.error(f"Queue stats API error: {e}")
@@ -1765,6 +1823,7 @@ def api_queue_stats():
 
 def api_summary_status():
     """Return summary generation status for one or more papers (optimized with batch queries)."""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_csrf=True, schema=SummaryStatusRequest)
         if err:
@@ -1785,6 +1844,8 @@ def api_summary_status():
         if not model:
             return _api_error("Model is required", 400)
 
+        logger.trace(f"[API] api_summary_status: checking {len(pids)} papers, model={model}")
+
         # Batch process: normalize pids and check existence
         raw_pids = []
         for pid in pids:
@@ -1798,10 +1859,12 @@ def api_summary_status():
             metas = MetaRepository.get_by_ids(raw_pids)
             existing_pids = set(metas.keys())
         except Exception:
-            # Fallback to individual checks
-            for raw_pid in raw_pids:
-                if paper_exists(raw_pid):
-                    existing_pids.add(raw_pid)
+            pass
+
+        # For pids not found in MetaRepository, check if they are uploaded papers
+        for raw_pid in raw_pids:
+            if raw_pid not in existing_pids and paper_exists(raw_pid):
+                existing_pids.add(raw_pid)
 
         # Batch get summary status (preserve cache/lock priority)
         statuses = {}
@@ -1863,6 +1926,7 @@ def api_summary_status():
                     status, last_error = get_summary_status(raw_pid, model)
                     statuses[raw_pid] = {"status": status, "last_error": last_error}
 
+        logger.trace(f"[API] api_summary_status: completed in {time.time() - t_start:.2f}s, {len(statuses)} results")
         return _api_success(statuses=statuses, model=model)
 
     except HTTPException:
@@ -1874,6 +1938,7 @@ def api_summary_status():
 
 def api_clear_model_summary():
     """API endpoint: Clear summary for a specific model only"""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_pid=True, schema=SummaryClearModelRequest)
         if err:
@@ -1881,10 +1946,12 @@ def api_clear_model_summary():
 
         pid = data.get("pid", "").strip()
         model = (data.get("model") or "").strip()
+        logger.trace(f"[API] api_clear_model_summary: pid={pid}, model={model}")
         if not model:
             return _api_error("Model name is required", 400)
 
         _clear_model_summary(pid, model, user=getattr(g, "user", None))
+        logger.trace(f"[API] api_clear_model_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=pid, model=model)
 
     except HTTPException:
@@ -1896,13 +1963,16 @@ def api_clear_model_summary():
 
 def api_clear_paper_cache():
     """API endpoint: Clear all caches for a paper (all models, HTML, MinerU, etc.)"""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_pid=True, schema=SummaryPidRequest)
         if err:
             return err
 
         pid = data.get("pid", "").strip()
+        logger.trace(f"[API] api_clear_paper_cache: pid={pid}")
         _clear_paper_cache(pid, user=getattr(g, "user", None))
+        logger.trace(f"[API] api_clear_paper_cache: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=pid)
 
     except HTTPException:
@@ -1966,6 +2036,20 @@ def api_llm_models():
                 return _api_success(models=models, warning="LLM base URL is not configured")
             return _api_error("LLM base URL is not configured", 500, models=[])
 
+        now = time.time()
+
+        # Fast path: return cached model list (avoid repeated network calls).
+        with _LLM_MODELS_CACHE_LOCK:
+            cached_models = list(_LLM_MODELS_CACHE.get("models") or [])
+            cached_time = float(_LLM_MODELS_CACHE.get("updated_time") or 0.0)
+            cached_warning = _LLM_MODELS_CACHE.get("warning")
+            in_progress = bool(_LLM_MODELS_CACHE.get("in_progress"))
+
+        if cached_models and (now - cached_time) < _LLM_MODELS_CACHE_TTL_S:
+            if cached_warning:
+                return _api_success(models=cached_models, warning=cached_warning)
+            return _api_success(models=cached_models)
+
         headers = {}
         if LLM_API_KEY:
             headers["Authorization"] = f"Bearer {LLM_API_KEY}"
@@ -1977,30 +2061,102 @@ def api_llm_models():
             candidate_urls.append(f"{base_url}/models")
             candidate_urls.append(f"{base_url}/v1/models")
 
-        payload = None
-        last_error = None
-        for url in candidate_urls:
-            try:
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 404 and url != candidate_urls[-1]:
-                    last_error = f"HTTP 404 for {url}"
-                    continue
-                response.raise_for_status()
-                payload = response.json()
-                break
-            except Exception as e:
-                last_error = e
-                continue
+        # If a refresh is already running, return stale cache/fallback quickly.
+        if in_progress:
+            models = cached_models or ([{"id": LLM_NAME}] if LLM_NAME else [])
+            if models:
+                return _api_success(models=models, warning="Refreshing model list...")
+            return _api_error("Refreshing model list...", 503, models=[])
 
-        if payload is None:
-            raise RuntimeError(f"Failed to fetch models from {candidate_urls}. Last error: {last_error}")
-        models = []
-        for item in payload.get("data", []):
-            mid = item.get("id")
-            if mid:
-                models.append(item)
-        if not models and LLM_NAME:
-            models = [{"id": LLM_NAME}]
+        def _fetch_models() -> tuple[list[dict], str | None]:
+            sess = requests.Session()
+            sess.trust_env = False
+            payload = None
+            last_error = None
+            # Tight timeouts: model list is optional UI sugar; avoid tying up web threads.
+            timeout = (1.5, 4.0)  # (connect, read)
+            for url in candidate_urls:
+                try:
+                    logger.trace(f"[BLOCKING] api_llm_models: fetching models from {url}, timeout={timeout}...")
+                    t0 = time.time()
+                    response = sess.get(url, headers=headers, timeout=timeout)
+                    logger.trace(f"[BLOCKING] api_llm_models: response received in {time.time() - t0:.2f}s")
+                    if response.status_code == 404 and url != candidate_urls[-1]:
+                        last_error = f"HTTP 404 for {url}"
+                        continue
+                    response.raise_for_status()
+                    payload = response.json()
+                    break
+                except Exception as e:
+                    last_error = e
+                    continue
+
+            if payload is None:
+                models = [{"id": LLM_NAME}] if LLM_NAME else []
+                if models:
+                    return models, "Failed to fetch model list from LLM endpoint"
+                raise RuntimeError(f"Failed to fetch models from {candidate_urls}. Last error: {last_error}")
+
+            models: list[dict] = []
+            for item in payload.get("data", []):
+                mid = item.get("id")
+                if mid:
+                    models.append(item)
+            if not models and LLM_NAME:
+                models = [{"id": LLM_NAME}]
+            return models, None
+
+        def _refresh_cache_in_background():
+            try:
+                models, warning = _fetch_models()
+            except Exception as e:
+                logger.error(f"Failed to fetch LLM models: {e}")
+                models = [{"id": LLM_NAME}] if LLM_NAME else []
+                warning = "Failed to fetch model list from LLM endpoint"
+            finally:
+                with _LLM_MODELS_CACHE_LOCK:
+                    _LLM_MODELS_CACHE["models"] = models
+                    _LLM_MODELS_CACHE["warning"] = warning
+                    _LLM_MODELS_CACHE["updated_time"] = time.time()
+                    _LLM_MODELS_CACHE["in_progress"] = False
+
+        # If we have a stale cache, refresh asynchronously and return immediately.
+        if cached_models:
+            with _LLM_MODELS_CACHE_LOCK:
+                # Double-check: someone else may have started it.
+                if not _LLM_MODELS_CACHE.get("in_progress"):
+                    _LLM_MODELS_CACHE["in_progress"] = True
+                    threading.Thread(target=_refresh_cache_in_background, daemon=True).start()
+            return _api_success(models=cached_models, warning="Using cached model list (refreshing...)")
+
+        # No cache yet: fetch synchronously once (still with tight timeouts).
+        # Double-check `in_progress` under lock to avoid multiple concurrent first-time fetches.
+        with _LLM_MODELS_CACHE_LOCK:
+            if _LLM_MODELS_CACHE.get("in_progress"):
+                models = list(_LLM_MODELS_CACHE.get("models") or []) or ([{"id": LLM_NAME}] if LLM_NAME else [])
+                if models:
+                    return _api_success(models=models, warning="Refreshing model list...")
+                return _api_error("Refreshing model list...", 503, models=[])
+            _LLM_MODELS_CACHE["in_progress"] = True
+
+        models: list[dict] = []
+        warning: str | None = None
+        try:
+            models, warning = _fetch_models()
+        except Exception as e:
+            logger.error(f"Failed to fetch LLM models: {e}")
+            models = [{"id": LLM_NAME}] if LLM_NAME else []
+            warning = "Failed to fetch model list from LLM endpoint"
+        finally:
+            with _LLM_MODELS_CACHE_LOCK:
+                _LLM_MODELS_CACHE["models"] = models
+                _LLM_MODELS_CACHE["warning"] = warning
+                _LLM_MODELS_CACHE["updated_time"] = time.time()
+                _LLM_MODELS_CACHE["in_progress"] = False
+        if warning:
+            if not models:
+                return _api_error(warning, 502, models=[])
+            return _api_success(models=models, warning=warning)
         return _api_success(models=models)
     except Exception as e:
         logger.error(f"Failed to fetch LLM models: {e}")
@@ -2015,8 +2171,10 @@ def api_check_paper_summaries():
     API endpoint: Check which models have existing summaries for a paper
     Returns a list of model names that have cached summaries
     """
+    t_start = time.time()
     try:
         pid = request.args.get("pid", "").strip()
+        logger.trace(f"[API] api_check_paper_summaries: pid={pid}")
         if not pid:
             return _api_error("Paper ID is required", 400)
 
@@ -2038,6 +2196,9 @@ def api_check_paper_summaries():
                 if meta_file.exists() and md_file.stat().st_size > 0:
                     available_models.append(model_name)
 
+        logger.trace(
+            f"[API] api_check_paper_summaries: completed in {time.time() - t_start:.2f}s, found {len(available_models)} models"
+        )
         return _api_success(available_models=available_models)
 
     except Exception as e:
@@ -2097,15 +2258,22 @@ def _clear_paper_cache(pid: str, user: str | None = None):
 
 def profile():
     """Render profile page - delegates to auth_service for email."""
-    from backend.services.auth_service import get_user_email
+    t_start = time.time()
+    logger.trace("[API] profile: starting")
+    from backend.services.auth_service import get_user_email, get_user_emails
 
     context = default_context()
-    email = get_user_email(g.user)
-    context["email"] = email
+    emails = get_user_emails(g.user)
+    context["email"] = get_user_email(g.user)
+    context["emails"] = emails
+    context["emails_text"] = "\n".join(emails)
+    logger.trace(f"[API] profile: completed in {time.time() - t_start:.2f}s")
     return render_template("profile.html", **context)
 
 
 def stats():
+    t_start = time.time()
+    logger.trace("[API] stats: starting")
     context = default_context()
     mdb = get_metas()
     times = [v["_time"] for v in mdb.values()]
@@ -2273,6 +2441,7 @@ def stats():
     context["queue_auto_refresh"] = True
     context["queue_refresh_seconds"] = 15
 
+    logger.trace(f"[API] stats: completed in {time.time() - t_start:.2f}s")
     return render_template("stats.html", **context)
 
 
@@ -2333,6 +2502,7 @@ def _temporary_user_context(user):
 
 def api_keyword_search():
     """API interface: single keyword search"""
+    t_start = time.time()
     try:
         data = request.get_json()
         # logger.info(f"API keyword search data: {data}")
@@ -2344,6 +2514,7 @@ def api_keyword_search():
         time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
         skip_num = data.get("skip_num", 0)
+        logger.trace(f"[API] api_keyword_search: keyword={keyword[:50] if keyword else ''}, limit={limit}")
 
         if not keyword:
             return _api_error("Keyword is required", 400)
@@ -2391,7 +2562,7 @@ def api_keyword_search():
         if len(pids) > limit:
             pids = pids[:limit]
             scores = scores[:limit]
-        # logger.trace(f"API keyword search results: {len(pids)} papers found")
+        logger.trace(f"[API] api_keyword_search: completed in {time.time() - t_start:.2f}s, {len(pids)} results")
         return _api_success(pids=pids, scores=scores, total_count=len(pids))
 
     except Exception as e:
@@ -2401,12 +2572,13 @@ def api_keyword_search():
 
 def api_tag_search():
     """API interface: single tag recommendation"""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_csrf=False)
         if err:
             return err
 
-        logger.trace(f"API tag search data: {data}")
+        logger.trace(f"[API] api_tag_search: data={data}")
 
         tag_name = (data.get("tag_name") or data.get("tag") or "").strip()  # tag name
         body_user = data.get("user", "")  # backward-compatible field
@@ -2479,7 +2651,7 @@ def api_tag_search():
         if len(rec_pids) > limit:
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
-        logger.trace(f"API tag search results: {len(rec_pids)} papers found")
+        logger.trace(f"[API] api_tag_search: completed in {time.time() - t_start:.2f}s, {len(rec_pids)} results")
         return _api_success(pids=rec_pids, scores=rec_scores, total_count=len(rec_pids))
 
     except Exception as e:
@@ -2489,12 +2661,13 @@ def api_tag_search():
 
 def api_tags_search():
     """API interface: joint tag recommendation"""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_csrf=False)
         if err:
             return err
 
-        logger.trace(f"API combined tags search data: {data}")
+        logger.trace(f"[API] api_tags_search: data={data}")
 
         tags_list = data.get("tags", [])  # List[tag_name]
         body_user = data.get("user", "")  # backward-compatible field
@@ -2574,7 +2747,7 @@ def api_tags_search():
             rec_pids = rec_pids[:limit]
             rec_scores = rec_scores[:limit]
 
-        logger.trace(f"API combined tags search results: {len(rec_pids)} papers found")
+        logger.trace(f"[API] api_tags_search: completed in {time.time() - t_start:.2f}s, {len(rec_pids)} results")
 
         return _api_success(pids=rec_pids, scores=rec_scores, total_count=len(rec_pids))
 
@@ -2724,6 +2897,7 @@ def cache_status():
 
 def api_tag_feedback():
     """Submit tag feedback - delegates to tag_service."""
+    t_start = time.time()
     if g.user is None:
         return _api_error("Not logged in", 401)
 
@@ -2735,6 +2909,7 @@ def api_tag_feedback():
         pid = data["pid"]
         tag = data["tag"]
         label = data["label"]
+        logger.trace(f"[API] api_tag_feedback: pid={pid}, tag={tag}, label={label}")
 
         err = _validate_tag_name(tag)
         if err:
@@ -2743,6 +2918,7 @@ def api_tag_feedback():
         from backend.services.tag_service import set_tag_feedback
 
         set_tag_feedback(pid, tag, label)
+        logger.trace(f"[API] api_tag_feedback: completed in {time.time() - t_start:.2f}s")
         return _api_success()
     except HTTPException:
         raise
@@ -2753,12 +2929,14 @@ def api_tag_feedback():
 
 def api_tag_members():
     """List papers under a tag - delegates to tag_service."""
+    t_start = time.time()
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     tag = _normalize_name(request.args.get("tag", ""))
     label = _normalize_name(request.args.get("label", "all")).lower()
     search = _normalize_name(request.args.get("search", "")).lower().strip()
+    logger.trace(f"[API] api_tag_members: tag={tag}, label={label}")
     if not tag:
         return _api_error("tag is required", 400)
     if label not in {"all", "pos", "neg"}:
@@ -2786,6 +2964,7 @@ def api_tag_members():
             get_metas_fn=get_metas,
             get_papers_bulk_fn=get_papers_bulk,
         )
+        logger.trace(f"[API] api_tag_members: completed in {time.time() - t_start:.2f}s")
         return _api_success(**result)
     except Exception as e:
         logger.error(f"Failed to list tag members for user {g.user}, tag={tag}: {e}")
@@ -2794,6 +2973,7 @@ def api_tag_members():
 
 def api_paper_titles():
     """Resolve paper titles - delegates to tag_service."""
+    t_start = time.time()
     if g.user is None:
         return _api_error("Not logged in", 401)
 
@@ -2803,6 +2983,7 @@ def api_paper_titles():
             return err
 
         raw = data.get("pids", [])
+        logger.trace(f"[API] api_paper_titles: {len(raw) if isinstance(raw, list) else 1} pids")
         if isinstance(raw, str):
             raw_list = [raw]
         elif isinstance(raw, list):
@@ -2825,6 +3006,7 @@ def api_paper_titles():
         from backend.services.tag_service import resolve_paper_titles
 
         items = resolve_paper_titles(pids, get_papers_bulk_fn=get_papers_bulk)
+        logger.trace(f"[API] api_paper_titles: completed in {time.time() - t_start:.2f}s")
         return _api_success(items=items)
     except HTTPException:
         raise
@@ -2839,6 +3021,7 @@ def add_tag(tag=None):
 
     _csrf_protect()
     tag = _normalize_name(tag)
+    logger.trace(f"[API] add_tag: tag={tag}")
     return create_empty_tag(tag)
 
 
@@ -2849,6 +3032,7 @@ def add(pid=None, tag=None):
     _csrf_protect()
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
+    logger.trace(f"[API] add: pid={pid}, tag={tag}")
     return add_paper_to_tag(pid, tag)
 
 
@@ -2859,6 +3043,7 @@ def sub(pid=None, tag=None):
     _csrf_protect()
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
+    logger.trace(f"[API] sub: pid={pid}, tag={tag}")
     return remove_paper_from_tag(pid, tag)
 
 
@@ -2868,6 +3053,7 @@ def delete_tag(tag=None):
 
     _csrf_protect()
     tag = _normalize_name(tag)
+    logger.trace(f"[API] delete_tag: tag={tag}")
     return _delete_tag(tag)
 
 
@@ -2878,6 +3064,7 @@ def rename_tag(otag=None, ntag=None):
     _csrf_protect()
     otag = _normalize_name(otag)
     ntag = _normalize_name(ntag)
+    logger.trace(f"[API] rename_tag: otag={otag}, ntag={ntag}")
     return _rename_tag(otag, ntag)
 
 
@@ -2887,6 +3074,7 @@ def add_ctag(ctag=None):
 
     _csrf_protect()
     ctag = _normalize_name(ctag)
+    logger.trace(f"[API] add_ctag: ctag={ctag}")
     return create_combined_tag(ctag)
 
 
@@ -2896,6 +3084,7 @@ def delete_ctag(ctag=None):
 
     _csrf_protect()
     ctag = _normalize_name(ctag)
+    logger.trace(f"[API] delete_ctag: ctag={ctag}")
     return delete_combined_tag(ctag)
 
 
@@ -2904,6 +3093,7 @@ def rename_ctag(otag=None, ntag=None):
     from backend.services.tag_service import rename_combined_tag
 
     _csrf_protect()
+    logger.trace(f"[API] rename_ctag: otag={otag}, ntag={ntag}")
     return rename_combined_tag(otag, ntag)
 
 
@@ -2913,6 +3103,7 @@ def add_key(keyword=None):
 
     _csrf_protect()
     keyword = _normalize_name(keyword)
+    logger.trace(f"[API] add_key: keyword={keyword}")
     return add_keyword(keyword)
 
 
@@ -2922,6 +3113,7 @@ def delete_key(keyword=None):
 
     _csrf_protect()
     keyword = _normalize_name(keyword)
+    logger.trace(f"[API] delete_key: keyword={keyword}")
     return delete_keyword(keyword)
 
 
@@ -2932,6 +3124,7 @@ def rename_key(okey=None, nkey=None):
     _csrf_protect()
     okey = _normalize_name(okey)
     nkey = _normalize_name(nkey)
+    logger.trace(f"[API] rename_key: okey={okey}, nkey={nkey}")
     return rename_keyword(okey, nkey)
 
 
@@ -2945,6 +3138,7 @@ def login():
 
     _csrf_protect()
     username = (request.form.get("username") or "").strip()
+    logger.trace(f"[API] login: username={username}")
     return redirect(login_user(username))
 
 
@@ -2953,6 +3147,7 @@ def logout():
     from backend.services.auth_service import logout_user
 
     _csrf_protect()
+    logger.trace("[API] logout")
     return redirect(logout_user())
 
 
@@ -2966,6 +3161,7 @@ def register_email():
 
     _csrf_protect()
     email = (request.form.get("email") or "").strip()
+    logger.trace(f"[API] register_email: email={email}")
     return redirect(register_user_email(email))
 
 
@@ -3039,6 +3235,8 @@ def _trigger_summary_async(
 
 def readinglist_page():
     """Display reading list page"""
+    t_start = time.time()
+    logger.trace("[API] readinglist_page: starting")
     context = default_context()
 
     if not g.user:
@@ -3048,7 +3246,11 @@ def readinglist_page():
         context["default_summary_model"] = LLM_NAME or ""
         return render_template("readinglist.html", **context)
 
+    t0 = time.time()
     readinglist = get_readinglist()
+    logger.trace(
+        f"[BLOCKING] readinglist_page: loaded readinglist in {time.time() - t0:.2f}s, items={len(readinglist)}"
+    )
 
     # Sort by added_time descending
     sorted_items = sorted(readinglist.items(), key=lambda x: x[1].get("added_time", 0), reverse=True)
@@ -3056,14 +3258,51 @@ def readinglist_page():
     # Render papers
     papers = []
     pids = [pid for pid, _ in sorted_items]
+    t0 = time.time()
     pid_to_paper = get_papers_bulk(pids)
+    logger.trace(f"[BLOCKING] readinglist_page: fetched {len(pid_to_paper)} papers in {time.time() - t0:.2f}s")
 
+    # Precompute per-paper tag lists once to avoid O(papers * tags) scans.
+    t0 = time.time()
+    tags_db = get_tags()
+    neg_tags_db = get_neg_tags()
+    pid_set = set(pids)
+    pid_to_utags = {pid: [] for pid in pids}
+    pid_to_ntags = {pid: [] for pid in pids}
+    for tag, tag_pids in (tags_db or {}).items():
+        if not tag_pids:
+            continue
+        try:
+            hit = pid_set.intersection(tag_pids)
+        except Exception:
+            hit = {pid for pid in pid_set if pid in (tag_pids or ())}
+        for pid in hit:
+            pid_to_utags[pid].append(tag)
+    for tag, tag_pids in (neg_tags_db or {}).items():
+        if not tag_pids:
+            continue
+        try:
+            hit = pid_set.intersection(tag_pids)
+        except Exception:
+            hit = {pid for pid in pid_set if pid in (tag_pids or ())}
+        for pid in hit:
+            pid_to_ntags[pid].append(tag)
+    logger.trace(f"[BLOCKING] readinglist_page: built pid->tags maps in {time.time() - t0:.2f}s")
+
+    t0 = time.time()
     for pid, info in sorted_items:
         paper = pid_to_paper.get(pid)
         if not paper:
             continue
 
-        rendered = render_pid(pid, paper=paper)
+        # Avoid per-paper summary_status checks: reading list already stores summary_status fields.
+        rendered = render_pid(
+            pid,
+            paper=paper,
+            pid_to_utags=pid_to_utags,
+            pid_to_ntags=pid_to_ntags,
+            include_summary_status=False,
+        )
         rendered["added_time"] = info.get("added_time", 0)
         rendered["top_tags"] = info.get("top_tags", [])
         rendered["summary_status"] = info.get("summary_status")
@@ -3072,13 +3311,12 @@ def readinglist_page():
         rendered["summary_task_id"] = info.get("summary_task_id")
         rendered["in_readinglist"] = True
         papers.append(rendered)
+    logger.trace(f"[BLOCKING] readinglist_page: rendered {len(papers)} cards in {time.time() - t0:.2f}s")
 
     context["papers"] = papers
     context["default_summary_model"] = LLM_NAME or ""
     # Provide tag list for tag dropdown (same shape as main page)
     if g.user:
-        tags_db = get_tags()
-        neg_tags_db = get_neg_tags()
         rtags = []
         for t in set(tags_db.keys()) | set(neg_tags_db.keys()):
             pos_n = len(tags_db.get(t, set()))
@@ -3097,17 +3335,20 @@ def readinglist_page():
         context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
     else:
         context["tags"] = []
+    logger.trace(f"[API] readinglist_page: completed in {time.time() - t_start:.2f}s")
     return render_template("readinglist.html", **context)
 
 
 def api_readinglist_add():
     """Add paper to reading list - delegates to readinglist_service."""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_pid=True, schema=ReadingListPidRequest)
         if err:
             return err
 
         raw_pid = data["_raw_pid"]
+        logger.trace(f"[API] api_readinglist_add: pid={raw_pid}")
 
         from backend.services.readinglist_service import add_to_readinglist
 
@@ -3142,6 +3383,7 @@ def api_readinglist_add():
         if "error" in result:
             return _api_error(result["error"], 401 if result["error"] == "Not logged in" else 500)
 
+        logger.trace(f"[API] api_readinglist_add: completed in {time.time() - t_start:.2f}s")
         return _api_success(**result)
 
     except HTTPException:
@@ -3153,12 +3395,14 @@ def api_readinglist_add():
 
 def api_readinglist_remove():
     """Remove paper from reading list - delegates to readinglist_service."""
+    t_start = time.time()
     try:
         data, err = _parse_api_request(require_login=True, require_csrf=True, schema=ReadingListPidRequest)
         if err:
             return err
 
         raw_pid, _ = split_pid_version(data["pid"])
+        logger.trace(f"[API] api_readinglist_remove: pid={raw_pid}")
 
         from backend.services.readinglist_service import remove_from_readinglist
 
@@ -3168,6 +3412,7 @@ def api_readinglist_remove():
             status = 401 if result["error"] == "Not logged in" else 404
             return _api_error(result["error"], status)
 
+        logger.trace(f"[API] api_readinglist_remove: completed in {time.time() - t_start:.2f}s")
         return _api_success(**result)
 
     except HTTPException:
@@ -3179,10 +3424,13 @@ def api_readinglist_remove():
 
 def api_readinglist_list():
     """Get reading list - delegates to readinglist_service."""
+    t_start = time.time()
+    logger.trace("[API] api_readinglist_list: starting")
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     from backend.services.readinglist_service import list_readinglist
 
     items = list_readinglist()
+    logger.trace(f"[API] api_readinglist_list: completed in {time.time() - t_start:.2f}s, {len(items)} items")
     return _api_success(items=items)

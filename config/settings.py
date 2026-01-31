@@ -64,7 +64,7 @@ class LLMSettings(BaseSettings):
     api_key: str = Field(default="no-key", description="LLM API key")
     name: str = Field(default="deepseek-v3.2", description="Default LLM model name")
     summary_lang: str = Field(default="zh", description="Summary language (zh/en)")
-    fallback_models: str = Field(default="glm-4.7,mimo-v2-flash", description="Fallback models (comma-separated)")
+    fallback_models: str = Field(default="glm-4.7", description="Fallback models (comma-separated)")
     # LiteLLM verbose logging switch (for bin/litellm.sh)
     litellm_verbose: bool = Field(default=False, description="LiteLLM verbose logging mode")
 
@@ -86,7 +86,7 @@ class ExtractInfoSettings(BaseSettings):
     )
 
     # Model name for extract info task (simpler task, can use smaller model)
-    model_name: str = Field(default="glm-4.7-flash", description="LLM model for metadata extraction")
+    model_name: str = Field(default="glm-4.7", description="LLM model for metadata extraction")
     # Optional: override base_url and api_key (empty uses main LLM settings)
     base_url: str = Field(default="", description="Extract Info API base URL (empty uses LLM_BASE_URL)")
     api_key: str = Field(default="", description="Extract Info API key (empty uses LLM_API_KEY)")
@@ -378,6 +378,31 @@ class DatabaseSettings(BaseSettings):
     timeout: int = Field(default=120, description="SQLite connection timeout (seconds)")
     max_retries: int = Field(default=5, description="Database operation max retries")
     retry_base_sleep: float = Field(default=0.2, description="Retry base sleep time (seconds)")
+
+    # Split web/worker settings to avoid tying up gunicorn threads on DB lock contention.
+    timeout_web: int = Field(default=5, description="SQLite timeout for web process (seconds)")
+    timeout_worker: int = Field(default=120, description="SQLite timeout for worker process (seconds)")
+    max_retries_web: int = Field(default=2, description="Database operation max retries for web process")
+    max_retries_worker: int = Field(default=5, description="Database operation max retries for worker process")
+
+    @model_validator(mode="after")
+    def set_split_defaults(self) -> DatabaseSettings:
+        """Backward-compatible split defaults.
+
+        If legacy fields (timeout/max_retries) are explicitly set by the user,
+        propagate them to web/worker split fields unless those are also set.
+        """
+        if "timeout" in self.model_fields_set:
+            if "timeout_web" not in self.model_fields_set:
+                self.timeout_web = self.timeout
+            if "timeout_worker" not in self.model_fields_set:
+                self.timeout_worker = self.timeout
+        if "max_retries" in self.model_fields_set:
+            if "max_retries_web" not in self.model_fields_set:
+                self.max_retries_web = self.max_retries
+            if "max_retries_worker" not in self.model_fields_set:
+                self.max_retries_worker = self.max_retries
+        return self
 
 
 class SearchSettings(BaseSettings):

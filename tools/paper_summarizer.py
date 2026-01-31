@@ -785,6 +785,7 @@ class PaperSummarizer:
         """
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         start_time = time.time()
+        logged_wait = False
 
         try:
             stale_s = float(settings.lock.mineru_lock_stale_sec)
@@ -799,8 +800,18 @@ class PaperSummarizer:
                     os.write(fd, f"{os.getpid()}\n{time.time()}\n".encode())
                 except Exception:
                     pass
+                waited = time.time() - start_time
+                if waited >= 0.25:
+                    logger.trace(
+                        f"[BLOCKING] mineru._acquire_file_lock: acquired lock after {waited:.2f}s: {lock_path}"
+                    )
                 return fd
             except FileExistsError:
+                if not logged_wait:
+                    logger.trace(
+                        f"[BLOCKING] mineru._acquire_file_lock: waiting for lock (timeout={timeout}s, stale_s={stale_s:.0f}s): {lock_path}"
+                    )
+                    logged_wait = True
                 # Check if lock is stale (by time or dead process)
                 try:
                     age = time.time() - lock_path.stat().st_mtime
@@ -830,7 +841,10 @@ class PaperSummarizer:
                 # Lock file exists, wait and retry
                 time.sleep(0.5)
 
-        logger.trace(f"Failed to acquire lock after {timeout} seconds: {lock_path}")
+        waited = time.time() - start_time
+        logger.warning(
+            f"[BLOCKING] mineru._acquire_file_lock: timeout after {waited:.2f}s (timeout={timeout}s): {lock_path}"
+        )
         return None
 
     def _release_file_lock(self, fd: int, lock_path: Path):
@@ -855,6 +869,7 @@ class PaperSummarizer:
         slots_dir.mkdir(parents=True, exist_ok=True)
 
         start_time = time.time()
+        logged_wait = False
         max_workers = max(1, MINERU_MAX_WORKERS)
 
         try:
@@ -868,7 +883,13 @@ class PaperSummarizer:
                 slot_lock_path = slots_dir / f"slot_{slot}.lock"
                 try:
                     fd = os.open(str(slot_lock_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL)
-                    logger.trace(f"Acquired GPU slot {slot}/{max_workers}")
+                    waited = time.time() - start_time
+                    if waited >= 0.25:
+                        logger.trace(
+                            f"[BLOCKING] mineru._acquire_gpu_slot: acquired GPU slot {slot}/{max_workers} after {waited:.2f}s"
+                        )
+                    else:
+                        logger.trace(f"Acquired GPU slot {slot}/{max_workers}")
                     # Write process info to lock file and close fd to avoid leak
                     try:
                         os.write(fd, f"{os.getpid()}\\n{time.time()}\\n".encode())
@@ -878,6 +899,11 @@ class PaperSummarizer:
                         os.close(fd)
                     return slot
                 except FileExistsError:
+                    if not logged_wait:
+                        logger.trace(
+                            f"[BLOCKING] mineru._acquire_gpu_slot: waiting for GPU slot (timeout={timeout}s, max_workers={max_workers})"
+                        )
+                        logged_wait = True
                     # Check if lock is stale (by time or dead process)
                     try:
                         age = time.time() - slot_lock_path.stat().st_mtime
@@ -910,7 +936,8 @@ class PaperSummarizer:
             # No slot available, wait and retry
             time.sleep(1.0)
 
-        logger.trace(f"Failed to acquire GPU slot after {timeout} seconds")
+        waited = time.time() - start_time
+        logger.warning(f"[BLOCKING] mineru._acquire_gpu_slot: timeout after {waited:.2f}s (timeout={timeout}s)")
         return None
 
     def _release_gpu_slot(self, slot: int):
@@ -1171,7 +1198,12 @@ class PaperSummarizer:
             }
 
             logger.trace(f"Requesting upload URL for: {pdf_name}.pdf")
+            t_req = time.time()
             res = requests.post(batch_url, headers=header, json=data, timeout=30)
+            logger.trace(
+                f"[BLOCKING] MinerU API: batch file-urls returned in {time.time() - t_req:.2f}s "
+                f"(status={res.status_code})"
+            )
 
             # Check HTTP status
             if res.status_code == 401:
@@ -1200,7 +1232,11 @@ class PaperSummarizer:
             # === Step 2: Upload PDF file ===
             logger.trace(f"Uploading PDF to: {upload_url[:80]}...")
             with open(pdf_path, "rb") as f:
+                t_up = time.time()
                 upload_res = requests.put(upload_url, data=f, timeout=120)
+                logger.trace(
+                    f"[BLOCKING] MinerU API: upload completed in {time.time() - t_up:.2f}s (status={upload_res.status_code})"
+                )
 
             if upload_res.status_code != 200:
                 logger.error(f"Failed to upload PDF: HTTP {upload_res.status_code}")
@@ -1221,7 +1257,11 @@ class PaperSummarizer:
 
                 time.sleep(MINERU_API_POLL_INTERVAL)
 
+                t_poll = time.time()
                 res = requests.get(query_url, headers=header, timeout=30)
+                dt_poll = time.time() - t_poll
+                if dt_poll >= 1.0:
+                    logger.trace(f"[BLOCKING] MinerU API: poll request took {dt_poll:.2f}s (status={res.status_code})")
                 result = res.json()
 
                 # Check API response code
@@ -1259,14 +1299,23 @@ class PaperSummarizer:
             output_path.mkdir(parents=True, exist_ok=True)
 
             logger.trace("Downloading ZIP...")
+            t_down = time.time()
             response = requests.get(download_url, timeout=120)
+            logger.trace(
+                f"[BLOCKING] MinerU API: zip download completed in {time.time() - t_down:.2f}s "
+                f"(status={response.status_code}, bytes={len(response.content) if response.content is not None else 0})"
+            )
 
+            t_extract = time.time()
             logger.trace(f"Extracting to {output_path}")
             with zipfile.ZipFile(io.BytesIO(response.content)) as z:
                 z.extractall(output_path)
+            logger.trace(f"[BLOCKING] MinerU API: zip extracted in {time.time() - t_extract:.2f}s to {output_path}")
 
             # Find and rename markdown file
+            t_find = time.time()
             md_files = list(output_path.rglob("*.md"))
+            logger.trace(f"[BLOCKING] MinerU API: scanned markdown files in {time.time() - t_find:.2f}s")
             if not md_files:
                 logger.error("No markdown file found in result")
                 raise ValueError("MINERU_API_NO_MARKDOWN")
@@ -2728,6 +2777,7 @@ def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     start_time = time.time()
+    logged_wait = False
     stale_s = _summary_lock_stale_seconds()
     while time.time() - start_time < timeout_s:
         try:
@@ -2737,8 +2787,16 @@ def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]
                 os.write(fd, f"{os.getpid()}\n{time.time()}\n".encode())
             except Exception:
                 pass
+            waited = time.time() - start_time
+            if waited >= 0.25:
+                logger.trace(f"[BLOCKING] acquire_summary_lock: acquired lock after {waited:.2f}s: {lock_path}")
             return fd
         except FileExistsError:
+            if not logged_wait:
+                logger.trace(
+                    f"[BLOCKING] acquire_summary_lock: waiting for lock (timeout={timeout_s}s, stale_s={stale_s:.0f}s): {lock_path}"
+                )
+                logged_wait = True
             # Strategy 1: Time-based stale detection
             if _is_lock_stale(lock_path, stale_s):
                 try:
@@ -2763,6 +2821,8 @@ def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]
             except (ValueError, IndexError, OSError):
                 pass  # Can't read PID, fall back to time-based only
             time.sleep(0.2)
+    waited = time.time() - start_time
+    logger.warning(f"[BLOCKING] acquire_summary_lock: timeout after {waited:.2f}s (timeout={timeout_s}s): {lock_path}")
     return None
 
 

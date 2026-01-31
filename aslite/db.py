@@ -10,10 +10,13 @@ import os
 import pickle
 import re
 import sqlite3
+import sys
 import tempfile
 import time
 import zlib
 from contextlib import contextmanager
+
+from loguru import logger
 
 from config import settings
 
@@ -21,9 +24,62 @@ DATA_DIR = str(settings.data_dir)
 
 # -----------------------------------------------------------------------------
 # SQLite configuration (from centralized settings)
-DB_TIMEOUT = settings.db.timeout
-DB_MAX_RETRIES = settings.db.max_retries
-DB_RETRY_BASE_SLEEP = settings.db.retry_base_sleep
+
+
+def _detect_process_role() -> str:
+    """Detect current process role for DB tuning.
+
+    Use ARXIV_SANITY_PROCESS_ROLE=web|worker to override auto detection.
+    """
+    role = (os.environ.get("ARXIV_SANITY_PROCESS_ROLE") or "").strip().lower()
+    if role in {"web", "worker"}:
+        return role
+
+    try:
+        argv0_full = (sys.argv[0] or "").lower()
+        argv0 = os.path.basename(argv0_full).lower()
+        argv_all = " ".join(sys.argv).lower()
+    except Exception:
+        argv0_full = ""
+        argv0 = ""
+        argv_all = ""
+
+    # Web-like entrypoints
+    if "gunicorn" in argv0 or "gunicorn" in argv_all:
+        return "web"
+    if argv0 == "flask" or " flask " in f" {argv_all} ":
+        return "web"
+    if "flask/__main__.py" in argv_all or "flask\\__main__.py" in argv_all:
+        return "web"
+    if "serve.py" in argv_all:
+        return "web"
+
+    # Default to worker/offline to avoid breaking batch jobs.
+    return "worker"
+
+
+_PROCESS_ROLE = _detect_process_role()
+
+# Prefer split web/worker settings if available, otherwise fall back to legacy.
+DB_TIMEOUT = (
+    int(getattr(settings.db, "timeout_web"))
+    if _PROCESS_ROLE == "web"
+    else (
+        int(getattr(settings.db, "timeout_worker"))
+        if hasattr(settings.db, "timeout_worker")
+        else int(getattr(settings.db, "timeout"))
+    )
+)
+DB_MAX_RETRIES = (
+    int(getattr(settings.db, "max_retries_web"))
+    if _PROCESS_ROLE == "web"
+    else (
+        int(getattr(settings.db, "max_retries_worker"))
+        if hasattr(settings.db, "max_retries_worker")
+        else int(getattr(settings.db, "max_retries"))
+    )
+)
+DB_RETRY_BASE_SLEEP = float(getattr(settings.db, "retry_base_sleep"))
 
 
 def _init_connection(conn: sqlite3.Connection, enable_wal: bool = False):
@@ -150,8 +206,23 @@ class SqliteKV:
                 msg = str(exc).lower()
                 if "locked" in msg or "busy" in msg:
                     if attempt >= DB_MAX_RETRIES - 1:
+                        logger.warning(
+                            f"[BLOCKING] db._execute_with_retry: giving up after {DB_MAX_RETRIES} retries "
+                            f"(db={self.db_path}, table={self.tablename})"
+                        )
                         raise
-                    time.sleep(DB_RETRY_BASE_SLEEP * (2**attempt))
+                    sleep_time = DB_RETRY_BASE_SLEEP * (2**attempt)
+                    op = ""
+                    try:
+                        op = (sql or "").lstrip().split(" ", 1)[0].upper()
+                    except Exception:
+                        op = ""
+                    logger.trace(
+                        f"[BLOCKING] db._execute_with_retry: db locked/busy, op={op}, "
+                        f"retry {attempt+1}/{DB_MAX_RETRIES}, sleeping {sleep_time:.2f}s "
+                        f"(db={self.db_path}, table={self.tablename})"
+                    )
+                    time.sleep(sleep_time)
                     continue
                 raise
 
@@ -166,8 +237,17 @@ class SqliteKV:
                 msg = str(exc).lower()
                 if "locked" in msg or "busy" in msg:
                     if attempt >= DB_MAX_RETRIES - 1:
+                        logger.warning(
+                            f"[BLOCKING] db._commit_with_retry: giving up after {DB_MAX_RETRIES} retries "
+                            f"(db={self.db_path}, table={self.tablename})"
+                        )
                         raise
-                    time.sleep(DB_RETRY_BASE_SLEEP * (2**attempt))
+                    sleep_time = DB_RETRY_BASE_SLEEP * (2**attempt)
+                    logger.trace(
+                        f"[BLOCKING] db._commit_with_retry: db locked/busy, retry {attempt+1}/{DB_MAX_RETRIES}, "
+                        f"sleeping {sleep_time:.2f}s (db={self.db_path}, table={self.tablename})"
+                    )
+                    time.sleep(sleep_time)
                     continue
                 raise
 
@@ -612,6 +692,143 @@ def parse_readinglist_key(key: str) -> tuple:
         return None, None
     parts = key.split("::", 1)
     return parts[0], parts[1]
+
+
+# -----------------------------------------------------------------------------
+# Metas time index (for efficient latest-n queries)
+
+
+def _get_metas_time_index_conn(flag: str = "r") -> sqlite3.Connection:
+    """Get a connection to the metas_time_index table in papers.db."""
+    if flag == "r":
+        if not os.path.exists(PAPERS_DB_FILE):
+            raise FileNotFoundError(f"Database not found: {PAPERS_DB_FILE}")
+        conn = sqlite3.connect(
+            f"file:{PAPERS_DB_FILE}?mode=ro",
+            uri=True,
+            timeout=DB_TIMEOUT,
+            check_same_thread=False,
+        )
+    else:
+        conn = sqlite3.connect(PAPERS_DB_FILE, timeout=DB_TIMEOUT, check_same_thread=False)
+
+    _init_connection(conn, enable_wal=(flag == "c"))
+
+    # Create table if needed (only for write mode)
+    if flag == "c":
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metas_time_index (
+                pid TEXT PRIMARY KEY,
+                _time REAL NOT NULL
+            )
+            """
+        )
+        # Create index on _time for efficient ORDER BY queries
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_metas_time ON metas_time_index (_time)")
+        conn.commit()
+
+    return conn
+
+
+def get_latest_pids_by_time(n: int) -> list[tuple[str, float]]:
+    """Get the latest n paper IDs sorted by _time descending.
+
+    Returns:
+        List of (pid, _time) tuples, sorted by _time descending.
+        Returns empty list if index table doesn't exist or is empty.
+    """
+    if n <= 0:
+        return []
+
+    try:
+        conn = _get_metas_time_index_conn(flag="r")
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return []
+
+    try:
+        cursor = conn.execute(
+            "SELECT pid, _time FROM metas_time_index ORDER BY _time DESC LIMIT ?",
+            (n,),
+        )
+        return cursor.fetchall()
+    except sqlite3.OperationalError:
+        # Table doesn't exist
+        return []
+    finally:
+        conn.close()
+
+
+def update_metas_time_index(pid_time_pairs: list[tuple[str, float]]):
+    """Update the metas_time_index table with new pid/_time pairs.
+
+    Args:
+        pid_time_pairs: List of (pid, _time) tuples to insert/update.
+    """
+    if not pid_time_pairs:
+        return
+
+    conn = _get_metas_time_index_conn(flag="c")
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO metas_time_index (pid, _time) VALUES (?, ?)",
+            pid_time_pairs,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def rebuild_metas_time_index():
+    """Rebuild the metas_time_index table from the metas table.
+
+    This is useful for initial setup or recovery.
+    """
+    from loguru import logger
+
+    logger.info("Rebuilding metas_time_index from metas table...")
+
+    # Read all metas and extract _time
+    pid_time_pairs = []
+    with get_metas_db() as mdb:
+        for pid, meta in mdb.items():
+            _time = meta.get("_time", 0) if isinstance(meta, dict) else 0
+            pid_time_pairs.append((pid, _time))
+
+    if not pid_time_pairs:
+        logger.warning("No metas found, skipping index rebuild")
+        return
+
+    # Write to index table
+    conn = _get_metas_time_index_conn(flag="c")
+    try:
+        # Clear existing data
+        conn.execute("DELETE FROM metas_time_index")
+        # Insert all pairs
+        conn.executemany(
+            "INSERT INTO metas_time_index (pid, _time) VALUES (?, ?)",
+            pid_time_pairs,
+        )
+        conn.commit()
+        logger.success(f"Rebuilt metas_time_index with {len(pid_time_pairs)} entries")
+    finally:
+        conn.close()
+
+
+def metas_time_index_count() -> int:
+    """Return the number of entries in the metas_time_index table."""
+    try:
+        conn = _get_metas_time_index_conn(flag="r")
+    except (FileNotFoundError, sqlite3.OperationalError):
+        return 0
+
+    try:
+        cursor = conn.execute("SELECT COUNT(*) FROM metas_time_index")
+        return cursor.fetchone()[0]
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
 
 
 # -----------------------------------------------------------------------------

@@ -33,6 +33,28 @@ from backend.utils.upload_utils import (
 from config import settings
 
 DATA_DIR = str(settings.data_dir)
+
+# SSE enabled flag - check if we're in a web context
+_SSE_ENABLED = True
+
+
+def _emit_upload_event(user: str, payload: dict) -> None:
+    """Emit SSE event for upload status changes.
+
+    Args:
+        user: Username to send event to
+        payload: Event payload dict
+    """
+    if not _SSE_ENABLED:
+        return
+    try:
+        from backend.utils.sse import emit_user_event
+
+        emit_user_event(user, payload)
+    except Exception as e:
+        logger.debug(f"Failed to emit upload event: {e}")
+
+
 # Main LLM settings (for fallback)
 LLM_NAME = settings.llm.name
 LLM_BASE_URL = settings.llm.base_url
@@ -497,6 +519,8 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         user: Username
         model: LLM model for summary (optional)
     """
+    t_start = time.time()
+    logger.trace(f"[BLOCKING] process_uploaded_pdf: starting pid={pid}, user={user}")
     # Validate PID format for security
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
@@ -524,13 +548,23 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
 
         # Parse with MinerU (use pid as cache_pid, keep_pdf=True to preserve uploaded file)
         summarizer = PaperSummarizer()
+        t_parse = time.time()
+        logger.trace(f"[BLOCKING] process_uploaded_pdf: starting MinerU parse pid={pid}, pdf={pdf_path}")
         md_path = summarizer.parse_pdf_with_mineru(pdf_path, cache_pid=pid, keep_pdf=True)
+        logger.trace(
+            f"[BLOCKING] process_uploaded_pdf: MinerU parse completed in {time.time() - t_parse:.2f}s pid={pid}"
+        )
 
         if not md_path or not md_path.exists():
             raise RuntimeError("MinerU parsing returned empty content")
 
         # Read the markdown content
+        t_read = time.time()
         md_content = md_path.read_text(encoding="utf-8")
+        logger.trace(
+            f"[BLOCKING] process_uploaded_pdf: markdown read completed in {time.time() - t_read:.2f}s "
+            f"(len={len(md_content)}) pid={pid}"
+        )
 
         # Update parse status first (parsing succeeded)
         UploadedPaperRepository.update(
@@ -545,7 +579,12 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         meta_extracted_ok = False
         try:
             front_matter = extract_front_matter(md_content)
+            t_meta = time.time()
+            logger.trace(f"[BLOCKING] process_uploaded_pdf: starting metadata extraction via LLM pid={pid}")
             meta_extracted = extract_metadata_with_llm(front_matter)
+            logger.trace(
+                f"[BLOCKING] process_uploaded_pdf: metadata extraction completed in {time.time() - t_meta:.2f}s pid={pid}"
+            )
             # Check if we got meaningful data
             if meta_extracted.get("title") or meta_extracted.get("authors"):
                 meta_extracted_ok = True
@@ -567,12 +606,17 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         try:
             from tasks import enqueue_summary_task
 
+            t_enqueue = time.time()
             task_id = enqueue_summary_task(pid, model=model, user=user)
+            logger.trace(
+                f"[BLOCKING] process_uploaded_pdf: enqueue_summary_task completed in {time.time() - t_enqueue:.2f}s pid={pid}"
+            )
             if task_id:
                 UploadedPaperRepository.update(pid, {"summary_task_id": task_id})
         except Exception as e:
             logger.warning(f"Failed to enqueue summary for {pid}: {e}")
 
+        logger.trace(f"[BLOCKING] process_uploaded_pdf: completed in {time.time() - t_start:.2f}s pid={pid}")
     except Exception as e:
         logger.error(f"Failed to process uploaded paper {pid}: {e}")
         parse_error = _redact_error_message(f"{type(e).__name__}: {e}") or type(e).__name__
@@ -583,6 +627,7 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 "parse_error": parse_error,
             },
         )
+        logger.trace(f"[BLOCKING] process_uploaded_pdf: failed after {time.time() - t_start:.2f}s pid={pid}")
         raise
 
 
@@ -595,13 +640,19 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
     Returns:
         List of paper items for frontend display
     """
+    t_start = time.time()
     from backend.services.summary_service import get_summary_status
 
     papers = UploadedPaperRepository.get_by_owner(user)
+    logger.trace(
+        f"[BLOCKING] get_uploaded_papers_list: loaded {len(papers)} record(s) in {time.time() - t_start:.2f}s user={user}"
+    )
 
     # Get user tags for these papers
+    t_tags = time.time()
     user_tags = TagRepository.get_user_tags(user)
     user_neg_tags = NegativeTagRepository.get_user_neg_tags(user)
+    logger.trace(f"[BLOCKING] get_uploaded_papers_list: loaded tag db in {time.time() - t_tags:.2f}s user={user}")
 
     result = []
     for pid, data in papers.items():
@@ -662,6 +713,9 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
 
     # Sort by created_time descending
     result.sort(key=lambda x: x.get("created_time", 0), reverse=True)
+    logger.trace(
+        f"[BLOCKING] get_uploaded_papers_list: completed in {time.time() - t_start:.2f}s user={user}, items={len(result)}"
+    )
     return result
 
 
@@ -826,6 +880,14 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
                 ntdb[user] = neg_tags
     except Exception as e:
         logger.warning(f"Failed to clean up tags for {pid}: {e}")
+
+    # Clean up reading list (best effort)
+    try:
+        from aslite.repositories import ReadingListRepository
+
+        ReadingListRepository.remove_from_reading_list(user, pid)
+    except Exception as e:
+        logger.warning(f"Failed to clean up reading list for {pid}: {e}")
 
     logger.info(f"Deleted uploaded paper {pid} for user {user}")
     return True, "deleted"
@@ -1051,6 +1113,9 @@ def do_extract_metadata(pid: str, user: str) -> bool:
     if record.get("parse_status") != "ok":
         return False
 
+    # Emit running status
+    _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "running"})
+
     try:
         from tools.paper_summarizer import PaperSummarizer
 
@@ -1060,6 +1125,7 @@ def do_extract_metadata(pid: str, user: str) -> bool:
 
         if not md_path or not md_path.exists():
             logger.error(f"MinerU markdown not found for {pid}")
+            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
             return False
 
         md_content = md_path.read_text(encoding="utf-8")
@@ -1075,13 +1141,29 @@ def do_extract_metadata(pid: str, user: str) -> bool:
                 },
             )
             logger.info(f"Successfully extracted metadata for {pid}")
+            # Emit success status with extracted metadata
+            authors_list = meta_extracted.get("authors") or []
+            _emit_upload_event(
+                user,
+                {
+                    "type": "upload_extract_status",
+                    "pid": pid,
+                    "status": "ok",
+                    "meta_extracted_ok": True,
+                    "title": meta_extracted.get("title") or "",
+                    "authors": ", ".join(authors_list) if authors_list else "",
+                    "abstract": meta_extracted.get("abstract") or "",
+                },
+            )
             return True
         else:
             logger.warning(f"Metadata extraction returned empty for {pid}")
+            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
             return False
 
     except Exception as e:
         logger.error(f"Failed to extract metadata for {pid}: {e}")
+        _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
         return False
 
 
@@ -1103,6 +1185,8 @@ def do_parse_only(pid: str, user: str) -> bool:
         return False
 
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
+    # Emit running status
+    _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""})
 
     try:
         from tools.paper_summarizer import PaperSummarizer
@@ -1125,6 +1209,8 @@ def do_parse_only(pid: str, user: str) -> bool:
             },
         )
         logger.info(f"Successfully parsed uploaded paper {pid}")
+        # Emit success status
+        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""})
         return True
 
     except Exception as e:
@@ -1137,6 +1223,8 @@ def do_parse_only(pid: str, user: str) -> bool:
                 "parse_error": parse_error,
             },
         )
+        # Emit failure status
+        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "failed", "error": parse_error})
         return False
 
 
@@ -1175,6 +1263,21 @@ def get_upload_summary_context(pid: str, user: str) -> Optional[Dict[str, Any]]:
     else:
         time_str = ""
 
+    # Get user tags for this paper
+    utags = []
+    ntags = []
+    try:
+        user_tags = TagRepository.get_user_tags(user) or {}
+        user_neg_tags = NegativeTagRepository.get_user_neg_tags(user) or {}
+        for tag, tag_pids in user_tags.items():
+            if pid in tag_pids:
+                utags.append(tag)
+        for tag, tag_pids in user_neg_tags.items():
+            if pid in tag_pids:
+                ntags.append(tag)
+    except Exception as e:
+        logger.warning(f"Failed to get tags for uploaded paper {pid}: {e}")
+
     # Build paper-like structure for template
     paper = {
         "id": pid,
@@ -1184,8 +1287,8 @@ def get_upload_summary_context(pid: str, user: str) -> Optional[Dict[str, Any]]:
         "time": time_str,
         "summary": abstract or "",
         "tags": "",
-        "utags": [],
-        "ntags": [],
+        "utags": utags,
+        "ntags": ntags,
         "parse_status": record.get("parse_status", ""),
         "meta_extracted_ok": meta_extracted_ok,
         "created_time": created_time,

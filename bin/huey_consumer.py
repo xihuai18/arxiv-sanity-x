@@ -6,6 +6,7 @@ This script wraps the huey consumer to apply memory limits configured
 in settings.huey.max_memory_mb.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 def main():
+    # Mark this process as worker for DB lock tolerance tuning.
+    os.environ.setdefault("ARXIV_SANITY_PROCESS_ROLE", "worker")
+
     # Apply memory limit before importing heavy modules
     try:
         from config import settings

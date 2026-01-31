@@ -96,5 +96,7 @@ echo "[gunicorn] port=${SERVE_PORT} workers=${WORKERS} threads=${THREADS} preloa
 
 # Set memory limit environment variable for serve.py to apply
 export ARXIV_SANITY_GUNICORN_MAX_MEMORY_MB="${MAX_MEMORY}"
+# Mark this process as web for DB fail-fast tuning.
+export ARXIV_SANITY_PROCESS_ROLE="web"
 
 gunicorn -w "${WORKERS}" --threads "${THREADS}" -k gthread ${PRELOAD_ARG} ${MEMORY_ARGS} ${EXTRA_ARGS} -b 0.0.0.0:${SERVE_PORT} serve:app

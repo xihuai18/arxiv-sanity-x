@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from threading import Lock
+import time
+from threading import Condition, Lock
 from typing import Any
 
 import numpy as np
@@ -24,8 +25,13 @@ LLM_API_KEY = settings.llm.api_key
 from .data_service import get_features_cached
 from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE
 
+# Lock ordering:
+# - get_paper_embeddings() avoids holding _EMBEDDINGS_LOCK while calling get_features_cached()
+#   to prevent lock ordering issues (FEATURES_LOCK vs _EMBEDDINGS_LOCK).
 _MODEL_LOCK = Lock()
 _EMBEDDINGS_LOCK = Lock()
+_EMBEDDINGS_COND = Condition(_EMBEDDINGS_LOCK)
+_EMBEDDINGS_LOADING = False
 
 _DOC_MODEL_LOCK = Lock()
 
@@ -132,7 +138,7 @@ def get_cached_embeddings_mtime() -> float:
 
 def get_paper_embeddings() -> dict[str, Any] | None:
     """Load and cache paper embeddings from features file."""
-    global _cached_embeddings, _cached_embeddings_mtime
+    global _cached_embeddings, _cached_embeddings_mtime, _EMBEDDINGS_LOADING
 
     try:
         current_mtime = os.path.getmtime(FEATURES_FILE)
@@ -142,7 +148,8 @@ def get_paper_embeddings() -> dict[str, Any] | None:
     if _cached_embeddings is not None and _cached_embeddings_mtime == current_mtime:
         return _cached_embeddings
 
-    with _EMBEDDINGS_LOCK:
+    # Coordinate reload without holding the embeddings lock during heavy I/O or normalization.
+    with _EMBEDDINGS_COND:
         try:
             current_mtime = os.path.getmtime(FEATURES_FILE)
         except Exception:
@@ -151,31 +158,72 @@ def get_paper_embeddings() -> dict[str, Any] | None:
         if _cached_embeddings is not None and _cached_embeddings_mtime == current_mtime:
             return _cached_embeddings
 
-        try:
-            features = get_features_cached()
-            if features.get("feature_type") == "hybrid_sparse_dense" and "x_embeddings" in features:
-                logger.trace("Using pre-computed embeddings from features file")
-                embeddings = features["x_embeddings"]
+        # If a reload is already running, return stale cache (if any) instead of blocking.
+        if _EMBEDDINGS_LOADING and _cached_embeddings is not None:
+            return _cached_embeddings
 
-                # Normalize once for fast cosine similarity via dot product
-                try:
-                    if getattr(embeddings, "dtype", None) != np.float32:
-                        embeddings = embeddings.astype(np.float32, copy=False)
-                    norms = np.linalg.norm(embeddings, axis=1, keepdims=True).astype(np.float32, copy=False)
-                    norms[norms == 0] = 1.0
-                    embeddings /= norms
-                except Exception as e:
-                    logger.warning(f"Failed to normalize embeddings, fallback to raw vectors: {e}")
-
-                _cached_embeddings = {"embeddings": embeddings, "pids": features.get("pids") or []}
-                _cached_embeddings_mtime = current_mtime
+        # If there is no cached embeddings yet, we must wait for the loader.
+        if _EMBEDDINGS_LOADING and _cached_embeddings is None:
+            while _EMBEDDINGS_LOADING:
+                _EMBEDDINGS_COND.wait(timeout=1.0)
+            # Loader finished; re-check freshness.
+            try:
+                current_mtime = os.path.getmtime(FEATURES_FILE)
+            except Exception:
+                current_mtime = 0.0
+            if _cached_embeddings is not None and _cached_embeddings_mtime == current_mtime:
                 return _cached_embeddings
 
+        # This thread becomes the loader.
+        _EMBEDDINGS_LOADING = True
+
+    new_cache: dict[str, Any] | None = None
+    new_mtime: float = current_mtime
+    try:
+        t0 = time.time()
+        logger.trace("[BLOCKING] get_paper_embeddings: loading features...")
+        features = get_features_cached()
+        logger.trace(f"[BLOCKING] get_paper_embeddings: features loaded in {time.time() - t0:.2f}s")
+
+        # Important: Do NOT re-read FEATURES_FILE mtime after loading.
+        # The file may be updated concurrently while we're building embeddings; if we
+        # store a newer mtime than the data we actually loaded, the cache may be
+        # incorrectly marked as "fresh" and serve stale embeddings indefinitely.
+
+        if features.get("feature_type") == "hybrid_sparse_dense" and "x_embeddings" in features:
+            logger.trace("Using pre-computed embeddings from features file")
+            embeddings = features["x_embeddings"]
+
+            # Normalize once for fast cosine similarity via dot product
+            try:
+                t1 = time.time()
+                logger.trace(f"[BLOCKING] get_paper_embeddings: normalizing {embeddings.shape[0]} embeddings...")
+                if getattr(embeddings, "dtype", None) != np.float32:
+                    embeddings = embeddings.astype(np.float32, copy=False)
+                norms = np.linalg.norm(embeddings, axis=1, keepdims=True).astype(np.float32, copy=False)
+                norms[norms == 0] = 1.0
+                embeddings /= norms
+                logger.trace(f"[BLOCKING] get_paper_embeddings: normalization completed in {time.time() - t1:.2f}s")
+            except Exception as e:
+                logger.warning(f"Failed to normalize embeddings, fallback to raw vectors: {e}")
+
+            new_cache = {"embeddings": embeddings, "pids": features.get("pids") or []}
+        else:
             logger.warning("No embeddings found in features file")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to load embeddings: {e}")
-            return None
+            new_cache = None
+    except Exception as e:
+        logger.error(f"Failed to load embeddings: {e}")
+        new_cache = None
+    finally:
+        with _EMBEDDINGS_COND:
+            if new_cache is not None:
+                _cached_embeddings = new_cache
+                _cached_embeddings_mtime = new_mtime
+            _EMBEDDINGS_LOADING = False
+            _EMBEDDINGS_COND.notify_all()
+
+    # If the reload failed but we still have a previous cache, return it as a best-effort fallback.
+    return new_cache if new_cache is not None else _cached_embeddings
 
 
 def get_query_embedding(q: str, embed_dim: int):
@@ -189,7 +237,10 @@ def get_query_embedding(q: str, embed_dim: int):
     if model is None:
         return None
 
+    logger.trace(f"[BLOCKING] get_query_embedding: calling embedding API for query (len={len(q)})...")
+    t0 = time.time()
     query_embedding = model.encode([q], dim=embed_dim)
+    logger.trace(f"[BLOCKING] get_query_embedding: embedding API returned in {time.time() - t0:.2f}s")
     if query_embedding is None:
         logger.error("Failed to encode query")
         return None
@@ -227,7 +278,10 @@ def get_document_embedding(text: str, embed_dim: int) -> np.ndarray | None:
         return None
 
     try:
+        logger.trace(f"[BLOCKING] get_document_embedding: calling embedding API (len={len(text)}), dim={embed_dim}...")
+        t0 = time.time()
         emb = model.encode([text], dim=int(embed_dim))
+        logger.trace(f"[BLOCKING] get_document_embedding: embedding API returned in {time.time() - t0:.2f}s")
         if emb is None:
             return None
         if hasattr(emb, "cpu"):
@@ -246,11 +300,16 @@ def get_document_embedding(text: str, embed_dim: int) -> np.ndarray | None:
 
 def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float]]:
     """Execute pure semantic search."""
+    t_start = time.time()
+
     q = (q or "").strip()
+    logger.trace(f"[BLOCKING] semantic_search_rank: starting for q='{q[:50]}...', limit={limit}")
     if not q:
         return [], []
 
+    logger.trace(f"[BLOCKING] semantic_search_rank: loading paper embeddings...")
     paper_data = get_paper_embeddings()
+    logger.trace(f"[BLOCKING] semantic_search_rank: embeddings loaded in {time.time() - t_start:.2f}s")
     if paper_data is None:
         logger.error("No paper embeddings available")
         return [], []
@@ -323,6 +382,10 @@ def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float
         except Exception:
             pass
 
+    logger.trace(
+        f"[BLOCKING] semantic_search_rank: completed in {time.time() - t_start:.2f}s, "
+        f"returned {len(out_pids)} result(s) from {n} paper(s)"
+    )
     return out_pids, out_scores
 
 

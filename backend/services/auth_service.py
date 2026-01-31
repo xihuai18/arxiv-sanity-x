@@ -59,26 +59,42 @@ def logout_user() -> str:
 
 
 def register_user_email(email: str) -> str:
-    """Register or update user's email.
+    """Register or update user's email(s).
 
     Args:
-        email: Email address to register
+        email: Email address(es) to register (comma/whitespace/newline separated)
 
     Returns:
         Redirect URL
     """
     csrf_protect()
 
-    email = (email or "").strip()
+    raw = (email or "").strip()
+
+    def _parse_emails(text: str) -> list[str]:
+        parts = [p.strip() for p in re.split(r"[,\s;]+", text or "") if p.strip()]
+        out: list[str] = []
+        seen = set()
+        for part in parts:
+            e = part.lower()
+            if e in seen:
+                continue
+            seen.add(e)
+            out.append(e)
+        return out
 
     if g.user:
-        # do some basic input validation
+        emails = _parse_emails(raw)
+
+        # Do some basic input validation.
         # Keep validation lightweight but accept modern long TLDs (up to 63 chars).
-        proper_email = re.match(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", email, re.IGNORECASE)
-        if email == "" or proper_email:  # allow empty email, meaning no email
-            # everything checks out, write using Repository
-            UserRepository.set_email(g.user, email)
-            logger.debug(f"User {g.user} registered email: {email or '(cleared)'}")
+        proper_email_re = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", re.IGNORECASE)
+        if raw == "" or (emails and all(proper_email_re.match(e) for e in emails)):
+            UserRepository.set_emails(g.user, emails)
+            if emails:
+                logger.debug(f"User {g.user} registered emails: {emails}")
+            else:
+                logger.debug(f"User {g.user} cleared emails")
 
     return url_for("web.profile")
 
@@ -97,3 +113,11 @@ def get_user_email(user: str = None) -> str:
         return ""
 
     return UserRepository.get_email(user) or ""
+
+
+def get_user_emails(user: str = None) -> list[str]:
+    """Get user's registered emails."""
+    user = user or getattr(g, "user", None)
+    if not user:
+        return []
+    return UserRepository.get_emails(user)

@@ -3,11 +3,11 @@
 Task Cleanup Utility for Development
 
 This script cleans up task entries in the summary status DB (task::*)
-that may be stale or incorrect after crashes or manual restarts.
+and revokes corresponding Huey tasks. Optionally flushes the entire Huey queue.
 
 Usage:
     python cleanup_tasks.py                          # Dry run (shows what would be deleted)
-    python cleanup_tasks.py --force                  # Actually delete matching tasks
+    python cleanup_tasks.py --force                  # Actually delete matching tasks + revoke Huey tasks
     python cleanup_tasks.py --all                    # Delete ALL task entries (dangerous!)
     python cleanup_tasks.py --status running         # Only clean tasks with status=running
     python cleanup_tasks.py --pid 2601.14256         # Only clean tasks for a pid
@@ -15,9 +15,13 @@ Usage:
     python cleanup_tasks.py --task-id <id>           # Only clean a specific task id
     python cleanup_tasks.py --stale-time 3600        # Only clean tasks older than N seconds
     python cleanup_tasks.py --keep-summary-status    # Do not delete pid::model summary status
+    python cleanup_tasks.py --no-revoke-huey         # Do not revoke Huey tasks when cleaning
+    python cleanup_tasks.py --flush-huey             # Also flush entire Huey task queue (huey.db)
+    python cleanup_tasks.py --all --force            # Complete cleanup (recommended after crashes)
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -42,7 +46,46 @@ class TaskCleaner:
             "total": 0,
             "matched": 0,
             "removed": 0,
+            "revoked": 0,
         }
+        self._huey = None
+
+    def _get_huey(self):
+        """Lazy load Huey instance."""
+        if self._huey is None:
+            try:
+                from tasks import huey
+
+                self._huey = huey
+            except Exception as e:
+                logger.debug(f"Failed to load Huey: {e}")
+        return self._huey
+
+    def _revoke_huey_task(self, task_id: str, model: str) -> bool:
+        """Revoke a Huey task by task_id.
+
+        Args:
+            task_id: The task ID to revoke
+            model: Model name (used to construct dummy task)
+
+        Returns:
+            True if revoke was attempted, False otherwise
+        """
+        huey = self._get_huey()
+        if huey is None:
+            return False
+
+        try:
+            from tasks import generate_summary_task
+
+            # Construct a dummy task with matching revoke_id
+            dummy = generate_summary_task.s("_", model=model or "default", user=None)
+            dummy.revoke_id = f"r:{task_id}"
+            huey.revoke(dummy, revoke_once=True)
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to revoke Huey task {task_id}: {e}")
+            return False
 
     @staticmethod
     def _normalize_status_filter(status_filter: Optional[str]) -> Optional[List[str]]:
@@ -71,6 +114,7 @@ class TaskCleaner:
         model_filter: Optional[str] = None,
         task_id_filter: Optional[str] = None,
         keep_summary_status: bool = False,
+        revoke_huey: bool = True,
     ) -> None:
         tasks = self.list_tasks()
         self.stats["total"] = len(tasks)
@@ -119,6 +163,12 @@ class TaskCleaner:
                     logger.error(f"Failed to remove {label}: {e}")
                     continue
 
+                # Revoke corresponding Huey task (best-effort)
+                if revoke_huey and status in ("queued", "running"):
+                    if self._revoke_huey_task(task_id, model):
+                        self.stats["revoked"] += 1
+                        logger.debug(f"Revoked Huey task: {task_id}")
+
                 # Optionally clear summary status if it is queued/running
                 if not keep_summary_status and pid and model and status in ("queued", "running"):
                     try:
@@ -126,12 +176,58 @@ class TaskCleaner:
                     except Exception:
                         pass
             else:
-                logger.warning(f"Would remove: {label}")
+                revoke_hint = " (+ revoke Huey)" if revoke_huey and status in ("queued", "running") else ""
+                logger.warning(f"Would remove: {label}{revoke_hint}")
 
         if force:
-            logger.success(f"Removed tasks: {self.stats['removed']} / matched {self.stats['matched']}")
+            revoke_msg = f", revoked {self.stats['revoked']}" if self.stats["revoked"] > 0 else ""
+            logger.success(f"Removed tasks: {self.stats['removed']} / matched {self.stats['matched']}{revoke_msg}")
         else:
             logger.warning(f"Would remove: {self.stats['matched']} task(s)")
+
+    def flush_huey_queue(self, force: bool = False) -> dict:
+        """Flush all pending tasks from the Huey queue (huey.db).
+
+        Args:
+            force: If False, only show what would be flushed (dry run).
+
+        Returns:
+            dict with 'pending_count', 'flushed', 'huey_db_path'
+        """
+        huey_db_path = settings.huey.db_path or str(settings.data_dir / "huey.db")
+        result = {
+            "pending_count": 0,
+            "flushed": False,
+            "huey_db_path": huey_db_path,
+        }
+
+        if not os.path.exists(huey_db_path):
+            logger.info(f"Huey database not found: {huey_db_path}")
+            return result
+
+        try:
+            from tasks import huey
+
+            # Get pending task count
+            pending_count = huey.pending_count()
+            result["pending_count"] = pending_count
+
+            if pending_count == 0:
+                logger.info("Huey queue is empty, nothing to flush")
+                return result
+
+            if force:
+                # Flush all pending tasks
+                huey.flush()
+                result["flushed"] = True
+                logger.success(f"Flushed {pending_count} pending task(s) from Huey queue")
+            else:
+                logger.warning(f"Would flush {pending_count} pending task(s) from Huey queue")
+
+        except Exception as e:
+            logger.error(f"Failed to flush Huey queue: {e}")
+
+        return result
 
 
 def main():
@@ -152,6 +248,16 @@ def main():
         action="store_true",
         help="Do not delete pid::model summary status when removing queued/running tasks",
     )
+    parser.add_argument(
+        "--no-revoke-huey",
+        action="store_true",
+        help="Do not revoke Huey tasks when cleaning (by default, queued/running tasks are revoked)",
+    )
+    parser.add_argument(
+        "--flush-huey",
+        action="store_true",
+        help="Also flush entire Huey task queue (huey.db) to clear ALL pending tasks",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
@@ -163,6 +269,14 @@ def main():
 
     if args.all:
         logger.warning("⚠️  --all will delete ALL task entries!")
+        if args.flush_huey:
+            logger.warning("⚠️  --flush-huey will also flush ALL pending Huey tasks!")
+        response = input("Are you sure? Type 'yes' to confirm: ")
+        if response.lower() != "yes":
+            logger.debug("Aborted")
+            return
+    elif args.flush_huey and args.force:
+        logger.warning("⚠️  --flush-huey will flush ALL pending Huey tasks!")
         response = input("Are you sure? Type 'yes' to confirm: ")
         if response.lower() != "yes":
             logger.debug("Aborted")
@@ -180,7 +294,12 @@ def main():
         model_filter=args.model,
         task_id_filter=args.task_id,
         keep_summary_status=args.keep_summary_status,
+        revoke_huey=not args.no_revoke_huey,
     )
+
+    # Flush Huey queue if requested
+    if args.flush_huey:
+        cleaner.flush_huey_queue(force=args.force)
 
 
 if __name__ == "__main__":

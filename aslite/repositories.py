@@ -39,6 +39,8 @@ Migration strategy:
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from loguru import logger
+
 from aslite.db import (
     get_combined_tags_db,
     get_email_db,
@@ -52,6 +54,7 @@ from aslite.db import (
     get_tags_db,
     get_uploaded_papers_db,
     get_uploaded_papers_index_db,
+    update_metas_time_index,
 )
 
 # -----------------------------------------------------------------------------
@@ -165,8 +168,16 @@ class PaperRepository:
     @staticmethod
     def iter_all_papers():
         """Stream all paper items as (pid, paper) tuples."""
+        t_start = time.time()
+        logger.trace("[BLOCKING] PaperRepository.iter_all_papers: starting full table scan...")
+        count = 0
         with get_papers_db() as pdb:
-            yield from pdb.items()
+            for item in pdb.items():
+                count += 1
+                yield item
+        logger.trace(
+            f"[BLOCKING] PaperRepository.iter_all_papers: yielded {count} papers in {time.time() - t_start:.2f}s"
+        )
 
     @staticmethod
     def get_recent_papers(days: int = 7, limit: Optional[int] = None) -> List[Tuple[str, dict]]:
@@ -257,11 +268,13 @@ class MetaRepository:
 
     @staticmethod
     def save_many(metas: Dict[str, dict]):
-        """Batch save metadata."""
+        """Batch save metadata and update time index."""
         if not metas:
             return
         with get_metas_db(flag="c") as mdb:
             mdb.set_many(metas)
+        # Update time index
+        MetaRepository._update_time_index(metas)
 
     @staticmethod
     def save_many_no_commit(metas: Dict[str, dict]):
@@ -271,12 +284,87 @@ class MetaRepository:
         with get_metas_db(flag="c", autocommit=False) as mdb:
             mdb.set_many(metas)
             mdb.commit()
+        # Update time index
+        MetaRepository._update_time_index(metas)
+
+    @staticmethod
+    def _update_time_index(metas: Dict[str, dict]):
+        """Update the metas_time_index table with _time values from metas."""
+        if not metas:
+            return
+        pid_time_pairs = []
+        for pid, meta in metas.items():
+            _time = meta.get("_time", 0) if isinstance(meta, dict) else 0
+            pid_time_pairs.append((pid, _time))
+        if pid_time_pairs:
+            try:
+                update_metas_time_index(pid_time_pairs)
+            except Exception:
+                # Don't fail the main operation if index update fails
+                pass
 
     @staticmethod
     def iter_all_metas():
         """Stream all metadata items as (pid, meta) tuples."""
+        t_start = time.time()
+        logger.trace("[BLOCKING] MetaRepository.iter_all_metas: starting full table scan...")
+        count = 0
         with get_metas_db() as mdb:
-            yield from mdb.items()
+            for item in mdb.items():
+                count += 1
+                yield item
+        logger.trace(f"[BLOCKING] MetaRepository.iter_all_metas: yielded {count} metas in {time.time() - t_start:.2f}s")
+
+    @staticmethod
+    def get_latest_n(n: int, use_index: bool = True) -> List[Tuple[str, dict]]:
+        """Get the latest n papers sorted by _time descending.
+
+        This method uses the metas_time_index table for efficient queries,
+        falling back to full table scan if the index is not available.
+
+        Args:
+            n: Number of papers to fetch
+            use_index: If True, try to use the time index table first
+
+        Returns:
+            List of (pid, meta) tuples, sorted by _time descending
+        """
+        if n <= 0:
+            return []
+
+        if use_index:
+            from aslite.db import get_latest_pids_by_time, metas_time_index_count
+
+            # Check if index has enough entries
+            index_count = metas_time_index_count()
+            if index_count > 0:
+                # Get latest pids from index
+                pid_time_pairs = get_latest_pids_by_time(n)
+                if pid_time_pairs:
+                    pids = [pid for pid, _time in pid_time_pairs]
+                    # Batch fetch metas
+                    metas_dict = MetaRepository.get_by_ids(pids)
+                    # Return in order (index already sorted by _time desc)
+                    result = []
+                    for pid in pids:
+                        if pid in metas_dict:
+                            result.append((pid, metas_dict[pid]))
+                    return result
+
+        # Fallback: full table scan with heapq (original behavior)
+        import heapq
+
+        heap: List[Tuple[float, str, dict]] = []
+        with get_metas_db() as mdb:
+            for pid, meta in mdb.items():
+                t = meta.get("_time", 0) if isinstance(meta, dict) else 0
+                if len(heap) < n:
+                    heapq.heappush(heap, (t, pid, meta))
+                elif t > heap[0][0]:
+                    heapq.heapreplace(heap, (t, pid, meta))
+
+        # Sort by time descending
+        return sorted([(pid, meta) for _t, pid, meta in heap], key=lambda x: x[1].get("_time", 0), reverse=True)
 
 
 # -----------------------------------------------------------------------------
@@ -1201,22 +1289,84 @@ class UserRepository:
     """Repository for user-related operations."""
 
     @staticmethod
+    def _coerce_email_list(value) -> List[str]:
+        """Coerce legacy/new email value into a normalized list[str]."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            v = value.strip()
+            return [v] if v else []
+        if isinstance(value, (list, tuple, set)):
+            out: List[str] = []
+            for item in value:
+                if not isinstance(item, str):
+                    continue
+                v = item.strip()
+                if v:
+                    out.append(v)
+            return out
+        return []
+
+    @staticmethod
     def get_email(user: str) -> Optional[str]:
-        """Get email address for a user."""
+        """Get primary email address for a user (legacy API)."""
         with get_email_db() as edb:
-            return edb.get(user)
+            value = edb.get(user)
+        emails = UserRepository._coerce_email_list(value)
+        return emails[0] if emails else ""
+
+    @staticmethod
+    def get_emails(user: str) -> List[str]:
+        """Get all email addresses for a user."""
+        with get_email_db() as edb:
+            value = edb.get(user)
+        return UserRepository._coerce_email_list(value)
 
     @staticmethod
     def get_all_emails() -> Dict[str, str]:
-        """Get email addresses for all users."""
+        """Get primary email addresses for all users (legacy API)."""
         with get_email_db() as edb:
-            return {user: email for user, email in edb.items()}
+            items = list(edb.items())
+        out: Dict[str, str] = {}
+        for user, value in items:
+            emails = UserRepository._coerce_email_list(value)
+            out[user] = emails[0] if emails else ""
+        return out
+
+    @staticmethod
+    def get_all_email_lists() -> Dict[str, List[str]]:
+        """Get email address lists for all users."""
+        with get_email_db() as edb:
+            items = list(edb.items())
+        return {user: UserRepository._coerce_email_list(value) for user, value in items}
 
     @staticmethod
     def set_email(user: str, email: str):
-        """Set email address for a user."""
+        """Set primary email address for a user (legacy API)."""
+        email = (email or "").strip()
+        if email:
+            UserRepository.set_emails(user, [email])
+        else:
+            UserRepository.set_emails(user, [])
+
+    @staticmethod
+    def set_emails(user: str, emails: List[str]):
+        """Set email addresses for a user."""
+        normalized: List[str] = []
+        seen = set()
+        for email in emails or []:
+            if not isinstance(email, str):
+                continue
+            e = email.strip()
+            if not e:
+                continue
+            key = e.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(e)
         with get_email_db(flag="c") as edb:
-            edb[user] = email
+            edb[user] = normalized
 
     @staticmethod
     def get_all_users() -> List[str]:

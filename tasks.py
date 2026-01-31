@@ -264,6 +264,37 @@ def _is_error_summary(summary_content: str) -> bool:
     return summary_content.startswith("# Error") or summary_content.startswith("# PDF Parsing Service Unavailable")
 
 
+def _extract_error_reason_from_summary(summary_content: str, *, max_len: int = 500) -> str:
+    """Extract a concise human-readable error reason from a '# Error' summary body."""
+    if not summary_content:
+        return "Summary generation failed: empty summary content"
+
+    text = str(summary_content).strip()
+    if not text:
+        return "Summary generation failed: empty summary content"
+
+    reason = ""
+    if text.startswith("# Error") or text.startswith("# PDF Parsing Service Unavailable"):
+        # Typically formatted as:
+        #   # Error
+        #
+        #   <reason>
+        # Keep the first non-empty line after the heading.
+        rest = text.split("\n", 1)[1] if "\n" in text else ""
+        for line in rest.splitlines():
+            candidate = (line or "").strip()
+            if candidate:
+                reason = candidate
+                break
+    else:
+        reason = text.splitlines()[0].strip()
+
+    reason = reason or "Summary generation failed"
+    if len(reason) > max_len:
+        reason = reason[: max_len - 1] + "…"
+    return reason
+
+
 def _is_task_canceled(task_id: str | None) -> bool:
     if not task_id:
         return False
@@ -623,7 +654,7 @@ def generate_summary_task(
             if record.get("parse_status") != "ok":
                 raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
 
-        summary_content, _meta = _generate_and_cache_summary(pid, model, cancel_check=_cancel_check)
+        summary_content, summary_meta = _generate_and_cache_summary(pid, model, cancel_check=_cancel_check)
 
         if _cancel_check():
             raise SummaryCanceled("Canceled after generation")
@@ -652,8 +683,20 @@ def generate_summary_task(
                     raise RuntimeError("Lock contention exhausted")
                 raise RuntimeError("Lock contention, retrying")
             else:
-                # Real generation failure
-                raise RuntimeError("Summary generation failed")
+                reason = _extract_error_reason_from_summary(summary_content)
+                # Best-effort: include meta hint (e.g. last LLM error) if available.
+                try:
+                    if isinstance(summary_meta, dict):
+                        attempts = summary_meta.get("llm_fallback_attempts")
+                        if isinstance(attempts, list) and attempts:
+                            last = attempts[-1]
+                            if isinstance(last, dict):
+                                last_err = (last.get("error") or "").strip()
+                                if last_err and last_err not in reason:
+                                    reason = f"{reason} (last_error={last_err})"
+                except Exception:
+                    pass
+                raise RuntimeError(reason)
 
         _update_task_status(task_id, "ok", pid=pid, model=model, user=user)
         _update_summary_status_db(pid, model, "ok", None, task_id=task_id, task_user=user)
@@ -666,7 +709,7 @@ def generate_summary_task(
         if user:
             _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None)
     except Exception as e:
-        logger.warning(f"Failed to generate summary for {pid}: {e}")
+        logger.warning(f"Failed to generate summary for {pid} model={model} attempt={attempt}/{max_attempts}: {e}")
         err = str(e)
 
         # Don't mark as failed if it's just lock contention

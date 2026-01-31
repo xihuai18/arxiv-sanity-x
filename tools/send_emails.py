@@ -341,6 +341,24 @@ template = """
             line-height: 1.6;
         }
 
+        .paper-abstract {
+            background-color: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-top: 10px;
+        }
+
+        .paper-abstract summary {
+            font-size: 12px;
+            font-weight: 700;
+            color: #374151;
+        }
+
+        .paper-abstract .paper-abstract-text {
+            margin-top: 8px;
+        }
+
         .footer {
             background-color: #f9fafb;
             padding: 30px;
@@ -395,7 +413,7 @@ template = """
         </div>
 
         <div class="footer">
-            <p>To stop these emails, remove your email in your <a href="__HOST__/profile">account settings</a>.</p>
+            <p>To stop these emails, remove your email(s) in your <a href="__HOST__/profile">account settings</a>.</p>
             <p>Your account: <strong>__ACCOUNT__</strong></p>
             <div class="brand">🎓 __WEB__</div>
         </div>
@@ -462,7 +480,8 @@ def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, s
         authors_str = ", ".join(_abbr_author_middle(a.get("name", "")) for a in author_list)
     authors = _h(authors_str)
 
-    full_summary = _h(paper.get("summary", ""))
+    # Keep abstract HTML-safe for email rendering (avoid HTML injection from paper metadata).
+    full_summary = _h(paper.get("summary", "")).replace("\n", "<br>")
     time_str = _h(paper.get("_time_str", ""))
     tldr_raw = _extract_tldr_from_summary(pid)
     tldr = markdown_to_email_html(tldr_raw) if tldr_raw else ""
@@ -481,6 +500,10 @@ def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, s
             <div class="tldr-label">💡 TL;DR</div>
             <div class="tldr-text">{tldr}</div>
         </div>
+        <details class="paper-abstract">
+            <summary>Abstract</summary>
+            <div class="paper-abstract-text paper-summary">{full_summary}</div>
+        </details>
         """
     else:
         content_html = f'<div class="paper-summary">{full_summary}</div>'
@@ -1138,6 +1161,11 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.debug(args)
 
+    # 打印关键配置信息
+    logger.info(f"邮件链接 HOST: {HOST}")
+    logger.info(f"API 基础 URL: {API_BASE_URL}")
+    logger.info(f"示例 Summary 链接: {HOST}/summary?pid=2401.00001")
+
     tnow = time.time()
     tnow_str = time.strftime("%b %d", time.localtime(tnow))  # e.g. "Nov 27"
 
@@ -1145,7 +1173,7 @@ def main(argv: list[str] | None = None) -> int:
     tags = TagRepository.get_all_tags()
     ctags = CombinedTagRepository.get_all_combined_tags()
     keywords = KeywordRepository.get_all_keywords()
-    emails = UserRepository.get_all_emails()
+    emails_by_user = UserRepository.get_all_email_lists()
 
     # iterate all users, create recommendations, send emails
     num_sent = 0
@@ -1156,11 +1184,11 @@ def main(argv: list[str] | None = None) -> int:
         tags = {args.user: tags[args.user]}
 
     for user, utags in tags.items():
-        # verify that we have an email for this user
-        email = emails.get(user, None)
-        logger.debug(f"processing user {user} email {email}")
-        if not email:
-            logger.debug(f"skipping user {user}, no email")
+        # verify that we have at least one email for this user
+        user_emails = emails_by_user.get(user, [])
+        logger.debug(f"processing user {user} emails {user_emails}")
+        if not user_emails:
+            logger.debug(f"skipping user {user}, no emails")
             continue
         if args.user and user != args.user:
             logger.debug(f"skipping user {user}, not {args.user}")
@@ -1216,18 +1244,19 @@ def main(argv: list[str] | None = None) -> int:
                 with open(f"recco/{user}.html", "w", encoding="utf-8") as f:
                     f.write(email_html)
 
-            # actually send the email
-            logger.debug("sending email...")
-            n_send_try = 0
-            while n_send_try < 3:
-                try:
-                    send_email(email, email_html)
-                    break
-                except Exception as e:
-                    logger.warning(f"Failed to send email attempt {n_send_try + 1}: {e}")
-                    n_send_try += 1
-            if not args.dry_run:
-                num_sent += 1
+            # actually send the email (send separately to avoid leaking addresses)
+            for to_email in user_emails:
+                logger.debug(f"sending email to {to_email}...")
+                n_send_try = 0
+                while n_send_try < 3:
+                    try:
+                        send_email(to_email, email_html)
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to send email attempt {n_send_try + 1} to {to_email}: {e}")
+                        n_send_try += 1
+                if not args.dry_run:
+                    num_sent += 1
         except Exception as e:
             logger.error(f"meeting errors {str(e)} in processing user {user}")
 

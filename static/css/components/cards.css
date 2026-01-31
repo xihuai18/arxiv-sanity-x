@@ -139,6 +139,28 @@
     border-left: 3px solid var(--border-color);
 }
 
+/* Collapsed abstract when TL;DR exists */
+.rel_abs_details {
+    margin: 6px 0 16px 0;
+}
+
+.rel_abs_details > .rel_abs_summary {
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    color: var(--text-color);
+    opacity: 0.8;
+}
+
+.rel_abs_details[open] > .rel_abs_summary {
+    margin-bottom: 8px;
+}
+
+.rel_abs_details > .rel_abs {
+    margin: 0;
+}
+
 /* Paper parent key container */
 .rel_parent_key {
     display: flex;

@@ -288,7 +288,14 @@ class Qwen3EmbeddingVllm:
                     if dim is not None:
                         payload["dimensions"] = int(dim)
 
+                    t_api = time.time()
                     resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    dt_api = time.time() - t_api
+                    if dt_api >= 1.0:
+                        logger.trace(
+                            f"[BLOCKING] Qwen3EmbeddingVllm.encode: OpenAI embeddings API responded in {dt_api:.2f}s "
+                            f"(status={resp.status_code}, n={len(instructed_sentences)}, dim={dim})"
+                        )
                     if resp.status_code != 200:
                         logger.error(f"OpenAI embed API call failed: HTTP {resp.status_code} ({embed_url})")
                         try:
@@ -324,7 +331,14 @@ class Qwen3EmbeddingVllm:
                     if payload["dimensions"] is None:
                         payload.pop("dimensions", None)
 
+                    t_api = time.time()
                     resp = self.session.post(embed_url, json=payload, timeout=(5, 600))
+                    dt_api = time.time() - t_api
+                    if dt_api >= 1.0:
+                        logger.trace(
+                            f"[BLOCKING] Qwen3EmbeddingVllm.encode: Ollama embed API responded in {dt_api:.2f}s "
+                            f"(status={resp.status_code}, n={len(instructed_sentences)}, dim={dim})"
+                        )
                     if resp.status_code != 200:
                         logger.error(f"Ollama embed API call failed: HTTP {resp.status_code} ({embed_url})")
                         try:
