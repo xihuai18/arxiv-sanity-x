@@ -45,14 +45,15 @@ arxiv-sanity-X is a personal research workbench for tracking arXiv papers. It co
 
 ### Key Capabilities
 
-| Feature | Description |
-|---------|-------------|
-| 🔍 **Multi-mode Search** | Keyword (TF-IDF), semantic (Embedding), hybrid search with tunable weights |
-| 🎯 **Smart Recommendations** | SVM classifiers trained on positive/negative feedback tags |
-| 🤖 **AI Summaries** | HTML/PDF parsing + LLM-generated structured summaries, multi-model support |
-| 🏷️ **Tag System** | Positive/negative feedback, combined tags, keyword tracking, reading list |
-| 📧 **Email Recommendations** | Automated daily recommendation emails with holiday-aware scheduling |
-| 🔄 **Automation** | Built-in scheduler: fetch → compute → summarize → email |
+| Feature                          | Description                                                                |
+| -------------------------------- | -------------------------------------------------------------------------- |
+| 🔍 **Multi-mode Search**          | Keyword (TF-IDF), semantic (Embedding), hybrid search with tunable weights |
+| 🎯 **Smart Recommendations**      | SVM classifiers trained on positive/negative feedback tags                 |
+| 🤖 **AI Summaries**               | HTML/PDF parsing + LLM-generated structured summaries, multi-model support |
+| 🏷️ **Tag System**                 | Positive/negative feedback, combined tags, keyword tracking, reading list  |
+| 📧 **Email Recommendations**      | Automated daily recommendation emails with holiday-aware scheduling        |
+| 🔄 **Automation**                 | Built-in scheduler: fetch → compute → summarize → email                    |
+| 📤 **PDF Uploads (Experimental)** | Upload private PDFs for parsing, summaries, and similarity search          |
 
 ## 🛠️ Tech Stack
 
@@ -93,14 +94,15 @@ arxiv-sanity-x/
 │
 ├── backend/              # Flask application
 │   ├── app.py            # App factory & initialization
-│   ├── blueprints/       # Route handlers (8 blueprints)
+│   ├── blueprints/       # Route handlers (9 blueprints)
 │   │   ├── web.py        # Page routes (/, /summary, /profile, etc.)
-│   │   ├── api_user.py   # User authentication & state
+│   │   ├── api_user.py   # Login/logout, user state, email registration
 │   │   ├── api_search.py # Search endpoints
 │   │   ├── api_summary.py# Summary generation & status
 │   │   ├── api_tags.py   # Tag management
 │   │   ├── api_papers.py # Paper data & images
 │   │   ├── api_readinglist.py # Reading list
+│   │   ├── api_uploads.py# Upload PDFs + parsing/extract/similarity
 │   │   └── api_sse.py    # Server-Sent Events
 │   ├── services/         # Business logic layer
 │   │   ├── data_service.py    # Cache & data management
@@ -145,11 +147,14 @@ arxiv-sanity-x/
 ├── templates/            # Jinja2 HTML templates
 ├── scripts/              # Build & maintenance scripts
 ├── tests/                # Test suite
-└── data/                 # Runtime data (gitignored)
-    ├── papers.db         # Paper metadata
-    ├── dict.db           # User data (tags, keywords, etc.)
-    ├── features.p        # Computed features
-    └── summary/          # Cached summaries
+├── data/                 # Runtime data (gitignored)
+│   ├── papers.db         # Paper metadata
+│   ├── dict.db           # User data (tags, keywords, etc.)
+│   ├── features.p        # Computed features
+│   ├── huey.db           # Huey task queue DB (SQLite)
+│   ├── uploads/          # Uploaded PDFs + metadata
+│   └── summary/          # Cached summaries
+└── data-repo/            # Optional git submodule for backing up data/dict.db
 ```
 
 ## 🧭 User Guide
@@ -161,6 +166,7 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - Click **Profile** in the top-right corner to access your profile page
 - Enter a username to log in (no password required, suitable for personal/intranet use)
 - If you plan to expose the site publicly, put it behind authentication/VPN and set a stable `ARXIV_SANITY_SECRET_KEY` (or `secret_key.txt`)
+- (Optional) Register notification emails on the Profile page. Multiple addresses are supported (comma/whitespace/newline separated). Submit an empty value to clear.
 
 ### 2) Browse and Search Papers
 
@@ -171,14 +177,14 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - Use the search box at the top (keyboard shortcut: `Ctrl+K`)
 
 **Search Syntax:**
-| Syntax | Example | Description |
-|--------|---------|-------------|
-| Title | `ti:transformer` | Search titles containing transformer |
-| Author | `au:goodfellow` | Search by author |
-| Category | `cat:cs.LG` | Search specific arXiv category |
-| ID | `id:2312.12345` | Find by arXiv ID |
-| Phrase | `"large language model"` | Exact phrase match |
-| Exclude | `-survey` or `!survey` | Exclude results containing the term |
+| Syntax   | Example                  | Description                          |
+| -------- | ------------------------ | ------------------------------------ |
+| Title    | `ti:transformer`         | Search titles containing transformer |
+| Author   | `au:goodfellow`          | Search by author                     |
+| Category | `cat:cs.LG`              | Search specific arXiv category       |
+| ID       | `id:2312.12345`          | Find by arXiv ID                     |
+| Phrase   | `"large language model"` | Exact phrase match                   |
+| Exclude  | `-survey` or `!survey`   | Exclude results containing the term  |
 
 **Search Mode Toggle:**
 
@@ -229,6 +235,9 @@ By default, data is stored under `data/` (configured by `ARXIV_SANITY_DATA_DIR` 
 - `data/features.p`: TF‑IDF / hybrid features generated by [compute.py](compute.py)
 - `data/summary/`: cached LLM summaries
 - `data/pdfs/`, `data/mineru/`, `data/html_md/`: intermediate caches for parsing
+- `data/uploads/`: uploaded private PDFs and derived artifacts (if you use uploads)
+- `data/huey.db`: Huey task queue database
+- `data-repo/` (optional): git submodule used by the daemon to back up `data/dict.db`
 
 To migrate to a new machine, you typically copy at least:
 
@@ -236,6 +245,16 @@ To migrate to a new machine, you typically copy at least:
 - `data/dict.db`
 - `data/features.p` (or regenerate it by running [compute.py](compute.py))
 - `data/summary/` (optional, if you want to keep cached summaries)
+
+If you enabled git backup via `data-repo/`, you can also restore from:
+
+- `data-repo/dict.db`
+
+To enable `data-repo/` backup:
+
+1. Initialize the submodule: `git submodule update --init --recursive`
+2. Set `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true`
+3. Ensure `data-repo/` has a valid git remote and your runtime environment can `git push`
 
 ## 🔐 Deployment & Security Notes
 
@@ -248,10 +267,12 @@ To migrate to a new machine, you typically copy at least:
 - **The website is empty / no papers**: you likely didn’t run [arxiv_daemon.py](arxiv_daemon.py) + [compute.py](compute.py) yet.
 - **Summaries always fail**: check `ARXIV_SANITY_LLM_API_KEY`, `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME` in `.env`.
 - **Semantic/hybrid search has no effect**: ensure embeddings are enabled and you regenerated features with [compute.py](compute.py) (for hybrid features).
+- **Time-sorted lists look wrong / slow**: rebuild the metadata time index: `python -m tools rebuild_time_index`.
 - **MinerU errors**:
     - API backend: check `MINERU_API_KEY` (or `ARXIV_SANITY_MINERU_API_KEY`)
     - local backend: check `ARXIV_SANITY_MINERU_BACKEND` and that the service is reachable on `MINERU_PORT`
 - **Stuck jobs after crash (locks)**: run [cleanup_locks.py](cleanup_locks.py) or tune `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`.
+- **Stuck/ghost summary tasks (Huey)**: dry-run `python scripts/cleanup_tasks.py`, then rerun with `--force` (optionally `--flush-huey` to clear the entire queue). Use with care.
 - **Cannot load features.p due to NumPy mismatch**: regenerate features by rerunning [compute.py](compute.py) under the current environment.
 
 ## ⚡ Quick Start
@@ -313,6 +334,9 @@ ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
 ARXIV_SANITY_EMAIL_SMTP_PORT=465
 ARXIV_SANITY_EMAIL_USERNAME=username
 ARXIV_SANITY_EMAIL_PASSWORD=your-password
+
+# Internal API key (Optional, for scripts calling APIs without a browser session)
+# ARXIV_SANITY_RECO_API_KEY=your-internal-key
 
 # Embeddings (Optional)
 # ARXIV_SANITY_EMBED_USE_LLM_API=true
@@ -406,8 +430,8 @@ python bin/run_services.py --fetch-compute 10000
 
 ### Configuration Checklist
 
-| Item                  | File/Location                                  | Required       | Description                                                                      |
-| --------------------- | ---------------------------------------------- | -------------- | -------------------------------------------------------------------------------- |
+| Item                  | File/Location                                  | Required      | Description                                                                      |
+| --------------------- | ---------------------------------------------- | ------------- | -------------------------------------------------------------------------------- |
 | **Core Config**       | [.env](.env.example)                           | ✅ Yes         | All settings via environment variables                                           |
 | **LLM Provider**      | `.env`                                         | ✅ Yes         | `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME`, `ARXIV_SANITY_LLM_API_KEY` |
 | **arXiv Categories**  | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | ⚙️ Important   | `CORE/LANG/AGENT/APP/ALL_TAGS` controls what you fetch & show                    |
@@ -448,8 +472,8 @@ Some launchers are bash scripts ([bin/up.sh](bin/up.sh), [bin/embedding_serve.sh
 
 This project uses **pydantic-settings** for configuration management. All settings are configured via environment variables or a `.env` file.
 
-| Source                                         | Purpose                                 | Required     |
-| ---------------------------------------------- | --------------------------------------- | ------------ |
+| Source                                         | Purpose                                 | Required    |
+| ---------------------------------------------- | --------------------------------------- | ----------- |
 | [.env](.env.example)                           | All configuration settings              | ✅ Yes       |
 | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | arXiv category lists for paper fetching | ⚙️ Important |
 | [config/llm.yml](config/llm.yml)               | LiteLLM multi-model gateway             | ⚙️ Optional  |
@@ -689,13 +713,13 @@ print(settings.email.smtp_server)
 | `ARXIV_SANITY_MINERU_MAX_WORKERS` | `2`     | Max concurrent minerU processes         |
 | `ARXIV_SANITY_MINERU_MAX_VRAM`    | `3`     | Max VRAM per process (GB)               |
 | `MINERU_API_POLL_INTERVAL`        | `5`     | API polling interval (seconds)          |
-| `MINERU_API_TIMEOUT`              | `600`   | API task timeout (seconds)              |
+| `MINERU_API_TIMEOUT`              | `900`   | API task timeout (seconds)              |
 
 #### Locks & Concurrency
 
 | Variable                              | Default | Description                                                 |
 | ------------------------------------- | ------- | ----------------------------------------------------------- |
-| `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` | `600`   | Stale timeout for summary cache locks (helps after crashes) |
+| `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` | `3600`  | Stale timeout for summary cache locks (helps after crashes) |
 | `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`  | `3600`  | Stale timeout for MinerU parsing / GPU-slot locks           |
 
 #### Embedding
@@ -874,83 +898,122 @@ Schedule (Asia/Shanghai timezone):
 
 ## 📚 API Reference
 
-The system provides 54 API endpoints distributed across 8 Blueprint modules.
+Routes are implemented as Flask Blueprints under `backend/blueprints/`.
 
-### Page Routes (web.py)
+### Page Routes (`web.py`)
 
-| Route | Description |
-|-------|-------------|
-| `GET /` | Homepage, paper list |
-| `GET /summary` | Paper summary page |
-| `GET /profile` | User profile |
-| `GET /stats` | System statistics page |
-| `GET /about` | About page |
-| `GET /readinglist` | Reading list page |
+| Route              | Description                        |
+| ------------------ | ---------------------------------- |
+| `GET /health`      | Health check                       |
+| `GET /`            | Homepage, paper list               |
+| `GET /inspect`     | Debug inspect page (auth required) |
+| `GET /summary`     | Paper summary page                 |
+| `GET /profile`     | User profile                       |
+| `GET /stats`       | System statistics page             |
+| `GET /about`       | About page                         |
+| `GET /readinglist` | Reading list page                  |
 
-### Search & Recommendations (api_search.py)
+### Search & Recommendations (`api_search.py`)
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /?rank=search&q=<query>` | Keyword search (TF-IDF) |
-| `GET /?rank=search&q=<query>&search_mode=semantic` | Semantic search |
-| `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=0.5` | Hybrid search |
-| `GET /?rank=tags&tags=<tag_list>&logic=<and\|or>` | Tag-based SVM recommendations |
-| `GET /?rank=time&time_filter=<days>` | Time-filtered papers |
-| `GET /?rank=pid&pid=<paper_id>` | Similar paper recommendations |
-| `POST /api/tag_search` | Single tag search (auth required) |
-| `POST /api/tags_search` | Multi-tag search (auth required) |
+**Homepage query params (GET `/`):**
 
-### Paper Summarization (api_summary.py)
+| Query                                                                | Description                   |
+| -------------------------------------------------------------------- | ----------------------------- |
+| `GET /?rank=search&q=<query>`                                        | Keyword search (TF-IDF)       |
+| `GET /?rank=search&q=<query>&search_mode=semantic`                   | Semantic search               |
+| `GET /?rank=search&q=<query>&search_mode=hybrid&semantic_weight=0.5` | Hybrid search                 |
+| `GET /?rank=tags&tags=<tag_list>&logic=<and\|or>`                    | Tag-based SVM recommendations |
+| `GET /?rank=time&time_filter=<days>`                                 | Time-filtered papers          |
+| `GET /?rank=pid&pid=<paper_id>`                                      | Similar paper recommendations |
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/get_paper_summary` | Get/generate paper summary |
-| `POST /api/clear_model_summary` | Clear specific model's summary cache |
-| `POST /api/clear_paper_cache` | Clear all paper caches |
-| `GET /api/summary_status/<pid>` | Get summary generation status |
+**JSON API:**
 
-### Tag Management (api_tags.py)
+| Endpoint                   | Description                                                          |
+| -------------------------- | -------------------------------------------------------------------- |
+| `POST /api/keyword_search` | Keyword search (JSON)                                                |
+| `POST /api/tag_search`     | Single tag search (auth required)                                    |
+| `POST /api/tags_search`    | Multi-tag search (auth required)                                     |
+| `GET /cache_status`        | Cache status page (requires `ARXIV_SANITY_ENABLE_CACHE_STATUS=true`) |
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /add/<pid>/<tag>` | Add positive tag to paper |
-| `GET /sub/<pid>/<tag>` | Remove tag from paper |
-| `GET /neg/<pid>/<tag>` | Add negative tag to paper |
-| `GET /add_key/<keyword>` | Add tracking keyword |
-| `GET /del_key/<keyword>` | Remove tracking keyword |
-| `POST /api/add_combined_tag` | Add combined tag |
-| `POST /api/remove_combined_tag` | Remove combined tag |
+Note: `tools/send_emails.py` may call tag-search endpoints without a browser session using `ARXIV_SANITY_RECO_API_KEY` and the `X-ARXIV-SANITY-API-KEY` header (or `Authorization: Bearer ...`), together with `{"user": "<username>"}` in the JSON body.
 
-### Reading List (api_readinglist.py)
+### Paper Summarization (`api_summary.py`)
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/readinglist/add` | Add paper to reading list |
+| Endpoint                          | Description                             |
+| --------------------------------- | --------------------------------------- |
+| `POST /api/get_paper_summary`     | Get/generate paper summary              |
+| `POST /api/trigger_paper_summary` | Enqueue summary generation task (async) |
+| `GET /api/task_status/<task_id>`  | Get Huey task status                    |
+| `GET /api/queue_stats`            | Huey queue stats                        |
+| `POST /api/summary_status`        | Get summary status (JSON)               |
+| `POST /api/clear_model_summary`   | Clear specific model's summary cache    |
+| `POST /api/clear_paper_cache`     | Clear all paper caches                  |
+| `GET /api/check_paper_summaries`  | Validate/recheck summary caches         |
+
+### Tag Management (`api_tags.py`)
+
+| Endpoint                          | Description                                  |
+| --------------------------------- | -------------------------------------------- |
+| `POST /api/tag_feedback`          | Add/remove positive/negative feedback (JSON) |
+| `GET /api/tag_members`            | Get tag members                              |
+| `POST /api/paper_titles`          | Get paper titles (batch)                     |
+| `POST /add_tag/<tag>`             | Create tag                                   |
+| `GET/POST /add/<pid>/<tag>`       | Add tag to paper                             |
+| `GET/POST /sub/<pid>/<tag>`       | Remove tag from paper                        |
+| `GET/POST /del/<tag>`             | Delete tag                                   |
+| `GET/POST /rename/<otag>/<ntag>`  | Rename tag                                   |
+| `GET/POST /add_ctag/<ctag>`       | Add combined tag                             |
+| `GET/POST /del_ctag/<ctag>`       | Delete combined tag                          |
+| `POST /rename_ctag/<otag>/<ntag>` | Rename combined tag                          |
+| `GET/POST /add_key/<keyword>`     | Add tracking keyword                         |
+| `GET/POST /del_key/<keyword>`     | Remove tracking keyword                      |
+| `POST /rename_key/<okey>/<nkey>`  | Rename tracking keyword                      |
+
+### Papers & Assets (`api_papers.py`)
+
+| Endpoint                                 | Description               |
+| ---------------------------------------- | ------------------------- |
+| `GET /api/paper_image/<pid>/<filename>`  | Paper image asset         |
+| `GET /api/mineru_image/<pid>/<filename>` | MinerU image asset        |
+| `GET /api/llm_models`                    | List available LLM models |
+
+### Reading List (`api_readinglist.py`)
+
+| Endpoint                       | Description                    |
+| ------------------------------ | ------------------------------ |
+| `POST /api/readinglist/add`    | Add paper to reading list      |
 | `POST /api/readinglist/remove` | Remove paper from reading list |
-| `GET /api/readinglist/status/<pid>` | Get paper reading list status |
+| `GET /api/readinglist/list`    | List reading list items        |
 
-### User Management (api_user.py)
+### User & Session (`api_user.py`)
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/login` | User login |
-| `POST /api/logout` | User logout |
-| `POST /api/update_email` | Update email address |
-| `GET /api/user_state` | Get user state |
+| Endpoint               | Description                    |
+| ---------------------- | ------------------------------ |
+| `GET /api/user_state`  | Get user state                 |
+| `POST /login`          | User login                     |
+| `GET/POST /logout`     | User logout                    |
+| `POST /register_email` | Register notification email(s) |
 
-### Real-time Updates (api_sse.py)
+### Real-time Updates (`api_sse.py`)
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/sse/user/<username>` | User-specific SSE stream |
-| `GET /api/sse/global` | Global SSE stream |
+| Endpoint               | Description     |
+| ---------------------- | --------------- |
+| `GET /api/user_stream` | User SSE stream |
 
-### System
+### Uploads (Experimental) (`api_uploads.py`)
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /cache_status` | Cache status (auth required) |
-| `POST /api/upload_paper` | Upload private PDF (experimental) |
+| Endpoint                             | Description                                         |
+| ------------------------------------ | --------------------------------------------------- |
+| `POST /upload_pdf`                   | Upload private PDF                                  |
+| `GET /uploaded_papers/list`          | List uploaded papers                                |
+| `POST /uploaded_papers/update_meta`  | Update uploaded paper metadata                      |
+| `POST /uploaded_papers/delete`       | Delete uploaded paper                               |
+| `POST /uploaded_papers/retry_parse`  | Retry parsing                                       |
+| `POST /uploaded_papers/parse`        | Parse uploaded PDF                                  |
+| `POST /uploaded_papers/extract_info` | Extract metadata via LLM                            |
+| `GET /uploaded_papers/pdf/<pid>`     | Download uploaded PDF                               |
+| `GET /uploaded_papers/similar/<pid>` | Similarity search for an upload                     |
+| `GET /uploaded_papers/tldr/<pid>`    | Get upload TL;DR (from cached summary if available) |
 
 ---
 
@@ -1096,6 +1159,7 @@ Click Summary → Huey Task → HTML/PDF Parse → LLM → Cache → SSE Push
 ---
 
 ## 📈 Changelog
+
 
 ### v3.2 - Upload, Testing & Security Hardening
 

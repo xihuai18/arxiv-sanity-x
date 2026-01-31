@@ -45,6 +45,7 @@ LLM_API_KEY = settings.llm.api_key
 LLM_NAME = settings.llm.name
 LLM_SUMMARY_LANG = settings.llm.summary_lang
 SUMMARY_FALLBACK_MODELS = settings.llm.fallback_models
+LLM_TIMEOUT = int(getattr(settings.llm, "timeout", 180))
 SUMMARY_MIN_CHINESE_RATIO = settings.summary.min_chinese_ratio
 SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
 SUMMARY_HTML_SOURCES = settings.summary.html_sources
@@ -58,6 +59,64 @@ MINERU_API_KEY = settings.mineru.api_key
 MINERU_API_POLL_INTERVAL = settings.mineru.api_poll_interval
 MINERU_API_TIMEOUT = settings.mineru.api_timeout
 MAIN_CONTENT_MIN_RATIO = settings.main_content_min_ratio
+
+_RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def _sleep_backoff(attempt: int, base_s: float = 0.5, cap_s: float = 8.0) -> None:
+    """Sleep with exponential backoff and jitter."""
+
+    sleep_s = min(cap_s, base_s * (2**attempt))
+    # Deterministic jitter keeps debugging reproducible while still spreading load.
+    jitter_s = sleep_s * 0.2 * ((hash((attempt, sleep_s)) % 100) / 100.0)
+    time.sleep(sleep_s + jitter_s)
+
+
+def _request_with_retry(
+    method: str,
+    url: str,
+    *,
+    timeout: float,
+    retries: int = 3,
+    retry_on_status: set[int] | None = None,
+    **kwargs,
+):
+    """requests.request wrapper with bounded retries.
+
+    Retries on network exceptions and retryable HTTP status codes.
+    """
+
+    retry_status = _RETRYABLE_HTTP_STATUS if retry_on_status is None else retry_on_status
+    last_exc: Exception | None = None
+
+    for attempt in range(max(1, int(retries))):
+        try:
+            resp = requests.request(method, url, timeout=timeout, **kwargs)
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt >= retries - 1:
+                raise
+            _sleep_backoff(attempt)
+            continue
+
+        try:
+            code = int(getattr(resp, "status_code", 0) or 0)
+        except Exception:
+            code = 0
+
+        if code in retry_status and attempt < retries - 1:
+            try:
+                resp.close()
+            except Exception:
+                pass
+            _sleep_backoff(attempt)
+            continue
+
+        return resp
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"request failed: {method} {url}")
 
 
 class PaperSummarizer:
@@ -155,6 +214,30 @@ class PaperSummarizer:
         return True
 
     @staticmethod
+    def _is_transient_llm_error(exc: Exception) -> bool:
+        """Best-effort detection for transient provider/network errors."""
+
+        msg = str(exc or "").lower()
+        markers = [
+            "timeout",
+            "timed out",
+            "rate limit",
+            "429",
+            "overloaded",
+            "temporarily",
+            "try again",
+            "bad gateway",
+            "502",
+            "503",
+            "504",
+            "connection",
+            "connection reset",
+            "connect",
+            "read error",
+        ]
+        return any(m in msg for m in markers)
+
+    @staticmethod
     def _build_summary_result(content: str, meta: Optional[dict] = None) -> dict:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
@@ -216,7 +299,13 @@ class PaperSummarizer:
                     else:
                         # Strategy 3: Make a HEAD request to get current version from redirect
                         try:
-                            head_response = requests.head(pdf_url, allow_redirects=True, timeout=10)
+                            head_response = _request_with_retry(
+                                "HEAD",
+                                pdf_url,
+                                allow_redirects=True,
+                                timeout=10,
+                                retries=2,
+                            )
                             if head_response.ok:
                                 version_from_url = self._extract_version_from_url(head_response.url, raw_pid)
                                 if version_from_url:
@@ -231,7 +320,15 @@ class PaperSummarizer:
 
             # Use atomic file write with temporary file
             logger.trace(f"Downloading paper {raw_pid} ...")
-            with requests.get(pdf_url, stream=True, timeout=30, allow_redirects=True) as response:
+            resp = _request_with_retry(
+                "GET",
+                pdf_url,
+                stream=True,
+                allow_redirects=True,
+                timeout=60,
+                retries=3,
+            )
+            with resp as response:
                 response.raise_for_status()
 
                 # Try to extract version from final URL after redirects
@@ -576,9 +673,20 @@ class PaperSummarizer:
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(img_url, headers=headers, timeout=30, stream=True)
+            response = _request_with_retry(
+                "GET",
+                img_url,
+                headers=headers,
+                timeout=30,
+                stream=True,
+                retries=3,
+            )
             if response.status_code != 200:
                 logger.trace(f"Failed to download image {img_url}: {response.status_code}")
+                try:
+                    response.close()
+                except Exception:
+                    pass
                 return False
 
             # Write to temporary file first, then atomic rename
@@ -600,6 +708,11 @@ class PaperSummarizer:
                 if Path(temp_path).exists():
                     Path(temp_path).unlink()
                 raise
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
             logger.trace(f"Downloaded image: {save_path.name}")
             return True
@@ -722,18 +835,24 @@ class PaperSummarizer:
 
         try:
             headers = {"User-Agent": "arxiv-sanity-x/summary"}
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code != 200:
-                logger.trace(f"HTML fetch failed ({source}) {response.status_code}: {url}")
-                return None, url
+            response = _request_with_retry("GET", url, headers=headers, timeout=30, retries=2)
+            try:
+                if response.status_code != 200:
+                    logger.trace(f"HTML fetch failed ({source}) {response.status_code}: {url}")
+                    return None, url
 
-            # Check if redirected to abstract page (ar5iv redirects to arxiv/abs when HTML not available)
-            final_url = response.url
-            if "/abs/" in final_url:
-                logger.trace(f"HTML not available ({source}), redirected to abstract page: {final_url}")
-                return None, url
+                # Check if redirected to abstract page (ar5iv redirects to arxiv/abs when HTML not available)
+                final_url = response.url
+                if "/abs/" in final_url:
+                    logger.trace(f"HTML not available ({source}), redirected to abstract page: {final_url}")
+                    return None, url
 
-            return response.text, url
+                return response.text, url
+            finally:
+                try:
+                    response.close()
+                except Exception:
+                    pass
         except Exception as e:
             logger.trace(f"HTML fetch error ({source}) {pid}: {e}")
             return None, url
@@ -1199,7 +1318,7 @@ class PaperSummarizer:
 
             logger.trace(f"Requesting upload URL for: {pdf_name}.pdf")
             t_req = time.time()
-            res = requests.post(batch_url, headers=header, json=data, timeout=30)
+            res = _request_with_retry("POST", batch_url, headers=header, json=data, timeout=30, retries=3)
             logger.trace(
                 f"[BLOCKING] MinerU API: batch file-urls returned in {time.time() - t_req:.2f}s "
                 f"(status={res.status_code})"
@@ -1233,7 +1352,7 @@ class PaperSummarizer:
             logger.trace(f"Uploading PDF to: {upload_url[:80]}...")
             with open(pdf_path, "rb") as f:
                 t_up = time.time()
-                upload_res = requests.put(upload_url, data=f, timeout=120)
+                upload_res = requests.put(upload_url, data=f, timeout=300)
                 logger.trace(
                     f"[BLOCKING] MinerU API: upload completed in {time.time() - t_up:.2f}s (status={upload_res.status_code})"
                 )
@@ -1258,7 +1377,7 @@ class PaperSummarizer:
                 time.sleep(MINERU_API_POLL_INTERVAL)
 
                 t_poll = time.time()
-                res = requests.get(query_url, headers=header, timeout=30)
+                res = _request_with_retry("GET", query_url, headers=header, timeout=30, retries=3)
                 dt_poll = time.time() - t_poll
                 if dt_poll >= 1.0:
                     logger.trace(f"[BLOCKING] MinerU API: poll request took {dt_poll:.2f}s (status={res.status_code})")
@@ -1300,7 +1419,7 @@ class PaperSummarizer:
 
             logger.trace("Downloading ZIP...")
             t_down = time.time()
-            response = requests.get(download_url, timeout=120)
+            response = _request_with_retry("GET", download_url, timeout=300, retries=3)
             logger.trace(
                 f"[BLOCKING] MinerU API: zip download completed in {time.time() - t_down:.2f}s "
                 f"(status={response.status_code}, bytes={len(response.content) if response.content is not None else 0})"
@@ -1993,12 +2112,25 @@ Please output strictly according to the following structure:
                     f"Calling {modelid} to generate paper summary... " f"(attempt {idx + 1}/{len(model_candidates)})"
                 )
 
-                response = self.client.chat.completions.create(
-                    model=modelid,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    top_p=0.95,
-                )
+                response = None
+                for llm_try in range(2):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=modelid,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.3,
+                            top_p=0.95,
+                            timeout=LLM_TIMEOUT,
+                        )
+                        break
+                    except Exception as e:
+                        if llm_try < 1 and self._is_transient_llm_error(e):
+                            logger.warning(f"LLM transient error for model={modelid}, retrying once: {e}")
+                            _sleep_backoff(llm_try, base_s=1.0, cap_s=4.0)
+                            continue
+                        raise
+                if response is None:
+                    raise RuntimeError("LLM call returned no response")
 
                 # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
                 try:

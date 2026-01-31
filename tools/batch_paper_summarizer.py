@@ -262,7 +262,7 @@ class BatchProcessor:
         from config import settings
 
         API_BASE_URL = f"http://localhost:{settings.serve_port}"
-        API_TIMEOUT = 60
+        API_TIMEOUT = float(getattr(settings.reco, "api_timeout", 45.0))
 
         logger.debug(f"Finding priority papers (email recommendations, no summary, last {time_delta_days} days)...")
 
@@ -297,16 +297,43 @@ class BatchProcessor:
                         "limit": 50,  # Top 50 recommendations per tag
                         "C": 0.1,
                     }
-                    resp = requests.post(
-                        f"{API_BASE_URL}/api/tag_search",
-                        json=payload,
-                        headers=headers,
-                        timeout=API_TIMEOUT,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
+                    resp = None
+                    for attempt in range(3):
+                        try:
+                            resp = requests.post(
+                                f"{API_BASE_URL}/api/tag_search",
+                                json=payload,
+                                headers=headers,
+                                timeout=API_TIMEOUT,
+                            )
+                            if resp.status_code in (408, 429, 500, 502, 503, 504) and attempt < 2:
+                                try:
+                                    resp.close()
+                                except Exception:
+                                    pass
+                                time.sleep(0.5 * (2**attempt))
+                                continue
+                            break
+                        except requests.RequestException:
+                            if attempt >= 2:
+                                raise
+                            time.sleep(0.5 * (2**attempt))
+                            continue
+                    if resp is not None and resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                        finally:
+                            try:
+                                resp.close()
+                            except Exception:
+                                pass
                         for pid in data.get("pids", []):
                             recommendation_count[pid] = recommendation_count.get(pid, 0) + 1
+                    elif resp is not None:
+                        try:
+                            resp.close()
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.debug(f"Failed to get recommendations for {user}/{tag_name}: {e}")
                     continue

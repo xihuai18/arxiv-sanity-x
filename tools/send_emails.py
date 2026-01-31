@@ -544,31 +544,65 @@ def _api_worker_count(n_tasks: int) -> int:
 
 
 def _post_recommendation(url: str, payload: dict, label: str, key: str):
-    try:
-        response = requests.post(url, json=payload, headers=API_HEADERS or None, timeout=API_TIMEOUT)
-    except requests.RequestException as e:
-        logger.error(f"API request exception for {label} {key}: {e}")
-        return None
+    def _sleep_backoff(attempt: int, base_s: float = 0.5, cap_s: float = 8.0) -> None:
+        # Exponential backoff with jitter.
+        sleep_s = min(cap_s, base_s * (2**attempt))
+        jitter_s = sleep_s * 0.2 * (hash((label, key, attempt)) % 100) / 100.0
+        time.sleep(sleep_s + jitter_s)
 
-    if response.status_code != 200:
-        body = (response.text or "").strip().replace("\n", " ")
-        if len(body) > 200:
-            body = body[:200] + "..."
-        suffix = f" body={body}" if body else ""
-        logger.error(f"API request failed for {label} {key}: {response.status_code}{suffix}")
-        return None
+    def _is_retryable_status(code: int) -> bool:
+        return code in (408, 429, 500, 502, 503, 504)
 
-    try:
-        result = response.json()
-    except Exception as e:
-        logger.error(f"API response parse failed for {label} {key}: {e}")
-        return None
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=API_HEADERS or None, timeout=API_TIMEOUT)
+        except requests.RequestException as e:
+            last_exc = e
+            if attempt >= 2:
+                logger.error(f"API request exception for {label} {key}: {e}")
+                return None
+            logger.warning(f"API request exception for {label} {key} (retry {attempt+1}/2): {e}")
+            _sleep_backoff(attempt)
+            continue
 
-    if not result.get("success"):
-        logger.error(f"API error for {label} {key}: {result.get('error')}")
-        return None
+        try:
+            if response.status_code != 200:
+                # Retry for transient overloads.
+                if _is_retryable_status(int(response.status_code)) and attempt < 2:
+                    logger.warning(
+                        f"API request failed for {label} {key}: {response.status_code} (retry {attempt+1}/2)"
+                    )
+                    _sleep_backoff(attempt)
+                    continue
 
-    return key, result.get("pids", []), result.get("scores", [])
+                body = (response.text or "").strip().replace("\n", " ")
+                if len(body) > 200:
+                    body = body[:200] + "..."
+                suffix = f" body={body}" if body else ""
+                logger.error(f"API request failed for {label} {key}: {response.status_code}{suffix}")
+                return None
+
+            try:
+                result = response.json()
+            except Exception as e:
+                logger.error(f"API response parse failed for {label} {key}: {e}")
+                return None
+
+            if not result.get("success"):
+                logger.error(f"API error for {label} {key}: {result.get('error')}")
+                return None
+
+            return key, result.get("pids", []), result.get("scores", [])
+        finally:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    if last_exc is not None:
+        logger.error(f"API request exception for {label} {key}: {last_exc}")
+    return None
 
 
 def calculate_ctag_recommendation(
