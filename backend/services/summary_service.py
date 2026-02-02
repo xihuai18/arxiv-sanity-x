@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -22,11 +23,13 @@ from tools.paper_summarizer import (
     generate_paper_summary as generate_paper_summary_from_module,
 )
 from tools.paper_summarizer import (
+    model_cache_key,
     normalize_summary_result,
     normalize_summary_source,
     read_summary_meta,
     release_summary_lock,
     resolve_cache_pid,
+    split_pid_version,
     summary_cache_paths,
     summary_source_matches,
 )
@@ -35,6 +38,25 @@ DATA_DIR = str(settings.data_dir)
 SUMMARY_DIR = str(settings.summary_dir)
 LLM_NAME = settings.llm.name
 SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
+
+
+def _get_native_thread_class():
+    """Return a real OS Thread class even under gevent monkey-patching."""
+    try:
+        import gevent.monkey
+
+        if gevent.monkey.is_module_patched("threading"):
+            return gevent.monkey.get_original("threading", "Thread")
+    except Exception:
+        return threading.Thread
+    return threading.Thread
+
+
+def _start_daemon_thread(*, target, name: str) -> None:
+    Thread = _get_native_thread_class()
+    t = Thread(target=target, name=name, daemon=True)
+    t.start()
+
 
 # -----------------------------------------------------------------------------
 # Summary coverage / cache stats (fast path + incremental updates + periodic full rebuild)
@@ -470,10 +492,26 @@ def compute_summary_cache_stats() -> dict:
                 pid = entry.name
                 for meta_path in entry.glob("*.meta.json"):
                     meta = read_summary_meta(meta_path)
-                    model = (meta.get("model") or meta.get("llm_model") or "").strip()
-                    if not model:
-                        name = meta_path.name
-                        model = name[: -len(".meta.json")] if name.endswith(".meta.json") else meta_path.stem
+                    # Prefer the filename as the cache key model. This keeps stats consistent with
+                    # how summaries are cached/cleared (files are keyed by model_cache_key(model)).
+                    #
+                    # Some historical caches may have inconsistent metadata (e.g. llm_model differs
+                    # from the filename due to fallback), which previously caused confusing counts.
+                    # meta file naming is `{model_key}.meta.json`, so Path.stem would yield
+                    # `{model_key}.meta`. Strip the full suffix instead.
+                    name = meta_path.name
+                    file_model_key = name[: -len(".meta.json")] if name.endswith(".meta.json") else meta_path.stem
+                    meta_model = (meta.get("model") or meta.get("llm_model") or "").strip()
+
+                    model = file_model_key
+                    if meta_model:
+                        try:
+                            # If meta model matches the filename (after sanitization), use the
+                            # original meta model for display; otherwise stick to filename.
+                            if model_cache_key(meta_model) == file_model_key:
+                                model = meta_model
+                        except Exception:
+                            model = file_model_key
                     cache_models[model] += 1
                     cache_total += 1
                     pid_counts[pid] += 1
@@ -506,7 +544,6 @@ def compute_summary_cache_stats() -> dict:
 
 def get_summary_cache_stats(ttl: int = 300) -> dict:
     """Get summary cache stats with caching."""
-    import threading
 
     # Fast path: persisted snapshot (shared across processes)
     snap = _read_snapshot()
@@ -548,7 +585,7 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
         with _SUMMARY_CACHE_STATS_LOCK:
             if not _SUMMARY_CACHE_STATS["in_progress"]:
                 _SUMMARY_CACHE_STATS["in_progress"] = True
-                threading.Thread(target=_run, daemon=True).start()
+                _start_daemon_thread(target=_run, name="summary-cache-stats-refresh")
 
         return {"data": data, "updated_time": updated_time, "in_progress": True, "duration": duration, "ttl": ttl}
 
@@ -608,7 +645,9 @@ def safe_rmtree(path: Path) -> bool:
 
 def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | None = None):
     """Clear summary cache for a specific model."""
-    meta = metas_getter().get(pid.split("v")[0] if "v" in pid else pid) if metas_getter and pid else None
+    raw_pid, _ = split_pid_version(pid)
+    meta_lookup_pid = raw_pid or pid
+    meta = metas_getter().get(meta_lookup_pid) if metas_getter and meta_lookup_pid else None
     cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
     ids_to_clear = {cache_pid, raw_pid}
     model = (model or "").strip()
@@ -623,23 +662,73 @@ def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | Non
     except Exception:
         cancel_info = {"canceled_task_ids": [], "epoch": 0}
 
-    # Best-effort: check whether a summary for (pid, model) exists BEFORE deletion.
-    # Track per pid so we can decrement accurately when both cache_pid/raw_pid have entries.
-    had_model_summary_by_pid: dict[str, bool] = {}
+    def _scan_dir_meta_matches(cache_dir: Path, target_model: str) -> list[tuple[Path, Path, Path]]:
+        """Find legacy cache files where meta declares target_model.
+
+        Some older caches may be saved under a different filename (e.g. requested model),
+        but the meta contains `llm_model` (actual model) which is used by stats scanning.
+        We delete those here so model-level clearing matches the stats definition.
+        """
+        matches: list[tuple[Path, Path, Path]] = []
+        if not cache_dir.exists() or not cache_dir.is_dir():
+            return matches
+        for meta_path in cache_dir.glob("*.meta.json"):
+            if not meta_path.is_file() or meta_path.name.startswith("."):
+                continue
+            try:
+                meta_d = read_summary_meta(meta_path)
+            except Exception:
+                continue
+            declared = _normalize_model_for_stats(None, meta_d)
+            if not declared or declared != target_model:
+                continue
+            name = meta_path.name
+            stem = name[: -len(".meta.json")] if name.endswith(".meta.json") else meta_path.stem
+            body_path = cache_dir / f"{stem}.md"
+            lock_path = cache_dir / f".{stem}.lock"
+            matches.append((body_path, meta_path, lock_path))
+        return matches
+
+    # Best-effort: check whether summaries for (pid, model) exist BEFORE deletion.
+    # We track a count (not just bool) so we can decrement totals accurately.
+    # Note: stats scanning counts `*.meta.json` entries, so we treat each matching meta as one summary.
+    had_model_summary_count_by_pid: dict[str, int] = {}
+    legacy_meta_matches_by_pid: dict[str, list[tuple[Path, Path, Path]]] = {}
+
     for paper_id in ids_to_clear:
+        count = 0
         try:
             cache_file, meta_file, _, legacy_cache, legacy_meta, _ = summary_cache_paths(paper_id, model)
-            if cache_file.exists() or meta_file.exists():
-                had_model_summary_by_pid[paper_id] = True
-                continue
+            if meta_file.exists():
+                count += 1
+            # Legacy root meta.json counts if it declares this model.
             if legacy_meta.exists():
                 legacy_meta_data = read_summary_meta(legacy_meta)
                 legacy_model = _normalize_model_for_stats(None, legacy_meta_data)
                 if legacy_model and legacy_model == model:
-                    # compute_summary_cache_stats counts legacy meta.json.
-                    had_model_summary_by_pid[paper_id] = True
+                    count += 1
+            # Legacy mismatch: meta declares target model but filename differs.
+            cache_dir = Path(SUMMARY_DIR) / paper_id
+            matches = _scan_dir_meta_matches(cache_dir, model)
+            if matches:
+                legacy_meta_matches_by_pid[paper_id] = matches
+                # Avoid double counting the canonical meta_file if it happens to also match.
+                try:
+                    canon_meta_path = meta_file.resolve()
+                except Exception:
+                    canon_meta_path = meta_file
+                for _body, mpath, _lock in matches:
+                    try:
+                        if mpath.resolve() == canon_meta_path:
+                            continue
+                    except Exception:
+                        if str(mpath) == str(canon_meta_path):
+                            continue
+                    count += 1
         except Exception:
-            continue
+            count = 0
+        if count > 0:
+            had_model_summary_count_by_pid[paper_id] = count
 
     for paper_id in ids_to_clear:
         cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(paper_id, model)
@@ -657,6 +746,15 @@ def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | Non
                 for file_path in (legacy_cache, legacy_meta, legacy_lock):
                     safe_unlink(file_path)
                 cleared = True
+
+        # Remove legacy mismatch files discovered by meta scan.
+        for body_path, meta_path, per_model_lock in legacy_meta_matches_by_pid.get(paper_id, []):
+            if safe_unlink(meta_path):
+                cleared = True
+            # The md may exist even if meta was removed previously; best-effort cleanup.
+            if safe_unlink(body_path):
+                cleared = True
+            safe_unlink(per_model_lock)
 
         try:
             if cancel_info.get("canceled_task_ids"):
@@ -679,7 +777,8 @@ def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | Non
         try:
             did_decrement = False
             for paper_id in ids_to_clear:
-                if had_model_summary_by_pid.get(paper_id):
+                n = int(had_model_summary_count_by_pid.get(paper_id) or 0)
+                for _ in range(max(0, n)):
                     summary_cache_stats_decrement(paper_id, model)
                     did_decrement = True
             if not did_decrement:
@@ -690,7 +789,9 @@ def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | Non
 
 def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
     """Clear all caches for a paper."""
-    meta = metas_getter().get(pid.split("v")[0] if "v" in pid else pid) if metas_getter and pid else None
+    raw_pid, _ = split_pid_version(pid)
+    meta_lookup_pid = raw_pid or pid
+    meta = metas_getter().get(meta_lookup_pid) if metas_getter and meta_lookup_pid else None
     cache_pid, raw_pid, _ = resolve_cache_pid(pid, meta)
     ids_to_clear = {cache_pid, raw_pid}
 
@@ -819,7 +920,9 @@ def generate_paper_summary(
     """
     try:
         # Use shared resolve_cache_pid with local meta lookup
-        meta = metas_getter().get(pid.split("v")[0] if "v" in pid else pid) if metas_getter and pid else None
+        raw_pid, _ = split_pid_version(pid)
+        meta_lookup_pid = raw_pid or pid
+        meta = metas_getter().get(meta_lookup_pid) if metas_getter and meta_lookup_pid else None
         cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, meta)
 
         if paper_exists_fn and not paper_exists_fn(raw_pid):
@@ -836,8 +939,9 @@ def generate_paper_summary(
 
         # Define cache file path
         cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
-        if legacy_cache.exists() and not cache_file.exists():
-            lock_file = legacy_lock
+        # Use a paper-level lock (legacy_lock) to avoid cross-model races (e.g. model fallback).
+        # This trades some parallelism for correctness and stability under concurrency.
+        lock_file = legacy_lock
 
         # Ensure cache directory exists
         cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -896,17 +1000,49 @@ def generate_paper_summary(
                 return cached_summary, sanitize_summary_meta(cached_meta)
 
         if cache_only:
-            # If another request is generating the same cache (lock held), tell client.
-            probe_fd = None
+            # Cache-only requests must never block on lock acquisition. We only need
+            # a best-effort signal that another worker is generating this paper.
             try:
-                probe_fd = acquire_summary_lock(lock_file, timeout_s=1)
+                if lock_file.exists():
+                    try:
+                        stale_s = float(getattr(settings.lock, "summary_lock_stale_sec", 3600.0) or 3600.0)
+                    except Exception:
+                        stale_s = 3600.0
+
+                    is_stale = False
+                    try:
+                        age = time.time() - float(lock_file.stat().st_mtime or 0.0)
+                        if stale_s > 0 and age > stale_s:
+                            is_stale = True
+                    except Exception:
+                        # If we cannot stat the lock, be conservative: treat as active.
+                        is_stale = False
+
+                    if not is_stale:
+                        # PID-based stale detection: if the owning process is dead, the lock is stale.
+                        try:
+                            lines = lock_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                            owner_pid = int(lines[0]) if lines and lines[0] else None
+                            if owner_pid:
+                                try:
+                                    import os
+
+                                    os.kill(owner_pid, 0)
+                                except OSError:
+                                    is_stale = True
+                        except Exception:
+                            # If we can't parse PID, fall back to time-based only.
+                            pass
+
+                    if is_stale:
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    else:
+                        return "# Error\n\nSummary is being generated, please retry shortly.", {}
             except Exception:
-                probe_fd = None
-            if probe_fd is None:
-                return "# Error\n\nSummary is being generated, please retry shortly.", {}
-            try:
-                release_summary_lock(probe_fd, lock_file)
-            except Exception:
+                # Never block cache-only path; on any unexpected error, continue with cache-miss.
                 pass
             raise SummaryCacheMiss("Summary cache not found")
 
@@ -919,6 +1055,7 @@ def generate_paper_summary(
                 return cached_summary, sanitize_summary_meta(cached_meta)
             return "# Error\n\nSummary is being generated, please retry shortly.", {}
 
+        acquired_lock_file = lock_file
         try:
             # If canceled while waiting for lock, abort without writing caches.
             try:
@@ -961,11 +1098,9 @@ def generate_paper_summary(
             # actual model id so future requests hit the right file.
             actual_model = (summary_meta.get("llm_model") or "").strip()
             if actual_model and model and actual_model != model:
-                cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(
+                cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(
                     cache_pid, actual_model
                 )
-                if legacy_cache.exists() and not cache_file.exists():
-                    lock_file = legacy_lock
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
 
             # Decide the stats model id and whether this pid+model already existed.
@@ -1021,7 +1156,7 @@ def generate_paper_summary(
 
             return summary_content, response_meta
         finally:
-            release_summary_lock(lock_fd, lock_file)
+            release_summary_lock(lock_fd, acquired_lock_file)
 
     except SummaryCacheMiss:
         raise

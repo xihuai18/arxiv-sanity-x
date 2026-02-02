@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import sys
 
@@ -30,6 +31,26 @@ logger.add(sys.stdout, level=settings.log_level.upper())
 
 if not settings.access_log:
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+
+def _register_static_mimetypes() -> None:
+    """Register missing MIME types for static assets.
+
+    We set `X-Content-Type-Options: nosniff` for security. If font files are
+    served as `application/octet-stream` (Python's default when the type is
+    unknown), browsers may refuse to load them, which breaks MathJax CHTML
+    glyphs (e.g. calligraphic / Greek symbols).
+    """
+
+    # Fonts
+    mimetypes.add_type("font/woff", ".woff")
+    mimetypes.add_type("font/woff2", ".woff2")
+    mimetypes.add_type("font/ttf", ".ttf")
+    mimetypes.add_type("font/otf", ".otf")
+    mimetypes.add_type("application/vnd.ms-fontobject", ".eot")
+
+
+_register_static_mimetypes()
 
 
 def _load_secret_key() -> str:
@@ -163,5 +184,15 @@ def create_app() -> Flask:
 
     app.before_request(legacy.before_request)
     app.teardown_request(legacy.close_connection)
+
+    # Start SSE IPC runtime lazily (safe under gunicorn --preload).
+    @app.before_request
+    def _ensure_sse_ipc_runtime():
+        try:
+            from .utils.sse import ensure_sse_runtime_started
+
+            ensure_sse_runtime_started()
+        except Exception:
+            pass
 
     return app

@@ -127,7 +127,7 @@ class SqliteKV:
             db_path: Path to SQLite database file
             tablename: Table name to use
             flag: 'r' for read-only, 'c' for read-write (create if needed)
-            autocommit: If True, commit after each write operation
+            autocommit: If True, commit after writes (batch writes may use a single transaction)
             compressed: If True, use zlib compression for values
         """
         # Validate flag parameter
@@ -345,18 +345,29 @@ class SqliteKV:
         return result
 
     def set_many(self, mapping: dict):
-        """Batch set multiple key-value pairs in a single transaction."""
+        """Batch set multiple key-value pairs.
+
+        Note:
+        - If autocommit=True, this method runs the batch in a single transaction (atomic).
+        - If autocommit=False, the caller is expected to manage the surrounding transaction.
+        """
         if self.flag == "r":
             raise RuntimeError("Cannot write to read-only database")
         if not mapping:
+            return
+        if self.autocommit:
+            with self.transaction():
+                for key, value in mapping.items():
+                    self._execute_with_retry(
+                        f"INSERT OR REPLACE INTO {self.tablename} (key, value) VALUES (?, ?)",
+                        (key, self._encode(value)),
+                    )
             return
         for key, value in mapping.items():
             self._execute_with_retry(
                 f"INSERT OR REPLACE INTO {self.tablename} (key, value) VALUES (?, ?)",
                 (key, self._encode(value)),
             )
-        if self.autocommit:
-            self._commit_with_retry()
 
     @staticmethod
     def _escape_like_prefix(prefix: str) -> str:

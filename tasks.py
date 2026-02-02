@@ -48,14 +48,23 @@ def _is_huey_consumer_process() -> bool:
 
     Huey runs tasks in a separate process, so in-process SSE emits are ineffective.
     """
+    # Prefer explicit environment markers over argv sniffing.
+    # - bin/huey_consumer.py sets ARXIV_SANITY_HUEY_CONSUMER=1.
+    # - Users may run huey consumer directly; keep argv fallback for compatibility.
+    try:
+        marker = (os.environ.get("ARXIV_SANITY_HUEY_CONSUMER") or "").strip().lower()
+        if marker in {"1", "true", "yes", "on"}:
+            return True
+    except Exception:
+        pass
     try:
         return any("huey" in (arg or "").lower() for arg in sys.argv)
     except Exception:
         return False
 
 
-# SSE can only reach clients in the web worker process. Disable SSE in Huey consumer.
-_TASKS_SSE_ENABLED = settings.huey.tasks_sse_enabled and not _is_huey_consumer_process()
+# With SQLite-backed SSE bus, Huey workers can publish events too.
+_TASKS_SSE_ENABLED = settings.huey.tasks_sse_enabled
 
 
 # Import SSE event emitters lazily to avoid circular imports.
@@ -137,7 +146,13 @@ def _paper_exists(pid: str) -> bool:
         from aslite.repositories import UploadedPaperRepository
 
         record = UploadedPaperRepository.get(pid)
-        return record is not None and record.get("parse_status") == "ok"
+        if record is None:
+            return False
+        # Treat deleting uploads as non-existent to prevent background tasks
+        # from working on records being removed.
+        if record.get("deleting") is True:
+            return False
+        return record.get("parse_status") == "ok"
 
     raw_pid, _ = split_pid_version(pid)
     if not raw_pid:
@@ -344,6 +359,33 @@ def cancel_summary_tasks(
 
     reason = (reason or "Canceled by user").strip()
 
+    # Cooperative cancellation: bump epoch first, so any in-flight task can see it quickly.
+    try:
+        epoch = SummaryStatusRepository.bump_generation_epoch(pid, model)
+    except Exception:
+        epoch = 0
+
+    def _task_epoch(info: dict | None) -> int:
+        if not isinstance(info, dict):
+            return 0
+        try:
+            return int(info.get("epoch") or 0)
+        except Exception:
+            return 0
+
+    def _should_cancel_task(task_id: str, info: dict | None = None) -> bool:
+        if epoch <= 0:
+            return True
+        if info is None:
+            try:
+                info = SummaryStatusRepository.get_task_status(task_id)
+            except Exception:
+                info = None
+        if not isinstance(info, dict):
+            # Avoid canceling unknown tasks when epoch filtering is enabled.
+            return False
+        return _task_epoch(info) < epoch
+
     canceled_task_ids: list[str] = []
 
     # 1) Fast path: summary status record points to the active task.
@@ -351,7 +393,7 @@ def cancel_summary_tasks(
         info = SummaryStatusRepository.get_status(pid, model)
         if isinstance(info, dict) and info.get("status") in ("queued", "running"):
             tid = info.get("task_id")
-            if tid:
+            if tid and _should_cancel_task(str(tid)):
                 canceled_task_ids.append(str(tid))
     except Exception:
         pass
@@ -365,19 +407,15 @@ def cancel_summary_tasks(
                 continue
             if tinfo.get("pid") != pid or tinfo.get("model") != model:
                 continue
-            canceled_task_ids.append(str(key).replace("task::", ""))
+            task_id = str(key).replace("task::", "")
+            if _should_cancel_task(task_id, tinfo):
+                canceled_task_ids.append(task_id)
     except Exception:
         pass
 
     # De-dup while preserving order
     seen = set()
     canceled_task_ids = [x for x in canceled_task_ids if x and (x not in seen and not seen.add(x))]
-
-    # Cooperative cancellation: bump epoch first, so any in-flight task can see it quickly.
-    try:
-        epoch = SummaryStatusRepository.bump_generation_epoch(pid, model)
-    except Exception:
-        epoch = 0
 
     for tid in canceled_task_ids:
         existing_user = None
@@ -402,10 +440,14 @@ def cancel_summary_tasks(
             pass
         _revoke_task_by_id(tid)
 
-    # Clear summary status so UI doesn't stay in queued/running state.
+    # Clear summary status so UI doesn't stay in queued/running state,
+    # but avoid overwriting a newly enqueued task (epoch >= current).
     try:
-        if canceled_task_ids:
-            SummaryStatusRepository.set_status(pid, model, "canceled", reason, task_id=None, task_user=None)
+        current = SummaryStatusRepository.get_status(pid, model)
+        if isinstance(current, dict) and current.get("status") in ("queued", "running"):
+            cur_tid = current.get("task_id")
+            if cur_tid and _should_cancel_task(str(cur_tid)):
+                SummaryStatusRepository.set_status(pid, model, "canceled", reason, task_id=None, task_user=None)
     except Exception:
         pass
 
@@ -443,6 +485,21 @@ def cancel_paper_summary_tasks(
             model_to_task_ids.setdefault(m, []).append(str(key).replace("task::", ""))
     except Exception:
         model_to_task_ids = {}
+    # Include models from status entries (even if no task:: record is present).
+    try:
+        for key, info in SummaryStatusRepository.get_items_with_prefix(f"{pid}::"):
+            if not isinstance(info, dict):
+                continue
+            if info.get("status") not in ("queued", "running"):
+                continue
+            if "::" not in key:
+                continue
+            _pid, m = key.split("::", 1)
+            if not m:
+                continue
+            model_to_task_ids.setdefault(m, [])
+    except Exception:
+        pass
 
     results: dict[str, dict] = {}
     total = 0
@@ -468,8 +525,9 @@ def _generate_and_cache_summary(
     summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
 
     cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
-    if legacy_cache.exists() and not cache_file.exists():
-        lock_file = legacy_lock
+    # Use a paper-level lock (legacy_lock) to avoid cross-model races (e.g. model fallback).
+    # This trades some parallelism for correctness and stability under concurrency.
+    lock_file = legacy_lock
 
     existed_before = False
     try:
@@ -620,6 +678,18 @@ def generate_summary_task(
             _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None)
         return
 
+    # Uploaded papers are private; ensure the task user owns the paper before marking running.
+    if _is_upload_pid(pid):
+        from aslite.repositories import UploadedPaperRepository
+
+        record = UploadedPaperRepository.get(pid)
+        if not user or not record or record.get("owner") != user:
+            raise RuntimeError("Uploaded paper not found")
+        if record.get("deleting") is True:
+            raise SummaryCanceled("Uploaded paper deleted")
+        if record.get("parse_status") != "ok":
+            raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
+
     _update_task_status(
         task_id,
         "running",
@@ -635,6 +705,14 @@ def generate_summary_task(
         _update_readinglist_summary_status(user, pid, "running", None, task_id=task_id)
 
     try:
+        # If cancellation happened between the pre-check and the "running" update, abort quickly.
+        try:
+            if SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch:
+                raise SummaryCanceled("Canceled by user")
+        except SummaryCanceled:
+            raise
+        except Exception:
+            pass
 
         def _cancel_check() -> bool:
             if _is_task_canceled(str(task_id) if task_id else None):
@@ -643,16 +721,6 @@ def generate_summary_task(
                 return SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch
             except Exception:
                 return False
-
-        # Uploaded papers are private; ensure the task user owns the paper.
-        if _is_upload_pid(pid):
-            from aslite.repositories import UploadedPaperRepository
-
-            record = UploadedPaperRepository.get(pid)
-            if not user or not record or record.get("owner") != user:
-                raise RuntimeError("Uploaded paper not found")
-            if record.get("parse_status") != "ok":
-                raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
 
         summary_content, summary_meta = _generate_and_cache_summary(pid, model, cancel_check=_cancel_check)
 
@@ -765,9 +833,10 @@ def enqueue_summary_task(
             if _allow_task_id(existing_task_user, user):
                 return existing_task_id
             return ""
-        # No active task found; best-effort: let caller fall back to summary_status polling.
-        logger.warning(f"Enqueue lock timeout for {pid}::{model}; skipping enqueue to avoid duplicates")
-        return ""
+        # No active task found; this is an enqueue failure. Returning "" would cause the caller
+        # to treat it as "queued but task_id hidden", which can leave a queued status stuck.
+        logger.warning(f"Enqueue lock timeout for {pid}::{model}; enqueue failed")
+        raise RuntimeError("enqueue_lock_timeout")
 
     try:
         # Check if there's already a queued/running task for this pid+model.
@@ -793,7 +862,7 @@ def enqueue_summary_task(
         task_id = task.id or getattr(result, "id", None)
         if task_id is None:
             logger.warning(f"Failed to obtain Huey task id for {pid}::{model}")
-            return ""
+            raise RuntimeError("enqueue_task_id_missing")
 
         _update_task_status(task_id, "queued", pid=pid, model=model, user=user, priority=task_priority, epoch=epoch)
         _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
@@ -952,10 +1021,7 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
 
 if settings.huey.summary_repair_on_start:
     # Only run repair if we're in a Huey consumer process (not during import in web server)
-    # Check if we're being imported by huey consumer
-    is_huey_consumer = any("huey" in arg.lower() for arg in sys.argv)
-
-    if is_huey_consumer or settings.huey.force_repair:
+    if _is_huey_consumer_process() or settings.huey.force_repair:
         try:
             repair_requeue = settings.huey.summary_repair_requeue
             repaired_count = repair_stale_summary_tasks(requeue=repair_requeue)

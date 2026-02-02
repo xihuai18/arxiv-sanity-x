@@ -10,6 +10,30 @@ import sys
 
 os.environ.setdefault("ARXIV_SANITY_PROCESS_ROLE", "web")
 
+
+def _maybe_gevent_monkey_patch():
+    """Best-effort early gevent monkey-patch.
+
+    When gunicorn runs with gevent + --preload, the master process may import the
+    app (and transitively urllib3/ssl/redis) before gunicorn's gevent worker
+    performs monkey-patching in the worker process, causing warnings and
+    occasional runtime issues.
+    """
+
+    cls = (os.environ.get("ARXIV_SANITY_GUNICORN_WORKER_CLASS") or "").strip()
+    if cls != "gevent":
+        return
+    try:
+        import gevent.monkey
+
+        gevent.monkey.patch_all()
+    except Exception:
+        # Best-effort only: never fail app import.
+        return
+
+
+_maybe_gevent_monkey_patch()
+
 from backend.app import create_app
 
 

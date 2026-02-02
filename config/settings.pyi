@@ -86,6 +86,8 @@ class DaemonSettings(BaseSettings):
     priority_limit: int
     email_dry_run: bool
     enable_git_backup: bool
+    subprocess_timeout_s: int
+    web_cache_warmup_on_update: bool
     timezone: str
 
 class HueySettings(BaseSettings):
@@ -106,6 +108,18 @@ class HueySettings(BaseSettings):
     sqlite_timeout_worker: float
     allow_thread_fallback: bool
 
+class SSESettings(BaseSettings):
+    enabled: bool
+    db_path: str
+    poll_interval: float
+    batch_size: int
+    retention_seconds: int
+    cleanup_interval: float
+    queue_maxsize: int
+    publish_retry_queue_maxsize: int
+    publish_retry_backoff_max_s: float
+    publish_async: bool
+
 class WebSettings(BaseSettings):
     cache_papers: bool
     warmup_data: bool
@@ -118,6 +132,8 @@ class WebSettings(BaseSettings):
     cookie_secure: bool
     max_content_length: int
     summary_cache_stats_refresh: int
+    data_cache_refresh_min_interval: int
+    features_cache_refresh_min_interval: int
     enable_cache_status: bool
 
 class LockSettings(BaseSettings):
@@ -180,6 +196,7 @@ class Settings(BaseSettings):
     svm: SVMSettings
     daemon: DaemonSettings
     huey: HueySettings
+    sse: SSESettings
     gunicorn: GunicornSettings
     web: WebSettings
     lock: LockSettings

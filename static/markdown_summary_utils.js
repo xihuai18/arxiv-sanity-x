@@ -36,6 +36,18 @@
         }
     }
 
+    function isNodeConnected(node) {
+        if (!node) return false;
+        try {
+            if (typeof node.isConnected === 'boolean') return node.isConnected;
+        } catch (e) {}
+        try {
+            return !!(document && document.body && document.body.contains(node));
+        } catch (e) {
+            return true;
+        }
+    }
+
     // Whitelist of safe HTML tags allowed in markdown content
     // These are commonly used for formatting and don't pose security risks
     const SAFE_HTML_TAGS = new Set([
@@ -444,7 +456,7 @@ ${qed}</div>`;
     function typesetMathPlaceholders(container) {
         if (!container) return;
         // Avoid work for detached nodes (e.g., during rapid re-renders)
-        if (container && container.isConnected === false) return;
+        if (!isNodeConnected(container)) return;
 
         // Render generation guard: if the container is re-rendered while a typeset
         // is in-flight, we should not write results back into stale DOM.
@@ -457,24 +469,50 @@ ${qed}</div>`;
             // If MathJax is now fully ready (has typeset methods), we clear the flag and proceed.
             const isFullyReady =
                 typeof MathJax !== 'undefined' &&
-                MathJax.startup &&
                 (typeof MathJax.tex2chtmlPromise === 'function' ||
-                    typeof MathJax.typesetPromise === 'function');
+                    (MathJax.startup &&
+                        MathJax.startup.document &&
+                        typeof MathJax.startup.document.convert === 'function') ||
+                    typeof MathJax.typesetPromise === 'function' ||
+                    typeof MathJax.typeset === 'function');
             if (!isFullyReady) {
+                // Keep retrying, but ensure only one pending retry per container to avoid storms.
+                try {
+                    if (container.dataset.mjxPendingScheduled !== '1') {
+                        container.dataset.mjxPendingScheduled = '1';
+                        const tries = Number(container.dataset.mjxPendingTries || 0) + 1;
+                        container.dataset.mjxPendingTries = String(tries);
+                        const delay = Math.min(2000, 150 + tries * 150);
+                        setTimeout(() => {
+                            if (!container || !isNodeConnected(container)) return;
+                            try {
+                                if (container.dataset) delete container.dataset.mjxPendingScheduled;
+                            } catch (e) {}
+                            typesetMathPlaceholders(container);
+                        }, delay);
+                    }
+                } catch (e) {}
                 return;
             }
             delete container.dataset.mjxPending;
+            try {
+                delete container.dataset.mjxPendingScheduled;
+                delete container.dataset.mjxPendingTries;
+            } catch (e) {}
         }
 
         // MathJax may not be fully ready when markdown is rendered (async script, startup in progress).
         // In that case, schedule a retry and (if available) trigger on-demand loading.
-        // IMPORTANT: Check for tex2chtmlPromise specifically, as MathJax.startup may exist
-        // before the full API is ready (race condition fix).
+        // IMPORTANT: Check for concrete APIs (typeset/convert) rather than `startup` alone,
+        // since some MathJax bundles don't expose `startup.promise`/`tex2chtmlPromise`.
         const mathJaxReady =
             typeof MathJax !== 'undefined' &&
-            MathJax.startup &&
             (typeof MathJax.tex2chtmlPromise === 'function' ||
-                typeof MathJax.typesetPromise === 'function');
+                (MathJax.startup &&
+                    MathJax.startup.document &&
+                    typeof MathJax.startup.document.convert === 'function') ||
+                typeof MathJax.typesetPromise === 'function' ||
+                typeof MathJax.typeset === 'function');
 
         if (!mathJaxReady) {
             if (container.dataset) container.dataset.mjxPending = '1';
@@ -525,18 +563,88 @@ ${qed}</div>`;
             }
 
             // If container was re-rendered or detached, abort.
-            if (container && container.isConnected === false) return;
+            if (!isNodeConnected(container)) return;
             if (gen && container.dataset && String(container.dataset.mjxGen || '') !== gen) return;
 
             if (typeof MathJax.tex2chtmlPromise !== 'function') {
-                // Fallback to normal typeset if available.
+                // Most MathJax browser bundles do NOT expose tex2chtmlPromise.
+                // Prefer the internal document.convert() path when available, as it is deterministic
+                // and avoids delimiter-scanning edge cases.
+                if (
+                    MathJax.startup &&
+                    MathJax.startup.document &&
+                    typeof MathJax.startup.document.convert === 'function'
+                ) {
+                    let didConvert = false;
+                    for (const el of nodes) {
+                        if (!el || !isNodeConnected(el)) continue;
+                        if (
+                            gen &&
+                            container.dataset &&
+                            String(container.dataset.mjxGen || '') !== gen
+                        )
+                            return;
+
+                        const tex = normalizeTex(el.getAttribute('data-tex') || '');
+                        const display =
+                            el.classList.contains('math-display') || el.tagName === 'DIV';
+                        if (!tex.trim()) continue;
+                        try {
+                            const out = MathJax.startup.document.convert(tex, { display: display });
+                            el.textContent = '';
+                            el.appendChild(out);
+                            el.classList.add('mjx-typeset');
+                            el.classList.remove('mjx-error');
+                            didConvert = true;
+                        } catch (e) {
+                            el.classList.add('mjx-error');
+                            el.classList.remove('mjx-typeset');
+                            const errorMsg = extractMathJaxError(e);
+                            el.innerHTML = `
+                                <span class="math-error-container">
+                                    <span class="math-error-icon" title="Math rendering error">⚠️</span>
+                                    <code class="math-error-tex">${escapeHtml(tex.substring(0, 100))}${tex.length > 100 ? '...' : ''}</code>
+                                    <span class="math-error-msg">${escapeHtml(errorMsg)}</span>
+                                    <button type="button" class="math-error-copy" title="Copy LaTeX source">📋</button>
+                                </span>
+                            `;
+                        }
+                    }
+                    // Ensure CHTML styles and layout are updated after manual conversions.
+                    // Some MathJax bundles require this for the output to display correctly.
+                    try {
+                        if (
+                            didConvert &&
+                            MathJax.startup &&
+                            MathJax.startup.document &&
+                            typeof MathJax.startup.document.updateDocument === 'function'
+                        ) {
+                            MathJax.startup.document.updateDocument();
+                        }
+                    } catch (e) {}
+                    return;
+                }
+
+                // Final fallback: delimiter scanning via typeset/typesetPromise.
+                // Clear previous math state in the container to avoid "already typeset" no-ops.
+                try {
+                    if (typeof MathJax.typesetClear === 'function') {
+                        MathJax.typesetClear([container]);
+                    }
+                } catch (e) {}
                 if (typeof MathJax.typesetPromise === 'function') {
                     try {
                         await MathJax.typesetPromise([container]);
+                        for (const el of nodes) {
+                            if (el && el.classList) el.classList.add('mjx-typeset');
+                        }
                     } catch (e) {}
                 } else if (typeof MathJax.typeset === 'function') {
                     try {
                         MathJax.typeset([container]);
+                        for (const el of nodes) {
+                            if (el && el.classList) el.classList.add('mjx-typeset');
+                        }
                     } catch (e) {}
                 }
                 return;
@@ -544,7 +652,7 @@ ${qed}</div>`;
 
             for (const el of nodes) {
                 // Skip stale nodes when re-render happens mid-flight.
-                if (!el || el.isConnected === false) continue;
+                if (!el || !isNodeConnected(el)) continue;
                 if (gen && container.dataset && String(container.dataset.mjxGen || '') !== gen)
                     return;
 

@@ -246,6 +246,21 @@ class DaemonSettings(BaseSettings):
     # Backup configuration
     enable_git_backup: bool = Field(default=True, description="Enable git backup")
 
+    # Subprocess guardrail (avoid daemon getting stuck forever on a hung child process).
+    # Intentionally long: these jobs can legitimately take a long time, but should not hang forever.
+    subprocess_timeout_s: int = Field(
+        default=7200,
+        description="Max seconds for each daemon subprocess call (prevents permanent hang)",
+    )
+
+    # Web cache warmup (optional)
+    # Used by tools/daemon.py to proactively ping the web service so in-memory caches
+    # reload soon after papers.db/features updates (even under low traffic).
+    web_cache_warmup_on_update: bool = Field(
+        default=True,
+        description="Ping web /health once after successful fetch/compute",
+    )
+
     # Scheduler timezone
     timezone: str = Field(default="Asia/Shanghai", description="Scheduler timezone")
 
@@ -290,6 +305,31 @@ class HueySettings(BaseSettings):
     allow_thread_fallback: bool = Field(
         default=False,
         description="Allow in-process thread fallback when Huey enqueue fails (NOT recommended for production)",
+    )
+
+
+class SSESettings(BaseSettings):
+    """SSE cross-process IPC configuration (SQLite event bus)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ARXIV_SANITY_SSE_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=True, description="Enable SQLite-backed SSE IPC")
+    db_path: str = Field(default="", description="SSE event bus SQLite path (default data_dir/sse_events.db)")
+    poll_interval: float = Field(default=0.05, description="SQLite poll interval (seconds)")
+    batch_size: int = Field(default=500, description="Max events fetched per poll")
+    retention_seconds: int = Field(default=86400, description="Event retention (seconds)")
+    cleanup_interval: float = Field(default=60.0, description="Cleanup interval (seconds)")
+    queue_maxsize: int = Field(default=200, description="Per-client in-process SSE queue size")
+    publish_retry_queue_maxsize: int = Field(default=2000, description="Async publish retry queue size (per process)")
+    publish_retry_backoff_max_s: float = Field(default=1.0, description="Async publish max backoff (seconds)")
+    publish_async: bool = Field(
+        default=True,
+        description="Publish to SQLite asynchronously (avoids blocking request threads on DB locks)",
     )
 
 
@@ -347,6 +387,16 @@ class WebSettings(BaseSettings):
 
     # Cache statistics
     summary_cache_stats_refresh: int = Field(default=1800, description="Summary cache stats refresh interval (seconds)")
+
+    # Cache refresh throttling (serve stale cache during refresh)
+    data_cache_refresh_min_interval: int = Field(
+        default=60,
+        description="Minimum interval between background refreshes when papers.db changes (seconds)",
+    )
+    features_cache_refresh_min_interval: int = Field(
+        default=300,
+        description="Minimum interval between background refreshes when features files change (seconds)",
+    )
 
     # Debug switch
     enable_cache_status: bool = Field(default=False, description="Enable /cache_status debug page")
@@ -509,24 +559,25 @@ class Settings(BaseSettings):
     # Other configuration
     main_content_min_ratio: float = 0.1
 
-    # Nested configuration - use type annotation + default value directly, Pydantic v2 handles instantiation
-    # This approach is more concise than Field(default_factory=...) and provides better type inference
-    email: EmailSettings = EmailSettings()
-    llm: LLMSettings = LLMSettings()
-    extract_info: ExtractInfoSettings = ExtractInfoSettings()
-    embedding: EmbeddingSettings = EmbeddingSettings()
-    mineru: MinerUSettings = MinerUSettings()
-    summary: SummarySettings = SummarySettings()
-    svm: SVMSettings = SVMSettings()
-    daemon: DaemonSettings = DaemonSettings()
-    huey: HueySettings = HueySettings()
-    gunicorn: GunicornSettings = GunicornSettings()
-    web: WebSettings = WebSettings()
-    lock: LockSettings = LockSettings()
-    db: DatabaseSettings = DatabaseSettings()
-    search: SearchSettings = SearchSettings()
-    reco: RecommendationSettings = RecommendationSettings()
-    arxiv: ArxivSettings = ArxivSettings()
+    # NOTE: Use default_factory so nested settings are evaluated at Settings() instantiation time.
+    # This makes reload_settings() reliably pick up updated environment variables.
+    email: EmailSettings = Field(default_factory=EmailSettings)
+    llm: LLMSettings = Field(default_factory=LLMSettings)
+    extract_info: ExtractInfoSettings = Field(default_factory=ExtractInfoSettings)
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    mineru: MinerUSettings = Field(default_factory=MinerUSettings)
+    summary: SummarySettings = Field(default_factory=SummarySettings)
+    svm: SVMSettings = Field(default_factory=SVMSettings)
+    daemon: DaemonSettings = Field(default_factory=DaemonSettings)
+    huey: HueySettings = Field(default_factory=HueySettings)
+    sse: SSESettings = Field(default_factory=SSESettings)
+    gunicorn: GunicornSettings = Field(default_factory=GunicornSettings)
+    web: WebSettings = Field(default_factory=WebSettings)
+    lock: LockSettings = Field(default_factory=LockSettings)
+    db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    search: SearchSettings = Field(default_factory=SearchSettings)
+    reco: RecommendationSettings = Field(default_factory=RecommendationSettings)
+    arxiv: ArxivSettings = Field(default_factory=ArxivSettings)
 
     # Backward-compatible alias: older code referenced settings.access_log.
     @property
@@ -544,6 +595,9 @@ class Settings(BaseSettings):
         # Set Huey database default path
         if not self.huey.db_path:
             self.huey.db_path = str(self.data_dir / "huey.db")
+        # Set SSE bus database default path
+        if not self.sse.db_path:
+            self.sse.db_path = str(self.data_dir / "sse_events.db")
         # Set recommendation API base URL default value
         if not self.reco.api_base_url:
             self.reco.api_base_url = f"http://localhost:{self.serve_port}"
@@ -571,8 +625,8 @@ settings: Settings = get_settings()
 
 
 def reload_settings() -> Settings:
-    """Reload settings (clear cache)"""
+    """Reload settings (clear cache) and refresh module-level singleton."""
+    global settings
     get_settings.cache_clear()
-    # Note: this does not update module-level settings variable, caller should use return value
-    # To update global settings, use config package's reload_settings
-    return get_settings()
+    settings = get_settings()
+    return settings

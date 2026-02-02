@@ -14,6 +14,24 @@ _SCHEDULER = None
 _SUMMARY_REPAIR_JOB = False
 
 
+def _get_native_thread_class():
+    """Return a real OS Thread class even under gevent monkey-patching."""
+    try:
+        import gevent.monkey
+
+        if gevent.monkey.is_module_patched("threading"):
+            return gevent.monkey.get_original("threading", "Thread")
+    except Exception:
+        return threading.Thread
+    return threading.Thread
+
+
+def _start_daemon_thread(*, target, name: str) -> None:
+    Thread = _get_native_thread_class()
+    t = Thread(target=target, name=name, daemon=True)
+    t.start()
+
+
 def _is_data_cache_loaded() -> bool:
     """Check if data cache (metas/pids) is already loaded."""
     try:
@@ -81,10 +99,10 @@ def ensure_background_services_started():
             return
 
         if settings.web.warmup_data:
-            threading.Thread(target=_warmup_data_cache, daemon=True).start()
+            _start_daemon_thread(target=_warmup_data_cache, name="warmup-data-cache")
 
         if settings.web.warmup_ml:
-            threading.Thread(target=_warmup_ml_cache, daemon=True).start()
+            _start_daemon_thread(target=_warmup_ml_cache, name="warmup-ml-cache")
 
         if settings.web.enable_scheduler:
             try:

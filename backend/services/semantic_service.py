@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
-from aslite.db import FEATURES_FILE
+from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW
 from config import settings
 from tools.compute import Qwen3EmbeddingVllm
 
@@ -39,6 +39,18 @@ _semantic_model: Qwen3EmbeddingVllm | None = None
 _document_model: Qwen3EmbeddingVllm | None = None
 _cached_embeddings: dict[str, Any] | None = None
 _cached_embeddings_mtime: float = 0.0
+
+
+def _features_effective_mtime() -> float:
+    """Return a features mtime suitable for cache invalidation (incl. staging file)."""
+    mtimes: list[float] = []
+    for p in (FEATURES_FILE, FEATURES_FILE_NEW):
+        try:
+            if p:
+                mtimes.append(float(os.path.getmtime(p)))
+        except Exception:
+            continue
+    return max(mtimes) if mtimes else 0.0
 
 
 def get_semantic_model() -> Qwen3EmbeddingVllm | None:
@@ -141,7 +153,7 @@ def get_paper_embeddings() -> dict[str, Any] | None:
     global _cached_embeddings, _cached_embeddings_mtime, _EMBEDDINGS_LOADING
 
     try:
-        current_mtime = os.path.getmtime(FEATURES_FILE)
+        current_mtime = _features_effective_mtime()
     except Exception:
         current_mtime = 0.0
 
@@ -151,7 +163,7 @@ def get_paper_embeddings() -> dict[str, Any] | None:
     # Coordinate reload without holding the embeddings lock during heavy I/O or normalization.
     with _EMBEDDINGS_COND:
         try:
-            current_mtime = os.path.getmtime(FEATURES_FILE)
+            current_mtime = _features_effective_mtime()
         except Exception:
             current_mtime = 0.0
 
@@ -168,7 +180,7 @@ def get_paper_embeddings() -> dict[str, Any] | None:
                 _EMBEDDINGS_COND.wait(timeout=1.0)
             # Loader finished; re-check freshness.
             try:
-                current_mtime = os.path.getmtime(FEATURES_FILE)
+                current_mtime = _features_effective_mtime()
             except Exception:
                 current_mtime = 0.0
             if _cached_embeddings is not None and _cached_embeddings_mtime == current_mtime:
@@ -185,7 +197,7 @@ def get_paper_embeddings() -> dict[str, Any] | None:
         features = get_features_cached()
         logger.trace(f"[BLOCKING] get_paper_embeddings: features loaded in {time.time() - t0:.2f}s")
 
-        # Important: Do NOT re-read FEATURES_FILE mtime after loading.
+        # Important: Do NOT re-read features mtime after loading.
         # The file may be updated concurrently while we're building embeddings; if we
         # store a newer mtime than the data we actually loaded, the cache may be
         # incorrectly marked as "fresh" and serve stale embeddings indefinitely.
@@ -202,7 +214,7 @@ def get_paper_embeddings() -> dict[str, Any] | None:
                     embeddings = embeddings.astype(np.float32, copy=False)
                 norms = np.linalg.norm(embeddings, axis=1, keepdims=True).astype(np.float32, copy=False)
                 norms[norms == 0] = 1.0
-                embeddings /= norms
+                embeddings = embeddings / norms
                 logger.trace(f"[BLOCKING] get_paper_embeddings: normalization completed in {time.time() - t1:.2f}s")
             except Exception as e:
                 logger.warning(f"Failed to normalize embeddings, fallback to raw vectors: {e}")

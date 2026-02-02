@@ -8,6 +8,7 @@
 <script defer src="{{ hashed_static('dist/markdown_core_utils.js') }}"></script>
 <script defer src="{{ hashed_static('dist/tldr_utils.js') }}"></script>
 <script>
+var MJX_FONT_URL = {{ url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2') | tojson }};
 {% raw %}
 window.MathJax = {
     loader: {
@@ -55,7 +56,8 @@ window.MathJax = {
     },
     chtml: {
         scale: 1.0,
-        displayAlign: 'center'
+        displayAlign: 'center',
+        fontURL: MJX_FONT_URL
     }
 };
 {% endraw %}
@@ -687,7 +689,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             </select>
                         </div>
                     </div>
-                    <div class="filter-item">
+                    <div class="filter-item filter-item--adv-toggle">
                         <button type="button" id="adv-filter-toggle" class="adv-filter-btn" aria-expanded="false" aria-controls="adv-filter-panel">
                             <span class="adv-filter-icon">⚙️</span>
                             <span class="adv-filter-text">Advanced Filter</span>
@@ -696,22 +698,22 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>
                 <div class="adv-filter-container">
                     <div id="adv-filter-panel" class="adv-filter-panel" style="display:none;">
-                        <div class="filter-item">
+                        <div class="filter-item filter-item--tags">
                             <label for="tags_field">Tags:</label>
                             <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}" placeholder="Comma separated tags" autocomplete="off" spellcheck="false">
                         </div>
-                        <div class="filter-item">
+                        <div class="filter-item filter-item--pids">
                             <label for="pid_field">PIDs:</label>
                             <input name="pid" type="text" id="pid_field" value="{{ gvars.pid }}" placeholder="Comma separated paper IDs" autocomplete="off" spellcheck="false">
                         </div>
-                        <div class="filter-item">
+                        <div class="filter-item filter-item--logic">
                             <label for="logic">Match logic within Tags/PIDs:</label>
                             <select name="logic" id="logic" title="Logical relation inside Tags and PIDs; results are combined when both lists are filled">
                                 <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
                                 <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
                             </select>
                         </div>
-                        <div class="filter-item">
+                        <div class="filter-item filter-item--svm-c">
                             <label for="svm_c_field">SVM C:</label>
                             <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}" placeholder="0.005" inputmode="decimal" autocomplete="off">
                         </div>

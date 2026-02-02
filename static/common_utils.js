@@ -167,17 +167,22 @@ function debugLog(category, message, data) {
     // User Event Stream (SSE + Polling fallback)
     // =========================================================================
 
-    const USER_EVENT_CHANNEL = 'arxiv-sanity-user-events';
-    const USER_EVENT_LEADER_KEY = 'arxiv-sanity-user-events-leader';
-    const USER_EVENT_LEADER_STALE_MS = 8000;
+    const USER_EVENT_CHANNEL_PREFIX = 'arxiv-sanity-user-events';
+    const USER_EVENT_LEADER_KEY_PREFIX = 'arxiv-sanity-user-events-leader';
+    const USER_EVENT_LEADER_STALE_MS = 20000;
     const USER_EVENT_LEADER_HEARTBEAT_MS = 3000;
     const USER_EVENT_LEADER_MONITOR_MS = 2000;
+    const USER_STATE_POLL_FAST_MS = 5000;
+    const USER_STATE_POLL_SLOW_MS = 15000;
     let userEventChannel = null;
+    let userEventChannelName = null;
     let userStatePoller = null;
+    let userStatePollIntervalMs = null;
     let eventSource = null;
     let eventHandlers = [];
     let eventSourceReconnectTimer = null;
     let eventSourceConnecting = false;
+    let eventSourceConnectWatchdogTimer = null;
     let userStateApplyFns = [];
     let userEventTabId = null;
     let userEventLeaderTimer = null;
@@ -185,15 +190,56 @@ function debugLog(category, message, data) {
     let userEventLeaderMonitorFn = null;
     let userEventUnloadBound = false;
     let userEventStorageAvailable = true;
+    let userEventNamespace = null;
+    let userEventStorageListenerBound = false;
+
+    function normalizeUserKey(user) {
+        if (!user) return '';
+        if (typeof user === 'string') return user;
+        if (typeof user === 'object') {
+            return user.username || user.user || user.name || user.id || '';
+        }
+        return String(user);
+    }
+
+    function setUserEventNamespace(user) {
+        const key = normalizeUserKey(user);
+        if (key && userEventNamespace === key) return;
+        userEventNamespace = key || 'anon';
+
+        // If user changes (e.g. logout/login without full reload), reset cross-tab channel.
+        if (userEventChannel) {
+            try {
+                userEventChannel.close();
+            } catch (e) {}
+            userEventChannel = null;
+            userEventChannelName = null;
+        }
+    }
+
+    function getUserEventChannelName() {
+        return USER_EVENT_CHANNEL_PREFIX + ':' + (userEventNamespace || 'anon');
+    }
+
+    function getUserEventLeaderKey() {
+        return USER_EVENT_LEADER_KEY_PREFIX + ':' + (userEventNamespace || 'anon');
+    }
 
     /**
      * Initialize BroadcastChannel for cross-tab communication
      * @returns {BroadcastChannel|null} BroadcastChannel instance or null if not supported
      */
     function initBroadcastChannel() {
-        if (userEventChannel) return userEventChannel;
+        const name = getUserEventChannelName();
+        if (userEventChannel && userEventChannelName === name) return userEventChannel;
         if (typeof BroadcastChannel !== 'undefined') {
-            userEventChannel = new BroadcastChannel(USER_EVENT_CHANNEL);
+            if (userEventChannel) {
+                try {
+                    userEventChannel.close();
+                } catch (e) {}
+            }
+            userEventChannel = new BroadcastChannel(name);
+            userEventChannelName = name;
             startUserEventLeaderElection();
         }
         return userEventChannel;
@@ -220,10 +266,10 @@ function debugLog(category, message, data) {
     function readUserEventLeader() {
         try {
             if (typeof localStorage === 'undefined') return null;
-            const raw = localStorage.getItem(USER_EVENT_LEADER_KEY);
+            const raw = localStorage.getItem(getUserEventLeaderKey());
             if (!raw) return null;
             const parsed = JSON.parse(raw);
-            if (!parsed || !parsed.id || !parsed.ts) return null;
+            if (!parsed || !parsed.id || (!parsed.ts && !parsed.leaseUntil)) return null;
             return parsed;
         } catch (e) {
             userEventStorageAvailable = false;
@@ -232,15 +278,28 @@ function debugLog(category, message, data) {
     }
 
     function leaderIsStale(leader) {
-        if (!leader || !leader.ts) return true;
-        return Date.now() - Number(leader.ts) > USER_EVENT_LEADER_STALE_MS;
+        if (!leader) return true;
+        const now = Date.now();
+        if (leader.leaseUntil) return now > Number(leader.leaseUntil);
+        if (!leader.ts) return true;
+        return now - Number(leader.ts) > USER_EVENT_LEADER_STALE_MS;
     }
 
     function writeUserEventLeader(id) {
         try {
             if (typeof localStorage === 'undefined') return false;
-            localStorage.setItem(USER_EVENT_LEADER_KEY, JSON.stringify({ id, ts: Date.now() }));
-            return true;
+            const record = {
+                id,
+                ts: Date.now(),
+                leaseUntil: Date.now() + USER_EVENT_LEADER_STALE_MS,
+            };
+            const key = getUserEventLeaderKey();
+            localStorage.setItem(key, JSON.stringify(record));
+            // Read-after-write verification reduces split-brain on some browsers/storage backends.
+            const raw = localStorage.getItem(key);
+            if (!raw) return false;
+            const parsed = JSON.parse(raw);
+            return parsed && parsed.id === id;
         } catch (e) {
             userEventStorageAvailable = false;
             return false;
@@ -279,7 +338,7 @@ function debugLog(category, message, data) {
         try {
             if (typeof localStorage === 'undefined' || !userEventStorageAvailable) return;
             if (isCurrentTabLeader()) {
-                localStorage.removeItem(USER_EVENT_LEADER_KEY);
+                localStorage.removeItem(getUserEventLeaderKey());
             }
         } catch (e) {}
     }
@@ -348,6 +407,20 @@ function debugLog(category, message, data) {
         });
     }
 
+    function computeUserStatePollIntervalMs() {
+        // If we don't have BroadcastChannel/localStorage coordination, poll faster for freshness.
+        if (!userEventChannel) return USER_STATE_POLL_FAST_MS;
+        if (typeof localStorage === 'undefined' || !userEventStorageAvailable)
+            return USER_STATE_POLL_FAST_MS;
+
+        // If another tab is leader, we expect broadcasts to be timely; poll slowly as a safety net.
+        const leader = readUserEventLeader();
+        if (leader && !leaderIsStale(leader) && leader.id !== getUserEventTabId()) {
+            return USER_STATE_POLL_SLOW_MS;
+        }
+        return USER_STATE_POLL_FAST_MS;
+    }
+
     /**
      * Stop user state polling
      */
@@ -356,6 +429,7 @@ function debugLog(category, message, data) {
             clearInterval(userStatePoller);
             userStatePoller = null;
         }
+        userStatePollIntervalMs = null;
     }
 
     /**
@@ -364,7 +438,13 @@ function debugLog(category, message, data) {
      */
     function startUserStatePolling(applyFn) {
         addUserStateApplyFn(applyFn);
-        if (userStatePoller) return;
+        const intervalMs = computeUserStatePollIntervalMs();
+        if (userStatePoller && userStatePollIntervalMs === intervalMs) return;
+        if (userStatePoller) {
+            clearInterval(userStatePoller);
+            userStatePoller = null;
+        }
+        userStatePollIntervalMs = intervalMs;
         // Apply once immediately to reduce perceived lag when falling back to polling.
         fetchUserState().then(state => {
             applyUserStateToAll(state);
@@ -373,7 +453,7 @@ function debugLog(category, message, data) {
             fetchUserState().then(state => {
                 applyUserStateToAll(state);
             });
-        }, 15000);
+        }, intervalMs);
     }
 
     /**
@@ -427,6 +507,7 @@ function debugLog(category, message, data) {
      */
     function setupUserEventStream(user, applyStateFn) {
         if (!user) return;
+        setUserEventNamespace(user);
         addUserStateApplyFn(applyStateFn);
 
         const channel = initBroadcastChannel();
@@ -451,6 +532,40 @@ function debugLog(category, message, data) {
             }, 8000);
         };
 
+        const clearConnectWatchdog = () => {
+            if (!eventSourceConnectWatchdogTimer) return;
+            clearTimeout(eventSourceConnectWatchdogTimer);
+            eventSourceConnectWatchdogTimer = null;
+        };
+
+        const startConnectWatchdog = () => {
+            clearConnectWatchdog();
+            eventSourceConnectWatchdogTimer = setTimeout(() => {
+                // If EventSource gets stuck in CONNECTING (no open/error), reset and retry.
+                try {
+                    if (
+                        eventSource &&
+                        typeof EventSource !== 'undefined' &&
+                        eventSource.readyState === EventSource.CONNECTING
+                    ) {
+                        try {
+                            eventSource.close();
+                        } catch (e) {}
+                        eventSource = null;
+                        eventSourceConnecting = false;
+                        relinquishLeadershipIfOwned();
+                        startUserStatePolling();
+                        scheduleReconnect();
+                    }
+                } catch (e) {
+                    // Best-effort: avoid wedging reconnect loop.
+                    eventSourceConnecting = false;
+                } finally {
+                    eventSourceConnectWatchdogTimer = null;
+                }
+            }, 15000);
+        };
+
         const connect = () => {
             if (eventSource || eventSourceConnecting) return;
             // Avoid opening SSE in every tab: only the leader tab should connect.
@@ -459,12 +574,23 @@ function debugLog(category, message, data) {
                 return;
             }
             eventSourceConnecting = true;
-            eventSource = new EventSource('/api/user_stream');
+            try {
+                eventSource = new EventSource('/api/user_stream');
+            } catch (e) {
+                eventSource = null;
+                eventSourceConnecting = false;
+                relinquishLeadershipIfOwned();
+                startUserStatePolling();
+                scheduleReconnect();
+                return;
+            }
+            startConnectWatchdog();
             eventSource.onopen = () => {
                 stopUserStatePolling();
                 // Prefer an SSE-connected tab to lead BroadcastChannel fanout.
                 startUserEventLeaderElection();
                 eventSourceConnecting = false;
+                clearConnectWatchdog();
                 if (eventSourceReconnectTimer) {
                     clearTimeout(eventSourceReconnectTimer);
                     eventSourceReconnectTimer = null;
@@ -485,6 +611,7 @@ function debugLog(category, message, data) {
                     eventSource = null;
                 }
                 eventSourceConnecting = false;
+                clearConnectWatchdog();
                 // If we were the leader, relinquish so another tab can take over quickly.
                 relinquishLeadershipIfOwned();
                 startUserStatePolling();
@@ -495,12 +622,14 @@ function debugLog(category, message, data) {
         const connectAsLeaderIfNeeded = () => {
             // If another tab is the leader, don't connect; rely on broadcast + polling.
             if (!tryClaimUserEventLeadership()) {
-                if (isSseOpen()) {
+                if (eventSource) {
                     try {
                         eventSource.close();
                     } catch (e) {}
                     eventSource = null;
                 }
+                eventSourceConnecting = false;
+                clearConnectWatchdog();
                 startUserStatePolling();
                 return;
             }
@@ -509,12 +638,14 @@ function debugLog(category, message, data) {
 
         // Periodically monitor leader staleness and avoid multiple SSE connections per user.
         startUserEventLeaderMonitor(() => {
-            // If SSE is open but leadership moved elsewhere, close to free server resources.
-            if (isSseOpen() && !isCurrentTabLeader()) {
+            // If SSE exists (including CONNECTING) but leadership moved elsewhere, close to free server resources.
+            if (eventSource && !isCurrentTabLeader()) {
                 try {
                     eventSource.close();
                 } catch (e) {}
                 eventSource = null;
+                eventSourceConnecting = false;
+                clearConnectWatchdog();
                 startUserStatePolling();
                 return;
             }
@@ -535,6 +666,26 @@ function debugLog(category, message, data) {
             try {
                 window.addEventListener('beforeunload', () => {
                     relinquishLeadershipIfOwned();
+                });
+            } catch (e) {}
+        }
+
+        // React quickly to leadership changes across tabs.
+        if (!userEventStorageListenerBound) {
+            userEventStorageListenerBound = true;
+            try {
+                window.addEventListener('storage', e => {
+                    if (!e || !e.key) return;
+                    if (e.key !== getUserEventLeaderKey()) return;
+                    if (eventSource && !isCurrentTabLeader()) {
+                        try {
+                            eventSource.close();
+                        } catch (err) {}
+                        eventSource = null;
+                        eventSourceConnecting = false;
+                        clearConnectWatchdog();
+                        startUserStatePolling();
+                    }
                 });
             } catch (e) {}
         }
@@ -1165,6 +1316,10 @@ function debugLog(category, message, data) {
         chtml: {
             scale: 1.0,
             displayAlign: 'center',
+            // Ensure MathJax web fonts resolve correctly in self-hosted deployments.
+            // Without an explicit fontURL, some setups may request fonts from a wrong relative path,
+            // causing missing glyphs in rendered formulas.
+            fontURL: staticUrl('lib/es5/output/chtml/fonts/woff-v2'),
         },
     };
 
@@ -1198,7 +1353,10 @@ function debugLog(category, message, data) {
      */
     function loadMathJaxOnDemand(callback, scriptUrl) {
         // Already loaded
-        if (mathJaxLoaded || (typeof MathJax !== 'undefined' && MathJax.typesetPromise)) {
+        if (
+            mathJaxLoaded ||
+            (typeof MathJax !== 'undefined' && (MathJax.typesetPromise || MathJax.typeset))
+        ) {
             mathJaxLoaded = true;
             if (callback) callback();
             return;

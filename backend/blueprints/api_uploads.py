@@ -76,10 +76,15 @@ def api_upload_pdf():
     if not file.filename.lower().endswith(".pdf"):
         return _api_error("Only PDF files are supported", 400)
 
-    # Check file size before reading entire content
-    file.seek(0, 2)  # Seek to end
-    file_size = file.tell()
-    file.seek(0)  # Seek back to start
+    # Check file size before reading entire content (best effort: handle non-seekable streams).
+    file_content: bytes | None = None
+    try:
+        file.seek(0, 2)  # Seek to end
+        file_size = int(file.tell() or 0)
+        file.seek(0)  # Seek back to start
+    except Exception:
+        file_content = file.read()
+        file_size = len(file_content or b"")
 
     if file_size > MAX_UPLOAD_SIZE:
         return _api_error(f"File too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)", 400)
@@ -87,8 +92,9 @@ def api_upload_pdf():
     if file_size < 100:
         return _api_error("File too small to be a valid PDF", 400)
 
-    # Read file content
-    file_content = file.read()
+    # Read file content (reuse if already read above).
+    if file_content is None:
+        file_content = file.read()
 
     # Check PDF magic bytes (with small preamble tolerance)
     if not _looks_like_pdf(file_content):
@@ -106,6 +112,16 @@ def api_upload_pdf():
             original_filename=file.filename,
             max_uploads_per_user=MAX_UPLOADS_PER_USER,
         )
+
+        # Defensive: if the record already exists but the PDF was deleted, restore it from this upload.
+        try:
+            pdf_path = get_upload_pdf_path(pid, DATA_DIR)
+            if not pdf_path.exists():
+                pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(pdf_path, "wb") as f:
+                    f.write(file_content)
+        except Exception as e:
+            logger.warning(f"Failed to restore missing PDF for {pid}: {e}")
 
         # Only trigger async processing if not already processed/processing.
         # For duplicate uploads (same SHA256), we must transition parse_status to
@@ -200,7 +216,7 @@ def api_uploaded_papers_update_meta():
 
     csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return _api_error("No JSON data provided", 400)
 
@@ -246,7 +262,7 @@ def api_uploaded_papers_delete():
 
     csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return _api_error("No JSON data provided", 400)
 
@@ -295,7 +311,7 @@ def api_uploaded_papers_retry_parse():
 
     csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return _api_error("No JSON data provided", 400)
 
@@ -347,7 +363,7 @@ def api_uploaded_papers_parse():
 
     csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return _api_error("No JSON data provided", 400)
 
@@ -393,7 +409,7 @@ def api_uploaded_papers_extract_info():
 
     csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return _api_error("No JSON data provided", 400)
 

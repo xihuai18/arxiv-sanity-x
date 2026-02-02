@@ -266,6 +266,7 @@ To enable `data-repo/` backup:
 
 - **The website is empty / no papers**: you likely didn’t run [arxiv_daemon.py](arxiv_daemon.py) + [compute.py](compute.py) yet.
 - **Summaries always fail**: check `ARXIV_SANITY_LLM_API_KEY`, `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME` in `.env`.
+- **Summary doesn’t start generating**: the Summary page will not auto-enqueue jobs on cache misses; click **Generate**. Ensure the Huey consumer is running (recommended: `python3 bin/run_services.py`).
 - **Semantic/hybrid search has no effect**: ensure embeddings are enabled and you regenerated features with [compute.py](compute.py) (for hybrid features).
 - **Time-sorted lists look wrong / slow**: rebuild the metadata time index: `python -m tools rebuild_time_index`.
 - **MinerU errors**:
@@ -274,6 +275,9 @@ To enable `data-repo/` backup:
 - **Stuck jobs after crash (locks)**: run [cleanup_locks.py](cleanup_locks.py) or tune `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`.
 - **Stuck/ghost summary tasks (Huey)**: dry-run `python scripts/cleanup_tasks.py`, then rerun with `--force` (optionally `--flush-huey` to clear the entire queue). Use with care.
 - **Cannot load features.p due to NumPy mismatch**: regenerate features by rerunning [compute.py](compute.py) under the current environment.
+- **Gunicorn WORKER TIMEOUT / SIGKILL**: if logs show `WORKER TIMEOUT`, increase Gunicorn timeout (e.g. `ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"`), and avoid too many worker processes when caches are enabled. `bin/up.sh` auto-selects `gevent` for SSE and adds generous timeouts by default.
+- **Gevent MonkeyPatchWarning (ssl/urllib3)**: this typically happens with `--preload`. If you still see it, try `ARXIV_SANITY_GUNICORN_PRELOAD=false` or force `ARXIV_SANITY_GUNICORN_WORKER_CLASS=gthread`.
+- **Real-time updates not working (SSE)**: check `ARXIV_SANITY_SSE_ENABLED=true` and inspect `GET /api/sse_stats` for per-process queue/bus status.
 
 ## ⚡ Quick Start
 
@@ -327,6 +331,27 @@ ARXIV_SANITY_SERVE_PORT=55555
 # Summary source (HTML is fast & default)
 ARXIV_SANITY_SUMMARY_SOURCE=html
 ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
+
+# Runtime tuning (Optional, recommended for stability)
+#
+# Daemon: prevent permanent hangs on stuck subprocesses (2 hours)
+# ARXIV_SANITY_DAEMON_SUBPROCESS_TIMEOUT_S=7200
+#
+# SSE IPC (SQLite-backed, cross-process)
+# ARXIV_SANITY_SSE_ENABLED=true
+# ARXIV_SANITY_SSE_QUEUE_MAXSIZE=200
+# ARXIV_SANITY_SSE_PUBLISH_RETRY_QUEUE_MAXSIZE=2000
+# ARXIV_SANITY_SSE_PUBLISH_RETRY_BACKOFF_MAX_S=1.0
+# ARXIV_SANITY_SSE_PUBLISH_ASYNC=true
+#
+# Cache refresh throttling (serve stale cache while refreshing)
+# ARXIV_SANITY_DATA_CACHE_REFRESH_MIN_INTERVAL=60
+# ARXIV_SANITY_FEATURES_CACHE_REFRESH_MIN_INTERVAL=300
+#
+# Gunicorn (bin/up.sh auto-selects gevent when SSE is enabled and gevent is installed)
+# ARXIV_SANITY_GUNICORN_WORKER_CLASS=gevent
+# ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"
+# ARXIV_SANITY_GUNICORN_FORCE_WORKERS=1
 
 # Email (Optional, for daily recommendations)
 ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
@@ -384,7 +409,7 @@ Choose the startup method based on your needs:
 python serve.py
 
 # Production mode (Gunicorn)
-./bin/up.sh
+bash bin/up.sh
 ```
 
 #### Option 2: One-Command Startup (Recommended)
@@ -404,7 +429,7 @@ python bin/run_services.py --with-daemon   # Include scheduler daemon
 
 ```bash
 # Terminal 1: Web service
-./bin/up.sh
+bash bin/up.sh
 
 # Terminal 2: Embedding service (optional)
 ./bin/embedding_serve.sh
@@ -999,6 +1024,7 @@ Note: `tools/send_emails.py` may call tag-search endpoints without a browser ses
 | Endpoint               | Description     |
 | ---------------------- | --------------- |
 | `GET /api/user_stream` | User SSE stream |
+| `GET /api/sse_stats`   | SSE stats (per process) |
 
 ### Uploads (Experimental) (`api_uploads.py`)
 
@@ -1066,7 +1092,7 @@ npm run format
 python serve.py
 
 # Or use gunicorn for production-like testing
-./bin/up.sh
+bash bin/up.sh
 ```
 
 ### Configuration Management
