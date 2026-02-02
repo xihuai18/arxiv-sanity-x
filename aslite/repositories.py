@@ -440,22 +440,22 @@ class TagRepository:
 
         This mirrors the legacy behavior in serve.py.
         """
+        # Avoid nesting multiple write connections to the same SQLite file; this reduces
+        # lock contention under concurrency (WAL still allows only one writer).
         with get_tags_db(flag="c") as tdb:
-            with get_neg_tags_db(flag="c") as ntdb:
-                tags = tdb.get(user, {})
-                neg_tags = ntdb.get(user, {})
+            tags = tdb.get(user, {})
+            if tag not in tags:
+                tags[tag] = set()
+            tags[tag].add(pid)
+            tdb[user] = tags
 
-                if tag not in tags:
-                    tags[tag] = set()
-                tags[tag].add(pid)
-
-                if tag in neg_tags and pid in neg_tags[tag]:
-                    neg_tags[tag].discard(pid)
-                    if not neg_tags[tag]:
-                        del neg_tags[tag]
-                    ntdb[user] = neg_tags
-
-                tdb[user] = tags
+        with get_neg_tags_db(flag="c") as ntdb:
+            neg_tags = ntdb.get(user, {})
+            if tag in neg_tags and pid in neg_tags[tag]:
+                neg_tags[tag].discard(pid)
+                if not neg_tags[tag]:
+                    del neg_tags[tag]
+                ntdb[user] = neg_tags
 
     @staticmethod
     def remove_paper_from_tag(user: str, pid: str, tag: str) -> bool:
@@ -533,30 +533,32 @@ class TagRepository:
         Returns:
             "ok" if deleted, otherwise legacy error message.
         """
+        # Avoid nesting multiple write connections to the same SQLite file; this reduces
+        # lock contention under concurrency (WAL still allows only one writer).
         with get_tags_db(flag="c") as tdb:
-            with get_combined_tags_db(flag="c") as ctdb:
-                with get_neg_tags_db(flag="c") as ntdb:
-                    if user not in tdb:
-                        return "user does not have a library"
+            if user not in tdb:
+                return "user does not have a library"
 
-                    tags = tdb[user]
-                    if tag not in tags:
-                        return "user does not have this tag"
+            tags = tdb[user]
+            if tag not in tags:
+                return "user does not have this tag"
 
-                    del tags[tag]
-                    tdb[user] = tags
+            del tags[tag]
+            tdb[user] = tags
 
-                    combined = ctdb.get(user)
-                    if combined:
-                        for ctag in list(combined):
-                            if tag in ctag.split(","):
-                                combined.remove(ctag)
-                        ctdb[user] = combined
+        with get_combined_tags_db(flag="c") as ctdb:
+            combined = ctdb.get(user)
+            if combined:
+                for ctag in list(combined):
+                    if tag in ctag.split(","):
+                        combined.remove(ctag)
+                ctdb[user] = combined
 
-                    neg_tags = ntdb.get(user)
-                    if neg_tags and tag in neg_tags:
-                        del neg_tags[tag]
-                        ntdb[user] = neg_tags
+        with get_neg_tags_db(flag="c") as ntdb:
+            neg_tags = ntdb.get(user)
+            if neg_tags and tag in neg_tags:
+                del neg_tags[tag]
+                ntdb[user] = neg_tags
 
         return "ok"
 
@@ -594,32 +596,34 @@ class TagRepository:
         Returns:
             "ok" if renamed, otherwise legacy error message.
         """
+        # Avoid nesting multiple write connections to the same SQLite file; this reduces
+        # lock contention under concurrency (WAL still allows only one writer).
         with get_tags_db(flag="c") as tdb:
-            with get_neg_tags_db(flag="c") as ntdb:
-                if user not in tdb:
-                    return "user does not have a library"
+            if user not in tdb:
+                return "user does not have a library"
 
-                tags = tdb[user]
-                if old_tag not in tags:
-                    return "user does not have this tag"
+            tags = tdb[user]
+            if old_tag not in tags:
+                return "user does not have this tag"
 
-                pids = tags[old_tag]
-                del tags[old_tag]
-                if new_tag not in tags:
-                    tags[new_tag] = pids
+            pids = tags[old_tag]
+            del tags[old_tag]
+            if new_tag not in tags:
+                tags[new_tag] = pids
+            else:
+                tags[new_tag] = tags[new_tag].union(pids)
+            tdb[user] = tags
+
+        with get_neg_tags_db(flag="c") as ntdb:
+            neg_tags = ntdb.get(user)
+            if neg_tags and old_tag in neg_tags:
+                o_pids = neg_tags[old_tag]
+                del neg_tags[old_tag]
+                if new_tag not in neg_tags:
+                    neg_tags[new_tag] = o_pids
                 else:
-                    tags[new_tag] = tags[new_tag].union(pids)
-                tdb[user] = tags
-
-                neg_tags = ntdb.get(user)
-                if neg_tags and old_tag in neg_tags:
-                    o_pids = neg_tags[old_tag]
-                    del neg_tags[old_tag]
-                    if new_tag not in neg_tags:
-                        neg_tags[new_tag] = o_pids
-                    else:
-                        neg_tags[new_tag] = neg_tags[new_tag].union(o_pids)
-                    ntdb[user] = neg_tags
+                    neg_tags[new_tag] = neg_tags[new_tag].union(o_pids)
+                ntdb[user] = neg_tags
 
         with get_combined_tags_db(flag="c") as ctdb:
             combined = ctdb.get(user)
@@ -676,47 +680,35 @@ class TagRepository:
             tag: Tag name
             label: 1 for positive, -1 for negative, 0 for neutral (remove)
         """
+        # Avoid nesting multiple write connections to the same SQLite file; this reduces
+        # lock contention under concurrency (WAL still allows only one writer).
+        # Positive tags update
         with get_tags_db(flag="c") as tags_db:
-            with get_neg_tags_db(flag="c") as neg_tags_db:
-                if user not in tags_db:
-                    tags_db[user] = {}
-                if user not in neg_tags_db:
-                    neg_tags_db[user] = {}
+            pos_d = tags_db.get(user) or {}
+            if label == 1:
+                if tag not in pos_d:
+                    pos_d[tag] = set()
+                pos_d[tag].add(pid)
+            else:
+                if tag in pos_d and pid in pos_d[tag]:
+                    pos_d[tag].discard(pid)
+                    if len(pos_d[tag]) == 0:
+                        del pos_d[tag]
+            tags_db[user] = pos_d
 
-                pos_d = tags_db[user]
-                neg_d = neg_tags_db[user]
-
-                if label == 1:
-                    # Add to positive, remove from negative
-                    if tag not in pos_d:
-                        pos_d[tag] = set()
-                    pos_d[tag].add(pid)
-                    if tag in neg_d and pid in neg_d[tag]:
-                        neg_d[tag].discard(pid)
-                        if len(neg_d[tag]) == 0:
-                            del neg_d[tag]
-                elif label == -1:
-                    # Add to negative, remove from positive
-                    if tag not in neg_d:
-                        neg_d[tag] = set()
-                    neg_d[tag].add(pid)
-                    if tag in pos_d and pid in pos_d[tag]:
-                        pos_d[tag].discard(pid)
-                        if len(pos_d[tag]) == 0:
-                            del pos_d[tag]
-                else:  # label == 0
-                    # Remove from both
-                    if tag in pos_d and pid in pos_d[tag]:
-                        pos_d[tag].discard(pid)
-                        if len(pos_d[tag]) == 0:
-                            del pos_d[tag]
-                    if tag in neg_d and pid in neg_d[tag]:
-                        neg_d[tag].discard(pid)
-                        if len(neg_d[tag]) == 0:
-                            del neg_d[tag]
-
-                tags_db[user] = pos_d
-                neg_tags_db[user] = neg_d
+        # Negative tags update
+        with get_neg_tags_db(flag="c") as neg_tags_db:
+            neg_d = neg_tags_db.get(user) or {}
+            if label == -1:
+                if tag not in neg_d:
+                    neg_d[tag] = set()
+                neg_d[tag].add(pid)
+            else:
+                if tag in neg_d and pid in neg_d[tag]:
+                    neg_d[tag].discard(pid)
+                    if len(neg_d[tag]) == 0:
+                        del neg_d[tag]
+            neg_tags_db[user] = neg_d
 
 
 # -----------------------------------------------------------------------------

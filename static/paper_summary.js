@@ -9,8 +9,23 @@ var escapeHtml = CommonUtils.escapeHtml;
 var checkSummaryFallback = CommonUtils.checkSummaryFallback;
 var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
 var triggerMathJax = CommonUtils.triggerMathJax;
-var SummaryMarkdown = window.ArxivSanitySummaryMarkdown;
-var renderSummaryMarkdown = SummaryMarkdown.renderSummaryMarkdown;
+var SummaryMarkdown = window.ArxivSanitySummaryMarkdown || null;
+var renderSummaryMarkdown =
+    SummaryMarkdown && typeof SummaryMarkdown.renderSummaryMarkdown === 'function'
+        ? SummaryMarkdown.renderSummaryMarkdown
+        : function (markdown, container) {
+              // Minimal fallback: don't break the page if the summary renderer bundle isn't loaded.
+              if (!container) return;
+              try {
+                  if (renderAbstractMarkdown && typeof renderAbstractMarkdown === 'function') {
+                      renderAbstractMarkdown(markdown || '', container);
+                      return;
+                  }
+              } catch (e) {}
+              try {
+                  container.textContent = String(markdown || '');
+              } catch (e) {}
+          };
 
 // Shared tag dropdown API instance
 var sharedTagDropdownApi = null;
@@ -121,9 +136,43 @@ class SummaryState {
 
         // Timer for renderMath to avoid stale callbacks (fix for issue #4)
         this._renderMathTimer = null;
+
+        // Batch setState optimization: pending state updates and render frame
+        this._pendingState = null;
+        this._renderFrame = null;
     }
 
     setState(newState) {
+        // Batch multiple setState calls into a single render using requestAnimationFrame
+        if (!this._pendingState) {
+            this._pendingState = {};
+        }
+        Object.assign(this._pendingState, newState);
+
+        // Schedule render on next animation frame if not already scheduled
+        if (!this._renderFrame) {
+            this._renderFrame = requestAnimationFrame(() => {
+                this._renderFrame = null;
+                if (this._pendingState) {
+                    Object.assign(this, this._pendingState);
+                    this._pendingState = null;
+                    this.render();
+                }
+            });
+        }
+    }
+
+    // Synchronous setState for cases where immediate render is needed
+    setStateSync(newState) {
+        // Cancel any pending batched updates and apply them first
+        if (this._renderFrame) {
+            cancelAnimationFrame(this._renderFrame);
+            this._renderFrame = null;
+        }
+        if (this._pendingState) {
+            Object.assign(this, this._pendingState);
+            this._pendingState = null;
+        }
         Object.assign(this, newState);
         this.render();
     }
@@ -821,7 +870,7 @@ summaryApp.handleModelChange = function (event) {
     this.lastTaskId = '';
     this.setState({ selectedModel: value, queueRank: 0, queueTotal: 0 });
     if (this.pid) {
-        this.loadSummary(this.pid, { model: value, cache_only: true, auto_trigger: false });
+        this.loadSummary(this.pid, { model: value, cache_only: true });
     }
 };
 
@@ -1536,8 +1585,6 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             const chosenModel = options.model || this.getCurrentModel() || this.defaultModel || '';
             const force = Boolean(options.force_regenerate);
             const cacheOnly = options.cache_only !== undefined ? Boolean(options.cache_only) : true;
-            const autoTrigger =
-                options.auto_trigger !== undefined ? Boolean(options.auto_trigger) : true;
             this.clearAutoRetry();
 
             const chosenModelStr = String(chosenModel || '').trim();
@@ -1673,42 +1720,38 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                         this.scheduleAutoRetry(pid, { model: statusModel, cache_only: true });
                         return;
                     }
-                    if (!autoTrigger) {
-                        try {
-                            const statusInfo = await fetchSummaryStatus(pid, statusModel);
-                            if (requestId !== this.requestSeq) {
-                                return;
-                            }
-                            if (
-                                statusInfo &&
-                                (statusInfo.status === 'queued' || statusInfo.status === 'running')
-                            ) {
-                                if (statusInfo.task_id) {
-                                    this.lastTaskId = String(statusInfo.task_id);
-                                    this.refreshQueueRank();
-                                }
-                                this.pendingGenerationModel = statusModel;
-                                this.setState({
-                                    loading: true,
-                                    regenerating: false,
-                                    notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
-                                    error: null,
-                                    content: null,
-                                    meta: null,
-                                });
-                                this.scheduleAutoRetry(pid, {
-                                    model: statusModel,
-                                    cache_only: true,
-                                });
-                                return;
-                            }
-                        } catch (statusError) {
-                            console.warn('Failed to check summary status:', statusError);
+                    // Summary generation is user-initiated on the summary page.
+                    // If a job is already queued/running (e.g., triggered elsewhere), show status and poll.
+                    try {
+                        const statusInfo = await fetchSummaryStatus(pid, statusModel);
+                        if (requestId !== this.requestSeq) {
+                            return;
                         }
-                    }
-                    if (autoTrigger && chosenModelStr) {
-                        await this.queueSummary(pid, { model: chosenModelStr });
-                        return;
+                        if (
+                            statusInfo &&
+                            (statusInfo.status === 'queued' || statusInfo.status === 'running')
+                        ) {
+                            if (statusInfo.task_id) {
+                                this.lastTaskId = String(statusInfo.task_id);
+                                this.refreshQueueRank();
+                            }
+                            this.pendingGenerationModel = statusModel;
+                            this.setState({
+                                loading: true,
+                                regenerating: false,
+                                notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
+                                error: null,
+                                content: null,
+                                meta: null,
+                            });
+                            this.scheduleAutoRetry(pid, {
+                                model: statusModel,
+                                cache_only: true,
+                            });
+                            return;
+                        }
+                    } catch (statusError) {
+                        console.warn('Failed to check summary status:', statusError);
                     }
                     this.setState({
                         loading: false,
@@ -1859,7 +1902,6 @@ async function initSummaryApp() {
     summaryApp.loadSummary(pid, {
         model: initialModel,
         cache_only: true,
-        auto_trigger: true,
     });
 
     // Fetch global queue stats

@@ -10,6 +10,7 @@ from typing import Optional
 from loguru import logger
 
 from config import settings
+from tools.paper_summarizer import split_pid_version
 
 LLM_NAME = settings.llm.name
 SUMMARY_DIR = str(settings.summary_dir)
@@ -550,7 +551,8 @@ def get_summary_file(pid: str, preferred_model: Optional[str] = None) -> Optiona
     Returns:
         Path to the summary file if found, None otherwise
     """
-    raw_pid = pid.split("v")[0] if "v" in pid else pid
+    raw_pid, _ = split_pid_version(pid)
+    raw_pid = raw_pid or pid
 
     # Try new layered structure first: SUMMARY_DIR/{pid}/{model}.md
     summary_dir = Path(SUMMARY_DIR) / raw_pid

@@ -99,7 +99,7 @@ def parse_api_request(
     if require_csrf:
         csrf_protect()
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     if not data:
         return None, api_error("No JSON data provided", 400)
 

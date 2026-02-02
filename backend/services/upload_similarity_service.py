@@ -177,36 +177,35 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
 
     features_path = get_upload_features_path(pid)
 
-    # Load global features (used for cache invalidation + tfidf params + feature type)
-    logger.trace(f"[BLOCKING] compute_upload_features: loading global features...")
-    global_features = get_features_cached()
-    logger.trace(f"[BLOCKING] compute_upload_features: global features loaded in {time_module.time() - t_start:.2f}s")
-    if not global_features:
-        logger.error("Global features not available")
-        return None
-
-    global_feat_mtime = float(get_features_file_mtime() or 0.0)
+    global_features = None
+    global_feat_mtime = 0.0
 
     # Check if features already exist and are compatible with current global features
     if not force and features_path.exists():
         try:
             cached = load_upload_features(pid)
             if cached is not None:
+                # Best-effort mtime check: if global features are unavailable, keep cached.
+                try:
+                    logger.trace("[BLOCKING] compute_upload_features: loading global features for cache validation...")
+                    global_features = get_features_cached()
+                    global_feat_mtime = float(get_features_file_mtime() or 0.0)
+                except Exception:
+                    global_features = None
+                    global_feat_mtime = 0.0
+
                 cached_mtime = float(cached.get("global_features_mtime") or 0.0)
-                # Invalidate cache if global features changed
-                if cached_mtime > 0 and global_feat_mtime > 0 and cached_mtime == global_feat_mtime:
+                # If we cannot validate (missing mtimes), keep old behavior (best effort).
+                if cached_mtime <= 0 or global_feat_mtime <= 0:
                     logger.trace(
-                        f"[BLOCKING] compute_upload_features: using cached features (mtime ok) for {pid} "
+                        f"[BLOCKING] compute_upload_features: using cached features (mtime unavailable) for {pid} "
                         f"in {time_module.time() - t_start:.2f}s"
                     )
                     return cached
-                # If metadata missing, keep old behavior (best effort), but log to help migration
-                if cached_mtime <= 0 or global_feat_mtime <= 0:
-                    logger.debug(
-                        f"Using cached upload features for {pid} without mtime check (cached_mtime={cached_mtime}, global_mtime={global_feat_mtime})"
-                    )
+
+                if cached_mtime == global_feat_mtime:
                     logger.trace(
-                        f"[BLOCKING] compute_upload_features: using cached features (mtime missing) for {pid} "
+                        f"[BLOCKING] compute_upload_features: using cached features (mtime ok) for {pid} "
                         f"in {time_module.time() - t_start:.2f}s"
                     )
                     return cached
@@ -217,6 +216,17 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
     text = get_upload_text_for_features(pid)
     if not text:
         logger.error(f"No text content available for {pid}")
+        return None
+
+    # Load global features (used for TF-IDF params + feature type).
+    if global_features is None:
+        try:
+            logger.trace("[BLOCKING] compute_upload_features: loading global features...")
+            global_features = get_features_cached()
+        except FileNotFoundError:
+            global_features = None
+    if not global_features:
+        logger.error("Global features not available")
         return None
 
     # Check required fields in global features
@@ -578,9 +588,20 @@ def find_similar_papers(
         top_pids = [pids_all[idx] for idx in top_indices if scores[idx] > 0]
 
         # Fetch full paper data (title, authors, summary, etc.)
-        from backend.services.data_service import get_papers_bulk
+        from backend.services import data_service
 
-        papers_data = get_papers_bulk(top_pids)
+        papers_data: dict[str, Any] = {}
+        metas_data: dict[str, Any] = {}
+        try:
+            papers_data = data_service.get_papers_bulk(top_pids)
+        except FileNotFoundError:
+            papers_data = {}
+        except Exception:
+            papers_data = {}
+        try:
+            metas_data = data_service.get_metas()
+        except Exception:
+            metas_data = {}
 
         # Import TL;DR extraction for enriched results
         from backend.services.summary_service import extract_tldr_from_summary
@@ -590,7 +611,8 @@ def find_similar_papers(
                 continue
 
             paper_pid = pids_all[idx]
-            paper = papers_data.get(paper_pid, {})
+            paper = papers_data.get(paper_pid, {}) or {}
+            meta = metas_data.get(paper_pid, {}) if isinstance(metas_data, dict) else {}
 
             # Get TL;DR if available
             tldr = ""
@@ -600,10 +622,10 @@ def find_similar_papers(
                 pass
 
             # Get abstract from paper data
-            abstract = paper.get("summary", "")
+            abstract = paper.get("summary") or meta.get("summary") or ""
 
             # Format authors (limit to reasonable length)
-            authors_list = paper.get("authors", [])
+            authors_list = paper.get("authors") or meta.get("authors") or []
             if authors_list:
                 authors_str = ", ".join(a.get("name", "") for a in authors_list[:5])
                 if len(authors_list) > 5:
@@ -612,13 +634,13 @@ def find_similar_papers(
                 authors_str = ""
 
             # Get time string
-            time_str = paper.get("_time_str", "")
+            time_str = paper.get("_time_str") or meta.get("_time_str") or ""
 
             results.append(
                 {
                     "id": paper_pid,
                     "score": float(scores[idx]),
-                    "title": paper.get("title", ""),
+                    "title": paper.get("title") or meta.get("title") or "",
                     "authors": authors_str,
                     "tldr": tldr,
                     "abstract": abstract,

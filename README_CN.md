@@ -265,6 +265,7 @@ arxiv-sanity-x/
 
 - **网站空白/没有论文**：通常是还没跑 [arxiv_daemon.py](arxiv_daemon.py) + [compute.py](compute.py)。
 - **总结一直失败**：检查 `.env` 里的 `ARXIV_SANITY_LLM_API_KEY`、`ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`。
+- **总结不自动开始生成**：总结页在“缓存缺失”时不会自动入队，请手动点击 **Generate**；同时确保 Huey consumer 在跑（推荐：`python3 bin/run_services.py` 一键启动）。
 - **语义/混合检索没效果**：确认嵌入（Embedding）已启用，并用 [compute.py](compute.py) 重新生成特征（混合特征需要包含嵌入）。
 - **按时间排序异常/变慢**：重建元数据时间索引：`python -m tools rebuild_time_index`。
 - **MinerU 报错**：
@@ -273,6 +274,9 @@ arxiv-sanity-x/
 - **崩溃后卡住（锁文件）**：运行 [cleanup_locks.py](cleanup_locks.py)，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
 - **总结任务“卡死/幽灵任务”（Huey）**：先 dry-run `python scripts/cleanup_tasks.py`，确认无误后加 `--force`；必要时用 `--flush-huey` 清空队列（谨慎）。
 - **features.p 读取失败（NumPy 版本不匹配）**：在当前环境重新运行 [compute.py](compute.py) 生成特征文件。
+- **Gunicorn 报 `WORKER TIMEOUT` / `SIGKILL`**：若日志里先出现 `WORKER TIMEOUT`，通常是 gunicorn 默认超时太短或冷启动/初始化阻塞。可通过 `ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"` 提高超时；并避免在开启大缓存时配置过多 worker。`bin/up.sh` 在 SSE 场景会优先选择 `gevent` 并自动设置较长超时。
+- **gevent 的 MonkeyPatchWarning（ssl/urllib3）**：常见于 `--preload` 场景；若仍出现，可尝试 `ARXIV_SANITY_GUNICORN_PRELOAD=false` 或强制 `ARXIV_SANITY_GUNICORN_WORKER_CLASS=gthread`。
+- **实时推送不工作（SSE）**：确认 `ARXIV_SANITY_SSE_ENABLED=true`，并访问 `GET /api/sse_stats` 查看每个进程的 SSE 队列/总线状态。
 
 ## ⚡ 快速开始
 
@@ -379,7 +383,7 @@ python bin/run_services.py
 python serve.py
 
 # 生产模式（Gunicorn）
-./bin/up.sh
+bash bin/up.sh
 ```
 
 #### 方式二：一键启动（推荐）
@@ -399,7 +403,7 @@ python bin/run_services.py --with-daemon   # 同时启动定时任务调度器
 
 ```bash
 # 终端 1：Web 服务
-./bin/up.sh
+bash bin/up.sh
 
 # 终端 2：Embedding 服务（可选）
 ./bin/embedding_serve.sh
@@ -517,6 +521,29 @@ ARXIV_SANITY_LLM_SUMMARY_LANG=zh
 ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
 ARXIV_SANITY_LLM_API_KEY=no-key
 ARXIV_SANITY_LLM_NAME=or-mimo
+```
+
+#### 1.3.1 运行稳定性（推荐）
+
+```bash
+# Daemon 子进程超时（防止某个子命令卡死导致 daemon 永久挂住；2 小时）
+# ARXIV_SANITY_DAEMON_SUBPROCESS_TIMEOUT_S=7200
+
+# SSE IPC（SQLite 跨进程事件总线）
+# ARXIV_SANITY_SSE_ENABLED=true
+# ARXIV_SANITY_SSE_QUEUE_MAXSIZE=200
+# ARXIV_SANITY_SSE_PUBLISH_RETRY_QUEUE_MAXSIZE=2000
+# ARXIV_SANITY_SSE_PUBLISH_RETRY_BACKOFF_MAX_S=1.0
+# ARXIV_SANITY_SSE_PUBLISH_ASYNC=true
+
+# 缓存刷新节流（papers.db / features 更新时，后台刷新；前台优先返回旧缓存）
+# ARXIV_SANITY_DATA_CACHE_REFRESH_MIN_INTERVAL=60
+# ARXIV_SANITY_FEATURES_CACHE_REFRESH_MIN_INTERVAL=300
+
+# Gunicorn（bin/up.sh 会在 SSE 开启且安装了 gevent 时自动选 gevent；也可手动覆盖）
+# ARXIV_SANITY_GUNICORN_WORKER_CLASS=gevent
+# ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"
+# ARXIV_SANITY_GUNICORN_FORCE_WORKERS=1
 ```
 
 #### 1.4 嵌入配置
@@ -973,6 +1000,7 @@ python -m tools daemon
 | 端点                   | 说明        |
 | ---------------------- | ----------- |
 | `GET /api/user_stream` | 用户 SSE 流 |
+| `GET /api/sse_stats`   | SSE 状态（进程内） |
 
 ### 上传（实验性）（`api_uploads.py`）
 
@@ -1040,7 +1068,7 @@ npm run format
 python serve.py
 
 # 或使用 gunicorn 进行类生产环境测试
-./bin/up.sh
+bash bin/up.sh
 ```
 
 ### 配置管理

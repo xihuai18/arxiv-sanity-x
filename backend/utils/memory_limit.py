@@ -74,7 +74,9 @@ def get_memory_usage_mb() -> float:
             for line in f:
                 if line.startswith("VmRSS:"):
                     # VmRSS is in KB
-                    return int(line.split()[1]) / 1024
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) / 1024
     except Exception:
         pass
 

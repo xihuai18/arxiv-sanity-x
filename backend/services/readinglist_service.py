@@ -200,6 +200,22 @@ def trigger_summary_async(
             pass
         return None
 
+    def _get_native_thread_class():
+        """Return a real OS Thread class even under gevent monkey-patching."""
+        try:
+            import gevent.monkey
+
+            if gevent.monkey.is_module_patched("threading"):
+                return gevent.monkey.get_original("threading", "Thread")
+        except Exception:
+            return threading.Thread
+        return threading.Thread
+
+    def _start_daemon_thread(*, target, name: str) -> None:
+        Thread = _get_native_thread_class()
+        t = Thread(target=target, name=name, daemon=True)
+        t.start()
+
     def _run():
         start_epoch = 0
         try:
@@ -240,8 +256,7 @@ def trigger_summary_async(
             if update_db_fn:
                 update_db_fn(pid, model, "failed", str(e))
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    _start_daemon_thread(target=_run, name="summary-thread-fallback")
     return None
 
 

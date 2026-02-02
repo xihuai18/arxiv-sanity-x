@@ -19,6 +19,8 @@ if str(_REPO_ROOT) not in sys.path:
 def main():
     # Mark this process as worker for DB lock tolerance tuning.
     os.environ.setdefault("ARXIV_SANITY_PROCESS_ROLE", "worker")
+    # Mark this process explicitly as a Huey consumer to avoid argv-based misdetection.
+    os.environ.setdefault("ARXIV_SANITY_HUEY_CONSUMER", "1")
 
     # Apply memory limit before importing heavy modules
     try:

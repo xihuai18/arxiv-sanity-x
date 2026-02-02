@@ -23,6 +23,7 @@ var tags = {{ tags | tojson }};
 <script defer src="{{ hashed_static('dist/tag_dropdown_shared.js') }}"></script>
 <script defer src="{{ hashed_static('dist/author_utils.js') }}"></script>
 <script>
+var MJX_FONT_URL = {{ url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2') | tojson }};
 {% raw %}
 window.MathJax = {
     // Load textmacros extension for \texttt, \textbf etc. in math mode
@@ -363,6 +364,10 @@ window.MathJax = {
     // (moved to options above)
     chtml: {
         scale: 1.0,
+        // Ensure MathJax web fonts resolve correctly in self-hosted deployments.
+        // Without an explicit fontURL, some setups may request fonts from a wrong relative path,
+        // causing missing glyphs in rendered formulas (e.g., \\mathcal, \\mathbb).
+        fontURL: MJX_FONT_URL,
         mtextInheritFont: false,
         merrorInheritFont: true,
         mathmlSpacing: false,

@@ -16,6 +16,7 @@ See backend/services/ for the new modular structure.
 # Multi-core optimization configuration - Ubuntu system
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -64,6 +65,24 @@ from tools.paper_summarizer import (
     summary_cache_paths,
     summary_source_matches,
 )
+
+
+def _register_static_mimetypes() -> None:
+    """Register missing MIME types for static assets.
+
+    The app sets `X-Content-Type-Options: nosniff`. Without proper font MIME
+    types, browsers may refuse to load MathJax web fonts, causing missing glyphs
+    in rendered formulas.
+    """
+
+    mimetypes.add_type("font/woff", ".woff")
+    mimetypes.add_type("font/woff2", ".woff2")
+    mimetypes.add_type("font/ttf", ".ttf")
+    mimetypes.add_type("font/otf", ".otf")
+    mimetypes.add_type("application/vnd.ms-fontobject", ".eot")
+
+
+_register_static_mimetypes()
 
 # Service layer imports (consolidated from scattered imports)
 from .schemas.readinglist import ReadingListPidRequest
@@ -309,8 +328,14 @@ def _parse_api_request(
         if not pid:
             return None, _api_error("Paper ID is required", 400)
         raw_pid, _ = split_pid_version(pid)
-        if not paper_exists(raw_pid):
-            return None, _api_error("Paper not found", 404)
+        # In fresh/CI environments papers.db may be missing; avoid hard-failing request parsing
+        # for endpoints that only need a syntactically valid PID.
+        try:
+            if os.path.exists(PAPERS_DB_FILE) and not paper_exists(raw_pid):
+                return None, _api_error("Paper not found", 404)
+        except Exception:
+            # Be permissive here; downstream handlers can decide what to do.
+            pass
 
     if schema is not None:
         try:
@@ -1287,23 +1312,48 @@ def api_user_stream():
 
     def gen():
         yield "event: init\ndata: {}\n\n"
-        while True:
+        try:
+            while True:
+                try:
+                    payload = q.get(timeout=25)
+                    data = json.dumps(payload, ensure_ascii=False)
+                    yield f"data: {data}\n\n"
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                except GeneratorExit:
+                    break
+                except Exception as exc:
+                    logger.warning(f"SSE stream error for user={user}: {exc}")
+                    yield ": keep-alive\n\n"
+        finally:
             try:
-                payload = q.get(timeout=25)
-                data = json.dumps(payload, ensure_ascii=False)
-                yield f"data: {data}\n\n"
-            except queue.Empty:
-                yield ": keep-alive\n\n"
-            except GeneratorExit:
-                break
+                _unregister_user_stream(user, q)
             except Exception:
-                yield ": keep-alive\n\n"
+                pass
 
     resp = Response(stream_with_context(gen()), mimetype="text/event-stream")
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
+    # Best-effort: gen() already unregisters in finally, keep this as a backup.
     resp.call_on_close(lambda: _unregister_user_stream(user, q))
     return resp
+
+
+def api_sse_stats():
+    """Return process-local SSE stats (debug/monitoring)."""
+    if g.user is None:
+        return _api_error("Not logged in", 401)
+    try:
+        from backend.utils.sse import get_sse_stats
+        from backend.utils.sse_bus import get_sse_bus
+
+        stats = get_sse_stats()
+        bus = get_sse_bus()
+        bus_stats = bus.get_stats() if bus is not None else None
+        return _api_success(sse=stats, bus=bus_stats)
+    except Exception as e:
+        logger.error(f"SSE stats API error: {e}")
+        return _api_error(f"Server error: {str(e)}", 500)
 
 
 def inspect():
@@ -1317,6 +1367,9 @@ def inspect():
 
     if is_upload_pid(pid):
         return _inspect_uploaded_paper(pid)
+
+    if not os.path.exists(PAPERS_DB_FILE):
+        return "<h1>Error</h1><p>papers.db not found.</p>", 200
 
     if not paper_exists(pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
@@ -1530,6 +1583,9 @@ def summary():
     # If versioned PID provided, redirect to unversioned URL
     if version is not None:
         return redirect(url_for("web.summary", pid=raw_pid), code=302)
+
+    if not os.path.exists(PAPERS_DB_FILE):
+        return "<h1>Error</h1><p>papers.db not found.</p>", 200
 
     if not paper_exists(raw_pid):
         return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
@@ -2126,7 +2182,17 @@ def api_llm_models():
                 # Double-check: someone else may have started it.
                 if not _LLM_MODELS_CACHE.get("in_progress"):
                     _LLM_MODELS_CACHE["in_progress"] = True
-                    threading.Thread(target=_refresh_cache_in_background, daemon=True).start()
+                try:
+                    import gevent.monkey
+
+                    Thread = (
+                        gevent.monkey.get_original("threading", "Thread")
+                        if gevent.monkey.is_module_patched("threading")
+                        else threading.Thread
+                    )
+                except Exception:
+                    Thread = threading.Thread
+                Thread(target=_refresh_cache_in_background, name="llm-models-refresh", daemon=True).start()
             return _api_success(models=cached_models, warning="Using cached model list (refreshing...)")
 
         # No cache yet: fetch synchronously once (still with tight timeouts).
@@ -2180,6 +2246,9 @@ def api_check_paper_summaries():
 
         raw_pid, _ = split_pid_version(pid)
         if not paper_exists(raw_pid):
+            # Graceful behavior for empty data dirs: the paper may not be in papers.db yet.
+            if not os.path.exists(PAPERS_DB_FILE):
+                return _api_success(available_models=[])
             return _api_error("Paper not found", 404)
 
         # Check summary directory for this paper

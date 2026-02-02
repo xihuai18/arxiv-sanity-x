@@ -2,6 +2,7 @@
 Flask
 Werkzeug
 gunicorn
+gevent
 
 # Machine learning and AI
 numpy

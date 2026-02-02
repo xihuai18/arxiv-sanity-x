@@ -87,6 +87,8 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
     stop_all = False
     category_stats = {}  # Track update stats per category
     for q_each in q_lst:
+        if not q_each:
+            continue
         if args.num_total > 0 and total_fetched >= args.num_total:
             break
         cat_new, cat_replace, cat_had = 0, 0, 0

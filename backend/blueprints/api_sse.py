@@ -31,3 +31,16 @@ def api_user_stream():
         description: Not logged in
     """
     return legacy.api_user_stream()
+
+
+@bp.route("/api/sse_stats", methods=["GET"])
+def api_sse_stats():
+    """Get process-local SSE stats
+    ---
+    tags:
+      - SSE
+    responses:
+      200:
+        description: SSE stats
+    """
+    return legacy.api_sse_stats()

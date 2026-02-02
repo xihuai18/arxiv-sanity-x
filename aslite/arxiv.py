@@ -85,11 +85,25 @@ def parse_arxiv_url(url):
     we want to extract the raw id (1512.08756) and the version (2)
     """
     ix = url.rfind("/")
-    assert ix >= 0, "bad url: " + url
+    if ix < 0:
+        raise ValueError(f"bad url: {url}")
     idv = url[ix + 1 :]  # extract just the id (and the version)
-    parts = idv.split("v")
-    assert len(parts) == 2, "error splitting id and version in idv string: " + idv
-    return idv, parts[0], int(parts[1])
+    if not idv:
+        raise ValueError(f"bad url (empty id): {url}")
+
+    rawid = idv
+    version = 1
+    try:
+        left, right = idv.rsplit("v", 1)
+        if left and right.isdigit():
+            rawid = left
+            version = int(right)
+    except ValueError:
+        # No 'v' in idv - treat as v1.
+        pass
+
+    idv_norm = f"{rawid}v{version}"
+    return idv_norm, rawid, version
 
 
 def parse_response(response):
@@ -99,15 +113,23 @@ def parse_response(response):
     for e in parse.entries:
         j = encode_feedparser_dict(e)
         # extract / parse id information
-        idv, rawid, version = parse_arxiv_url(j["id"])
+        try:
+            idv, rawid, version = parse_arxiv_url(j.get("id", ""))
+        except Exception as exc:
+            logger.warning("skip entry with invalid arxiv id: %s (%s)", j.get("id"), exc)
+            continue
         j["_idv"] = idv
         j["_id"] = rawid
         j["_version"] = version
-        j["_time"] = time.mktime(j["updated_parsed"])
-        j["_time_str"] = time.strftime("%b %d %Y", j["updated_parsed"])
+        updated_parsed = j.get("updated_parsed") or j.get("published_parsed")
+        if not updated_parsed:
+            logger.warning("skip entry missing updated/published time: %s", idv)
+            continue
+        j["_time"] = time.mktime(updated_parsed)
+        j["_time_str"] = time.strftime("%b %d %Y", updated_parsed)
         # delete apparently spurious and redundant information
-        del j["summary_detail"]
-        del j["title_detail"]
+        j.pop("summary_detail", None)
+        j.pop("title_detail", None)
         out.append(j)
 
     return out
@@ -120,8 +142,35 @@ def filter_latest_version(idvs):
 
     pid_to_v = OrderedDict()
     for idv in idvs:
-        pid, v = idv.split("v")
-        pid_to_v[pid] = max(int(v), pid_to_v.get(pid, 0))
+        s = str(idv or "").strip()
+        if not s:
+            continue
+        pid = ""
+        v = 1
+        if "v" not in s:
+            # Accept version-less ids as v1, but only if it resembles an arXiv id.
+            # arXiv ids are either new-style "YYYY.NNNNN" or old-style "archive/YYMMNNN".
+            if "." not in s and "/" not in s:
+                continue
+            pid = s
+            v = 1
+        else:
+            left, right = s.rsplit("v", 1)
+            if left and right.isdigit():
+                pid = left
+                v = int(right)
+            else:
+                logger.warning("skip invalid idv '%s'", s)
+                continue
+
+        if not pid:
+            continue
+
+        try:
+            pid_to_v[pid] = max(int(v), pid_to_v.get(pid, 0))
+        except Exception as exc:
+            logger.warning("skip invalid idv '%s': %s", s, exc)
+            continue
 
     filt = [f"{pid}v{v}" for pid, v in pid_to_v.items()]
     return filt

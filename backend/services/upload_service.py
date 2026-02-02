@@ -801,6 +801,26 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
 
     sha256 = record.get("sha256")
 
+    # Mark as deleting early to prevent concurrent tasks from treating it as valid.
+    try:
+        UploadedPaperRepository.update(pid, {"deleting": True, "deleting_started_at": time.time()})
+    except Exception:
+        pass
+
+    # Best-effort: cancel any in-flight summary tasks before deleting files.
+    try:
+        from tasks import cancel_paper_summary_tasks
+
+        cancel_paper_summary_tasks(pid, user=user, reason="Paper deleted")
+    except Exception as e:
+        logger.warning(f"Failed to cancel summary tasks for {pid}: {e}")
+
+    # Invalidate upload feature caches early (best effort).
+    try:
+        _invalidate_upload_features(pid)
+    except Exception:
+        pass
+
     # Phase 1: Delete files first (critical paths)
     # If this fails, we abort and keep DB intact so user can retry
     critical_errors = []
@@ -815,6 +835,11 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
 
     # If critical file deletion failed, abort
     if critical_errors:
+        # Revert deleting marker so user can retry operations.
+        try:
+            UploadedPaperRepository.update(pid, {"deleting": False})
+        except Exception:
+            pass
         return False, f"file_delete_failed: {'; '.join(critical_errors)}"
 
     # Phase 2: Delete DB records (now safe since files are gone)
@@ -850,6 +875,35 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
             shutil.rmtree(summary_dir)
         except Exception as e:
             logger.warning(f"Failed to delete summary cache for {pid}: {e}")
+
+    # Best-effort: clean up summary task/status records after delete.
+    # Important: do NOT delete epoch markers here; they are used for cooperative cancellation
+    # and may still be needed by in-flight tasks to stop promptly.
+    try:
+        from aslite.db import get_summary_status_db
+
+        with get_summary_status_db(flag="c") as sdb:
+            status_keys = [k for k, _v in sdb.items_with_prefix(f"{pid}::")]
+            for k in status_keys:
+                try:
+                    del sdb[k]
+                except Exception:
+                    pass
+
+            task_keys = []
+            for k, v in sdb.items_with_prefix("task::"):
+                if isinstance(v, dict) and v.get("pid") == pid:
+                    task_keys.append(k)
+            for k in task_keys:
+                try:
+                    del sdb[k]
+                except Exception:
+                    pass
+
+        if status_keys or task_keys:
+            logger.debug(f"Cleaned up {len(status_keys)} status and {len(task_keys)} task records for {pid}")
+    except Exception as e:
+        logger.warning(f"Failed to clean up summary task/status records for {pid}: {e}")
 
     # Clean up tags (best effort)
     try:
@@ -890,6 +944,10 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         logger.warning(f"Failed to clean up reading list for {pid}: {e}")
 
     logger.info(f"Deleted uploaded paper {pid} for user {user}")
+    try:
+        _emit_upload_event(user, {"type": "upload_deleted", "pid": pid})
+    except Exception:
+        pass
     return True, "deleted"
 
 
@@ -1110,6 +1168,9 @@ def do_extract_metadata(pid: str, user: str) -> bool:
     if not record or record.get("owner") != user:
         return False
 
+    if record.get("deleting") is True:
+        return False
+
     if record.get("parse_status") != "ok":
         return False
 
@@ -1182,6 +1243,9 @@ def do_parse_only(pid: str, user: str) -> bool:
 
     record = UploadedPaperRepository.get(pid)
     if not record or record.get("owner") != user:
+        return False
+
+    if record.get("deleting") is True:
         return False
 
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})

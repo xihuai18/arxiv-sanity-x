@@ -2,6 +2,7 @@ import datetime
 import os
 import shutil
 import subprocess
+import subprocess as _real_subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,9 @@ TOOLS_DIR = PROJECT_ROOT / "tools"
 logger.remove()
 logger.add(sys.stdout, level=settings.log_level.upper())
 
+# Guardrail: avoid daemon getting stuck forever on a hung child process.
+SUBPROCESS_TIMEOUT_S = int(getattr(settings.daemon, "subprocess_timeout_s", 7200) or 7200)
+
 # Read daemon settings from configuration
 FETCH_NUM = settings.daemon.fetch_num
 FETCH_MAX = settings.daemon.fetch_max
@@ -35,6 +39,8 @@ ENABLE_SUMMARY_QUEUE = settings.daemon.enable_summary_queue
 PRIORITY_DAYS = settings.daemon.priority_days
 PRIORITY_LIMIT = settings.daemon.priority_limit
 
+_LAST_RUN_REASON: dict[str, str] = {}
+
 
 def _run_cmd(cmd, name: str, fail_level: str = "error") -> bool:
     logger.debug(f"{name}: {' '.join(cmd)}")
@@ -42,18 +48,26 @@ def _run_cmd(cmd, name: str, fail_level: str = "error") -> bool:
     try:
         t0 = time.time()
         logger.trace(f"[BLOCKING] daemon._run_cmd: starting {name}")
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=SUBPROCESS_TIMEOUT_S)
         logger.trace(f"[BLOCKING] daemon._run_cmd: completed {name} in {time.time() - t0:.2f}s")
+        _LAST_RUN_REASON[str(name)] = "ok"
         return True
-    except subprocess.CalledProcessError as e:
+    except _real_subprocess.CalledProcessError as e:
         # arxiv_daemon returns exit code 1 if no new papers (not a real error).
         if name == "fetch" and e.returncode == 1:
             logger.info("[BLOCKING] daemon._run_cmd: fetch returned code 1 (no new papers)")
+            _LAST_RUN_REASON[str(name)] = "no_new_papers"
             return False
         log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed with code {e.returncode}")
+        _LAST_RUN_REASON[str(name)] = f"exit_{int(e.returncode)}"
+        return False
+    except _real_subprocess.TimeoutExpired:
+        log_fn(f"[BLOCKING] daemon._run_cmd: {name} timed out after {SUBPROCESS_TIMEOUT_S}s")
+        _LAST_RUN_REASON[str(name)] = "timeout"
         return False
     except Exception as e:
         log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed: {e}")
+        _LAST_RUN_REASON[str(name)] = "error"
         return False
 
 
@@ -114,7 +128,11 @@ def fetch_compute():
 
     # arxiv_daemon returns exit code 1 if no new papers, skip compute and summary
     if not fetch_ok:
-        logger.debug("No new papers fetched, skipping compute and summary")
+        reason = _LAST_RUN_REASON.get("fetch") or "unknown"
+        if reason == "no_new_papers":
+            logger.debug("No new papers fetched, skipping compute and summary")
+        else:
+            logger.warning(f"Fetch did not complete successfully ({reason}); skipping compute and summary")
         return
 
     compute_cmd = [PYTHON, str(TOOLS_DIR / "compute.py")]
@@ -156,15 +174,21 @@ def send_email():
 
     t0 = time.time()
     logger.trace("[BLOCKING] daemon.send_email: starting send_emails.py ...")
-    subprocess.call(
-        [
-            PYTHON,
-            str(TOOLS_DIR / "send_emails.py"),
-            "-t",
-            time_param,
-            *(["--dry-run"] if settings.daemon.email_dry_run else []),
-        ]
-    )
+    try:
+        rc = subprocess.call(
+            [
+                PYTHON,
+                str(TOOLS_DIR / "send_emails.py"),
+                "-t",
+                time_param,
+                *(["--dry-run"] if settings.daemon.email_dry_run else []),
+            ],
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        if rc not in (0, 1):
+            logger.warning(f"[BLOCKING] daemon.send_email: send_emails.py returned code {rc}")
+    except _real_subprocess.TimeoutExpired:
+        logger.warning(f"[BLOCKING] daemon.send_email: timed out after {SUBPROCESS_TIMEOUT_S}s")
     logger.trace(f"[BLOCKING] daemon.send_email: completed in {time.time() - t0:.2f}s")
 
 
@@ -200,7 +224,17 @@ def backup_user_data():
     # Stage dict.db in submodule
     t0 = time.time()
     logger.trace("[BLOCKING] daemon.backup_user_data: git add dict.db ...")
-    add_result = subprocess.run(["git", "add", "dict.db"], cwd=data_repo_dir, capture_output=True, text=True)
+    try:
+        add_result = subprocess.run(
+            ["git", "add", "dict.db"],
+            cwd=data_repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+    except _real_subprocess.TimeoutExpired:
+        logger.warning(f"[BLOCKING] daemon.backup_user_data: git add timed out after {SUBPROCESS_TIMEOUT_S}s")
+        return
     logger.trace(f"[BLOCKING] daemon.backup_user_data: git add completed in {time.time() - t0:.2f}s")
     if add_result.returncode != 0:
         logger.warning(f"git add failed in submodule: {add_result.stderr.strip()}")
@@ -208,7 +242,15 @@ def backup_user_data():
 
     # Check if there are staged changes
     t0 = time.time()
-    diff_result = subprocess.run(["git", "diff", "--cached", "--quiet", "--", "dict.db"], cwd=data_repo_dir)
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "dict.db"],
+            cwd=data_repo_dir,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+    except _real_subprocess.TimeoutExpired:
+        logger.warning(f"[BLOCKING] daemon.backup_user_data: git diff timed out after {SUBPROCESS_TIMEOUT_S}s")
+        return
     logger.trace(f"[BLOCKING] daemon.backup_user_data: git diff completed in {time.time() - t0:.2f}s")
     if diff_result.returncode == 0:
         logger.debug("No changes to back up")
@@ -220,12 +262,17 @@ def backup_user_data():
     # Commit in submodule
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     t0 = time.time()
-    commit_result = subprocess.run(
-        ["git", "commit", "-m", f"backup dict.db ({timestamp})"],
-        cwd=data_repo_dir,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        commit_result = subprocess.run(
+            ["git", "commit", "-m", f"backup dict.db ({timestamp})"],
+            cwd=data_repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+    except _real_subprocess.TimeoutExpired:
+        logger.warning(f"[BLOCKING] daemon.backup_user_data: git commit timed out after {SUBPROCESS_TIMEOUT_S}s")
+        return
     logger.trace(f"[BLOCKING] daemon.backup_user_data: git commit completed in {time.time() - t0:.2f}s")
     if commit_result.returncode != 0:
         logger.warning(f"git commit failed in submodule: {commit_result.stderr.strip()}")
@@ -233,7 +280,17 @@ def backup_user_data():
 
     # Push submodule
     t0 = time.time()
-    push_result = subprocess.run(["git", "push"], cwd=data_repo_dir, capture_output=True, text=True)
+    try:
+        push_result = subprocess.run(
+            ["git", "push"],
+            cwd=data_repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+    except _real_subprocess.TimeoutExpired:
+        logger.warning(f"[BLOCKING] daemon.backup_user_data: git push timed out after {SUBPROCESS_TIMEOUT_S}s")
+        return
     logger.trace(f"[BLOCKING] daemon.backup_user_data: git push completed in {time.time() - t0:.2f}s")
     if push_result.returncode != 0:
         logger.warning(f"git push failed in submodule: {push_result.stderr.strip()}")

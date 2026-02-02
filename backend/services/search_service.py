@@ -601,9 +601,9 @@ def lexical_rank_fullscan(
     logger.trace(f"[BLOCKING] lexical_rank_fullscan: scanning {len(all_pids)} papers...")
 
     try:
-        k = int(limit) if limit is not None else 200
+        k = int(limit) if limit is not None else int(max_results)
     except Exception:
-        k = 200
+        k = int(max_results)
     k = max(1, min(k, int(max_results)))
 
     import heapq
@@ -1726,7 +1726,7 @@ def enhanced_search_rank(
     limit: int | None = None,
     search_mode: str = "keyword",
     semantic_weight: float = None,
-) -> tuple[list[str], list[float]]:
+) -> tuple[list[str], list[float]] | tuple[list[str], list[float], dict]:
     """
     Enhanced search function supporting multiple search modes.
 
@@ -1737,7 +1737,8 @@ def enhanced_search_rank(
         semantic_weight: Semantic search weight (0-1), only used in hybrid mode
 
     Returns:
-        (paper_ids, scores) tuple
+        (paper_ids, scores) tuple for keyword/semantic modes
+        (paper_ids, scores, score_details) tuple for hybrid mode
     """
     t_start = time.time()
     q = (q or "").strip()
@@ -1747,6 +1748,8 @@ def enhanced_search_rank(
         semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
     if not q:
+        if search_mode == "hybrid":
+            return [], [], {}
         return [], []
 
     result = None
@@ -1759,8 +1762,7 @@ def enhanced_search_rank(
         result = semantic_search_rank(q, limit)
 
     elif search_mode == "hybrid":
-        pids, scores, _ = hybrid_search_rank(q, limit, semantic_weight)
-        result = pids, scores
+        result = hybrid_search_rank(q, limit, semantic_weight)
 
     else:
         raise ValueError(f"Unknown search mode: {search_mode}")

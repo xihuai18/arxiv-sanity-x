@@ -13,6 +13,7 @@
 <script defer src="{{ hashed_static('dist/tldr_utils.js') }}"></script>
 
 <script>
+var MJX_FONT_URL = {{ url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2') | tojson }};
 {% raw %}
 // MathJax config only; actual MathJax script is loaded on-demand by CommonUtils.triggerMathJax().
 window.MathJax = {
@@ -46,7 +47,7 @@ window.MathJax = {
         }
     },
     options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'], ignoreHtmlClass: 'tex2jax_ignore', processHtmlClass: 'tex2jax_process' },
-    chtml: { scale: 1.0, displayAlign: 'center' }
+    chtml: { scale: 1.0, displayAlign: 'center', fontURL: MJX_FONT_URL }
 };
 {% endraw %}
 </script>

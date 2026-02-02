@@ -52,6 +52,9 @@ static/dist/
 static/test_mathjax.html
 
 
+# Claude
+.claude/
+
 # Local files
 designs/
 
