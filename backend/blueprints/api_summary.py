@@ -77,6 +77,10 @@ def api_trigger_paper_summary():
               type: string
             priority:
               type: integer
+            force:
+              type: boolean
+            force_regenerate:
+              type: boolean
     responses:
       200:
         description: Task queued

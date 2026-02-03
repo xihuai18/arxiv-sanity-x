@@ -1523,7 +1523,8 @@ def search_rank(
                 logger.warning(f"TF-IDF keyword search failed: {e}")
 
     # If TF-IDF found too little, lexical scan fallback
-    if (not tfidf_pids or len(tfidf_pids) < 30) or looks_like_cjk_query(parsed.get("raw", "")):
+    needs_fullscan_fallback = (not tfidf_pids or len(tfidf_pids) < 30) or looks_like_cjk_query(parsed.get("raw", ""))
+    if needs_fullscan_fallback and not bool(getattr(settings.search, "disable_fullscan", False)):
         pids, scores = lexical_rank_fullscan(
             parsed,
             get_pids_fn=get_pids_fn,
@@ -1537,8 +1538,13 @@ def search_rank(
         if cache_key is not None:
             SEARCH_RANK_CACHE.set(cache_key, (pids, scores))
         return pids, scores
+    if needs_fullscan_fallback and bool(getattr(settings.search, "disable_fullscan", False)):
+        logger.trace("[BLOCKING] search_rank: fullscan fallback disabled by ARXIV_SANITY_SEARCH_DISABLE_FULLSCAN")
 
-    # Safety net for pasted full titles
+    # Safety net for pasted full titles. Also used as a bounded fallback when fullscan is disabled:
+    # if TF-IDF misses (e.g., vocab/min_df effects or transient feature load failures), we'd rather
+    # do a small time-bounded scan than return empty results.
+    extra = []
     if is_title_like:
         extra = title_candidate_scan(
             parsed,
@@ -1547,12 +1553,23 @@ def search_rank(
             paper_text_fields_fn=paper_text_fields_fn,
             max_candidates=400,
         )
-        if extra:
-            seen = set(tfidf_pids)
-            for pid in extra:
-                if pid not in seen:
-                    tfidf_pids.append(pid)
-                    seen.add(pid)
+    elif needs_fullscan_fallback and bool(getattr(settings.search, "disable_fullscan", False)):
+        extra = title_candidate_scan(
+            parsed,
+            get_pids_fn=get_pids_fn,
+            get_papers_bulk_fn=get_papers_bulk_fn,
+            paper_text_fields_fn=paper_text_fields_fn,
+            max_candidates=250,
+            max_scan=60000,
+            time_budget_s=0.35,
+        )
+
+    if extra:
+        seen = set(tfidf_pids)
+        for pid in extra:
+            if pid not in seen:
+                tfidf_pids.append(pid)
+                seen.add(pid)
 
     # Rerank TF-IDF candidates using paper-oriented lexical scoring
     lex_pids, _ = lexical_rank_over_pids(
@@ -1620,6 +1637,14 @@ def hybrid_search_rank(
     if semantic_weight is None:
         semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
+    q = (q or "").strip()
+    if not q:
+        return [], [], {}
+
+    if bool(getattr(settings.search, "semantic_disabled", False)):
+        keyword_pids, keyword_scores = (search_rank_fn or search_rank)(q, limit=limit)
+        return keyword_pids, keyword_scores, {}
+
     # Default dependency injection
     if search_rank_fn is None:
         search_rank_fn = search_rank
@@ -1627,10 +1652,6 @@ def hybrid_search_rank(
         from backend.services.semantic_service import semantic_search_rank
 
         semantic_search_fn = semantic_search_rank
-
-    q = (q or "").strip()
-    if not q:
-        return [], [], {}
 
     try:
         from backend.services.data_service import get_features_file_mtime
@@ -1751,6 +1772,13 @@ def enhanced_search_rank(
         if search_mode == "hybrid":
             return [], [], {}
         return [], []
+
+    if bool(getattr(settings.search, "semantic_disabled", False)):
+        if search_mode == "hybrid":
+            pids, scores = search_rank(q, limit)
+            return pids, scores, {}
+        if search_mode == "semantic":
+            return search_rank(q, limit)
 
     result = None
     if search_mode == "keyword":

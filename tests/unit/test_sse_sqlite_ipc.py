@@ -12,12 +12,17 @@ def test_sse_sqlite_ipc_basic(tmp_path, monkeypatch):
 
     reload_settings()
 
-    from backend.utils.sse import emit_user_event, register_user_stream
+    from backend.utils.sse import (
+        _user_stream_key,
+        emit_user_event,
+        register_user_stream,
+    )
     from backend.utils.sse_bus import get_sse_bus
 
     q = register_user_stream("alice")
 
     emit_user_event("alice", {"type": "hello"})
+    user_key = _user_stream_key("alice")
 
     bus = get_sse_bus()
     assert bus is not None
@@ -25,7 +30,7 @@ def test_sse_sqlite_ipc_basic(tmp_path, monkeypatch):
     t0 = time.time()
     while True:
         rows = bus.fetch_after(0, limit=50)
-        if any(r.user == "alice" and r.payload.get("type") == "hello" for r in rows):
+        if any(r.user == user_key and r.payload.get("type") == "hello" for r in rows):
             break
         if time.time() - t0 > 3.0:
             raise AssertionError("Timed out waiting for SSE event to be persisted to the bus")

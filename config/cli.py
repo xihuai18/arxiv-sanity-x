@@ -82,6 +82,7 @@ def cmd_show(args):
         print(f"  markdown_source:  {settings.summary.markdown_source}")
         print(f"  html_sources:     {settings.summary.html_sources}")
         print(f"  batch_num:        {settings.summary.batch_num}")
+        print(f"  force_cache_only: {settings.summary.force_cache_only}")
 
         print("\n📧 Email Configuration:")
         print(f"  from_email:   {settings.email.from_email or '(not set)'}")
@@ -134,6 +135,8 @@ def cmd_show(args):
         print("\n🔍 Search Configuration:")
         print(f"  ret_num:          {settings.search.ret_num}")
         print(f"  max_results:      {settings.search.max_results}")
+        print(f"  disable_fullscan: {settings.search.disable_fullscan}")
+        print(f"  semantic_disabled:{settings.search.semantic_disabled}")
 
         print("\n📬 Recommendation Configuration:")
         print(f"  api_base_url:     {settings.reco.api_base_url}")
@@ -239,6 +242,13 @@ def cmd_env(args):
     print(f"ARXIV_SANITY_EMBED_PORT={settings.embedding.port}")
     print(f"ARXIV_SANITY_EMBED_USE_LLM_API={str(settings.embedding.use_llm_api).lower()}")
     print(f"ARXIV_SANITY_EMBED_MODEL_NAME={settings.embedding.model_name}")
+    print()
+
+    # Search configuration
+    print(f"ARXIV_SANITY_SEARCH_RET_NUM={settings.search.ret_num}")
+    print(f"ARXIV_SANITY_SEARCH_MAX_RESULTS={settings.search.max_results}")
+    print(f"ARXIV_SANITY_SEARCH_DISABLE_FULLSCAN={str(settings.search.disable_fullscan).lower()}")
+    print(f"ARXIV_SANITY_SEARCH_SEMANTIC_DISABLED={str(settings.search.semantic_disabled).lower()}")
     print()
 
     # MinerU configuration

@@ -415,12 +415,16 @@ def get_features_cache_time() -> float:
     return _FEATURES_CACHE_TIME
 
 
-def get_data_cached() -> dict[str, Any]:
+def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None) -> dict[str, Any]:
     """Return cached {pids, papers, metas}.
 
     - Always caches metas/pids in memory (small and hot).
     - Optionally caches full papers table when ARXIV_SANITY_CACHE_PAPERS=1.
     - Cache invalidation is based on papers.db file modification time.
+    - On cold start, a background loader is started. By default (`wait=True`),
+      this call cooperatively waits until the cache becomes ready (legacy behavior).
+      When `wait=False`, it returns immediately with the current snapshot.
+      When `max_wait_s` is provided, waiting is bounded to that duration.
     """
     global _PAPERS_CACHE, _METAS_CACHE, _PIDS_CACHE
     global _PAPERS_DB_FILE_MTIME, _PAPERS_DB_CACHE_TIME
@@ -450,24 +454,44 @@ def get_data_cached() -> dict[str, Any]:
         # blocking the worker event loop on lock acquisition.
         _ensure_cold_load_started(current_mtime=current_mtime, cache_papers=cache_papers)
 
-        last_log = 0.0
-        while True:
+        if wait:
+            start_wait = time.time()
+            deadline = None
+            if max_wait_s is not None:
+                try:
+                    deadline = start_wait + float(max_wait_s)
+                except Exception:
+                    deadline = start_wait
+
+            last_log = 0.0
+            while True:
+                with _DATA_LOCK:
+                    ready = _data_cache_ready(cache_papers=cache_papers)
+                    last_err = _DATA_COLD_LOAD_LAST_ERROR
+                    in_prog = _DATA_COLD_LOAD_IN_PROGRESS
+                    started_at = float(_DATA_COLD_LOAD_LAST_START or 0.0)
+                if ready:
+                    break
+                # If background loader finished but cache still isn't ready, surface error.
+                if (not in_prog) and last_err:
+                    raise RuntimeError(last_err)
+                now = time.time()
+                if deadline is not None and now >= deadline:
+                    break
+                if started_at and (now - started_at) > 60.0 and (now - last_log) > 60.0:
+                    last_log = now
+                    logger.warning(
+                        f"[BLOCKING] get_data_cached: cold start still loading after {now - started_at:.0f}s"
+                    )
+                # Yield to other greenlets/threads.
+                time.sleep(0.05)
+        else:
+            # Non-blocking peek: still surface a previous cold-start error if one already happened.
             with _DATA_LOCK:
-                ready = _data_cache_ready(cache_papers=cache_papers)
                 last_err = _DATA_COLD_LOAD_LAST_ERROR
                 in_prog = _DATA_COLD_LOAD_IN_PROGRESS
-                started_at = float(_DATA_COLD_LOAD_LAST_START or 0.0)
-            if ready:
-                break
-            # If background loader finished but cache still isn't ready, surface error.
             if (not in_prog) and last_err:
                 raise RuntimeError(last_err)
-            now = time.time()
-            if started_at and (now - started_at) > 60.0 and (now - last_log) > 60.0:
-                last_log = now
-                logger.warning(f"[BLOCKING] get_data_cached: cold start still loading after {now - started_at:.0f}s")
-            # Yield to other greenlets/threads.
-            time.sleep(0.05)
     else:
         # Warm cache: never block request threads on a full reload.
         if stale:

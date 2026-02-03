@@ -134,6 +134,10 @@ class SummaryState {
         // Track which model the currently rendered content belongs to
         this.contentModel = '';
 
+        // Track forced regenerations so we don't stop polling on stale cached content
+        // Shape: { [modelId]: { generatedAt: number|null, contentHash: string } }
+        this.pendingRegenerations = Object.create(null);
+
         // Timer for renderMath to avoid stale callbacks (fix for issue #4)
         this._renderMathTimer = null;
 
@@ -270,6 +274,26 @@ class SummaryState {
 
     scheduleAutoRetry(pid, options = {}) {
         if (this.autoRetryCount >= this.maxAutoRetries) {
+            // Avoid getting stuck in "generating" state forever if the backend never produces a cache.
+            const targetModel = String(options.model || '').trim();
+            if (targetModel) {
+                if (this.inflightModels) {
+                    this.inflightModels[targetModel] = false;
+                }
+                if (this.pendingRegenerations) {
+                    delete this.pendingRegenerations[targetModel];
+                }
+                if (this.pendingGenerationModel && this.pendingGenerationModel === targetModel) {
+                    this.pendingGenerationModel = '';
+                }
+            } else {
+                this.pendingGenerationModel = '';
+            }
+            this.setState({
+                loading: false,
+                regenerating: false,
+                notice: 'Auto-refresh stopped. Please click Generate/Regenerate again to retry.',
+            });
             return;
         }
         this.autoRetryCount += 1;
@@ -360,21 +384,22 @@ class SummaryState {
         // Keep Generate disabled during loading to avoid concurrent generations.
         // For uploaded papers, require MinerU parsing to be complete.
         const disableGenerate =
-            this.loading ||
-            this.clearing ||
-            this.isCurrentModelGenerating() ||
-            hasCachedSummary ||
-            uploadNotParsed
+            this.loading || this.clearing || this.isCurrentModelGenerating() || uploadNotParsed
                 ? 'disabled'
                 : '';
         const disableClear = this.clearing ? 'disabled' : '';
         // Allow switching models even while generating
         const disableSelect = this.clearing ? 'disabled' : '';
-        const regenLabel = this.regenerating ? 'Generating...' : 'Generate';
+        const isGenerating = this.isCurrentModelGenerating();
+        const regenLabel = isGenerating
+            ? 'Generating...'
+            : hasCachedSummary
+              ? 'Regenerate'
+              : 'Generate';
         const generateTitle = uploadNotParsed
             ? 'Parse PDF first before generating summary.'
             : hasCachedSummary
-              ? 'Clear current summary to regenerate.'
+              ? 'Regenerate summary for this model (overwrites the cached summary).'
               : 'Generate summary';
         const modelOptions = this.renderModelOptions();
         const errorNote = this.modelsError
@@ -773,6 +798,9 @@ async function triggerSummary(pid, options = {}) {
     const model = String(options.model || '').trim();
     const payload = { pid };
     if (model) payload.model = model;
+    if (options.force_regenerate !== undefined) {
+        payload.force_regenerate = Boolean(options.force_regenerate);
+    }
     if (options.priority !== undefined && options.priority !== null) {
         payload.priority = options.priority;
     }
@@ -858,6 +886,17 @@ function modelCacheKey(modelId) {
     return raw.replace(/[^a-zA-Z0-9._-]+/g, '_');
 }
 
+function hashString(input) {
+    const str = String(input || '');
+    // djb2 hash; stable and fast enough for UI polling comparisons
+    let hash = 5381;
+    for (let i = 0; i < str.length; i++) {
+        hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+    }
+    // Force unsigned 32-bit and stringify for easy comparisons
+    return String(hash >>> 0);
+}
+
 // Retry function
 summaryApp.retry = function () {
     if (this.pid) {
@@ -891,8 +930,7 @@ summaryApp.regenerate = function () {
     const hasCachedSummary = Boolean(
         this.content && currentModel && contentModel && contentModel === String(currentModel).trim()
     );
-    if (hasCachedSummary) return;
-    this.queueSummary(this.pid, { model: currentModel, force: true });
+    this.queueSummary(this.pid, { model: currentModel, force_regenerate: hasCachedSummary });
 };
 
 summaryApp.requestClearModel = function () {
@@ -924,6 +962,9 @@ summaryApp.confirmClearModel = async function () {
         const clearedKey = modelCacheKey(currentModel);
         if (clearedKey) {
             this.availableSummaries = this.availableSummaries.filter(k => k !== clearedKey);
+        }
+        if (currentModel && this.pendingRegenerations) {
+            delete this.pendingRegenerations[currentModel];
         }
 
         this.setState({
@@ -1010,7 +1051,10 @@ summaryApp.queueSummary = async function (pid, options = {}) {
         return;
     }
 
-    const force = Boolean(options.force);
+    const forceRegenerate =
+        options.force_regenerate !== undefined
+            ? Boolean(options.force_regenerate)
+            : Boolean(options.force);
     this.clearAutoRetry();
     this.autoRetryCount = 0;
     this.pendingGenerationModel = targetModel || '';
@@ -1018,21 +1062,36 @@ summaryApp.queueSummary = async function (pid, options = {}) {
         this.inflightModels[targetModel] = true;
     }
 
+    const currentContentModel = String(this.contentModel || '').trim();
+    const hasRenderedSummaryForTarget = Boolean(
+        this.content && currentContentModel && currentContentModel === String(targetModel).trim()
+    );
+    if (forceRegenerate && targetModel && hasRenderedSummaryForTarget) {
+        const generatedAt =
+            this.meta && this.meta.generated_at !== undefined && this.meta.generated_at !== null
+                ? Number(this.meta.generated_at)
+                : null;
+        this.pendingRegenerations[targetModel] = {
+            generatedAt: Number.isFinite(generatedAt) ? generatedAt : null,
+            contentHash: hashString(this.content),
+        };
+    }
+
     this.setState({
-        loading: true,
-        regenerating: force,
-        notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
+        loading: !(forceRegenerate && hasRenderedSummaryForTarget),
+        regenerating: true,
+        notice: forceRegenerate
+            ? 'Summary is being regenerated for this model. You can switch models; this view will auto-refresh when ready.'
+            : 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
         error: null,
-        content: null,
-        meta: null,
+        // When regenerating, keep showing the cached version until the new one arrives.
+        content: forceRegenerate && hasRenderedSummaryForTarget ? this.content : null,
+        meta: forceRegenerate && hasRenderedSummaryForTarget ? this.meta : null,
         selectedModel: targetModel || this.selectedModel || '',
     });
 
     try {
-        if (force && targetModel) {
-            await clearModelSummary(pid, targetModel);
-        }
-        const triggerOptions = { model: targetModel };
+        const triggerOptions = { model: targetModel, force_regenerate: forceRegenerate };
         if (options.priority !== undefined && options.priority !== null) {
             triggerOptions.priority = options.priority;
         }
@@ -1082,6 +1141,7 @@ summaryApp.confirmClearAll = async function () {
 
         // Clear all available summaries since we cleared everything
         this.availableSummaries = [];
+        this.pendingRegenerations = Object.create(null);
 
         this.setState({
             clearing: false,
@@ -1625,14 +1685,18 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             const inFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
             // Show loading when: force regenerate, or no content yet, or in-flight generation,
             // or model changed (to avoid showing "No summary" flash before API returns)
+            const hasRenderedContent = Boolean(!modelChanged && this.content);
             const shouldShowLoading =
-                force || (!cacheOnly && !this.content) || (cacheOnly && inFlight) || modelChanged;
+                force ||
+                (!cacheOnly && !this.content) ||
+                (cacheOnly && inFlight && !hasRenderedContent) ||
+                modelChanged;
             this.setState({
                 loading: shouldShowLoading,
                 error: null,
                 regenerating: force,
                 selectedModel: chosenModel || '',
-                notice: cacheOnly ? '' : this.notice,
+                notice: cacheOnly ? (inFlight ? this.notice : '') : this.notice,
                 // Prevent showing another model's summary while fetching this model
                 content: modelChanged ? null : this.content,
                 meta: modelChanged ? null : this.meta,
@@ -1675,6 +1739,43 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                 const selectedModel = fallback.occurred
                     ? fallback.actualModel
                     : this.selectedModel || chosenModel || '';
+
+                // If we requested a forced regeneration and the cache still returns the same content,
+                // keep polling instead of stopping at the stale cached version.
+                const regen = chosenModelStr ? this.pendingRegenerations[chosenModelStr] : null;
+                if (regen && String(selectedModel || '').trim() === chosenModelStr) {
+                    const prevGenAt = regen.generatedAt;
+                    const newGenAt =
+                        meta && meta.generated_at !== undefined && meta.generated_at !== null
+                            ? Number(meta.generated_at)
+                            : null;
+                    const sameGeneratedAt =
+                        Number.isFinite(prevGenAt) &&
+                        Number.isFinite(newGenAt) &&
+                        Number(prevGenAt) === Number(newGenAt);
+                    const sameContent = hashString(content) === String(regen.contentHash || '');
+                    const stillStale =
+                        sameGeneratedAt || (!Number.isFinite(prevGenAt) && sameContent);
+                    if (stillStale) {
+                        this.pendingGenerationModel = chosenModelStr;
+                        if (chosenModelStr) {
+                            this.inflightModels[chosenModelStr] = true;
+                        }
+                        this.setState({
+                            loading: false,
+                            regenerating: true,
+                            notice: 'Summary is being regenerated for this model. Showing the cached version until the new one is ready.',
+                            error: null,
+                            content: content,
+                            meta: meta,
+                            contentModel: String(selectedModel || '').trim(),
+                            selectedModel,
+                        });
+                        this.scheduleAutoRetry(pid, { model: chosenModelStr, cache_only: true });
+                        return;
+                    }
+                    delete this.pendingRegenerations[chosenModelStr];
+                }
 
                 this.autoRetryCount = 0;
                 this.pendingGenerationModel = '';

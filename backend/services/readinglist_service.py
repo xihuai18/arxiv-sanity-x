@@ -139,6 +139,7 @@ def trigger_summary_async(
     pid: str,
     model: str | None = None,
     priority: int | None = None,
+    force_refresh: bool = False,
     generate_summary_fn: Callable | None = None,
     update_readinglist_fn: Callable | None = None,
     update_db_fn: Callable | None = None,
@@ -168,6 +169,7 @@ def trigger_summary_async(
                 model=model,
                 user=user,
                 priority=(priority if priority is not None else SUMMARY_PRIORITY_HIGH),
+                force_refresh=force_refresh,
             )
         except Exception as e:
             logger.warning(f"Failed to enqueue summary task for {pid}: {e}")
@@ -232,7 +234,7 @@ def trigger_summary_async(
                 update_db_fn(pid, model, "running", None)
 
             if generate_summary_fn:
-                generate_summary_fn(pid, model=model, force_refresh=False, cache_only=False)
+                generate_summary_fn(pid, model=model, force_refresh=bool(force_refresh), cache_only=False)
 
             # If canceled mid-flight, do not mark ok.
             try:

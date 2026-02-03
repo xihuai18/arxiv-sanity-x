@@ -19,7 +19,8 @@ def health():
     from backend.services.data_service import get_data_cached
 
     try:
-        data = get_data_cached()
+        # Non-blocking peek: avoid /health being stuck on cold-start cache loading.
+        data = get_data_cached(wait=False)
         pids = data.get("pids", [])
         if not pids:
             return jsonify({"status": "loading", "message": "No papers loaded yet"}), 503

@@ -190,6 +190,10 @@ class SummarySettings(BaseSettings):
         ),
     )
     batch_num: int = Field(default=500, description="Batch summary generation count")
+    force_cache_only: bool = Field(
+        default=True,
+        description="Force /api/get_paper_summary to be cache-only (regeneration must go through /api/trigger_paper_summary)",
+    )
 
     @property
     def html_source_list(self) -> list[str]:
@@ -325,6 +329,18 @@ class SSESettings(BaseSettings):
     retention_seconds: int = Field(default=86400, description="Event retention (seconds)")
     cleanup_interval: float = Field(default=60.0, description="Cleanup interval (seconds)")
     queue_maxsize: int = Field(default=200, description="Per-client in-process SSE queue size")
+    max_connections_per_user: int = Field(
+        default=2,
+        description="Max concurrent SSE connections per user (0=unlimited)",
+    )
+    connection_lease_ttl_s: float = Field(
+        default=90.0,
+        description="TTL for per-user SSE connection leases (seconds, cross-process best-effort)",
+    )
+    strict_worker_class: bool = Field(
+        default=False,
+        description="Fail startup if SSE enabled but gunicorn worker_class is not gevent",
+    )
     publish_retry_queue_maxsize: int = Field(default=2000, description="Async publish retry queue size (per process)")
     publish_retry_backoff_max_s: float = Field(default=1.0, description="Async publish max backoff (seconds)")
     publish_async: bool = Field(
@@ -468,6 +484,14 @@ class SearchSettings(BaseSettings):
 
     ret_num: int = Field(default=100, description="Papers returned per page")
     max_results: int = Field(default=1000, description="Search max results (default ret_num * 10)")
+    disable_fullscan: bool = Field(
+        default=False,
+        description="Disable keyword-search fullscan fallback (avoid scanning whole corpus when TF-IDF recall is low)",
+    )
+    semantic_disabled: bool = Field(
+        default=False,
+        description="Disable semantic/hybrid search; downgrade to keyword-only",
+    )
 
     @model_validator(mode="after")
     def set_max_results_default(self) -> SearchSettings:
