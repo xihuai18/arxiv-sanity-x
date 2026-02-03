@@ -38,6 +38,39 @@ class TestSummaryGetApi:
         resp = client.post("/api/get_paper_summary", json={"pid": "2301.00001"})
         assert resp.status_code == 403
 
+    def test_get_paper_summary_forces_cache_only(self, client, csrf_token, monkeypatch):
+        """P0: get_paper_summary must be cache-only (ignore cache_only=false and any force flags)."""
+        from backend import legacy
+
+        captured = {}
+
+        def _fake_generate(pid, model=None, force_refresh=False, cache_only=False):
+            captured["pid"] = pid
+            captured["model"] = model
+            captured["force_refresh"] = force_refresh
+            captured["cache_only"] = cache_only
+            return "cached-summary", {"model": model or "test-model"}
+
+        monkeypatch.setattr(legacy, "generate_paper_summary", _fake_generate)
+
+        resp = client.post(
+            "/api/get_paper_summary",
+            json={
+                "pid": "2301.00001",
+                "model": "test-model",
+                "cache_only": False,
+                "force_regenerate": True,
+            },
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        assert data.get("summary_content") == "cached-summary"
+
+        assert captured["cache_only"] is True
+        assert captured["force_refresh"] is False
+
 
 class TestSummaryTriggerApi:
     """Tests for trigger paper summary API."""
@@ -46,6 +79,64 @@ class TestSummaryTriggerApi:
         """Test that trigger_paper_summary without CSRF returns 403."""
         resp = client.post("/api/trigger_paper_summary", json={"pid": "2301.00001"})
         assert resp.status_code == 403
+
+    def test_trigger_paper_summary_force_regenerate_passes_force_refresh(
+        self, logged_in_client, csrf_token, monkeypatch
+    ):
+        """P0: trigger_paper_summary supports force_regenerate and forwards to enqueue(force_refresh)."""
+        from backend.services import readinglist_service
+
+        captured = {}
+
+        def _fake_enqueue(pid, model=None, user=None, priority=None, force_refresh=False):
+            captured["pid"] = pid
+            captured["model"] = model
+            captured["user"] = user
+            captured["priority"] = priority
+            captured["force_refresh"] = force_refresh
+            return "task_test_123"
+
+        monkeypatch.setattr(readinglist_service, "enqueue_summary_task", _fake_enqueue)
+
+        resp = logged_in_client.post(
+            "/api/trigger_paper_summary",
+            json={"pid": "2301.00001", "model": "test-model", "force_regenerate": True},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        assert data.get("status") == "queued"
+        assert data.get("task_id") == "task_test_123"
+        assert captured["force_refresh"] is True
+
+    def test_trigger_paper_summary_force_alias_passes_force_refresh(self, logged_in_client, csrf_token, monkeypatch):
+        """Backward compatibility: trigger_paper_summary supports legacy `force` flag."""
+        from backend.services import readinglist_service
+
+        captured = {}
+
+        def _fake_enqueue(pid, model=None, user=None, priority=None, force_refresh=False):
+            captured["pid"] = pid
+            captured["model"] = model
+            captured["user"] = user
+            captured["priority"] = priority
+            captured["force_refresh"] = force_refresh
+            return "task_test_124"
+
+        monkeypatch.setattr(readinglist_service, "enqueue_summary_task", _fake_enqueue)
+
+        resp = logged_in_client.post(
+            "/api/trigger_paper_summary",
+            json={"pid": "2301.00001", "model": "test-model", "force": True},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        assert data.get("status") == "queued"
+        assert data.get("task_id") == "task_test_124"
+        assert captured["force_refresh"] is True
 
 
 class TestQueueStatsApi:

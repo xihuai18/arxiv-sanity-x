@@ -32,6 +32,23 @@ def _get_native_thread_class():
     return threading.Thread
 
 
+def _get_native_thread_local_class():
+    """Return a real thread-local even under gevent monkey-patching.
+
+    Under gevent, `threading.local` becomes greenlet-local, which can unintentionally create
+    a SQLite connection per greenlet (e.g., per SSE connection). For the SQLite bus we want
+    one connection per OS thread.
+    """
+    try:
+        import gevent.monkey
+
+        if gevent.monkey.is_module_patched("threading"):
+            return gevent.monkey.get_original("threading", "local")
+    except Exception:
+        return threading.local
+    return threading.local
+
+
 def _start_daemon_thread(*, target, name: str) -> threading.Thread:
     Thread = _get_native_thread_class()
     t = Thread(target=target, name=name, daemon=True)
@@ -74,7 +91,7 @@ class SQLiteSSEBus:
         self.wal_autocheckpoint = int(wal_autocheckpoint)
         self.retry_queue_maxsize = int(max(1, retry_queue_maxsize))
         self.retry_backoff_max_s = float(max(0.05, retry_backoff_max_s))
-        self._local = threading.local()
+        self._local = _get_native_thread_local_class()()
         self._init_lock = threading.Lock()
         self._initialized = False
         # Serialize writes within a single process to avoid N connections/threads
@@ -94,6 +111,8 @@ class SQLiteSSEBus:
             "publish_failed": 0,
             "cleanup_runs": 0,
             "cleanup_deleted": 0,
+            "lease_cleanup_runs": 0,
+            "lease_cleanup_deleted": 0,
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -243,6 +262,12 @@ class SQLiteSSEBus:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sse_events_ts ON sse_events(ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sse_events_user_id ON sse_events(user, id)")
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_sse_leases_expires_ts ON sse_leases(expires_ts)")
+            except sqlite3.OperationalError as exc:
+                # Index is an optimization only; don't fail initialization on transient locks.
+                if not _is_locked_error(exc):
+                    logger.warning(f"Failed to create SSE leases index: {exc}")
             conn.commit()
             self._initialized = True
 
@@ -435,7 +460,54 @@ class SQLiteSSEBus:
             return 0
         return deleted
 
-    def try_acquire_lease(self, name: str, *, ttl_s: float) -> bool:
+    def cleanup_expired_leases(self, now: float | None = None, *, chunk: int = 2000) -> int:
+        """Best-effort deletion of expired leases (prevents unbounded lease table growth)."""
+        if not self.db_path:
+            return 0
+        self._ensure_schema()
+        conn = self._get_conn()
+        ts = float(time.time() if now is None else now)
+        deleted = 0
+        try:
+            with self._write_lock:
+                cur = conn.execute(
+                    """
+                    DELETE FROM sse_leases
+                    WHERE name IN (
+                        SELECT name FROM sse_leases
+                        WHERE expires_ts < ?
+                        ORDER BY expires_ts ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (float(ts), int(chunk)),
+                )
+                deleted = int(cur.rowcount or 0)
+                if deleted:
+                    conn.commit()
+        except sqlite3.OperationalError as exc:
+            if _is_locked_error(exc):
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return 0
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"Failed to cleanup SSE leases: {exc}")
+            return 0
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning(f"Failed to cleanup SSE leases: {exc}")
+            return 0
+        return deleted
+
+    def try_acquire_lease(self, name: str, *, ttl_s: float, holder: str | None = None) -> bool:
         """Best-effort cross-process lease using SQLite.
 
         Used to ensure only one process performs heavy housekeeping (e.g., cleanup) at a time.
@@ -444,7 +516,7 @@ class SQLiteSSEBus:
             return False
         self._ensure_schema()
         conn = self._get_conn()
-        holder = str(os.getpid())
+        holder = str(holder or os.getpid())
         now = time.time()
         expires = now + float(max(1.0, ttl_s))
         try:
@@ -470,6 +542,38 @@ class SQLiteSSEBus:
                     acquired = int(cur2.rowcount or 0) > 0
                 conn.commit()
             return bool(acquired)
+        except sqlite3.OperationalError:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+
+    def release_lease(self, name: str, *, holder: str | None = None) -> bool:
+        """Release a lease held by `holder` (best-effort).
+
+        Note: This is optional for correctness when leases have TTL, but it helps
+        reduce false-positive "in use" states after fast reconnects.
+        """
+        if not self.db_path:
+            return False
+        self._ensure_schema()
+        conn = self._get_conn()
+        holder = str(holder or os.getpid())
+        try:
+            with self._write_lock:
+                cur = conn.execute(
+                    "DELETE FROM sse_leases WHERE name = ? AND holder = ?",
+                    (str(name), holder),
+                )
+                conn.commit()
+            return int(cur.rowcount or 0) > 0
         except sqlite3.OperationalError:
             try:
                 conn.rollback()
@@ -638,22 +742,30 @@ def ensure_poller_started(
                     drain_loops = 0
 
                     now = time.time()
-                    if retention > 0 and (now - last_cleanup) >= cleanup_every:
+                    if (now - last_cleanup) >= cleanup_every:
                         # Only one process should perform housekeeping at a time.
                         if not bus.try_acquire_lease("cleanup", ttl_s=max(5.0, cleanup_every * 2)):
                             last_cleanup = now
                         else:
-                            cutoff = now - float(retention)
-                            # Try a few chunks; stop early if no more deletions.
-                            for _ in range(3):
-                                n = bus.cleanup_older_than(cutoff, chunk=2000)
-                                if n > 0:
-                                    with bus._stats_lock:
-                                        bus._stats["cleanup_deleted"] += int(n)
-                                if n <= 0:
-                                    break
+                            if retention > 0:
+                                cutoff = now - float(retention)
+                                # Try a few chunks; stop early if no more deletions.
+                                for _ in range(3):
+                                    n = bus.cleanup_older_than(cutoff, chunk=2000)
+                                    if n > 0:
+                                        with bus._stats_lock:
+                                            bus._stats["cleanup_deleted"] += int(n)
+                                    if n <= 0:
+                                        break
+                                with bus._stats_lock:
+                                    bus._stats["cleanup_runs"] += 1
+
+                            n_lease = bus.cleanup_expired_leases(now, chunk=2000)
                             with bus._stats_lock:
-                                bus._stats["cleanup_runs"] += 1
+                                bus._stats["lease_cleanup_runs"] += 1
+                                if n_lease > 0:
+                                    bus._stats["lease_cleanup_deleted"] += int(n_lease)
+
                             last_cleanup = now
                 except Exception as exc:
                     logger.warning(f"SSE poller loop error: {exc}")

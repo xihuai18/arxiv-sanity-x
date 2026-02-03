@@ -1079,6 +1079,20 @@ class SummaryStatusRepository:
     """Repository for summary status tracking."""
 
     @staticmethod
+    def _needs_updated_time_backfill(value) -> bool:
+        """Return True when an entry's updated_time should be (re)written.
+
+        Some older DB entries may not have an updated_time field. With de-duplicated
+        writes, a no-op set_status/set_task_status call could otherwise skip the
+        write and leave updated_time missing forever, which breaks UI sorting and
+        "updated_ago" rendering.
+        """
+        try:
+            return float(value or 0.0) <= 0.0
+        except Exception:
+            return True
+
+    @staticmethod
     def get_status(pid: str, model: str = None) -> Optional[dict]:
         """
         Get summary status for a paper.
@@ -1110,19 +1124,38 @@ class SummaryStatusRepository:
             existing = sdb.get(key, {})
             if not isinstance(existing, dict):
                 existing = {}
-            updates = {
-                "status": status,
-                "last_error": error,
-                "updated_time": time.time(),
-            }
+
+            updates = {"status": status, "last_error": error}
             if extra:
                 updates.update(extra)
+
+            # Preserve legacy behavior: allow caller to override updated_time via **extra.
+            explicit_updated_time = updates.pop("updated_time", None)
+
+            desired = dict(existing)
+            changed = False
             for field, value in updates.items():
                 if value is None:
-                    existing.pop(field, None)
+                    if field in desired:
+                        desired.pop(field, None)
+                        changed = True
                 else:
-                    existing[field] = value
-            sdb[key] = existing
+                    if desired.get(field) != value:
+                        desired[field] = value
+                        changed = True
+
+            # De-duplicate: if no fields change (excluding updated_time), do not write.
+            if not changed:
+                # If caller explicitly passes updated_time, treat it as a real update request.
+                if explicit_updated_time is None:
+                    if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
+                        return
+                else:
+                    if desired.get("updated_time") == explicit_updated_time:
+                        return
+
+            desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
+            sdb[key] = desired
 
     @staticmethod
     def update_status(pid: str, model: str, updates: dict):
@@ -1224,19 +1257,38 @@ class SummaryStatusRepository:
             existing = sdb.get(key, {})
             if not isinstance(existing, dict):
                 existing = {}
-            updates = {
-                "status": status,
-                "error": error,
-                "updated_time": time.time(),
-            }
+
+            updates = {"status": status, "error": error}
             if extra:
                 updates.update(extra)
+
+            # Preserve legacy behavior: allow caller to override updated_time via **extra.
+            explicit_updated_time = updates.pop("updated_time", None)
+
+            desired = dict(existing)
+            changed = False
             for field, value in updates.items():
                 if value is None:
-                    existing.pop(field, None)
+                    if field in desired:
+                        desired.pop(field, None)
+                        changed = True
                 else:
-                    existing[field] = value
-            sdb[key] = existing
+                    if desired.get(field) != value:
+                        desired[field] = value
+                        changed = True
+
+            # De-duplicate: if no fields change (excluding updated_time), do not write.
+            if not changed:
+                # If caller explicitly passes updated_time, treat it as a real update request.
+                if explicit_updated_time is None:
+                    if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
+                        return
+                else:
+                    if desired.get("updated_time") == explicit_updated_time:
+                        return
+
+            desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
+            sdb[key] = desired
 
     @staticmethod
     def get_generation_epoch(pid: str, model: str) -> int:

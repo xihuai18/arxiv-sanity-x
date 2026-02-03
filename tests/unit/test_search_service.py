@@ -244,3 +244,126 @@ class TestSvmRankWithUploads:
         )
 
         assert out_pids[0] == "p1"
+
+
+class TestSearchDowngradeSwitches:
+    """Tests for search downgrade switches."""
+
+    def test_semantic_disabled_downgrades_semantic_and_hybrid(self, monkeypatch):
+        """When semantic is disabled, semantic/hybrid should downgrade to keyword-only."""
+        import importlib
+        import sys
+        import types
+
+        import config
+
+        monkeypatch.setenv("ARXIV_SANITY_SEARCH_SEMANTIC_DISABLED", "true")
+        config.reload_settings()
+
+        import backend.services.search_service as search_service
+
+        search_service = importlib.reload(search_service)
+
+        def _kw_stub(_q: str, _limit=None):
+            return ["p1", "p2"], [10.0, 9.0]
+
+        monkeypatch.setattr(search_service, "search_rank", _kw_stub)
+
+        # Guardrail: if code tries to import semantic_service, it should crash.
+        sentinel = types.ModuleType("backend.services.semantic_service")
+
+        def _missing_attr(_name: str):
+            raise AssertionError("semantic_service should not be used when semantic_disabled=true")
+
+        sentinel.__getattr__ = _missing_attr  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "backend.services.semantic_service", sentinel)
+
+        pids, scores = search_service.enhanced_search_rank(q="test query", limit=10, search_mode="semantic")
+        assert pids == ["p1", "p2"]
+        assert scores == [10.0, 9.0]
+
+        pids, scores, details = search_service.enhanced_search_rank(q="test query", limit=10, search_mode="hybrid")
+        assert pids == ["p1", "p2"]
+        assert scores == [10.0, 9.0]
+        assert details == {}
+
+    def test_disable_fullscan_skips_fullscan_fallback(self, monkeypatch):
+        """When fullscan fallback is disabled, keyword search should not call lexical_rank_fullscan."""
+        import importlib
+
+        import config
+
+        monkeypatch.setenv("ARXIV_SANITY_SEARCH_DISABLE_FULLSCAN", "true")
+        config.reload_settings()
+
+        import backend.services.search_service as search_service
+
+        search_service = importlib.reload(search_service)
+
+        def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("lexical_rank_fullscan should be skipped when disable_fullscan=true")
+
+        monkeypatch.setattr(search_service, "lexical_rank_fullscan", _should_not_run)
+
+        pids, scores = search_service.search_rank(
+            "foo",
+            limit=10,
+            get_features_fn=lambda: {},  # falsy -> forces fallback path
+            get_pids_fn=lambda: [],
+            get_papers_bulk_fn=lambda _pids: {},
+            get_metas_fn=lambda: {},
+            paper_exists_fn=lambda _pid: False,
+            paper_text_fields_fn=lambda _paper: {},
+        )
+
+        assert pids == []
+        assert scores == []
+
+    def test_disable_fullscan_uses_bounded_title_scan_fallback(self, monkeypatch):
+        """When fullscan is disabled and TF-IDF misses, do a bounded title scan instead of returning empty."""
+        import importlib
+
+        import config
+
+        monkeypatch.setenv("ARXIV_SANITY_SEARCH_DISABLE_FULLSCAN", "true")
+        config.reload_settings()
+
+        import backend.services.search_service as search_service
+
+        search_service = importlib.reload(search_service)
+
+        def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("lexical_rank_fullscan should be skipped when disable_fullscan=true")
+
+        monkeypatch.setattr(search_service, "lexical_rank_fullscan", _should_not_run)
+
+        papers = {
+            "p1": {"title": "Graph Neural Networks"},
+            "p2": {"title": "Unrelated Paper"},
+        }
+
+        def get_pids():
+            return list(papers.keys())
+
+        def get_papers_bulk(pids):
+            return {pid: papers.get(pid) for pid in pids}
+
+        def paper_text_fields(paper):
+            title = (paper or {}).get("title") or ""
+            return {
+                "title_norm_loose": search_service.normalize_text_loose(title),
+                "title_norm": search_service.normalize_text(title),
+            }
+
+        pids, _scores = search_service.search_rank(
+            "Graph Neural Networks",
+            limit=10,
+            get_features_fn=lambda: {},  # falsy -> forces TF-IDF miss path
+            get_pids_fn=get_pids,
+            get_papers_bulk_fn=get_papers_bulk,
+            get_metas_fn=lambda: {},
+            paper_exists_fn=lambda _pid: False,
+            paper_text_fields_fn=paper_text_fields,
+        )
+
+        assert pids[:1] == ["p1"]

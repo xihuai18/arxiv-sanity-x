@@ -104,6 +104,9 @@ from .services.summary_service import (
 from .services.summary_service import get_summary_status
 from .utils.cache import LRUCacheTTL as _LRUCacheTTL
 from .utils.sse import register_user_stream as _register_user_stream
+from .utils.sse import (
+    try_acquire_user_connection_lease as _try_acquire_user_connection_lease,
+)
 from .utils.sse import unregister_user_stream as _unregister_user_stream
 
 # -----------------------------------------------------------------------------
@@ -385,10 +388,78 @@ def _validate_keyword_name(keyword: str) -> Optional[str]:
 # Small in-memory caches (thread-safe, per-process)
 # Note: Some caches are now in backend.services modules
 
-# Cache for queue rank computation (TTL 3 seconds to balance freshness and performance)
-_QUEUE_RANK_CACHE = _LRUCacheTTL(maxsize=128, ttl_s=3.0)
+# Cache for queue_stats/task_status expensive scans (per-process TTL).
+_QUEUE_STATS_CACHE = _LRUCacheTTL(maxsize=16, ttl_s=2.0)
 
 PAPER_CACHE = _LRUCacheTTL(maxsize=2048, ttl_s=300.0)
+
+
+def _get_queue_snapshot_cached() -> dict:
+    """Return cached queue snapshot to avoid full scans on hot endpoints."""
+    cache_key = "queue_snapshot_v1"
+    cached = _QUEUE_STATS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    queued_count = 0
+    running_count = 0
+    high_priority_queued: list[tuple[float, str]] = []
+    has_task_entries = False
+
+    try:
+        for tkey, info in SummaryStatusRepository.get_items_with_prefix("task::"):
+            if not isinstance(info, dict):
+                continue
+            has_task_entries = True
+            status = info.get("status")
+            if status == "queued":
+                queued_count += 1
+                try:
+                    if SUMMARY_PRIORITY_HIGH is not None:
+                        prio = info.get("priority")
+                        if prio is not None and int(prio) >= int(SUMMARY_PRIORITY_HIGH):
+                            ts = info.get("updated_time") or 0
+                            high_priority_queued.append((float(ts), str(tkey)))
+                except Exception:
+                    pass
+            elif status == "running":
+                running_count += 1
+    except Exception:
+        # If the task-status store is unavailable, fall back to the summary-status scan.
+        has_task_entries = False
+
+    # Fallback: if task:: entries are missing (older versions), count summary statuses.
+    #
+    # Important: do NOT fall back when task:: entries exist but the active queue is empty.
+    # That path used to trigger a full scan of the entire summary-status DB on every poll,
+    # which is extremely expensive in large deployments and breaks the purpose of caching.
+    if not has_task_entries:
+        summary_queued = 0
+        summary_running = 0
+        for key, info in SummaryStatusRepository.get_all_items():
+            if not isinstance(info, dict):
+                continue
+            if str(key).startswith("task::"):
+                continue
+            status = info.get("status")
+            if status == "queued":
+                summary_queued += 1
+            elif status == "running":
+                summary_running += 1
+        if (queued_count + running_count) == 0:
+            queued_count = summary_queued
+            running_count = summary_running
+
+    if high_priority_queued:
+        high_priority_queued.sort(key=lambda item: (item[0], item[1]))
+
+    snapshot = {
+        "queued": queued_count,
+        "running": running_count,
+        "high_priority_queued": high_priority_queued,
+    }
+    _QUEUE_STATS_CACHE.set(cache_key, snapshot)
+    return snapshot
 
 
 # globals that manage the (lazy) loading of various state for a request
@@ -446,7 +517,7 @@ def _build_user_combined_tag_list():
 # Intelligent unified data caching functionality
 
 
-def get_data_cached():
+def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None):
     """Load papers/metas/pids caches (delegates to backend.services.data_service).
 
     Returns:
@@ -454,7 +525,7 @@ def get_data_cached():
     """
     from backend.services.data_service import get_data_cached as _get_data_cached
 
-    data = _get_data_cached()
+    data = _get_data_cached(wait=wait, max_wait_s=max_wait_s)
     return data.get("papers"), data.get("metas") or {}, data.get("pids") or []
 
 
@@ -1308,14 +1379,38 @@ def api_user_stream():
 
     # Capture user in request context to avoid issues in call_on_close callback
     user = g.user
-    q = _register_user_stream(user)
+    ok, lease, limit = _try_acquire_user_connection_lease(user)
+    if not ok:
+        return _api_error("Too many SSE connections", 429, limit=int(limit))
+    try:
+        q = _register_user_stream(user)
+    except Exception:
+        try:
+            if lease is not None:
+                lease.release()
+        except Exception:
+            pass
+        raise
 
     def gen():
         yield "event: init\ndata: {}\n\n"
+        # Keepalive cadence also controls how often we get a chance to renew the cross-process lease.
+        # Ensure the idle wait stays comfortably below the lease TTL to avoid false-expiration
+        # when the client is idle and the queue is empty.
+        idle_timeout_s = 25.0
+        try:
+            if lease is not None:
+                ttl_s = float(getattr(lease, "ttl_s", 0.0) or 0.0)
+                if ttl_s > 0:
+                    idle_timeout_s = min(idle_timeout_s, max(1.0, ttl_s * 0.5))
+        except Exception:
+            idle_timeout_s = 25.0
         try:
             while True:
+                if lease is not None:
+                    lease.renew()
                 try:
-                    payload = q.get(timeout=25)
+                    payload = q.get(timeout=idle_timeout_s)
                     data = json.dumps(payload, ensure_ascii=False)
                     yield f"data: {data}\n\n"
                 except queue.Empty:
@@ -1327,6 +1422,11 @@ def api_user_stream():
                     yield ": keep-alive\n\n"
         finally:
             try:
+                if lease is not None:
+                    lease.release()
+            except Exception:
+                pass
+            try:
                 _unregister_user_stream(user, q)
             except Exception:
                 pass
@@ -1334,8 +1434,20 @@ def api_user_stream():
     resp = Response(stream_with_context(gen()), mimetype="text/event-stream")
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
-    # Best-effort: gen() already unregisters in finally, keep this as a backup.
-    resp.call_on_close(lambda: _unregister_user_stream(user, q))
+
+    # Best-effort: gen() already unregisters/releases in finally, keep this as a backup.
+    def _close() -> None:
+        try:
+            _unregister_user_stream(user, q)
+        except Exception:
+            pass
+        try:
+            if lease is not None:
+                lease.release()
+        except Exception:
+            pass
+
+    resp.call_on_close(_close)
     return resp
 
 
@@ -1646,11 +1758,24 @@ def api_get_paper_summary():
         if not model:
             return _api_error("Model is required", 400)
 
-        force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
-        cache_only = bool(data.get("cache_only", False))
+        requested_force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
+        requested_cache_only = bool(data.get("cache_only", False))
+
+        force_cache_only = bool(getattr(settings.summary, "force_cache_only", True))
+        if force_cache_only:
+            # P0: cache-only endpoint. Ignore cache_only=false and any force flags.
+            # Regeneration must go through /api/trigger_paper_summary (async queue).
+            force_regen = False
+            cache_only = True
+        else:
+            # Legacy escape hatch (NOT recommended for production): allow sync generation on cache miss.
+            force_regen = bool(requested_force_regen)
+            cache_only = bool(requested_cache_only)
 
         logger.trace(
-            f"[API] api_get_paper_summary: pid={pid}, model={model}, force={force_regen}, cache_only={cache_only}"
+            f"[API] api_get_paper_summary: pid={pid}, model={model}, "
+            f"force={requested_force_regen}->{force_regen}, cache_only={requested_cache_only}->{cache_only}, "
+            f"force_cache_only={force_cache_only}"
         )
 
         summary_content, summary_meta = generate_paper_summary(
@@ -1689,35 +1814,58 @@ def api_trigger_paper_summary():
 
         raw_pid = data["_raw_pid"]
         model = (data.get("model") or LLM_NAME or "").strip()
+        force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
         logger.trace(f"[API] api_trigger_paper_summary: pid={raw_pid}, model={model}")
         if not model:
             return _api_error("Model is required", 400)
 
         status, _last_error = get_summary_status(raw_pid, model)
-        if status == "ok":
-            return _api_success(pid=raw_pid, status="ok")
-        if status in ("running", "queued"):
-            task_id = None
-            try:
-                info = SummaryStatusRepository.get_status(raw_pid, model)
-                if isinstance(info, dict):
-                    task_user = info.get("task_user")
-                    if task_user is None or (g.user and task_user == g.user):
-                        task_id = info.get("task_id")
-            except Exception:
+        if not force_regen:
+            if status == "ok":
+                return _api_success(pid=raw_pid, status="ok")
+            if status in ("running", "queued"):
                 task_id = None
-            # Never leak task_id; if not owned, omit it.
-            return _api_success(pid=raw_pid, status=status, last_error=None, task_id=task_id)
+                try:
+                    info = SummaryStatusRepository.get_status(raw_pid, model)
+                    if isinstance(info, dict):
+                        task_user = info.get("task_user")
+                        if task_user is None or (g.user and task_user == g.user):
+                            task_id = info.get("task_id")
+                except Exception:
+                    task_id = None
+                # Never leak task_id; if not owned, omit it.
+                return _api_success(pid=raw_pid, status=status, last_error=None, task_id=task_id)
 
-        _update_summary_status_db(raw_pid, model, "queued", None, task_user=g.user)
-        if g.user:
-            _update_readinglist_summary_status(g.user, raw_pid, "queued", None)
         priority = data.get("priority")
         try:
             priority = int(priority) if priority is not None else None
         except Exception:
             priority = None
-        task_id = _trigger_summary_async(g.user, raw_pid, model=model, priority=priority)
+
+        task_id = _trigger_summary_async(
+            g.user,
+            raw_pid,
+            model=model,
+            priority=priority,
+            force_refresh=force_regen,
+        )
+
+        # task_id semantics from enqueue_summary_task():
+        # - str: successfully enqueued (safe to return)
+        # - "": active task exists but task_id must not be disclosed to requester
+        # - None: enqueue failed; if allow_thread_fallback=true, a local thread was started
+        if task_id == "":
+            # Do not overwrite global status/task ownership when the active task isn't ours.
+            ret_status = "queued"
+            try:
+                info = SummaryStatusRepository.get_status(raw_pid, model)
+                if isinstance(info, dict) and info.get("status") in ("queued", "running"):
+                    ret_status = info.get("status") or ret_status
+            except Exception:
+                pass
+            logger.trace(f"[API] api_trigger_paper_summary: completed in {time.time() - t_start:.2f}s (hidden task)")
+            return _api_success(pid=raw_pid, status=ret_status, last_error=None, task_id=None)
+
         if task_id is None and not settings.huey.allow_thread_fallback:
             # Enqueue failed and we do not allow running summaries inside web workers.
             err_msg = None
@@ -1732,15 +1880,12 @@ def api_trigger_paper_summary():
             if g.user:
                 _update_readinglist_summary_status(g.user, raw_pid, "failed", err_msg)
             return _api_error(err_msg, 503, code="summary_queue_unavailable")
-        if task_id:
-            _update_summary_status_db(raw_pid, model, "queued", None, task_id=task_id, task_user=g.user)
-            if g.user:
-                _update_readinglist_summary_status(g.user, raw_pid, "queued", None, task_id=task_id)
 
-        # If we couldn't enqueue because an active task exists (but we didn't return its id
-        # due to ownership restrictions), still return queued without task_id.
-        if task_id == "":
-            task_id = None
+        # Thread fallback: no task_id. Best-effort mark queued for UI (without claiming a task_id).
+        if task_id is None and settings.huey.allow_thread_fallback:
+            _update_summary_status_db(raw_pid, model, "queued", None, task_user=g.user)
+            if g.user:
+                _update_readinglist_summary_status(g.user, raw_pid, "queued", None)
 
         logger.trace(f"[API] api_trigger_paper_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=raw_pid, status="queued", last_error=None, task_id=task_id)
@@ -1795,28 +1940,8 @@ def api_task_status(task_id: str):
                 and priority is not None
                 and int(priority) >= int(SUMMARY_PRIORITY_HIGH)
             ):
-                # Try cache first
-                cache_key = "queue_rank_list"
-                cached_queued = _QUEUE_RANK_CACHE.get(cache_key)
-
-                if cached_queued is None:
-                    # Compute and cache
-                    queued = []
-                    for tkey, tinfo in SummaryStatusRepository.get_items_with_prefix("task::"):
-                        if not isinstance(tinfo, dict):
-                            continue
-                        if tinfo.get("status") != "queued":
-                            continue
-                        tprio = tinfo.get("priority")
-                        if tprio is None or int(tprio) < int(SUMMARY_PRIORITY_HIGH):
-                            continue
-                        ts = tinfo.get("updated_time") or 0
-                        queued.append((ts, tkey))
-                    queued.sort(key=lambda item: (item[0], item[1]))
-                    _QUEUE_RANK_CACHE.set(cache_key, queued)
-                else:
-                    queued = cached_queued
-
+                snapshot = _get_queue_snapshot_cached()
+                queued = snapshot.get("high_priority_queued") or []
                 for idx, (_ts, tkey) in enumerate(queued):
                     if tkey == key:
                         payload["queue_rank"] = idx + 1
@@ -1836,40 +1961,9 @@ def api_queue_stats():
     t_start = time.time()
     logger.trace("[API] api_queue_stats: starting")
     try:
-        queued_count = 0
-        running_count = 0
-        task_entries = []
-
-        for key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            task_entries.append((key, info))
-
-        if task_entries:
-            for _key, info in task_entries:
-                status = info.get("status")
-                if status == "queued":
-                    queued_count += 1
-                elif status == "running":
-                    running_count += 1
-
-        if not task_entries or (queued_count + running_count) == 0:
-            summary_queued = 0
-            summary_running = 0
-            for key, info in SummaryStatusRepository.get_all_items():
-                if not isinstance(info, dict):
-                    continue
-                if key.startswith("task::"):
-                    continue
-                status = info.get("status")
-                if status == "queued":
-                    summary_queued += 1
-                elif status == "running":
-                    summary_running += 1
-            if (queued_count + running_count) == 0:
-                queued_count = summary_queued
-                running_count = summary_running
-
+        snapshot = _get_queue_snapshot_cached()
+        queued_count = int(snapshot.get("queued") or 0)
+        running_count = int(snapshot.get("running") or 0)
         logger.trace(f"[API] api_queue_stats: completed in {time.time() - t_start:.2f}s")
         return _api_success(queued=queued_count, running=running_count)
     except Exception as e:
@@ -3286,6 +3380,7 @@ def _trigger_summary_async(
     pid: str,
     model: Optional[str] = None,
     priority: Optional[int] = None,
+    force_refresh: bool = False,
 ) -> Optional[str]:
     """Trigger summary generation - delegates to readinglist_service."""
     from backend.services.readinglist_service import trigger_summary_async
@@ -3295,6 +3390,7 @@ def _trigger_summary_async(
         pid=pid,
         model=model,
         priority=priority,
+        force_refresh=force_refresh,
         generate_summary_fn=generate_paper_summary,
         update_readinglist_fn=_update_readinglist_summary_status,
         update_db_fn=_update_summary_status_db,

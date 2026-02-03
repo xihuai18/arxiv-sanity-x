@@ -517,6 +517,7 @@ def _generate_and_cache_summary(
     model: str,
     *,
     cancel_check: Callable[[], bool] | None = None,
+    force_refresh: bool = False,
 ) -> tuple[str, dict]:
     cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, None)
     if not _paper_exists(raw_pid):
@@ -539,7 +540,7 @@ def _generate_and_cache_summary(
     cache_file.parent.mkdir(parents=True, exist_ok=True)
 
     cached_summary, cached_meta = _read_cached_summary(cache_file, meta_file, legacy_cache, legacy_meta, model)
-    if cached_summary:
+    if cached_summary and not force_refresh:
         if summary_source_matches(cached_meta, summary_source):
             return cached_summary, cached_meta
 
@@ -548,7 +549,7 @@ def _generate_and_cache_summary(
 
     lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
     if lock_fd is None:
-        if cached_summary:
+        if cached_summary and not force_refresh:
             return cached_summary, cached_meta
         return "# Error\n\nSummary is being generated, please retry shortly.", {}
 
@@ -560,7 +561,7 @@ def _generate_and_cache_summary(
             raise SummaryCanceled("Canceled after lock acquisition")
 
         cached_summary, cached_meta = _read_cached_summary(cache_file, meta_file, legacy_cache, legacy_meta, model)
-        if cached_summary:
+        if cached_summary and not force_refresh:
             if summary_source_matches(cached_meta, summary_source):
                 return cached_summary, cached_meta
 
@@ -626,7 +627,9 @@ def generate_summary_task(
     model: str | None = None,
     user: str | None = None,
     epoch: int | None = None,
+    force_refresh: bool = False,
     task=None,
+    **_kwargs,
 ) -> None:
     model = (model or LLM_NAME or "").strip()
     task_id = getattr(task, "id", None)
@@ -638,9 +641,11 @@ def generate_summary_task(
         max_attempts = 1
 
     attempt = 1
+    status_force_refresh = False
     try:
         existing = SummaryStatusRepository.get_task_status(str(task_id)) if task_id else None
         if isinstance(existing, dict):
+            status_force_refresh = bool(existing.get("force_refresh"))
             # Respect pre-cancellation (e.g. user cleared summary while task was queued).
             if existing.get("status") == "canceled":
                 reason = (existing.get("error") or "Canceled by user").strip()
@@ -652,6 +657,11 @@ def generate_summary_task(
             attempt = int(existing.get("attempt") or 0) + 1
     except Exception:
         attempt = 1
+
+    # NOTE: For backward compatibility, some enqueue paths intentionally do not
+    # pass force_refresh to Huey payload (old workers would crash on new kwargs).
+    # We still persist force_refresh in task status, so the worker can recover it.
+    force_refresh = bool(force_refresh) or bool(status_force_refresh)
 
     start_epoch = 0
     if epoch is not None:
@@ -699,6 +709,7 @@ def generate_summary_task(
         attempt=attempt,
         max_attempts=max_attempts,
         epoch=start_epoch,
+        force_refresh=bool(force_refresh),
     )
     _update_summary_status_db(pid, model, "running", None, task_id=task_id, task_user=user)
     if user:
@@ -722,7 +733,12 @@ def generate_summary_task(
             except Exception:
                 return False
 
-        summary_content, summary_meta = _generate_and_cache_summary(pid, model, cancel_check=_cancel_check)
+        summary_content, summary_meta = _generate_and_cache_summary(
+            pid,
+            model,
+            cancel_check=_cancel_check,
+            force_refresh=bool(force_refresh),
+        )
 
         if _cancel_check():
             raise SummaryCanceled("Canceled after generation")
@@ -801,6 +817,7 @@ def enqueue_summary_task(
     model: str | None = None,
     user: str | None = None,
     priority: int | None = None,
+    force_refresh: bool = False,
 ) -> str:
     model = (model or LLM_NAME or "").strip()
     if not model:
@@ -810,18 +827,19 @@ def enqueue_summary_task(
     raw_pid, _ = split_pid_version(pid)
     pid = raw_pid or pid
 
-    # Fast path: if status record already points to an active task, return it without scanning.
-    try:
-        info = SummaryStatusRepository.get_status(pid, model)
-        if isinstance(info, dict) and (info.get("status") in ("queued", "running")):
-            existing_task_id = info.get("task_id")
-            existing_task_user = info.get("task_user")
-            if existing_task_id and _allow_task_id(existing_task_user, user):
-                return str(existing_task_id)
-            if existing_task_id and not _allow_task_id(existing_task_user, user):
-                return ""
-    except Exception:
-        pass
+    if not force_refresh:
+        # Fast path: if status record already points to an active task, return it without scanning.
+        try:
+            info = SummaryStatusRepository.get_status(pid, model)
+            if isinstance(info, dict) and (info.get("status") in ("queued", "running")):
+                existing_task_id = info.get("task_id")
+                existing_task_user = info.get("task_user")
+                if existing_task_id and _allow_task_id(existing_task_user, user):
+                    return str(existing_task_id)
+                if existing_task_id and not _allow_task_id(existing_task_user, user):
+                    return ""
+        except Exception:
+            pass
 
     # Serialize enqueue across processes to reduce race-induced duplicate tasks.
     enqueue_lock = _enqueue_lock_path(pid, model)
@@ -839,15 +857,24 @@ def enqueue_summary_task(
         raise RuntimeError("enqueue_lock_timeout")
 
     try:
+        if force_refresh:
+            # Cancel any existing queued/running tasks and bump epoch before enqueueing.
+            # This enables "force regenerate" semantics via cancel+enqueue.
+            cancel_summary_tasks(pid, model, user=user, reason="Force regenerate")
+            # NOTE: Avoid passing new kwargs to Huey payload to stay compatible with
+            # older workers that don't accept force_refresh.
+            _purge_summary_cache(pid, model)
+
         # Check if there's already a queued/running task for this pid+model.
-        existing_task_id, existing_task_user = _find_active_task(pid, model)
-        if existing_task_id:
-            if _allow_task_id(existing_task_user, user):
-                logger.debug(f"Task already exists for {pid}::{model}: {existing_task_id}")
-                return existing_task_id
-            # Don't leak task_id across users.
-            logger.debug(f"Active task exists for {pid}::{model} but belongs to a different user")
-            return ""
+        if not force_refresh:
+            existing_task_id, existing_task_user = _find_active_task(pid, model)
+            if existing_task_id:
+                if _allow_task_id(existing_task_user, user):
+                    logger.debug(f"Task already exists for {pid}::{model}: {existing_task_id}")
+                    return existing_task_id
+                # Don't leak task_id across users.
+                logger.debug(f"Active task exists for {pid}::{model} but belongs to a different user")
+                return ""
 
         task_priority = SUMMARY_PRIORITY_HIGH if priority is None else priority
         epoch = 0
@@ -856,6 +883,7 @@ def enqueue_summary_task(
         except Exception:
             epoch = 0
 
+        # Keep Huey payload minimal for forward/backward compatibility.
         task = generate_summary_task.s(pid, model=model, user=user, epoch=epoch)
         task.priority = task_priority
         result = huey.enqueue(task)
@@ -864,7 +892,16 @@ def enqueue_summary_task(
             logger.warning(f"Failed to obtain Huey task id for {pid}::{model}")
             raise RuntimeError("enqueue_task_id_missing")
 
-        _update_task_status(task_id, "queued", pid=pid, model=model, user=user, priority=task_priority, epoch=epoch)
+        _update_task_status(
+            task_id,
+            "queued",
+            pid=pid,
+            model=model,
+            user=user,
+            priority=task_priority,
+            epoch=epoch,
+            force_refresh=bool(force_refresh),
+        )
         _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
         if user:
             _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id)
@@ -875,6 +912,32 @@ def enqueue_summary_task(
             release_summary_lock(lock_fd, enqueue_lock)
         except Exception:
             pass
+
+
+def _purge_summary_cache(pid: str, model: str) -> None:
+    """Best-effort delete cached summary files for (pid, model).
+
+    This is used to implement force regeneration semantics without relying on
+    Huey task kwargs, which can break older workers when new kwargs are added.
+    """
+    try:
+        cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(pid, model)
+    except Exception:
+        return
+
+    for path in (cache_file, meta_file, legacy_cache, legacy_meta):
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Remove empty dir best-effort (don't fail force refresh on cleanup).
+    try:
+        base_dir = cache_file.parent
+        if base_dir.exists() and not any(base_dir.iterdir()):
+            base_dir.rmdir()
+    except Exception:
+        pass
 
 
 def _collect_task_priority_map() -> dict:

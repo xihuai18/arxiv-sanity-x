@@ -26,6 +26,9 @@ class SummaryGetRequest(SummaryPidRequest):
 class SummaryTriggerRequest(SummaryPidRequest):
     model: str | None = None
     priority: int | str | None = None
+    # Backward compatibility: some legacy clients use `force` instead of `force_regenerate`.
+    force: bool = False
+    force_regenerate: bool = False
 
 
 class SummaryStatusRequest(SummaryBaseModel):

@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import weakref
+from hashlib import sha256
 from secrets import token_hex
 
 from loguru import logger
@@ -34,6 +35,9 @@ _SSE_STATS = {
 
 _JANITOR_LOCK = threading.Lock()
 _JANITOR_STARTED = False
+
+_CONN_LOCK = threading.Lock()
+_CONN_LOCAL: dict[str, set[str]] = {}
 
 
 def _get_native_thread_class():
@@ -149,6 +153,171 @@ def _ensure_janitor_started() -> None:
         _JANITOR_STARTED = True
 
 
+class SSEUserConnectionLease:
+    """A best-effort per-user connection slot.
+
+    - Cross-process: backed by SQLite leases (sse_leases).
+    - Fallback: in-process reservation (for development/testing).
+    """
+
+    def __init__(
+        self,
+        *,
+        user_key: str,
+        lease_name: str,
+        holder: str,
+        ttl_s: float,
+        release_fn=None,
+    ) -> None:
+        self.user_key = str(user_key or "")
+        self.lease_name = str(lease_name or "")
+        self.holder = str(holder or "")
+        self.ttl_s = float(max(1.0, ttl_s))
+        self._released = False
+        self._release_fn = release_fn
+        self._last_renew_ts = 0.0
+        self._last_renew_attempt_ts = 0.0
+        self._lock = threading.Lock()
+
+    def renew(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            now = time.time()
+            # Avoid excessive SQLite writes: renew at most every ~ttl/3 (capped at 30s),
+            # but retry failed renewals with a small backoff.
+            min_success_interval = min(30.0, max(1.0, self.ttl_s / 3.0))
+            min_attempt_interval = 1.0
+            if (now - self._last_renew_attempt_ts) < min_attempt_interval:
+                return
+            if (now - self._last_renew_ts) < min_success_interval:
+                return
+            self._last_renew_attempt_ts = now
+            lease_name = self.lease_name
+            holder = self.holder
+            ttl_s = self.ttl_s
+        bus = get_sse_bus()
+        if bus is None:
+            return
+        try:
+            ok = bus.try_acquire_lease(lease_name, ttl_s=ttl_s, holder=holder)
+            if ok:
+                with self._lock:
+                    self._last_renew_ts = now
+            # If the lease was released while renew was in-flight, best-effort cleanup.
+            if ok:
+                with self._lock:
+                    released = self._released
+                if released:
+                    try:
+                        bus.release_lease(lease_name, holder=holder)
+                    except Exception:
+                        pass
+        except Exception:
+            return
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        if self._release_fn is not None:
+            try:
+                self._release_fn()
+            except Exception:
+                pass
+            return
+        bus = get_sse_bus()
+        if bus is None:
+            return
+        try:
+            bus.release_lease(self.lease_name, holder=self.holder)
+        except Exception:
+            return
+
+
+def _user_conn_key(user: str) -> str:
+    """Stable, non-PII key for lease names."""
+    u = str(user or "")
+    if not u:
+        return "anon"
+    return sha256(u.encode("utf-8")).hexdigest()[:24]
+
+
+def _user_stream_key(user: str) -> str:
+    """Stable, non-PII key for SSE routing and SQLite bus storage."""
+    return _user_conn_key(user)
+
+
+def get_max_connections_per_user() -> int:
+    settings = config.settings
+    try:
+        limit = int(getattr(settings.sse, "max_connections_per_user", 2) or 2)
+    except Exception:
+        limit = 2
+    return int(limit)
+
+
+def try_acquire_user_connection_lease(user: str) -> tuple[bool, SSEUserConnectionLease | None, int]:
+    """Try to reserve a per-user SSE connection slot.
+
+    Returns (ok, lease, limit). If ok is False, the caller should return HTTP 429.
+    """
+    limit = get_max_connections_per_user()
+    if limit <= 0:
+        return True, None, limit
+
+    settings = config.settings
+    try:
+        ttl_s = float(getattr(settings.sse, "connection_lease_ttl_s", 90.0) or 90.0)
+    except Exception:
+        ttl_s = 90.0
+
+    bus = get_sse_bus()
+    user_key = _user_conn_key(user)
+    holder = f"{os.getpid()}-{token_hex(8)}"
+
+    if bus is None:
+        with _CONN_LOCK:
+            holders = _CONN_LOCAL.setdefault(user_key, set())
+            if len(holders) >= limit:
+                return False, None, limit
+            holders.add(holder)
+
+        def _local_release() -> None:
+            with _CONN_LOCK:
+                hs = _CONN_LOCAL.get(user_key)
+                if not hs:
+                    return
+                hs.discard(holder)
+                if len(hs) == 0:
+                    _CONN_LOCAL.pop(user_key, None)
+
+        lease = SSEUserConnectionLease(
+            user_key=user_key,
+            lease_name=f"local:{user_key}",
+            holder=holder,
+            ttl_s=ttl_s,
+            release_fn=_local_release,
+        )
+        return True, lease, limit
+
+    # Cross-process lease slots: sse_conn:<user_hash>:<slot>
+    for slot in range(int(limit)):
+        lease_name = f"sse_conn:{user_key}:{slot}"
+        try:
+            if bus.try_acquire_lease(lease_name, ttl_s=ttl_s, holder=holder):
+                return (
+                    True,
+                    SSEUserConnectionLease(user_key=user_key, lease_name=lease_name, holder=holder, ttl_s=ttl_s),
+                    limit,
+                )
+        except Exception:
+            continue
+
+    return False, None, limit
+
+
 def register_user_stream(user: str) -> queue.Queue:
     # Starting the poller here makes SSE robust even if the app forgot to call ensure_sse_runtime_started().
     try:
@@ -161,14 +330,16 @@ def register_user_stream(user: str) -> queue.Queue:
     # queue.Queue(maxsize=0) means "infinite" (never Full).
     qmax = 0 if maxsize <= 0 else max(1, maxsize)
     q = queue.Queue(maxsize=qmax)
+    user_key = _user_stream_key(user)
     with USER_EVENT_LOCK:
-        USER_EVENT_SUBS.setdefault(user, weakref.WeakSet()).add(q)
+        USER_EVENT_SUBS.setdefault(user_key, weakref.WeakSet()).add(q)
     return q
 
 
 def unregister_user_stream(user: str, q: queue.Queue) -> None:
+    user_key = _user_stream_key(user)
     with USER_EVENT_LOCK:
-        subs = USER_EVENT_SUBS.get(user)
+        subs = USER_EVENT_SUBS.get(user_key)
         if not subs:
             return
         try:
@@ -176,16 +347,16 @@ def unregister_user_stream(user: str, q: queue.Queue) -> None:
         except Exception:
             pass
         if len(subs) == 0:
-            USER_EVENT_SUBS.pop(user, None)
+            USER_EVENT_SUBS.pop(user_key, None)
 
 
-def _enqueue_user_event(user: str, payload: dict) -> None:
+def _enqueue_user_event(user_key: str, payload: dict) -> None:
     payload = _strip_origin(payload)
     with USER_EVENT_LOCK:
-        subs = USER_EVENT_SUBS.get(user)
+        subs = USER_EVENT_SUBS.get(user_key)
         queues = _snapshot_weakset(subs)
         if subs is not None and len(subs) == 0:
-            USER_EVENT_SUBS.pop(user, None)
+            USER_EVENT_SUBS.pop(user_key, None)
     for q in queues:
         _enqueue_with_drop(q, payload, max_drop_attempts=3)
 
@@ -218,7 +389,7 @@ def ensure_sse_runtime_started() -> None:
     def _dispatch_user_from_bus(user: str, payload: dict) -> None:
         if isinstance(payload, dict) and payload.get(_ORIGIN_FIELD) == origin:
             return
-        _enqueue_user_event(user, payload)
+        _enqueue_user_event(str(user), payload)
 
     def _dispatch_all_from_bus(payload: dict) -> None:
         if isinstance(payload, dict) and payload.get(_ORIGIN_FIELD) == origin:
@@ -231,6 +402,7 @@ def ensure_sse_runtime_started() -> None:
 def emit_user_event(user: str | None, payload: dict) -> None:
     if not user:
         return
+    user_key = _user_stream_key(str(user))
     payload = dict(payload or {})
     payload.setdefault("ts", time.time())
     bus = get_sse_bus()
@@ -239,9 +411,9 @@ def emit_user_event(user: str | None, payload: dict) -> None:
         settings = config.settings
         publish_async = bool(getattr(settings.sse, "publish_async", True))
         if publish_async:
-            ok = bus.publish_async(user, payload)
+            ok = bus.publish_async(user_key, payload)
         else:
-            ok, bus_id = bus.publish_with_id(user, payload)
+            ok, bus_id = bus.publish_with_id(user_key, payload)
             if bus_id is not None:
                 payload.setdefault("bus_id", bus_id)
         if not ok:
@@ -251,9 +423,9 @@ def emit_user_event(user: str | None, payload: dict) -> None:
                 f"Failed to publish SSE event to SQLite bus (db busy/locked): {bus.db_path}; cross-process delivery may be lost",
             )
         # Immediate in-process delivery (poller will skip by origin id).
-        _enqueue_user_event(user, payload)
+        _enqueue_user_event(user_key, payload)
         return
-    _enqueue_user_event(user, payload)
+    _enqueue_user_event(user_key, payload)
 
 
 def emit_all_event(payload: dict) -> None:
