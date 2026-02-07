@@ -2,30 +2,98 @@
 
 // Use shared utilities from common_utils.js
 var CommonUtils = window.ArxivSanityCommon;
-var getCsrfToken = CommonUtils.getCsrfToken;
 var csrfFetch = CommonUtils.csrfFetch;
 var formatAuthorsText = CommonUtils.formatAuthorsText;
 var escapeHtml = CommonUtils.escapeHtml;
 var checkSummaryFallback = CommonUtils.checkSummaryFallback;
 var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
 var triggerMathJax = CommonUtils.triggerMathJax;
-var SummaryMarkdown = window.ArxivSanitySummaryMarkdown || null;
-var renderSummaryMarkdown =
-    SummaryMarkdown && typeof SummaryMarkdown.renderSummaryMarkdown === 'function'
-        ? SummaryMarkdown.renderSummaryMarkdown
-        : function (markdown, container) {
-              // Minimal fallback: don't break the page if the summary renderer bundle isn't loaded.
-              if (!container) return;
-              try {
-                  if (renderAbstractMarkdown && typeof renderAbstractMarkdown === 'function') {
-                      renderAbstractMarkdown(markdown || '', container);
-                      return;
-                  }
-              } catch (e) {}
-              try {
-                  container.textContent = String(markdown || '');
-              } catch (e) {}
+var fetchTaskStatus =
+    typeof CommonUtils.fetchTaskStatus === 'function'
+        ? CommonUtils.fetchTaskStatus
+        : function (taskId) {
+              if (!taskId) return Promise.resolve(null);
+              return fetch(`/api/task_status/${encodeURIComponent(taskId)}`)
+                  .then(resp => (resp.ok ? resp.json() : null))
+                  .then(data => (data && data.success ? data : null))
+                  .catch(() => null);
           };
+
+// Resolve summary markdown renderer at call-time so we can fall back gracefully
+// when some frontend bundles fail to load (e.g., transient 404 / cache mismatch).
+var _warnedMissingSummaryRenderer = false;
+function _getSummaryMarkdownRenderer() {
+    try {
+        const mod = typeof window !== 'undefined' ? window.ArxivSanitySummaryMarkdown : null;
+        if (mod && typeof mod.renderSummaryMarkdown === 'function')
+            return mod.renderSummaryMarkdown;
+    } catch (e) {}
+    return null;
+}
+
+function renderSummaryMarkdown(markdown, container, tocContainer) {
+    if (!container) return;
+
+    const renderer = _getSummaryMarkdownRenderer();
+    if (renderer) {
+        try {
+            renderer(markdown, container, tocContainer);
+            return;
+        } catch (e) {
+            console.warn('Summary markdown renderer failed, falling back:', e);
+        }
+    } else if (!_warnedMissingSummaryRenderer) {
+        _warnedMissingSummaryRenderer = true;
+        console.warn(
+            'Summary markdown renderer bundle not loaded (window.ArxivSanitySummaryMarkdown missing). ' +
+                'Falling back to basic markdown rendering.'
+        );
+    }
+
+    // Fallback: render with the abstract markdown renderer (no TOC, best-effort safety).
+    // NOTE: renderAbstractMarkdown returns an HTML string.
+    let rendered = '';
+    try {
+        if (renderAbstractMarkdown && typeof renderAbstractMarkdown === 'function') {
+            rendered = renderAbstractMarkdown(markdown || '');
+        }
+    } catch (e) {
+        rendered = '';
+    }
+    try {
+        if (rendered) {
+            container.innerHTML = rendered;
+        } else {
+            container.textContent = String(markdown || '');
+        }
+    } catch (e) {}
+
+    // Clear TOC in fallback mode (to avoid stale TOC from previous renders).
+    if (tocContainer) {
+        try {
+            tocContainer.innerHTML = '';
+            if (tocContainer.classList) tocContainer.classList.add('is-empty');
+        } catch (e) {}
+        try {
+            const contentContainer = tocContainer.closest('.summary-content');
+            if (contentContainer && contentContainer.classList)
+                contentContainer.classList.remove('has-toc');
+        } catch (e) {}
+    }
+
+    // Mirror a bit of the main renderer cleanup to avoid stale UI elements.
+    try {
+        const legacy = document.querySelector('.back-to-top');
+        if (legacy) legacy.remove();
+    } catch (e) {}
+
+    // Best-effort math rendering via delimiter scanning (slower, but better than raw TeX).
+    try {
+        if (CommonUtils && typeof CommonUtils.triggerMathJax === 'function') {
+            CommonUtils.triggerMathJax(container);
+        }
+    } catch (e) {}
+}
 
 // Shared tag dropdown API instance
 var sharedTagDropdownApi = null;
@@ -87,6 +155,15 @@ function handleUserEvent(event, options = {}) {
             renderTagDropdown();
         }
         fetchUserStateAndApply();
+    } else if (event.type === 'readinglist_changed') {
+        // Keep reading list button in sync across pages/tabs.
+        if (event.pid && summaryApp.pid && String(event.pid) === String(summaryApp.pid)) {
+            if (event.action === 'add') {
+                summaryApp.setState({ inReadingList: true });
+            } else if (event.action === 'remove') {
+                summaryApp.setState({ inReadingList: false });
+            }
+        }
     }
 }
 
@@ -144,6 +221,11 @@ class SummaryState {
         // Batch setState optimization: pending state updates and render frame
         this._pendingState = null;
         this._renderFrame = null;
+
+        // Reading list state (arXiv papers only; uploaded papers do not use reading list)
+        this.inReadingList = false;
+        this.readingListPending = false;
+        this._readingListRequestInFlight = false;
     }
 
     setState(newState) {
@@ -533,6 +615,23 @@ class SummaryState {
         // Check if this is an uploaded paper (hide arXiv-specific links)
         const isUploadedPaper = this.paper && this.paper.kind === 'upload';
 
+        // Reading list toggle (hide for uploaded papers; show only for logged in users)
+        const showReadingList = Boolean(isLoggedIn && !isUploadedPaper);
+        const rlPending = Boolean(this.readingListPending);
+        const rlActive = Boolean(this.inReadingList);
+        const rlBtnClass =
+            'readinglist-toggle-btn' + (rlActive ? ' active' : '') + (rlPending ? ' pending' : '');
+        const rlBtnIcon = rlPending ? '⏳' : rlActive ? '📖' : '🔖';
+        const rlBtnTitle = rlPending
+            ? 'Working...'
+            : rlActive
+              ? 'In reading list'
+              : 'Add to reading list';
+        const rlBtnDisabledAttr = rlPending ? 'disabled' : '';
+        const readingListHTML = showReadingList
+            ? `<div class="rel_readinglist"><button type="button" class="${rlBtnClass}" ${rlBtnDisabledAttr} onclick="summaryApp.toggleReadingList()" title="${rlBtnTitle}">${rlBtnIcon}</button></div>`
+            : '';
+
         // Build navigation links - for uploaded papers, show Similar button; for arXiv, show all links
         const navLinksHTML = isUploadedPaper
             ? (() => {
@@ -573,6 +672,7 @@ class SummaryState {
                 <div class="paper-nav paper-actions-footer">
                     <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
                     <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
+                    ${readingListHTML}
                     <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
                     <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
                 </div>`;
@@ -696,12 +796,8 @@ async function fetchSummary(pid, options = {}) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout (cache-only fetch should be fast)
 
-        const response = await fetch('/api/get_paper_summary', {
+        const response = await csrfFetch('/api/get_paper_summary', {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': getCsrfToken(),
-            },
             body: JSON.stringify({
                 pid: pid,
                 model: options.model || undefined,
@@ -753,12 +849,8 @@ async function fetchSummary(pid, options = {}) {
 }
 
 async function clearModelSummary(pid, model) {
-    const response = await fetch('/api/clear_model_summary', {
+    const response = await csrfFetch('/api/clear_model_summary', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': getCsrfToken(),
-        },
         body: JSON.stringify({ pid, model }),
     });
 
@@ -774,12 +866,8 @@ async function clearModelSummary(pid, model) {
 }
 
 async function clearPaperCache(pid) {
-    const response = await fetch('/api/clear_paper_cache', {
+    const response = await csrfFetch('/api/clear_paper_cache', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': getCsrfToken(),
-        },
         body: JSON.stringify({ pid }),
     });
 
@@ -804,12 +892,8 @@ async function triggerSummary(pid, options = {}) {
     if (options.priority !== undefined && options.priority !== null) {
         payload.priority = options.priority;
     }
-    const response = await fetch('/api/trigger_paper_summary', {
+    const response = await csrfFetch('/api/trigger_paper_summary', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': getCsrfToken(),
-        },
         body: JSON.stringify(payload),
     });
 
@@ -820,19 +904,6 @@ async function triggerSummary(pid, options = {}) {
     const data = await response.json();
     if (!data.success) {
         throw new Error(data.error || 'Failed to trigger summary');
-    }
-    return data;
-}
-
-async function fetchTaskStatus(taskId) {
-    if (!taskId) return null;
-    const response = await fetch(`/api/task_status/${encodeURIComponent(taskId)}`);
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    const data = await response.json();
-    if (!data.success) {
-        throw new Error(data.error || 'Failed to fetch task status');
     }
     return data;
 }
@@ -896,6 +967,120 @@ function hashString(input) {
     // Force unsigned 32-bit and stringify for easy comparisons
     return String(hash >>> 0);
 }
+
+async function fetchReadingListItems() {
+    const response = await fetch('/api/readinglist/list');
+    if (!response.ok) {
+        const err = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        err.httpStatus = response.status;
+        throw err;
+    }
+    const data = await response.json().catch(() => null);
+    if (!data || !data.success) {
+        throw new Error((data && data.error) || 'Failed to fetch reading list');
+    }
+    return Array.isArray(data.items) ? data.items : [];
+}
+
+summaryApp.refreshReadingListState = async function (pidValue) {
+    // Only relevant for logged-in, arXiv papers.
+    try {
+        const items = await fetchReadingListItems();
+        const p = String(pidValue || this.pid || '').trim();
+        if (!p) return;
+        const inList = items.some(it => it && String(it.pid || '') === p);
+        this.setState({ inReadingList: Boolean(inList) });
+    } catch (e) {
+        // Ignore errors (e.g., 401 when not logged in).
+    }
+};
+
+summaryApp.toggleReadingList = function () {
+    const isLoggedIn = typeof user !== 'undefined' && user;
+    if (!isLoggedIn) {
+        alert('Please log in to use reading list.');
+        return;
+    }
+    if (!this.paper || this.paper.kind === 'upload') return;
+    if (!this.pid) return;
+    if (this.readingListPending || this._readingListRequestInFlight) return;
+
+    const pidValue = String(this.pid).trim();
+    if (!pidValue) return;
+
+    const toast =
+        CommonUtils && typeof CommonUtils.showToast === 'function' ? CommonUtils.showToast : null;
+
+    this._readingListRequestInFlight = true;
+    const currentlyIn = Boolean(this.inReadingList);
+    if (currentlyIn) {
+        // Optimistic remove
+        this.setState({ readingListPending: true, inReadingList: false });
+        csrfFetch('/api/readinglist/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid: pidValue }),
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.success) {
+                    this.setStateSync({ inReadingList: false });
+                    if (toast) toast('Removed from reading list', { type: 'success' });
+                } else {
+                    this.setStateSync({ inReadingList: true });
+                    const msg =
+                        'Failed to remove from reading list: ' + ((data && data.error) || '');
+                    if (toast) toast(msg, { type: 'error' });
+                }
+            })
+            .catch(err => {
+                this.setStateSync({ inReadingList: true });
+                if (toast) {
+                    toast('Network error: failed to remove from reading list', { type: 'error' });
+                }
+                console.error('Error removing from reading list:', err);
+            })
+            .finally(() => {
+                this._readingListRequestInFlight = false;
+                this.setState({ readingListPending: false });
+            });
+    } else {
+        // Optimistic add
+        this.setState({ readingListPending: true, inReadingList: true });
+        csrfFetch('/api/readinglist/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid: pidValue }),
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.success) {
+                    this.setStateSync({ inReadingList: true });
+                    if (toast) toast('Added to reading list', { type: 'success' });
+
+                    // Backend may enqueue summary generation when adding.
+                    const taskId = data.task_id ? String(data.task_id) : '';
+                    if (taskId) {
+                        this.lastTaskId = taskId;
+                        this.refreshQueueRank();
+                    }
+                } else {
+                    this.setStateSync({ inReadingList: false });
+                    const msg = 'Failed to add to reading list: ' + ((data && data.error) || '');
+                    if (toast) toast(msg, { type: 'error' });
+                }
+            })
+            .catch(err => {
+                this.setStateSync({ inReadingList: false });
+                if (toast) toast('Network error: failed to add to reading list', { type: 'error' });
+                console.error('Error adding to reading list:', err);
+            })
+            .finally(() => {
+                this._readingListRequestInFlight = false;
+                this.setState({ readingListPending: false });
+            });
+    }
+};
 
 // Retry function
 summaryApp.retry = function () {
@@ -1005,6 +1190,7 @@ summaryApp.refreshQueueRank = async function () {
     if (!this.lastTaskId) return;
     try {
         const data = await fetchTaskStatus(this.lastTaskId);
+        if (!data) return;
         const queueRank = Number(data.queue_rank || 0);
         const queueTotal = Number(data.queue_total || 0);
         if (data.status && data.status !== 'queued') {
@@ -1885,10 +2071,12 @@ summaryApp.loadModels = async function () {
     return await CommonUtils.measurePerformanceAsync('loadModels', async () => {
         try {
             const models = await fetchModels();
-            this.setState({ models, modelsError: null });
+            // Keep model data immediately readable for init sequence
+            // (selectInitialModel runs right after loadModels resolves).
+            this.setStateSync({ models, modelsError: null });
         } catch (error) {
             const friendlyMsg = CommonUtils.handleApiError(error, 'Load Models');
-            this.setState({ modelsError: friendlyMsg });
+            this.setStateSync({ modelsError: friendlyMsg });
         }
     });
 };
@@ -1977,7 +2165,9 @@ async function initSummaryApp() {
     const initialDefaultModel =
         typeof defaultSummaryModel !== 'undefined' ? String(defaultSummaryModel || '').trim() : '';
 
-    summaryApp.setState({
+    // Use sync state init so defaultModel/selectedModel are available
+    // immediately to subsequent initialization steps.
+    summaryApp.setStateSync({
         paper: paper,
         pid: pid,
         loading: true,
@@ -1994,6 +2184,10 @@ async function initSummaryApp() {
         tagDropdownOpen: false,
         tagSearchValue: '',
         newTagValue: '',
+
+        // Reading list state (only used for logged-in arXiv papers)
+        inReadingList: false,
+        readingListPending: false,
     });
 
     await summaryApp.loadModels();
@@ -2013,6 +2207,14 @@ async function initSummaryApp() {
         await initTagManagement();
         _registerEventHandler(handleUserEvent);
         _setupUserEventStream(user, applyUserState);
+
+        // Refresh reading list membership for arXiv papers (do not block summary loading).
+        try {
+            const isUploaded = summaryApp.paper && summaryApp.paper.kind === 'upload';
+            if (!isUploaded) {
+                summaryApp.refreshReadingListState(pid);
+            }
+        } catch (e) {}
     }
 
     // Setup back to top button

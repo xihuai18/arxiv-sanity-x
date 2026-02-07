@@ -206,7 +206,7 @@ if [ "${WORKER_CLASS}" = "gevent" ]; then
     WARMUP_DATA_CFG=$(python3 -c "from config import settings; print('1' if settings.web.warmup_data else '0')")
     WARMUP_ML_CFG=$(python3 -c "from config import settings; print('1' if settings.web.warmup_ml else '0')")
     PRELOAD_CACHES_CFG=$(python3 -c "from config import settings; print('1' if settings.gunicorn.preload_caches else '0')")
-    if [ "${WORKERS}" -gt 2 ] 2>/dev/null; then
+    if [ "${WORKERS}" -gt 4 ] 2>/dev/null; then
       if [ "${CACHE_PAPERS_CFG}" = "1" ] || [ "${WARMUP_DATA_CFG}" = "1" ] || [ "${WARMUP_ML_CFG}" = "1" ] || [ "${PRELOAD_CACHES_CFG}" = "1" ]; then
         echo "[gunicorn] Warning: gevent workers=${WORKERS} with cache/warmup enabled can OOM; clamping to 2 (set ARXIV_SANITY_GUNICORN_FORCE_WORKERS=1 to override)" 1>&2
         WORKERS=2

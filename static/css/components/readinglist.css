@@ -36,6 +36,84 @@
     border-color: var(--link-color);
 }
 
+.readinglist-btn.pending {
+    cursor: wait;
+    opacity: 0.9;
+    transform: none;
+    pointer-events: none;
+}
+
+.readinglist-btn.pending:hover {
+    transform: none;
+}
+
+/* Summary page: Reading List toggle button in header nav
+ * Reuses the same circular icon style as the main page (.readinglist-btn)
+ * but without absolute positioning so it flows inline with nav buttons. */
+.readinglist-toggle-btn {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: 40px;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 1.2rem;
+    transition: all var(--transition-fast);
+    opacity: 0.7;
+    padding: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    font-family: inherit;
+    line-height: 1;
+}
+
+.readinglist-toggle-btn:hover:not(:disabled) {
+    opacity: 1;
+    background: var(--tag-bg-light);
+    border-color: var(--tag-border-light);
+    transform: scale(1.1);
+}
+
+.readinglist-toggle-btn.active {
+    opacity: 1;
+    background: var(--tag-bg-light);
+    border-color: var(--link-color);
+}
+
+.readinglist-toggle-btn.active:hover:not(:disabled) {
+    background: var(--tag-bg-light);
+    border-color: var(--link-color);
+    transform: scale(1.1);
+}
+
+.readinglist-toggle-btn.pending {
+    cursor: wait;
+    opacity: 0.85;
+    pointer-events: none;
+    transform: none;
+}
+
+[data-theme='dark'] .readinglist-toggle-btn:hover:not(:disabled) {
+    background: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+}
+
+[data-theme='dark'] .readinglist-toggle-btn.active {
+    background: var(--tag-bg-dark);
+    border-color: var(--link-color);
+}
+
+[data-theme='dark'] .readinglist-toggle-btn.active:hover:not(:disabled) {
+    background: var(--tag-bg-dark);
+    border-color: var(--link-color);
+}
+
 [data-theme='dark'] .readinglist-btn:hover {
     background: var(--tag-bg-dark);
     border-color: var(--tag-border-dark);

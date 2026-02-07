@@ -1,121 +1,70 @@
-"""Integration tests for tag and keyword management APIs.
-
-Note: These are legacy endpoints that return plain text responses (e.g., "ok" or
-"error, not logged in") with HTTP 200 status code, rather than proper JSON API
-responses with appropriate HTTP status codes.
-
-The wide assertions (e.g., `in [200, 302, 401, 403]`) are intentional because:
-1. These endpoints return 200 even for "not logged in" errors (as plain text)
-2. Some endpoints may redirect (302) in certain configurations
-3. CSRF protection returns 403
-
-These tests primarily verify that endpoints exist and don't crash.
-For proper API behavior testing, see the newer /api/* endpoints.
-"""
+"""Integration tests for legacy tag/keyword mutation endpoints JSON contract."""
 
 from __future__ import annotations
 
+import uuid
 
-class TestAddTagApi:
-    """Tests for add_tag API."""
+import pytest
 
-    def test_add_tag_responds(self, client, csrf_token):
-        """Test that add_tag endpoint responds."""
-        resp = client.post("/add_tag/test_tag", headers={"X-CSRF-Token": csrf_token})
-        # Legacy endpoint returns 200 with "error, not logged in" text when not logged in
-        assert resp.status_code in [200, 302, 401, 403]
-
-    def test_add_tag_without_csrf_returns_403(self, logged_in_client):
-        """Test that add_tag without CSRF returns 403."""
-        resp = logged_in_client.post("/add_tag/test_tag")
-        assert resp.status_code == 403
-
-
-class TestAddPaperToTagApi:
-    """Tests for add/<pid>/<tag> API."""
-
-    def test_add_paper_to_tag_responds(self, client, csrf_token):
-        """Test that adding paper to tag endpoint responds."""
-        resp = client.post("/add/2301.00001/test_tag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+MUTATION_ENDPOINTS = [
+    "/add_tag/test_tag",
+    "/add/2301.00001/test_tag",
+    "/sub/2301.00001/test_tag",
+    "/del/test_tag",
+    "/rename/old_tag/new_tag",
+    "/add_ctag/test_ctag",
+    "/del_ctag/test_ctag",
+    "/rename_ctag/old_ctag/new_ctag",
+    "/add_key/test_keyword",
+    "/del_key/test_keyword",
+    "/rename_key/old_key/new_key",
+]
 
 
-class TestSubPaperFromTagApi:
-    """Tests for sub/<pid>/<tag> API."""
+@pytest.mark.parametrize("endpoint", MUTATION_ENDPOINTS)
+def test_legacy_mutation_endpoints_return_json_error_when_not_logged_in(client, csrf_token, endpoint):
+    """Legacy mutation endpoints should return JSON error payload when unauthenticated."""
+    resp = client.post(endpoint, headers={"X-CSRF-Token": csrf_token})
+    assert resp.status_code == 200
 
-    def test_sub_paper_from_tag_responds(self, client, csrf_token):
-        """Test that removing paper from tag endpoint responds."""
-        resp = client.post("/sub/2301.00001/test_tag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
-
-
-class TestDeleteTagApi:
-    """Tests for del/<tag> API."""
-
-    def test_delete_tag_responds(self, client, csrf_token):
-        """Test that deleting tag endpoint responds."""
-        resp = client.post("/del/test_tag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+    payload = resp.get_json()
+    assert isinstance(payload, dict)
+    assert payload.get("success") is False
+    assert isinstance(payload.get("error"), str)
+    assert payload["error"]
 
 
-class TestRenameTagApi:
-    """Tests for rename/<otag>/<ntag> API."""
+def test_add_tag_returns_json_success_when_logged_in(logged_in_client, csrf_token):
+    """add_tag should return JSON success payload for a unique tag."""
+    tag_name = f"json_contract_tag_{uuid.uuid4().hex[:8]}"
+    resp = logged_in_client.post(f"/add_tag/{tag_name}", headers={"X-CSRF-Token": csrf_token})
+    assert resp.status_code == 200
 
-    def test_rename_tag_responds(self, client, csrf_token):
-        """Test that renaming tag endpoint responds."""
-        resp = client.post("/rename/old_tag/new_tag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
-
-
-class TestAddCombinedTagApi:
-    """Tests for add_ctag/<ctag> API."""
-
-    def test_add_ctag_responds(self, client, csrf_token):
-        """Test that adding combined tag endpoint responds."""
-        resp = client.post("/add_ctag/test_ctag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+    payload = resp.get_json()
+    assert isinstance(payload, dict)
+    assert payload.get("success") is True
 
 
-class TestDeleteCombinedTagApi:
-    """Tests for del_ctag/<ctag> API."""
+def test_add_key_returns_json_success_when_logged_in(logged_in_client, csrf_token):
+    """add_key should return JSON success payload for a unique keyword."""
+    keyword = f"json_contract_keyword_{uuid.uuid4().hex[:8]}"
+    resp = logged_in_client.post(f"/add_key/{keyword}", headers={"X-CSRF-Token": csrf_token})
+    assert resp.status_code == 200
 
-    def test_del_ctag_responds(self, client, csrf_token):
-        """Test that deleting combined tag endpoint responds."""
-        resp = client.post("/del_ctag/test_ctag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
-
-
-class TestRenameCombinedTagApi:
-    """Tests for rename_ctag/<otag>/<ntag> API."""
-
-    def test_rename_ctag_responds(self, client, csrf_token):
-        """Test that renaming combined tag endpoint responds."""
-        resp = client.post("/rename_ctag/old_ctag/new_ctag", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+    payload = resp.get_json()
+    assert isinstance(payload, dict)
+    assert payload.get("success") is True
 
 
-class TestAddKeywordApi:
-    """Tests for add_key/<keyword> API."""
-
-    def test_add_key_responds(self, client, csrf_token):
-        """Test that adding keyword endpoint responds."""
-        resp = client.post("/add_key/test_keyword", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+@pytest.mark.parametrize("endpoint", MUTATION_ENDPOINTS)
+def test_legacy_mutation_endpoints_without_csrf_return_403(logged_in_client, endpoint):
+    """Mutation endpoints still require CSRF protection."""
+    resp = logged_in_client.post(endpoint)
+    assert resp.status_code == 403
 
 
-class TestDeleteKeywordApi:
-    """Tests for del_key/<keyword> API."""
-
-    def test_del_key_responds(self, client, csrf_token):
-        """Test that deleting keyword endpoint responds."""
-        resp = client.post("/del_key/test_keyword", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
-
-
-class TestRenameKeywordApi:
-    """Tests for rename_key/<okey>/<nkey> API."""
-
-    def test_rename_key_responds(self, client, csrf_token):
-        """Test that renaming keyword endpoint responds."""
-        resp = client.post("/rename_key/old_key/new_key", headers={"X-CSRF-Token": csrf_token})
-        assert resp.status_code in [200, 302, 401, 403]
+@pytest.mark.parametrize("endpoint", MUTATION_ENDPOINTS)
+def test_legacy_mutation_endpoints_reject_get(client, endpoint):
+    """Mutation endpoints should reject GET method."""
+    resp = client.get(endpoint)
+    assert resp.status_code == 405

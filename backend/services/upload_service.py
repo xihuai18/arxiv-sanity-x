@@ -19,6 +19,7 @@ from loguru import logger
 
 from aslite.repositories import (
     NegativeTagRepository,
+    SummaryStatusRepository,
     TagRepository,
     UploadedPaperRepository,
 )
@@ -66,6 +67,57 @@ MAX_META_TITLE_CHARS = 512
 MAX_META_ABSTRACT_CHARS = 20000
 MAX_META_AUTHOR_COUNT = 200
 MAX_META_AUTHOR_CHARS = 200
+
+UPLOAD_TASK_MODEL_PROCESS = "upload_process"
+UPLOAD_TASK_MODEL_PARSE = "upload_parse"
+UPLOAD_TASK_MODEL_EXTRACT = "upload_extract"
+
+
+def _extract_huey_task_id(task: Any = None, enqueue_result: Any = None) -> str:
+    """Best-effort extract Huey task id from task/result objects."""
+    for obj in (task, enqueue_result):
+        if obj is None:
+            continue
+        task_id = getattr(obj, "id", None)
+        if task_id:
+            return str(task_id)
+    return ""
+
+
+def _get_upload_task_meta(task_type: str) -> tuple[str, str]:
+    """Return (model, record_field) for upload task bookkeeping."""
+    if task_type == "extract":
+        return UPLOAD_TASK_MODEL_EXTRACT, "extract_task_id"
+    if task_type == "parse":
+        return UPLOAD_TASK_MODEL_PARSE, "parse_task_id"
+    return UPLOAD_TASK_MODEL_PROCESS, "parse_task_id"
+
+
+def register_upload_task_enqueue(
+    *,
+    task_type: str,
+    pid: str,
+    user: str,
+    task: Any = None,
+    enqueue_result: Any = None,
+) -> str:
+    """Persist upload task queued status and return task id if available."""
+    task_id = _extract_huey_task_id(task, enqueue_result)
+    if not task_id:
+        return ""
+
+    model, record_field = _get_upload_task_meta(task_type)
+    try:
+        UploadedPaperRepository.update(pid, {record_field: task_id})
+    except Exception as e:
+        logger.warning(f"Failed to update {record_field} for {pid}: {e}")
+
+    try:
+        SummaryStatusRepository.set_task_status(task_id, "queued", None, pid=pid, model=model, user=user)
+    except Exception as e:
+        logger.warning(f"Failed to write upload task queued status for {pid}: {e}")
+
+    return task_id
 
 
 def _infer_meta_extracted_ok(record: Dict[str, Any], title: str, abstract: str, authors: List) -> bool:
@@ -474,6 +526,8 @@ def create_uploaded_paper(
                     },
                     "meta_extracted_ok": False,
                     "meta_override": {},
+                    "parse_task_id": None,
+                    "extract_task_id": None,
                     "summary_task_id": None,
                 }
 
@@ -539,6 +593,7 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
 
     # Update status to running
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
+    _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""})
 
     try:
         # Get PDF path
@@ -574,9 +629,11 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 "parse_error": None,
             },
         )
+        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""})
 
         # Extract metadata from front matter (separate step, can fail independently)
         meta_extracted_ok = False
+        _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "running"})
         try:
             front_matter = extract_front_matter(md_content)
             t_meta = time.time()
@@ -595,10 +652,25 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                         "meta_extracted_ok": True,
                     },
                 )
+                authors_list = meta_extracted.get("authors") or []
+                _emit_upload_event(
+                    user,
+                    {
+                        "type": "upload_extract_status",
+                        "pid": pid,
+                        "status": "ok",
+                        "meta_extracted_ok": True,
+                        "title": meta_extracted.get("title") or "",
+                        "authors": ", ".join(authors_list) if authors_list else "",
+                        "abstract": meta_extracted.get("abstract") or "",
+                    },
+                )
             else:
                 logger.warning(f"Metadata extraction returned empty for {pid}")
+                _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
         except Exception as e:
             logger.warning(f"Failed to extract metadata for {pid}: {e}")
+            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
 
         logger.info(f"Successfully processed uploaded paper {pid} (meta_ok={meta_extracted_ok})")
 
@@ -625,6 +697,15 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
             {
                 "parse_status": "failed",
                 "parse_error": parse_error,
+            },
+        )
+        _emit_upload_event(
+            user,
+            {
+                "type": "upload_parse_status",
+                "pid": pid,
+                "status": "failed",
+                "error": parse_error,
             },
         )
         logger.trace(f"[BLOCKING] process_uploaded_pdf: failed after {time.time() - t_start:.2f}s pid={pid}")
@@ -705,6 +786,8 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
                 "meta_extracted_ok": meta_extracted_ok,
                 "summary_status": summary_status or "",
                 "summary_last_error": summary_last_error or "",
+                "parse_task_id": data.get("parse_task_id") or "",
+                "extract_task_id": data.get("extract_task_id") or "",
                 "summary_task_id": data.get("summary_task_id") or "",
                 "created_time": data.get("created_time", 0),
                 "original_filename": data.get("original_filename", ""),
@@ -951,7 +1034,7 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
     return True, "deleted"
 
 
-def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
+def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str, str]:
     """Retry parsing for a failed uploaded paper.
 
     Args:
@@ -959,7 +1042,7 @@ def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         user: Username (must be owner)
 
     Returns:
-        Tuple of (success, message).
+        Tuple of (success, message, task_id).
         - success=True, message="queued": newly enqueued
         - success=True, message="already_in_progress": idempotent, already queued/running
         - success=False, message="...": error reason
@@ -967,25 +1050,25 @@ def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
     # Validate PID format for security
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False, "invalid_pid"
+        return False, "invalid_pid", ""
 
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return False, "not_found"
+        return False, "not_found", ""
 
     if record.get("owner") != user:
-        return False, "not_owner"
+        return False, "not_owner", ""
 
     current_status = record.get("parse_status", "")
 
     # Idempotent: if already queued or running, return success
     if current_status in ("queued", "running"):
         logger.info(f"Parse already in progress for {pid} (status={current_status})")
-        return True, "already_in_progress"
+        return True, "already_in_progress", str(record.get("parse_task_id") or "")
 
     # Only allow retry for failed status
     if current_status != "failed":
-        return False, "not_failed"
+        return False, "not_failed", ""
 
     # Atomically check-and-set status
     from aslite.db import get_uploaded_papers_db
@@ -995,39 +1078,46 @@ def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
             with updb.transaction(mode="IMMEDIATE"):
                 current_record = updb.get(pid)
                 if not isinstance(current_record, dict):
-                    return False, "not_found"
+                    return False, "not_found", ""
 
                 actual_status = current_record.get("parse_status", "")
                 if actual_status in ("queued", "running"):
-                    return True, "already_in_progress"
+                    return True, "already_in_progress", str(current_record.get("parse_task_id") or "")
                 if actual_status != "failed":
-                    return False, "not_failed"
+                    return False, "not_failed", ""
 
                 current_record["parse_status"] = "queued"
                 current_record["parse_error"] = None
                 updb[pid] = current_record
     except Exception as e:
         logger.error(f"Failed to update parse status for {pid}: {e}")
-        return False, "db_error"
+        return False, "db_error", ""
 
     try:
         from tasks import huey, process_uploaded_pdf_task
 
         # Use huey.enqueue() to run task asynchronously
         task = process_uploaded_pdf_task.s(pid, user)
-        huey.enqueue(task)
+        enqueue_result = huey.enqueue(task)
+        task_id = register_upload_task_enqueue(
+            task_type="process",
+            pid=pid,
+            user=user,
+            task=task,
+            enqueue_result=enqueue_result,
+        )
     except Exception as e:
         logger.error(f"Failed to enqueue retry for {pid}: {e}")
         try:
             UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
         except Exception:
             pass
-        return False, "enqueue_failed"
+        return False, "enqueue_failed", ""
 
-    return True, "queued"
+    return True, "queued", task_id
 
 
-def trigger_parse_only(pid: str, user: str) -> tuple[bool, str]:
+def trigger_parse_only(pid: str, user: str) -> tuple[bool, str, str]:
     """Trigger MinerU parsing only (without metadata extraction).
 
     Args:
@@ -1035,32 +1125,32 @@ def trigger_parse_only(pid: str, user: str) -> tuple[bool, str]:
         user: Username (must be owner)
 
     Returns:
-        Tuple of (success, message). Message explains why if not successful.
+        Tuple of (success, message, task_id). Message explains why if not successful.
         - success=True, message="queued": newly enqueued
         - success=True, message="already_in_progress": idempotent, already queued/running
         - success=False, message="...": error reason
     """
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False, "invalid_pid"
+        return False, "invalid_pid", ""
 
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return False, "not_found"
+        return False, "not_found", ""
 
     if record.get("owner") != user:
-        return False, "not_owner"
+        return False, "not_owner", ""
 
     current_status = record.get("parse_status", "")
 
     # Idempotent: if already queued or running, return success without re-enqueue
     if current_status in ("queued", "running"):
         logger.info(f"Parse already in progress for {pid} (status={current_status})")
-        return True, "already_in_progress"
+        return True, "already_in_progress", str(record.get("parse_task_id") or "")
 
     # Already parsed successfully - no need to re-parse
     if current_status == "ok":
-        return False, "already_parsed"
+        return False, "already_parsed", ""
 
     # Atomically check-and-set status to avoid race conditions
     # Use compare-and-swap pattern: only update if status hasn't changed
@@ -1071,14 +1161,14 @@ def trigger_parse_only(pid: str, user: str) -> tuple[bool, str]:
             with updb.transaction(mode="IMMEDIATE"):
                 current_record = updb.get(pid)
                 if not isinstance(current_record, dict):
-                    return False, "not_found"
+                    return False, "not_found", ""
 
                 # Re-check status inside transaction
                 actual_status = current_record.get("parse_status", "")
                 if actual_status in ("queued", "running"):
-                    return True, "already_in_progress"
+                    return True, "already_in_progress", str(current_record.get("parse_task_id") or "")
                 if actual_status == "ok":
-                    return False, "already_parsed"
+                    return False, "already_parsed", ""
 
                 # Update status atomically
                 current_record["parse_status"] = "queued"
@@ -1086,13 +1176,20 @@ def trigger_parse_only(pid: str, user: str) -> tuple[bool, str]:
                 updb[pid] = current_record
     except Exception as e:
         logger.error(f"Failed to update parse status for {pid}: {e}")
-        return False, "db_error"
+        return False, "db_error", ""
 
     try:
         from tasks import huey, parse_uploaded_pdf_task
 
         task = parse_uploaded_pdf_task.s(pid, user)
-        huey.enqueue(task)
+        enqueue_result = huey.enqueue(task)
+        task_id = register_upload_task_enqueue(
+            task_type="parse",
+            pid=pid,
+            user=user,
+            task=task,
+            enqueue_result=enqueue_result,
+        )
     except Exception as e:
         logger.error(f"Failed to enqueue parse for {pid}: {e}")
         # Rollback status on enqueue failure
@@ -1100,12 +1197,12 @@ def trigger_parse_only(pid: str, user: str) -> tuple[bool, str]:
             UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
         except Exception:
             pass
-        return False, "enqueue_failed"
+        return False, "enqueue_failed", ""
 
-    return True, "queued"
+    return True, "queued", task_id
 
 
-def trigger_extract_info(pid: str, user: str) -> bool:
+def trigger_extract_info(pid: str, user: str) -> tuple[bool, str]:
     """Trigger metadata extraction only (requires parsing to be done).
 
     Args:
@@ -1113,42 +1210,49 @@ def trigger_extract_info(pid: str, user: str) -> bool:
         user: Username (must be owner)
 
     Returns:
-        True if extraction was triggered
+        Tuple of (success, task_id)
     """
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False
+        return False, ""
 
     record = UploadedPaperRepository.get(pid)
     if not record:
         logger.warning(f"Record not found for {pid}")
-        return False
+        return False, ""
 
     if record.get("owner") != user:
         logger.warning(f"User {user} does not own {pid}")
-        return False
+        return False, ""
 
     # Only allow if already parsed successfully
     if record.get("parse_status") != "ok":
         logger.warning(f"Paper {pid} not parsed yet (status: {record.get('parse_status')})")
-        return False
+        return False, ""
 
     # Only allow if not already extracted successfully
     # Use explicit True check to allow re-extraction for old records without this field
     if record.get("meta_extracted_ok") is True:
         logger.warning(f"Paper {pid} already has extracted metadata")
-        return False
+        return False, ""
 
     try:
         from tasks import extract_info_task, huey
 
         task = extract_info_task.s(pid, user)
-        huey.enqueue(task)
+        enqueue_result = huey.enqueue(task)
+        task_id = register_upload_task_enqueue(
+            task_type="extract",
+            pid=pid,
+            user=user,
+            task=task,
+            enqueue_result=enqueue_result,
+        )
     except Exception as e:
         logger.error(f"Failed to enqueue extract info for {pid}: {e}")
-        return False
+        return False, ""
 
-    return True
+    return True, task_id
 
 
 def do_extract_metadata(pid: str, user: str) -> bool:

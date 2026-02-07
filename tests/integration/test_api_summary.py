@@ -72,6 +72,36 @@ class TestSummaryGetApi:
         assert captured["force_refresh"] is False
 
 
+class TestSummaryTldrApi:
+    """Tests for get paper TL;DR API."""
+
+    def test_get_paper_tldr_without_csrf_returns_403(self, client):
+        """Test that get_paper_tldr without CSRF returns 403."""
+        resp = client.post("/api/get_paper_tldr", json={"pid": "2301.00001"})
+        assert resp.status_code == 403
+
+    def test_get_paper_tldr_returns_tldr_when_ok(self, client, csrf_token, monkeypatch):
+        """Test that get_paper_tldr returns TL;DR when summary status is ok."""
+        from backend import legacy, services
+
+        # Avoid depending on a real papers.db in CI.
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(services.summary_service, "get_summary_status", lambda _pid, model=None: ("ok", None))
+        monkeypatch.setattr(services.summary_service, "extract_tldr_from_summary", lambda _pid: "Hello TL;DR")
+
+        resp = client.post(
+            "/api/get_paper_tldr",
+            json={"pid": "2301.00001"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        assert data.get("pid") == "2301.00001"
+        assert data.get("summary_status") == "ok"
+        assert data.get("tldr") == "Hello TL;DR"
+
+
 class TestSummaryTriggerApi:
     """Tests for trigger paper summary API."""
 

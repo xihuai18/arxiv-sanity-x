@@ -83,6 +83,18 @@ class TestUploadPdfApi:
         )
         assert resp.status_code == 400
 
+    def test_upload_pdf_too_large_returns_413(self, logged_in_client, csrf_token, monkeypatch):
+        """Test that oversized file returns 413."""
+        monkeypatch.setattr("backend.blueprints.api_uploads.MAX_UPLOAD_SIZE", 8)
+        data = {"file": (io.BytesIO(b"%PDF-1.4 too large content"), "large.pdf")}
+        resp = logged_in_client.post(
+            "/api/upload_pdf",
+            data=data,
+            content_type="multipart/form-data",
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 413
+
     def test_reupload_failed_duplicate_sets_queued_once(self, logged_in_client, csrf_token):
         """Re-uploading a failed duplicate should atomically set queued and avoid duplicate enqueues."""
         from aslite.repositories import UploadedPaperRepository
@@ -158,6 +170,64 @@ class TestUploadPdfApi:
         finally:
             UploadedPaperRepository.delete(pid)
 
+    def test_upload_pdf_success_returns_task_id(self, logged_in_client, csrf_token):
+        """Successful upload should include task_id when Huey provides one."""
+
+        class DummyTask:
+            id = "task_upload_001"
+
+        pid = "up_taskupload01"
+        with patch("backend.services.upload_service.create_uploaded_paper") as create_mock:
+            create_mock.return_value = (
+                pid,
+                {
+                    "pid": pid,
+                    "owner": "test_user",
+                    "original_filename": "test.pdf",
+                    "parse_status": "queued",
+                },
+                True,
+            )
+
+            with patch("tasks.huey") as huey_mock, patch("tasks.process_uploaded_pdf_task") as task_mock:
+                task_mock.s = MagicMock(return_value=DummyTask())
+                huey_mock.enqueue = MagicMock(return_value=DummyTask())
+
+                pdf_bytes = b"%PDF-1.4 " + (b"x" * 256)
+                data = {"file": (io.BytesIO(pdf_bytes), "test.pdf")}
+                resp = logged_in_client.post(
+                    "/api/upload_pdf",
+                    data=data,
+                    content_type="multipart/form-data",
+                    headers={"X-CSRF-Token": csrf_token},
+                )
+
+                assert resp.status_code == 200
+                payload = resp.get_json(silent=True) or {}
+                assert payload.get("success") is True
+                assert payload.get("task_id") == "task_upload_001"
+
+
+class TestUploadedPapersParseApi:
+    """Tests for POST /api/uploaded_papers/parse endpoint."""
+
+    def test_parse_success_returns_task_id(self, logged_in_client, csrf_token):
+        """Parse endpoint should return task_id on successful enqueue."""
+        with patch("backend.services.upload_service.trigger_parse_only") as parse_mock:
+            parse_mock.return_value = (True, "queued", "task_parse_001")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/parse",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 200
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is True
+        assert payload.get("parse_status") == "queued"
+        assert payload.get("task_id") == "task_parse_001"
+
 
 class TestUploadedPapersListApi:
     """Tests for GET /api/uploaded_papers/list endpoint."""
@@ -175,6 +245,38 @@ class TestUploadedPapersListApi:
         assert data.get("success") is True
         assert "papers" in data
         assert isinstance(data["papers"], list)
+
+    def test_list_includes_upload_task_ids(self, logged_in_client):
+        """List endpoint should expose parse/extract task ids for observability."""
+        mocked_item = {
+            "id": "up_testpaper_list1",
+            "kind": "upload",
+            "title": "Test",
+            "authors": "Author",
+            "time": "",
+            "summary": "",
+            "utags": [],
+            "ntags": [],
+            "parse_status": "queued",
+            "summary_status": "",
+            "created_time": 1.0,
+            "original_filename": "test.pdf",
+            "parse_task_id": "task_parse_list_1",
+            "extract_task_id": "task_extract_list_1",
+            "summary_task_id": "task_summary_list_1",
+        }
+
+        with patch("backend.services.upload_service.get_uploaded_papers_list", return_value=[mocked_item]):
+            resp = logged_in_client.get("/api/uploaded_papers/list")
+
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        papers = data.get("papers") or []
+        assert len(papers) == 1
+        assert papers[0].get("parse_task_id") == "task_parse_list_1"
+        assert papers[0].get("extract_task_id") == "task_extract_list_1"
+        assert papers[0].get("summary_task_id") == "task_summary_list_1"
 
 
 class TestUploadedPapersUpdateMetaApi:
@@ -264,6 +366,34 @@ class TestUploadedPapersExtractInfoApi:
         finally:
             UploadedPaperRepository.delete(pid)
 
+    def test_extract_info_success_returns_task_id(self, logged_in_client, csrf_token, monkeypatch):
+        """Extract-info endpoint should return task_id on successful enqueue."""
+        from aslite import repositories
+
+        monkeypatch.setattr(
+            repositories.UploadedPaperRepository,
+            "get",
+            lambda _pid: {
+                "owner": "test_user",
+                "parse_status": "ok",
+                "meta_extracted_ok": False,
+            },
+        )
+
+        with patch("backend.services.upload_service.trigger_extract_info") as extract_mock:
+            extract_mock.return_value = (True, "task_extract_001")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/extract_info",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 200
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is True
+        assert payload.get("task_id") == "task_extract_001"
+
 
 class TestUploadedPapersDeleteApi:
     """Tests for POST /api/uploaded_papers/delete endpoint."""
@@ -341,6 +471,58 @@ class TestUploadedPapersRetryParseApi:
             headers={"X-CSRF-Token": csrf_token},
         )
         assert resp.status_code == 404
+
+    def test_retry_parse_success_returns_task_id(self, logged_in_client, csrf_token):
+        """Retry endpoint should return task_id on successful enqueue."""
+        with patch("backend.services.upload_service.retry_parse_uploaded_paper") as retry_mock:
+            retry_mock.return_value = (True, "queued", "task_retry_001")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/retry_parse",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 200
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is True
+        assert payload.get("parse_status") == "queued"
+        assert payload.get("task_id") == "task_retry_001"
+
+
+class TestUploadTaskStatusApi:
+    """Tests for upload-related task status query."""
+
+    def test_task_status_can_query_upload_task(self, logged_in_client):
+        """Upload task stored in task::* should be queryable via /api/task_status."""
+        from aslite.db import get_summary_status_db
+        from aslite.repositories import SummaryStatusRepository
+
+        task_id = "task_upload_status_001"
+        SummaryStatusRepository.set_task_status(
+            task_id,
+            "queued",
+            None,
+            pid="up_testpaper123",
+            model="upload_parse",
+            user="test_user",
+        )
+
+        try:
+            resp = logged_in_client.get(f"/api/task_status/{task_id}")
+            assert resp.status_code == 200
+
+            payload = resp.get_json(silent=True) or {}
+            assert payload.get("success") is True
+            assert payload.get("task_id") == task_id
+            assert payload.get("status") == "queued"
+            assert payload.get("pid") == "up_testpaper123"
+            assert payload.get("model") == "upload_parse"
+        finally:
+            with get_summary_status_db(flag="c") as sdb:
+                key = f"task::{task_id}"
+                if key in sdb:
+                    del sdb[key]
 
 
 class TestUploadedPapersPdfApi:

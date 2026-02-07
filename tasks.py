@@ -1192,8 +1192,8 @@ def cleanup_tasks(
 # -----------------------------------------------------------------------------
 
 
-@huey.task(retries=2, retry_delay=60)
-def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None) -> None:
+@huey.task(retries=2, retry_delay=60, context=True)
+def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, task=None, **_kwargs) -> None:
     """
     Process an uploaded PDF: MinerU parsing + LLM metadata extraction.
     After parsing completes, automatically triggers summary generation.
@@ -1203,17 +1203,25 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None) -> 
         user: Username (owner)
         model: LLM model for summary (optional, uses default)
     """
-    from backend.services.upload_service import process_uploaded_pdf
+    from backend.services.upload_service import (
+        UPLOAD_TASK_MODEL_PROCESS,
+        process_uploaded_pdf,
+    )
+
+    task_id = str(getattr(task, "id", None) or "")
+    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user)
 
     try:
         process_uploaded_pdf(pid, user, model)
+        _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user)
     except Exception as e:
         logger.error(f"Failed to process uploaded PDF {pid}: {e}")
+        _update_task_status(task_id, "failed", error=str(e), pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user)
         raise
 
 
-@huey.task(retries=2, retry_delay=60)
-def parse_uploaded_pdf_task(pid: str, user: str) -> None:
+@huey.task(retries=2, retry_delay=60, context=True)
+def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
     """
     Parse an uploaded PDF with MinerU only (no metadata extraction).
 
@@ -1221,17 +1229,25 @@ def parse_uploaded_pdf_task(pid: str, user: str) -> None:
         pid: Upload PID
         user: Username (owner)
     """
-    from backend.services.upload_service import do_parse_only
+    from backend.services.upload_service import UPLOAD_TASK_MODEL_PARSE, do_parse_only
+
+    task_id = str(getattr(task, "id", None) or "")
+    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
 
     try:
-        do_parse_only(pid, user)
+        ok = do_parse_only(pid, user)
+        if ok:
+            _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
+            return
+        _update_task_status(task_id, "failed", error="parse_failed", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
     except Exception as e:
         logger.error(f"Failed to parse uploaded PDF {pid}: {e}")
+        _update_task_status(task_id, "failed", error=str(e), pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
         raise
 
 
-@huey.task(retries=2, retry_delay=30)
-def extract_info_task(pid: str, user: str) -> None:
+@huey.task(retries=2, retry_delay=30, context=True)
+def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
     """
     Extract metadata from an already-parsed uploaded PDF.
 
@@ -1239,10 +1255,28 @@ def extract_info_task(pid: str, user: str) -> None:
         pid: Upload PID
         user: Username (owner)
     """
-    from backend.services.upload_service import do_extract_metadata
+    from backend.services.upload_service import (
+        UPLOAD_TASK_MODEL_EXTRACT,
+        do_extract_metadata,
+    )
+
+    task_id = str(getattr(task, "id", None) or "")
+    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user)
 
     try:
-        do_extract_metadata(pid, user)
+        ok = do_extract_metadata(pid, user)
+        if ok:
+            _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user)
+            return
+        _update_task_status(
+            task_id,
+            "failed",
+            error="extract_failed",
+            pid=pid,
+            model=UPLOAD_TASK_MODEL_EXTRACT,
+            user=user,
+        )
     except Exception as e:
         logger.error(f"Failed to extract info for {pid}: {e}")
+        _update_task_status(task_id, "failed", error=str(e), pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user)
         raise

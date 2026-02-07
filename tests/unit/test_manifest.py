@@ -33,6 +33,11 @@ class TestManifestUtils:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"main.css": "main-ABCDEF1234.css", "common_utils.js": "common_utils-XYZ98765.js"}, f)
 
+            # The resolver validates that mapped files exist on disk (guards against stale manifests).
+            # Create placeholder files to simulate a real dist/ directory.
+            open(os.path.join(td, "main-ABCDEF1234.css"), "a", encoding="utf-8").close()
+            open(os.path.join(td, "common_utils-XYZ98765.js"), "a", encoding="utf-8").close()
+
             with mock.patch.object(manifest, "_get_manifest_path", return_value=path):
                 assert manifest.static_url("dist/main.css") == "dist/main-ABCDEF1234.css"
                 assert manifest.static_url("dist/common_utils.js") == "dist/common_utils-XYZ98765.js"
@@ -50,6 +55,23 @@ class TestManifestUtils:
             with mock.patch.object(manifest, "_get_manifest_path", return_value=path):
                 # Unmapped file should be returned as-is
                 assert manifest.static_url("dist/other.js") == "dist/other.js"
+
+    def test_static_url_falls_back_when_manifest_points_to_missing_file(self):
+        """Test that we fall back when manifest entry points to a non-existent file on disk."""
+        from backend.utils import manifest
+
+        manifest.clear_manifest_cache()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "manifest.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"main.css": "main-STALE123.css"}, f)
+
+            # Create an alternative hashed file that matches the fallback glob.
+            open(os.path.join(td, "main-REAL999.css"), "a", encoding="utf-8").close()
+
+            with mock.patch.object(manifest, "_get_manifest_path", return_value=path):
+                assert manifest.static_url("dist/main.css") == "dist/main-REAL999.css"
+                assert manifest.static_url("dist/main.css") != "dist/main-STALE123.css"
 
     def test_clear_manifest_cache(self):
         """Test that clear_manifest_cache clears the cache."""

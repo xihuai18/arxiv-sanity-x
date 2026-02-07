@@ -196,3 +196,28 @@ class TestCacheStatusEndpoint:
         """Test that cache_status is disabled by default."""
         resp = client.get("/cache_status")
         assert resp.status_code == 404
+
+    def test_cache_status_enabled_without_login_returns_401_json(self, client, monkeypatch):
+        """Test that cache_status requires login when enabled."""
+        monkeypatch.setattr("backend.legacy.settings.web.enable_cache_status", True)
+
+        resp = client.get("/cache_status")
+        assert resp.status_code == 401
+
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Not logged in"
+
+    def test_cache_status_enabled_with_login_returns_200_json(self, logged_in_client, monkeypatch):
+        """Test that cache_status returns status JSON for logged-in users."""
+        monkeypatch.setattr("backend.legacy.settings.web.enable_cache_status", True)
+
+        resp = logged_in_client.get("/cache_status")
+        assert resp.status_code == 200
+
+        payload = resp.get_json(silent=True) or {}
+        assert isinstance(payload, dict)
+        assert "current_time" in payload
+        assert "features" in payload
+        assert "papers_and_metas" in payload
+        assert "backend_services" in payload
