@@ -45,3 +45,4 @@ claude -p "<your question>" --allowedTools "Read,Bash" --disallowedTools "Write,
 
 - Each invocation is independent; Claude does not share Codex's context.
 - Add `--max-turns 3` to limit exploration on large codebases.
+- Recommend `--model Opus` for best results.

@@ -282,9 +282,30 @@ def _api_success(**data):
     return api_success(**data)
 
 
+def _legacy_mutation_result_to_json(result):
+    """Convert legacy mutation text result to JSON success/error payload."""
+    if isinstance(result, Response):
+        return result
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    if isinstance(result, dict) and "success" in result:
+        return jsonify(result)
+
+    text = _normalize_name(str(result))
+    if text.lower().startswith("ok"):
+        if text == "ok":
+            return _api_success()
+        return _api_success(message=text)
+
+    error = text or "Unknown error"
+    cleaned = re.sub(r"^error\s*[:,]?\s*", "", error, flags=re.IGNORECASE).strip()
+    return jsonify({"success": False, "error": cleaned or error})
+
+
 def _parse_api_request(
     require_login: bool = False,
     require_csrf: bool = True,
+    require_csrf_for_session: bool = False,
     require_pid: bool = False,
     schema: Optional[Type[BaseModel]] = None,
 ):
@@ -296,6 +317,8 @@ def _parse_api_request(
     data = request.get_json(silent=True)
     if not data:
         data = {}
+
+    machine_authed = False
 
     if require_login and g.user is None:
         # Allow internal service-to-service calls for endpoints that already disable CSRF.
@@ -318,7 +341,11 @@ def _parse_api_request(
         else:
             return None, _api_error("Not logged in", 401)
 
-    if require_csrf:
+    should_require_csrf = require_csrf
+    if require_csrf_for_session and require_login and g.user is not None and not machine_authed:
+        should_require_csrf = True
+
+    if should_require_csrf:
         _csrf_protect()
 
     if not data:
@@ -1804,6 +1831,33 @@ def api_get_paper_summary():
         return _api_error(f"Server error: {str(e)}", 500)
 
 
+def api_get_paper_tldr():
+    """API endpoint: Get cached TL;DR (best-effort) for a paper."""
+    t_start = time.time()
+    try:
+        data, err = _parse_api_request(require_pid=True, schema=SummaryPidRequest)
+        if err:
+            return err
+
+        raw_pid = data["_raw_pid"]
+        from .services import summary_service
+
+        summary_status, _last_error = summary_service.get_summary_status(raw_pid)
+
+        tldr = ""
+        if summary_status == "ok":
+            tldr = summary_service.extract_tldr_from_summary(raw_pid) or ""
+
+        logger.trace(f"[API] api_get_paper_tldr: completed in {time.time() - t_start:.2f}s")
+        return _api_success(pid=raw_pid, tldr=tldr, summary_status=summary_status)
+
+    except HTTPException:
+        raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
+    except Exception as e:
+        logger.error(f"Paper TL;DR API error: {e}")
+        return _api_error("Server error", 500)
+
+
 def api_trigger_paper_summary():
     """Trigger summary generation without returning content."""
     t_start = time.time()
@@ -2737,7 +2791,7 @@ def api_tag_search():
     """API interface: single tag recommendation"""
     t_start = time.time()
     try:
-        data, err = _parse_api_request(require_login=True, require_csrf=False)
+        data, err = _parse_api_request(require_login=True, require_csrf=False, require_csrf_for_session=True)
         if err:
             return err
 
@@ -2817,6 +2871,8 @@ def api_tag_search():
         logger.trace(f"[API] api_tag_search: completed in {time.time() - t_start:.2f}s, {len(rec_pids)} results")
         return _api_success(pids=rec_pids, scores=rec_scores, total_count=len(rec_pids))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"API tag search error: {e}")
         return _api_error(str(e), 500)
@@ -2826,7 +2882,7 @@ def api_tags_search():
     """API interface: joint tag recommendation"""
     t_start = time.time()
     try:
-        data, err = _parse_api_request(require_login=True, require_csrf=False)
+        data, err = _parse_api_request(require_login=True, require_csrf=False, require_csrf_for_session=True)
         if err:
             return err
 
@@ -2914,6 +2970,8 @@ def api_tags_search():
 
         return _api_success(pids=rec_pids, scores=rec_scores, total_count=len(rec_pids))
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"API tags search error: {e}")
         return _api_error(str(e), 500)
@@ -2923,8 +2981,8 @@ def cache_status():
     """Debug endpoint to display cache status"""
     if not settings.web.enable_cache_status:
         abort(404)
-    if not g.user:
-        return "Access denied"
+    if g.user is None:
+        return _api_error("Not logged in", 401)
 
     from backend.services import data_service
 
@@ -3185,7 +3243,7 @@ def add_tag(tag=None):
     _csrf_protect()
     tag = _normalize_name(tag)
     logger.trace(f"[API] add_tag: tag={tag}")
-    return create_empty_tag(tag)
+    return _legacy_mutation_result_to_json(create_empty_tag(tag))
 
 
 def add(pid=None, tag=None):
@@ -3196,7 +3254,7 @@ def add(pid=None, tag=None):
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
     logger.trace(f"[API] add: pid={pid}, tag={tag}")
-    return add_paper_to_tag(pid, tag)
+    return _legacy_mutation_result_to_json(add_paper_to_tag(pid, tag))
 
 
 def sub(pid=None, tag=None):
@@ -3207,7 +3265,7 @@ def sub(pid=None, tag=None):
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
     logger.trace(f"[API] sub: pid={pid}, tag={tag}")
-    return remove_paper_from_tag(pid, tag)
+    return _legacy_mutation_result_to_json(remove_paper_from_tag(pid, tag))
 
 
 def delete_tag(tag=None):
@@ -3217,7 +3275,7 @@ def delete_tag(tag=None):
     _csrf_protect()
     tag = _normalize_name(tag)
     logger.trace(f"[API] delete_tag: tag={tag}")
-    return _delete_tag(tag)
+    return _legacy_mutation_result_to_json(_delete_tag(tag))
 
 
 def rename_tag(otag=None, ntag=None):
@@ -3228,7 +3286,7 @@ def rename_tag(otag=None, ntag=None):
     otag = _normalize_name(otag)
     ntag = _normalize_name(ntag)
     logger.trace(f"[API] rename_tag: otag={otag}, ntag={ntag}")
-    return _rename_tag(otag, ntag)
+    return _legacy_mutation_result_to_json(_rename_tag(otag, ntag))
 
 
 def add_ctag(ctag=None):
@@ -3238,7 +3296,7 @@ def add_ctag(ctag=None):
     _csrf_protect()
     ctag = _normalize_name(ctag)
     logger.trace(f"[API] add_ctag: ctag={ctag}")
-    return create_combined_tag(ctag)
+    return _legacy_mutation_result_to_json(create_combined_tag(ctag))
 
 
 def delete_ctag(ctag=None):
@@ -3248,7 +3306,7 @@ def delete_ctag(ctag=None):
     _csrf_protect()
     ctag = _normalize_name(ctag)
     logger.trace(f"[API] delete_ctag: ctag={ctag}")
-    return delete_combined_tag(ctag)
+    return _legacy_mutation_result_to_json(delete_combined_tag(ctag))
 
 
 def rename_ctag(otag=None, ntag=None):
@@ -3257,7 +3315,7 @@ def rename_ctag(otag=None, ntag=None):
 
     _csrf_protect()
     logger.trace(f"[API] rename_ctag: otag={otag}, ntag={ntag}")
-    return rename_combined_tag(otag, ntag)
+    return _legacy_mutation_result_to_json(rename_combined_tag(otag, ntag))
 
 
 def add_key(keyword=None):
@@ -3267,7 +3325,7 @@ def add_key(keyword=None):
     _csrf_protect()
     keyword = _normalize_name(keyword)
     logger.trace(f"[API] add_key: keyword={keyword}")
-    return add_keyword(keyword)
+    return _legacy_mutation_result_to_json(add_keyword(keyword))
 
 
 def delete_key(keyword=None):
@@ -3277,7 +3335,7 @@ def delete_key(keyword=None):
     _csrf_protect()
     keyword = _normalize_name(keyword)
     logger.trace(f"[API] delete_key: keyword={keyword}")
-    return delete_keyword(keyword)
+    return _legacy_mutation_result_to_json(delete_keyword(keyword))
 
 
 def rename_key(okey=None, nkey=None):
@@ -3288,7 +3346,7 @@ def rename_key(okey=None, nkey=None):
     okey = _normalize_name(okey)
     nkey = _normalize_name(nkey)
     logger.trace(f"[API] rename_key: okey={okey}, nkey={nkey}")
-    return rename_keyword(okey, nkey)
+    return _legacy_mutation_result_to_json(rename_keyword(okey, nkey))
 
 
 # -----------------------------------------------------------------------------
@@ -3321,6 +3379,9 @@ def logout():
 def register_email():
     """Register email - delegates to auth_service."""
     from backend.services.auth_service import register_user_email
+
+    if g.user is None:
+        return _api_error("Not logged in", 401)
 
     _csrf_protect()
     email = (request.form.get("email") or "").strip()
@@ -3508,7 +3569,12 @@ def api_readinglist_add():
     """Add paper to reading list - delegates to readinglist_service."""
     t_start = time.time()
     try:
-        data, err = _parse_api_request(require_login=True, require_pid=True, schema=ReadingListPidRequest)
+        data, err = _parse_api_request(
+            require_login=True,
+            require_csrf=True,
+            require_pid=True,
+            schema=ReadingListPidRequest,
+        )
         if err:
             return err
 

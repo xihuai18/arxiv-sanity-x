@@ -38,6 +38,13 @@ function fetchUserStateAndApply() {
     return CommonUtils.fetchUserState().then(applyUserState);
 }
 
+function parseMutationResponse(response) {
+    return response.json().catch(() => ({
+        success: false,
+        error: 'Invalid server response',
+    }));
+}
+
 // Common helpers are centralized in common_utils.js
 
 function updatePaperSummaryStatus(pid, status, error, queueRank, queueTotal, taskId) {
@@ -57,6 +64,160 @@ function updatePaperSummaryStatus(pid, status, error, queueRank, queueTotal, tas
         p.summary_queue_total = queueTotal || 0;
     }
     renderPaperList();
+
+    // If a summary just became available, refresh TL;DR for this card (best-effort).
+    if (status === 'ok') {
+        maybeRefreshPaperTldr(pid);
+    }
+}
+
+// Best-effort TL;DR refresh state to avoid repeated network calls.
+// We keep it small and robust against duplicate summary_status events.
+const TLDR_REFRESH_STATE = new Map(); // pid -> { inFlight, attempts, cooldownUntilMs, lastError }
+const TLDR_REFRESH_MAX_RETRIES = 2;
+const TLDR_REFRESH_COOLDOWN_MS = 60000;
+
+function updatePaperTldr(pid, tldr) {
+    if (!pid || !Array.isArray(papers)) return;
+    const p = papers.find(item => item && item.id === pid);
+    if (!p) return;
+    p.tldr = String(tldr || '');
+    renderPaperList();
+    try {
+        // Scoped to the list container to avoid full-document scans.
+        triggerMathJax(document.getElementById('paperList'));
+    } catch (e) {}
+}
+
+function fetchPaperTldr(pid) {
+    return csrfFetch('/api/get_paper_tldr', {
+        method: 'POST',
+        body: JSON.stringify({ pid: pid }),
+    }).then(resp => resp.json());
+}
+
+function _getTldrRefreshState(pid) {
+    const s = TLDR_REFRESH_STATE.get(pid);
+    if (s && typeof s === 'object') return s;
+    return { inFlight: false, attempts: 0, cooldownUntilMs: 0, lastError: '' };
+}
+
+function _setTldrRefreshState(pid, next) {
+    TLDR_REFRESH_STATE.set(pid, next);
+}
+
+function _scheduleTldrRetry(pid, attempts) {
+    const delayMs = 1200 * Math.max(1, Number(attempts || 1));
+    setTimeout(() => {
+        refreshPaperTldr(pid);
+    }, delayMs);
+}
+
+function refreshPaperTldr(pid) {
+    if (!pid || !Array.isArray(papers)) return;
+    const p = papers.find(item => item && item.id === pid);
+    if (!p) return;
+
+    const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
+    if (hasTldr) {
+        _setTldrRefreshState(pid, {
+            inFlight: false,
+            attempts: 0,
+            cooldownUntilMs: 0,
+            lastError: '',
+        });
+        return;
+    }
+
+    const current = _getTldrRefreshState(pid);
+    if (!current.inFlight) return;
+
+    fetchPaperTldr(pid)
+        .then(data => {
+            if (data && data.success) {
+                const tldr = String(data.tldr || '');
+                if (tldr.trim()) {
+                    updatePaperTldr(pid, tldr);
+                    _setTldrRefreshState(pid, {
+                        inFlight: false,
+                        attempts: 0,
+                        cooldownUntilMs: 0,
+                        lastError: '',
+                    });
+                    return;
+                }
+
+                const stillOk = String(data.summary_status || '') === 'ok';
+                const nextAttempts = Number(current.attempts || 0) + 1;
+                if (stillOk && nextAttempts <= TLDR_REFRESH_MAX_RETRIES) {
+                    // Keep inFlight=true to prevent duplicate refreshes while we retry.
+                    _setTldrRefreshState(pid, {
+                        inFlight: true,
+                        attempts: nextAttempts,
+                        cooldownUntilMs: 0,
+                        lastError: '',
+                    });
+                    _scheduleTldrRetry(pid, nextAttempts);
+                    return;
+                }
+
+                // Back off to avoid repeated fetches if the summary doesn't contain TL;DR.
+                _setTldrRefreshState(pid, {
+                    inFlight: false,
+                    attempts: 0,
+                    cooldownUntilMs: Date.now() + TLDR_REFRESH_COOLDOWN_MS,
+                    lastError: '',
+                });
+                return;
+            }
+
+            const err = (data && data.error) || 'unknown_error';
+            _setTldrRefreshState(pid, {
+                inFlight: false,
+                attempts: 0,
+                cooldownUntilMs: Date.now() + TLDR_REFRESH_COOLDOWN_MS,
+                lastError: String(err || ''),
+            });
+        })
+        .catch(err => {
+            _setTldrRefreshState(pid, {
+                inFlight: false,
+                attempts: 0,
+                cooldownUntilMs: Date.now() + TLDR_REFRESH_COOLDOWN_MS,
+                lastError: String(err || 'network_error'),
+            });
+        });
+}
+
+function maybeRefreshPaperTldr(pid) {
+    if (!pid || !Array.isArray(papers)) return;
+    const p = papers.find(item => item && item.id === pid);
+    if (!p) return;
+
+    const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
+    if (hasTldr) {
+        _setTldrRefreshState(pid, {
+            inFlight: false,
+            attempts: 0,
+            cooldownUntilMs: 0,
+            lastError: '',
+        });
+        return;
+    }
+
+    const current = _getTldrRefreshState(pid);
+    const now = Date.now();
+    if (current.inFlight) return;
+    if (current.cooldownUntilMs && now < current.cooldownUntilMs) return;
+
+    // Mark as in-flight synchronously to prevent duplicate requests.
+    _setTldrRefreshState(pid, {
+        inFlight: true,
+        attempts: Number(current.attempts || 0),
+        cooldownUntilMs: 0,
+        lastError: '',
+    });
+    refreshPaperTldr(pid);
 }
 
 // Register callback for summary status updates from shared polling
@@ -307,11 +468,23 @@ const Paper = props => {
     let readinglist_btn = null;
     if (user) {
         const isInReadingList = props.inReadingList;
-        const btnClass = isInReadingList ? 'readinglist-btn active' : 'readinglist-btn';
-        const btnTitle = isInReadingList ? 'In reading list' : 'Add to reading list';
-        const btnIcon = isInReadingList ? '📖' : '🔖';
+        const isPending = Boolean(props.readingListPending);
+        const btnClass =
+            (isInReadingList ? 'readinglist-btn active' : 'readinglist-btn') +
+            (isPending ? ' pending' : '');
+        const btnTitle = isPending
+            ? 'Working...'
+            : isInReadingList
+              ? 'In reading list'
+              : 'Add to reading list';
+        const btnIcon = isPending ? '⏳' : isInReadingList ? '📖' : '🔖';
         readinglist_btn = (
-            <div class={btnClass} onClick={props.onToggleReadingList} title={btnTitle}>
+            <div
+                class={btnClass}
+                onClick={isPending ? null : props.onToggleReadingList}
+                title={btnTitle}
+                aria-disabled={isPending ? 'true' : 'false'}
+            >
                 {btnIcon}
             </div>
         );
@@ -413,6 +586,8 @@ const PaperList = props => {
 class PaperComponent extends React.Component {
     constructor(props) {
         super(props);
+        this._isMounted = false;
+        this._readingListRequestInFlight = false;
         if (!Array.isArray(props.paper.utags)) {
             props.paper.utags = [];
         }
@@ -426,6 +601,7 @@ class PaperComponent extends React.Component {
             newTagValue: '',
             searchValue: '',
             inReadingList: isInReadingList(props.paper.id),
+            readingListPending: false,
             summaryStatus: props.paper.summary_status || '',
             summaryLastError: props.paper.summary_last_error || '',
             summaryQueueRank: props.paper.summary_queue_rank || 0,
@@ -442,9 +618,16 @@ class PaperComponent extends React.Component {
         this.handleSearchChange = this.handleSearchChange.bind(this);
         this.handleToggleReadingList = this.handleToggleReadingList.bind(this);
         this.handleTriggerSummary = this.handleTriggerSummary.bind(this);
+        this.setStateIfMounted = this.setStateIfMounted.bind(this);
+    }
+
+    setStateIfMounted(nextState) {
+        if (!this._isMounted) return;
+        this.setState(nextState);
     }
 
     componentDidMount() {
+        this._isMounted = true;
         registerDropdown(this.dropdownId, {
             isOpen: () => this.state.dropdownOpen,
             close: () => {
@@ -500,6 +683,7 @@ class PaperComponent extends React.Component {
     }
 
     componentWillUnmount() {
+        this._isMounted = false;
         unregisterDropdown(this.dropdownId);
         this.stopQueueRankPolling();
     }
@@ -691,10 +875,14 @@ class PaperComponent extends React.Component {
     }
 
     handleToggleReadingList() {
-        const { paper, inReadingList } = this.state;
+        const { paper, inReadingList, readingListPending } = this.state;
+        if (readingListPending) return;
+        if (this._readingListRequestInFlight) return;
+        this._readingListRequestInFlight = true;
 
         if (inReadingList) {
             // Remove from reading list
+            this.setState({ readingListPending: true, inReadingList: false });
             csrfFetch('/api/readinglist/remove', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -703,18 +891,44 @@ class PaperComponent extends React.Component {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        removeFromReadingListCache(paper.id);
-                        this.setState({ inReadingList: false });
+                        this.setStateIfMounted({ inReadingList: false });
+                        try {
+                            removeFromReadingListCache(paper.id);
+                        } catch (e) {
+                            console.warn('Failed to update readinglist cache (remove):', e);
+                        }
                         console.log(`Removed ${paper.id} from reading list`);
                     } else {
+                        this.setStateIfMounted({ inReadingList: true });
                         console.error('Failed to remove from reading list:', data.error);
+                        const c = (window && window.ArxivSanityCommon) || {};
+                        if (typeof c.showToast === 'function') {
+                            c.showToast(
+                                'Failed to remove from reading list: ' + (data.error || ''),
+                                {
+                                    type: 'error',
+                                }
+                            );
+                        }
                     }
                 })
                 .catch(error => {
+                    this.setStateIfMounted({ inReadingList: true });
                     console.error('Error removing from reading list:', error);
+                    const c = (window && window.ArxivSanityCommon) || {};
+                    if (typeof c.showToast === 'function') {
+                        c.showToast('Network error, failed to remove from reading list', {
+                            type: 'error',
+                        });
+                    }
+                })
+                .finally(() => {
+                    this._readingListRequestInFlight = false;
+                    this.setStateIfMounted({ readingListPending: false });
                 });
         } else {
             // Add to reading list
+            this.setState({ readingListPending: true, inReadingList: true });
             csrfFetch('/api/readinglist/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -723,10 +937,14 @@ class PaperComponent extends React.Component {
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        addToReadingListCache(paper.id);
+                        this.setStateIfMounted({ inReadingList: true });
+                        try {
+                            addToReadingListCache(paper.id);
+                        } catch (e) {
+                            console.warn('Failed to update readinglist cache (add):', e);
+                        }
                         const taskId = data.task_id ? String(data.task_id) : '';
-                        this.setState({
-                            inReadingList: true,
+                        this.setStateIfMounted({
                             summaryStatus: 'queued',
                             summaryLastError: '',
                             summaryTaskId: taskId,
@@ -746,12 +964,32 @@ class PaperComponent extends React.Component {
                         console.log(`Added ${paper.id} to reading list, top_tags:`, data.top_tags);
                     } else {
                         console.error('Failed to add to reading list:', data.error);
-                        alert('Failed to add to reading list: ' + data.error);
+                        this.setStateIfMounted({ inReadingList: false });
+                        const msg =
+                            'Failed to add to reading list: ' + (data.error || 'Unknown error');
+                        const c = (window && window.ArxivSanityCommon) || {};
+                        if (typeof c.showToast === 'function') {
+                            c.showToast(msg, { type: 'error' });
+                        } else {
+                            alert(msg);
+                        }
                     }
                 })
                 .catch(error => {
                     console.error('Error adding to reading list:', error);
-                    alert('Network error, failed to add to reading list');
+                    this.setStateIfMounted({ inReadingList: false });
+                    const c = (window && window.ArxivSanityCommon) || {};
+                    if (typeof c.showToast === 'function') {
+                        c.showToast('Network error, failed to add to reading list', {
+                            type: 'error',
+                        });
+                    } else {
+                        alert('Network error, failed to add to reading list');
+                    }
+                })
+                .finally(() => {
+                    this._readingListRequestInFlight = false;
+                    this.setStateIfMounted({ readingListPending: false });
                 });
         }
     }
@@ -835,6 +1073,7 @@ class PaperComponent extends React.Component {
                 searchValue={this.state.searchValue}
                 onSearchChange={this.handleSearchChange}
                 inReadingList={this.state.inReadingList}
+                readingListPending={this.state.readingListPending}
                 onToggleReadingList={this.handleToggleReadingList}
                 summaryStatus={this.state.summaryStatus}
                 summaryLastError={this.state.summaryLastError}
@@ -1415,9 +1654,9 @@ class TagListComponent extends React.Component {
         }
 
         csrfFetch('/add_tag/' + encodeURIComponent(trimmedTag))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags
@@ -1433,7 +1672,7 @@ class TagListComponent extends React.Component {
                     });
                     console.log('Tag added successfully');
                 } else {
-                    alert('Add failed: ' + text);
+                    alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
@@ -1736,9 +1975,9 @@ class TagListComponent extends React.Component {
         csrfFetch(
             '/rename/' + encodeURIComponent(editingTag.name) + '/' + encodeURIComponent(trimmedName)
         )
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.map(tag =>
@@ -1761,7 +2000,7 @@ class TagListComponent extends React.Component {
                     });
                     console.log('Tag renamed successfully');
                 } else {
-                    alert('Rename failed: ' + text);
+                    alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
@@ -1774,9 +2013,9 @@ class TagListComponent extends React.Component {
         const { deletingTag } = this.state;
 
         csrfFetch('/del/' + encodeURIComponent(deletingTag.name))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.filter(tag => tag.name !== deletingTag.name)
@@ -1795,7 +2034,7 @@ class TagListComponent extends React.Component {
                     });
                     console.log('Tag deleted successfully');
                 } else {
-                    alert('Delete failed: ' + text);
+                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
@@ -2166,9 +2405,9 @@ class CombinedTagListComponent extends React.Component {
                     '/' +
                     encodeURIComponent(combinationName)
             )
-                .then(response => response.text())
-                .then(text => {
-                    if (text.includes('ok')) {
+                .then(parseMutationResponse)
+                .then(payload => {
+                    if (payload && payload.success) {
                         this.setState(prevState => {
                             const nextCombinedTags = renameCombinedTagInList(
                                 prevState.combined_tags,
@@ -2187,7 +2426,9 @@ class CombinedTagListComponent extends React.Component {
                         });
                         console.log('Combined tag edited successfully');
                     } else {
-                        throw new Error('Rename failed: ' + text);
+                        throw new Error(
+                            'Rename failed: ' + ((payload && payload.error) || 'Unknown error')
+                        );
                     }
                 })
                 .catch(error => {
@@ -2197,9 +2438,9 @@ class CombinedTagListComponent extends React.Component {
         } else {
             // Add new combined tag
             csrfFetch('/add_ctag/' + encodeURIComponent(combinationName))
-                .then(response => response.text())
-                .then(text => {
-                    if (text.includes('ok')) {
+                .then(parseMutationResponse)
+                .then(payload => {
+                    if (payload && payload.success) {
                         this.setState(prevState => {
                             const nextCombinedTags = prevState.combined_tags.concat([
                                 { name: combinationName },
@@ -2215,7 +2456,7 @@ class CombinedTagListComponent extends React.Component {
                         });
                         console.log('Combined tag added successfully');
                     } else {
-                        alert('Add failed: ' + text);
+                        alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
                     }
                 })
                 .catch(error => {
@@ -2229,9 +2470,9 @@ class CombinedTagListComponent extends React.Component {
         const { deletingCombinedTag } = this.state;
 
         csrfFetch('/del_ctag/' + encodeURIComponent(deletingCombinedTag.name))
-            .then(response => response.text())
-            .then(text => {
-                if (text.includes('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextCombinedTags = prevState.combined_tags.filter(
                             tag => tag.name !== deletingCombinedTag.name
@@ -2245,7 +2486,7 @@ class CombinedTagListComponent extends React.Component {
                     });
                     console.log('Combined tag deleted successfully');
                 } else {
-                    alert('Delete failed: ' + text);
+                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
@@ -2579,9 +2820,9 @@ class KeyComponent extends React.Component {
         }
 
         csrfFetch('/add_key/' + encodeURIComponent(trimmedKey))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextKeys = [...prevState.keys, { name: trimmedKey, pids: [] }];
                         setGlobalKeys(nextKeys, { renderKeys: false });
@@ -2593,7 +2834,9 @@ class KeyComponent extends React.Component {
                     });
                     console.log('Keyword added successfully');
                 } else {
-                    alert('Failed to add keyword: ' + text);
+                    alert(
+                        'Failed to add keyword: ' + ((payload && payload.error) || 'Unknown error')
+                    );
                 }
             })
             .catch(error => {
@@ -2644,9 +2887,9 @@ class KeyComponent extends React.Component {
                 '/' +
                 encodeURIComponent(trimmedKeyName)
         )
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextKeys = prevState.keys.map(key =>
                             key.name === editingKey.name ? { ...key, name: trimmedKeyName } : key
@@ -2661,7 +2904,7 @@ class KeyComponent extends React.Component {
                     });
                     console.log('Keyword renamed successfully');
                 } else {
-                    alert('Rename failed: ' + text);
+                    alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
@@ -2674,9 +2917,9 @@ class KeyComponent extends React.Component {
         const { deletingKey } = this.state;
 
         csrfFetch('/del_key/' + encodeURIComponent(deletingKey.name))
-            .then(response => response.text())
-            .then(text => {
-                if (text.startsWith('ok')) {
+            .then(parseMutationResponse)
+            .then(payload => {
+                if (payload && payload.success) {
                     this.setState(prevState => {
                         const nextKeys = prevState.keys.filter(
                             key => key.name !== deletingKey.name
@@ -2690,7 +2933,7 @@ class KeyComponent extends React.Component {
                     });
                     console.log('Keyword deleted successfully');
                 } else {
-                    alert('Delete failed: ' + text);
+                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {

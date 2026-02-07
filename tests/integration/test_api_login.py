@@ -74,3 +74,17 @@ class TestRegisterEmailApi:
             data={"email": "test@example.com"},
         )
         assert resp.status_code == 403
+
+    def test_register_email_with_csrf_but_no_login_returns_401_json(self, client, csrf_token):
+        """Test that register_email returns JSON 401 when not logged in."""
+        resp = client.post(
+            "/register_email",
+            data={"email": "test@example.com"},
+            headers={"X-CSRF-Token": csrf_token},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 401
+
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Not logged in"

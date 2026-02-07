@@ -71,25 +71,32 @@ class TestTagSearchApi:
         )
         assert resp.status_code == 401
 
-    def test_tag_search_missing_tag_returns_400(self, logged_in_client):
+    def test_tag_search_missing_tag_returns_400(self, logged_in_client, csrf_token):
         """Test that missing tag_name returns 400."""
-        resp = logged_in_client.post("/api/tag_search", json={})
+        resp = logged_in_client.post("/api/tag_search", json={}, headers={"X-CSRF-Token": csrf_token})
         assert resp.status_code == 400
 
-    def test_tag_search_with_tag_returns_success(self, logged_in_client):
+    def test_tag_search_session_without_csrf_returns_403(self, logged_in_client):
+        """Test that session auth requires CSRF for tag_search."""
+        resp = logged_in_client.post("/api/tag_search", json={"tag_name": "test_tag"})
+        assert resp.status_code == 403
+
+    def test_tag_search_with_tag_returns_success(self, logged_in_client, csrf_token):
         """Test that valid tag search returns success structure."""
         resp = logged_in_client.post(
             "/api/tag_search",
             json={"tag_name": "test_tag", "user": "test_user", "time_delta": 365, "limit": 5},
+            headers={"X-CSRF-Token": csrf_token},
         )
         # May return 200 with empty results or 400 if tag doesn't exist
         assert resp.status_code in [200, 400]
 
-    def test_tag_search_user_mismatch_returns_403(self, logged_in_client):
+    def test_tag_search_user_mismatch_returns_403(self, logged_in_client, csrf_token):
         """Test that mismatched user field is rejected."""
         resp = logged_in_client.post(
             "/api/tag_search",
             json={"tag_name": "test_tag", "user": "other_user"},
+            headers={"X-CSRF-Token": csrf_token},
         )
         assert resp.status_code == 403
 
@@ -111,32 +118,40 @@ class TestTagsSearchApi:
         )
         assert resp.status_code in [200, 400]
 
-    def test_tags_search_missing_tags_returns_400(self, logged_in_client):
+    def test_tags_search_missing_tags_returns_400(self, logged_in_client, csrf_token):
         """Test that missing tags returns 400."""
-        resp = logged_in_client.post("/api/tags_search", json={})
+        resp = logged_in_client.post("/api/tags_search", json={}, headers={"X-CSRF-Token": csrf_token})
         assert resp.status_code == 400
 
-    def test_tags_search_with_tags_returns_success(self, logged_in_client):
+    def test_tags_search_session_without_csrf_returns_403(self, logged_in_client):
+        """Test that session auth requires CSRF for tags_search."""
+        resp = logged_in_client.post("/api/tags_search", json={"tags": ["test_tag"]})
+        assert resp.status_code == 403
+
+    def test_tags_search_with_tags_returns_success(self, logged_in_client, csrf_token):
         """Test that valid tags search returns success structure."""
         resp = logged_in_client.post(
             "/api/tags_search",
             json={"tags": ["test_tag"], "user": "test_user", "time_delta": 365, "limit": 5},
+            headers={"X-CSRF-Token": csrf_token},
         )
         # May return 200 with empty results or 400 if tags don't exist
         assert resp.status_code in [200, 400]
 
-    def test_tags_search_user_mismatch_returns_403(self, logged_in_client):
+    def test_tags_search_user_mismatch_returns_403(self, logged_in_client, csrf_token):
         """Test that mismatched user field is rejected."""
         resp = logged_in_client.post(
             "/api/tags_search",
             json={"tags": ["test_tag"], "user": "other_user"},
+            headers={"X-CSRF-Token": csrf_token},
         )
         assert resp.status_code == 403
 
-    def test_tags_search_empty_tags_list(self, logged_in_client):
+    def test_tags_search_empty_tags_list(self, logged_in_client, csrf_token):
         """Test tags search with empty tags list."""
         resp = logged_in_client.post(
             "/api/tags_search",
             json={"tags": [], "user": "test_user"},
+            headers={"X-CSRF-Token": csrf_token},
         )
         assert resp.status_code == 400

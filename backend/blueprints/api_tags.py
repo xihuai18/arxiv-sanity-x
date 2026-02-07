@@ -128,32 +128,32 @@ def add_tag(tag):
     return legacy.add_tag(tag)
 
 
-@bp.route("/add/<pid>/<tag>", methods=["GET", "POST"])
+@bp.route("/add/<pid>/<tag>", methods=["POST"])
 def add(pid, tag):
     return legacy.add(pid, tag)
 
 
-@bp.route("/sub/<pid>/<tag>", methods=["GET", "POST"])
+@bp.route("/sub/<pid>/<tag>", methods=["POST"])
 def sub(pid, tag):
     return legacy.sub(pid, tag)
 
 
-@bp.route("/del/<tag>", methods=["GET", "POST"])
+@bp.route("/del/<tag>", methods=["POST"])
 def delete_tag(tag):
     return legacy.delete_tag(tag)
 
 
-@bp.route("/rename/<otag>/<ntag>", methods=["GET", "POST"])
+@bp.route("/rename/<otag>/<ntag>", methods=["POST"])
 def rename_tag(otag, ntag):
     return legacy.rename_tag(otag, ntag)
 
 
-@bp.route("/add_ctag/<ctag>", methods=["GET", "POST"])
+@bp.route("/add_ctag/<ctag>", methods=["POST"])
 def add_ctag(ctag):
     return legacy.add_ctag(ctag)
 
 
-@bp.route("/del_ctag/<ctag>", methods=["GET", "POST"])
+@bp.route("/del_ctag/<ctag>", methods=["POST"])
 def delete_ctag(ctag):
     return legacy.delete_ctag(ctag)
 
@@ -163,12 +163,12 @@ def rename_ctag(otag, ntag):
     return legacy.rename_ctag(otag, ntag)
 
 
-@bp.route("/add_key/<keyword>", methods=["GET", "POST"])
+@bp.route("/add_key/<keyword>", methods=["POST"])
 def add_key(keyword):
     return legacy.add_key(keyword)
 
 
-@bp.route("/del_key/<keyword>", methods=["GET", "POST"])
+@bp.route("/del_key/<keyword>", methods=["POST"])
 def delete_key(keyword):
     return legacy.delete_key(keyword)
 

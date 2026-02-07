@@ -33,6 +33,9 @@ def _load_manifest() -> dict[str, str]:
 
     if not os.path.isfile(manifest_path):
         # Fallback: no manifest, return empty dict (use original filenames)
+        # Clear cached manifest so a newly-created file will be reloaded even if mtime resolution is coarse.
+        _MANIFEST_MTIME = 0.0
+        _MANIFEST_CACHE = {}
         logger.debug(f"Manifest file not found at {manifest_path}, using fallback resolution")
         return {}
 
@@ -138,7 +141,16 @@ def get_hashed_filename(original_name: str) -> str:
     manifest = _load_manifest()
     resolved = manifest.get(original_name)
     if resolved:
-        return resolved
+        # Guard against stale manifest entries (e.g., partial deploy/rollback).
+        # If manifest points to a non-existent file, fall back to best-effort lookup.
+        try:
+            dist_dir = _get_dist_dir()
+            if os.path.isfile(os.path.join(dist_dir, resolved)):
+                return resolved
+            logger.warning(f"Manifest entry missing on disk: {original_name} -> {resolved}. Falling back.")
+        except Exception:
+            # If anything goes wrong, fall back to best-effort lookup.
+            pass
 
     fallback = _fallback_hashed_filename(original_name)
     return fallback or original_name

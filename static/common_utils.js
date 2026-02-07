@@ -1152,10 +1152,19 @@ function debugLog(category, message, data) {
         // Only lazy-load MathJax if we detect math content.
         // Note: MathJax config object may exist but script not loaded yet
         try {
-            const text = element
-                ? element.textContent || ''
-                : (document.body && document.body.textContent) || '';
-            if (!hasMathContent(text)) return;
+            // If summary markdown placeholders exist, load MathJax even if textContent is empty.
+            if (
+                element &&
+                typeof element.querySelector === 'function' &&
+                element.querySelector('[data-tex]')
+            ) {
+                // fall through
+            } else {
+                const text = element
+                    ? element.textContent || ''
+                    : (document.body && document.body.textContent) || '';
+                if (!hasMathContent(text)) return;
+            }
         } catch (e) {
             // If detection fails, be conservative and load MathJax.
         }
@@ -1172,6 +1181,38 @@ function debugLog(category, message, data) {
     let mathJaxLoading = false;
     let mathJaxLoaded = false;
     const mathJaxCallbacks = [];
+    let mathJaxLoadFailures = 0;
+    let mathJaxRetryTimer = null;
+    let mathJaxAttempt = 0;
+    let mathJaxWatchdogTimer = null;
+
+    function isMathJaxAvailable() {
+        try {
+            if (typeof MathJax === 'undefined') return false;
+            if (typeof MathJax.typesetPromise === 'function') return true;
+            if (typeof MathJax.typeset === 'function') return true;
+            if (typeof MathJax.tex2chtmlPromise === 'function') return true;
+            if (
+                MathJax.startup &&
+                MathJax.startup.document &&
+                typeof MathJax.startup.document.convert === 'function'
+            )
+                return true;
+        } catch (e) {}
+        return false;
+    }
+
+    function runMathJaxCallbacks() {
+        while (mathJaxCallbacks.length > 0) {
+            const cb = mathJaxCallbacks.shift();
+            if (typeof cb !== 'function') continue;
+            try {
+                cb();
+            } catch (e) {
+                console.warn('MathJax callback error:', e);
+            }
+        }
+    }
 
     /**
      * Default MathJax configuration
@@ -1331,7 +1372,9 @@ function debugLog(category, message, data) {
     function hasMathContent(text) {
         if (!text) return false;
         // Check for common LaTeX patterns
-        return /\$[^$]+\$|\\\[|\\\(|\\begin\{|\\frac|\\sum|\\int|\\alpha|\\beta|\\gamma/.test(text);
+        return /\$\$|\$[^$]+\$|\\\[|\\\(|\\begin\{|\\frac|\\sum|\\int|\\alpha|\\beta|\\gamma/.test(
+            text
+        );
     }
 
     /**
@@ -1352,24 +1395,50 @@ function debugLog(category, message, data) {
      * @param {string} [scriptUrl] - Custom MathJax script URL
      */
     function loadMathJaxOnDemand(callback, scriptUrl) {
-        // Already loaded
-        if (
-            mathJaxLoaded ||
-            (typeof MathJax !== 'undefined' && (MathJax.typesetPromise || MathJax.typeset))
-        ) {
-            mathJaxLoaded = true;
-            if (callback) callback();
-            return;
-        }
+        // Queue callback first so we can consistently drain the queue when MathJax becomes ready.
+        if (callback) mathJaxCallbacks.push(callback);
 
-        // Queue callback
-        if (callback) {
-            mathJaxCallbacks.push(callback);
+        // Already loaded / ready (covers cases where a script tag was loaded outside this helper)
+        if (mathJaxLoaded || isMathJaxAvailable()) {
+            mathJaxLoaded = true;
+            mathJaxLoading = false;
+            mathJaxLoadFailures = 0;
+            try {
+                if (mathJaxRetryTimer) {
+                    clearTimeout(mathJaxRetryTimer);
+                    mathJaxRetryTimer = null;
+                }
+            } catch (e) {}
+            try {
+                if (mathJaxWatchdogTimer) {
+                    clearTimeout(mathJaxWatchdogTimer);
+                    mathJaxWatchdogTimer = null;
+                }
+            } catch (e) {}
+
+            // Wait for MathJax startup (if available) before running callbacks.
+            try {
+                if (typeof MathJax !== 'undefined' && MathJax.startup && MathJax.startup.promise) {
+                    MathJax.startup.promise.then(runMathJaxCallbacks).catch(runMathJaxCallbacks);
+                    return;
+                }
+            } catch (e) {}
+            runMathJaxCallbacks();
+            return;
         }
 
         // Already loading
         if (mathJaxLoading) return;
         mathJaxLoading = true;
+        mathJaxAttempt += 1;
+        const attempt = mathJaxAttempt;
+
+        try {
+            if (mathJaxWatchdogTimer) {
+                clearTimeout(mathJaxWatchdogTimer);
+                mathJaxWatchdogTimer = null;
+            }
+        } catch (e) {}
 
         // Set config before loading script
         if (typeof window.MathJax === 'undefined') {
@@ -1378,41 +1447,147 @@ function debugLog(category, message, data) {
 
         // Create and load script (avoid duplicates)
         let script = document.getElementById('MathJax-script');
-        if (!script) {
-            script = document.createElement('script');
-            script.id = 'MathJax-script';
-            script.src = scriptUrl || staticUrl('lib/es5/tex-chtml-full.js');
-            script.async = true;
-            document.head.appendChild(script);
+        let isExternalScript = false;
+        try {
+            isExternalScript =
+                !!script && (!script.dataset || String(script.dataset.mjxCreated || '') !== '1');
+        } catch (e) {
+            isExternalScript = !!script;
         }
-        script.onload = function () {
+
+        // If a previous attempt failed, remove the script so we can retry.
+        // This helps with transient network errors and multi-backend deployments where
+        // a subsequent request may hit a different static server successfully.
+        try {
+            if (script && script.dataset && script.dataset.mjxFailed === '1') {
+                script.remove();
+                script = null;
+            }
+        } catch (e) {}
+
+        let finished = false;
+        const finishOk = function () {
+            if (finished) return;
+            if (attempt !== mathJaxAttempt) return;
+            finished = true;
+
             mathJaxLoaded = true;
             mathJaxLoading = false;
-
-            const runCallbacks = function () {
-                while (mathJaxCallbacks.length > 0) {
-                    const cb = mathJaxCallbacks.shift();
-                    try {
-                        cb();
-                    } catch (e) {
-                        console.warn('MathJax callback error:', e);
-                    }
+            mathJaxLoadFailures = 0;
+            try {
+                if (mathJaxRetryTimer) {
+                    clearTimeout(mathJaxRetryTimer);
+                    mathJaxRetryTimer = null;
                 }
-            };
+            } catch (e) {}
+            try {
+                if (mathJaxWatchdogTimer) {
+                    clearTimeout(mathJaxWatchdogTimer);
+                    mathJaxWatchdogTimer = null;
+                }
+            } catch (e) {}
+            try {
+                if (script && script.dataset) {
+                    script.dataset.mjxFailed = '0';
+                    script.dataset.mjxLoaded = '1';
+                }
+            } catch (e) {}
 
             // Wait for MathJax startup (if available) before running callbacks.
             try {
                 if (typeof MathJax !== 'undefined' && MathJax.startup && MathJax.startup.promise) {
-                    MathJax.startup.promise.then(runCallbacks).catch(runCallbacks);
+                    MathJax.startup.promise.then(runMathJaxCallbacks).catch(runMathJaxCallbacks);
                     return;
                 }
             } catch (e) {}
-            runCallbacks();
+            runMathJaxCallbacks();
         };
-        script.onerror = function () {
+
+        const finishFail = function () {
+            if (finished) return;
+            if (attempt !== mathJaxAttempt) return;
+            finished = true;
+
             mathJaxLoading = false;
+            mathJaxLoadFailures += 1;
+            try {
+                if (mathJaxWatchdogTimer) {
+                    clearTimeout(mathJaxWatchdogTimer);
+                    mathJaxWatchdogTimer = null;
+                }
+            } catch (e) {}
+            try {
+                if (script && script.dataset) script.dataset.mjxFailed = '1';
+            } catch (e) {}
+            try {
+                if (script && script.parentNode) script.parentNode.removeChild(script);
+            } catch (e) {}
             console.warn('Failed to load MathJax');
+
+            if (mathJaxLoadFailures >= 3) {
+                // Give up auto-retry; clear pending callbacks to avoid hanging forever.
+                mathJaxCallbacks.length = 0;
+                return;
+            }
+
+            // Best-effort retry with exponential backoff if there are pending callbacks.
+            try {
+                if (mathJaxCallbacks.length === 0) return;
+                if (mathJaxRetryTimer) return;
+                const delay = Math.min(8000, 300 * Math.pow(2, mathJaxLoadFailures - 1));
+                mathJaxRetryTimer = setTimeout(() => {
+                    mathJaxRetryTimer = null;
+                    loadMathJaxOnDemand(null, scriptUrl);
+                }, delay);
+            } catch (e) {}
         };
+
+        if (!script) {
+            script = document.createElement('script');
+            script.id = 'MathJax-script';
+            script.async = true;
+            try {
+                if (script.dataset) script.dataset.mjxCreated = '1';
+            } catch (e) {}
+            // Bind handlers before setting src/append to avoid missing fast load events.
+            script.onload = finishOk;
+            script.onerror = finishFail;
+            script.src = scriptUrl || staticUrl('lib/es5/tex-chtml-full.js');
+            document.head.appendChild(script);
+        } else {
+            // Attach handlers to an existing script tag (e.g., summary.html).
+            try {
+                if (script.dataset) {
+                    if (String(script.dataset.mjxManaged || '') !== '1') {
+                        script.dataset.mjxManaged = '1';
+                        script.addEventListener('load', finishOk, { once: true });
+                        script.addEventListener('error', finishFail, { once: true });
+                    }
+                } else {
+                    script.addEventListener('load', finishOk, { once: true });
+                    script.addEventListener('error', finishFail, { once: true });
+                }
+            } catch (e) {
+                // Older browsers: fall back to property assignment (may overwrite).
+                script.onload = finishOk;
+                script.onerror = finishFail;
+            }
+        }
+
+        // In some cases (cached, already-failed, or onload missed), the load/error events may not fire.
+        // Use a watchdog to avoid leaving the loader stuck in a "loading" state forever.
+        try {
+            const watchdogMs = isExternalScript ? 2000 : 30000;
+            mathJaxWatchdogTimer = setTimeout(() => {
+                if (attempt !== mathJaxAttempt) return;
+                // If MathJax became available, finalize success.
+                if (isMathJaxAvailable()) {
+                    finishOk();
+                    return;
+                }
+                finishFail();
+            }, watchdogMs);
+        } catch (e) {}
     }
 
     /**

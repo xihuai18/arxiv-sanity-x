@@ -87,7 +87,7 @@ def api_upload_pdf():
         file_size = len(file_content or b"")
 
     if file_size > MAX_UPLOAD_SIZE:
-        return _api_error(f"File too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)", 400)
+        return _api_error(f"File too large (max {MAX_UPLOAD_SIZE // 1024 // 1024}MB)", 413)
 
     if file_size < 100:
         return _api_error("File too small to be a valid PDF", 400)
@@ -160,10 +160,18 @@ def api_upload_pdf():
 
         if should_enqueue:
             try:
+                from backend.services.upload_service import register_upload_task_enqueue
                 from tasks import huey, process_uploaded_pdf_task
 
                 task = process_uploaded_pdf_task.s(pid, g.user)
-                huey.enqueue(task)
+                enqueue_result = huey.enqueue(task)
+                task_id = register_upload_task_enqueue(
+                    task_type="process",
+                    pid=pid,
+                    user=g.user,
+                    task=task,
+                    enqueue_result=enqueue_result,
+                )
             except Exception as e:
                 logger.warning(f"Failed to enqueue processing for {pid}: {e}")
                 try:
@@ -176,11 +184,14 @@ def api_upload_pdf():
                 except Exception as update_err:
                     logger.warning(f"Failed to mark enqueue failure for {pid}: {update_err}")
                 return _api_error("Failed to enqueue processing. Please retry.", 500)
+        else:
+            task_id = str(paper_data.get("parse_task_id") or "")
 
         return _api_success(
             pid=pid,
             parse_status=parse_status or "queued",
             original_filename=paper_data.get("original_filename", ""),
+            task_id=task_id,
         )
 
     except QuotaExceededError as e:
@@ -322,10 +333,10 @@ def api_uploaded_papers_retry_parse():
     try:
         from backend.services.upload_service import retry_parse_uploaded_paper
 
-        success, message = retry_parse_uploaded_paper(pid, g.user)
+        success, message, task_id = retry_parse_uploaded_paper(pid, g.user)
 
         if success:
-            return _api_success(pid=pid, parse_status=message)
+            return _api_success(pid=pid, parse_status=message, task_id=task_id)
 
         if message == "not_found":
             return _api_error("Paper not found", 404)
@@ -374,11 +385,11 @@ def api_uploaded_papers_parse():
     try:
         from backend.services.upload_service import trigger_parse_only
 
-        success, message = trigger_parse_only(pid, g.user)
+        success, message, task_id = trigger_parse_only(pid, g.user)
 
         if success:
             # Both "queued" and "already_in_progress" are success cases
-            return _api_success(pid=pid, parse_status=message)
+            return _api_success(pid=pid, parse_status=message, task_id=task_id)
 
         # Handle specific error cases with appropriate HTTP status codes
         if message == "not_found":
@@ -436,12 +447,12 @@ def api_uploaded_papers_extract_info():
         if record.get("meta_extracted_ok") is True:
             return _api_error("Metadata already extracted", 400)
 
-        success = trigger_extract_info(pid, g.user)
+        success, task_id = trigger_extract_info(pid, g.user)
 
         if not success:
             return _api_error("Failed to enqueue extraction task", 500)
 
-        return _api_success(pid=pid)
+        return _api_success(pid=pid, task_id=task_id)
 
     except Exception as e:
         logger.error(f"Failed to trigger extract info: {e}")

@@ -56,6 +56,46 @@ def api_get_paper_summary():
     return legacy.api_get_paper_summary()
 
 
+@bp.route("/api/get_paper_tldr", methods=["POST"])
+def api_get_paper_tldr():
+    """Get paper TL;DR (best-effort, from cached summary).
+    ---
+    tags:
+      - Summary
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - pid
+          properties:
+            pid:
+              type: string
+              description: Paper ID (e.g., "2301.00001")
+    responses:
+      200:
+        description: TL;DR content (empty if unavailable)
+        schema:
+          type: object
+          properties:
+            success:
+              type: boolean
+            pid:
+              type: string
+            tldr:
+              type: string
+            summary_status:
+              type: string
+      403:
+        description: CSRF token missing/invalid
+      404:
+        description: Paper not found
+    """
+    return legacy.api_get_paper_tldr()
+
+
 @bp.route("/api/trigger_paper_summary", methods=["POST"])
 def api_trigger_paper_summary():
     """Trigger summary generation
