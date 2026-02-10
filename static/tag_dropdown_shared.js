@@ -10,6 +10,16 @@
 
     // Use shared utilities from common_utils.js
     var CommonUtils = window.ArxivSanityCommon;
+    if (!CommonUtils) {
+        console.error('[TagDropdown] common_utils.js not loaded – tag dropdown unavailable.');
+        window.ArxivSanityTagDropdown = {
+            mount: function () {
+                return {};
+            },
+            unmount: function () {},
+        };
+        return;
+    }
     var csrfFetch = CommonUtils.csrfFetch;
 
     // Dropdown close registry from common_utils

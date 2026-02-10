@@ -152,6 +152,39 @@ function debugLog(category, message, data) {
         return '/static/';
     }
 
+    // =========================================================================
+    // Frontend Asset CDN Helpers
+    // =========================================================================
+
+    function isAssetCdnEnabled() {
+        try {
+            if (typeof global === 'undefined') return true;
+            if (typeof global.__arxivSanityAssetCdnEnabled === 'undefined') return true;
+            return !!global.__arxivSanityAssetCdnEnabled;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function getAssetNpmCdnBase() {
+        try {
+            const raw =
+                global && typeof global.__arxivSanityAssetNpmCdnBase === 'string'
+                    ? global.__arxivSanityAssetNpmCdnBase
+                    : '';
+            const base = String(raw || '').trim();
+            return base || 'https://cdn.jsdelivr.net/npm';
+        } catch (e) {
+            return 'https://cdn.jsdelivr.net/npm';
+        }
+    }
+
+    function npmCdnUrl(path) {
+        const base = getAssetNpmCdnBase().replace(/\/+$/, '');
+        const rel = String(path || '').replace(/^\/+/, '');
+        return base + '/' + rel;
+    }
+
     /**
      * Build a full URL to a static file.
      * @param {string} filename - Path relative to the static root (e.g., 'lib/jszip.min.js')
@@ -174,6 +207,8 @@ function debugLog(category, message, data) {
     const USER_EVENT_LEADER_MONITOR_MS = 2000;
     const USER_STATE_POLL_FAST_MS = 5000;
     const USER_STATE_POLL_SLOW_MS = 15000;
+    const SSE_RECONNECT_BASE_MS = 8000;
+    const SSE_RECONNECT_MAX_MS = 120000; // cap at 2 minutes
     let userEventChannel = null;
     let userEventChannelName = null;
     let userStatePoller = null;
@@ -185,6 +220,8 @@ function debugLog(category, message, data) {
     let eventSourceConnectWatchdogTimer = null;
     let userStateApplyFns = [];
     let userEventTabId = null;
+    let sseConsecutiveErrors = 0;
+    let pollConsecutiveErrors = 0;
     let userEventLeaderTimer = null;
     let userEventLeaderMonitorTimer = null;
     let userEventLeaderMonitorFn = null;
@@ -382,13 +419,39 @@ function debugLog(category, message, data) {
     }
 
     /**
+     * Compute exponential backoff delay with jitter.
+     * @param {number} consecutiveErrors - Number of consecutive errors
+     * @param {number} baseMs - Base delay in ms
+     * @param {number} maxMs - Maximum delay in ms
+     * @returns {number} Delay in ms
+     */
+    function computeBackoffMs(consecutiveErrors, baseMs, maxMs) {
+        if (consecutiveErrors <= 0) return baseMs;
+        // Exponential: base * 2^(errors-1), capped at max, with ±25% jitter
+        const raw = baseMs * Math.pow(2, Math.min(consecutiveErrors - 1, 10));
+        const capped = Math.min(raw, maxMs);
+        const jitter = capped * (0.75 + Math.random() * 0.5);
+        return Math.round(jitter);
+    }
+
+    /**
      * Fetch user state from server
      * @returns {Promise<Object|null>} User state object or null on error
      */
     function fetchUserState() {
         return fetch('/api/user_state', { credentials: 'same-origin' })
-            .then(resp => resp.json())
-            .catch(() => null);
+            .then(resp => {
+                if (!resp.ok) {
+                    pollConsecutiveErrors++;
+                    return null;
+                }
+                pollConsecutiveErrors = 0;
+                return resp.json();
+            })
+            .catch(() => {
+                pollConsecutiveErrors++;
+                return null;
+            });
     }
 
     function addUserStateApplyFn(applyFn) {
@@ -409,16 +472,25 @@ function debugLog(category, message, data) {
 
     function computeUserStatePollIntervalMs() {
         // If we don't have BroadcastChannel/localStorage coordination, poll faster for freshness.
-        if (!userEventChannel) return USER_STATE_POLL_FAST_MS;
-        if (typeof localStorage === 'undefined' || !userEventStorageAvailable)
-            return USER_STATE_POLL_FAST_MS;
-
-        // If another tab is leader, we expect broadcasts to be timely; poll slowly as a safety net.
-        const leader = readUserEventLeader();
-        if (leader && !leaderIsStale(leader) && leader.id !== getUserEventTabId()) {
-            return USER_STATE_POLL_SLOW_MS;
+        let baseMs;
+        if (!userEventChannel) {
+            baseMs = USER_STATE_POLL_FAST_MS;
+        } else if (typeof localStorage === 'undefined' || !userEventStorageAvailable) {
+            baseMs = USER_STATE_POLL_FAST_MS;
+        } else {
+            // If another tab is leader, we expect broadcasts to be timely; poll slowly as a safety net.
+            const leader = readUserEventLeader();
+            if (leader && !leaderIsStale(leader) && leader.id !== getUserEventTabId()) {
+                baseMs = USER_STATE_POLL_SLOW_MS;
+            } else {
+                baseMs = USER_STATE_POLL_FAST_MS;
+            }
         }
-        return USER_STATE_POLL_FAST_MS;
+        // Apply exponential backoff when server is unreachable
+        if (pollConsecutiveErrors > 0) {
+            return computeBackoffMs(pollConsecutiveErrors, baseMs, SSE_RECONNECT_MAX_MS);
+        }
+        return baseMs;
     }
 
     /**
@@ -448,12 +520,33 @@ function debugLog(category, message, data) {
         // Apply once immediately to reduce perceived lag when falling back to polling.
         fetchUserState().then(state => {
             applyUserStateToAll(state);
+            // Re-adjust polling interval after each fetch (backoff may have changed)
+            _maybeReadjustPollInterval();
         });
         userStatePoller = setInterval(() => {
             fetchUserState().then(state => {
                 applyUserStateToAll(state);
+                _maybeReadjustPollInterval();
             });
         }, intervalMs);
+    }
+
+    /**
+     * Re-adjust polling interval if backoff state changed (e.g. errors resolved or accumulated).
+     */
+    function _maybeReadjustPollInterval() {
+        if (!userStatePoller) return;
+        const newInterval = computeUserStatePollIntervalMs();
+        if (newInterval !== userStatePollIntervalMs) {
+            clearInterval(userStatePoller);
+            userStatePollIntervalMs = newInterval;
+            userStatePoller = setInterval(() => {
+                fetchUserState().then(state => {
+                    applyUserStateToAll(state);
+                    _maybeReadjustPollInterval();
+                });
+            }, newInterval);
+        }
     }
 
     /**
@@ -526,10 +619,15 @@ function debugLog(category, message, data) {
 
         const scheduleReconnect = () => {
             if (eventSourceReconnectTimer) return;
+            const delayMs = computeBackoffMs(
+                sseConsecutiveErrors,
+                SSE_RECONNECT_BASE_MS,
+                SSE_RECONNECT_MAX_MS
+            );
             eventSourceReconnectTimer = setTimeout(() => {
                 eventSourceReconnectTimer = null;
                 connectAsLeaderIfNeeded();
-            }, 8000);
+            }, delayMs);
         };
 
         const clearConnectWatchdog = () => {
@@ -577,6 +675,7 @@ function debugLog(category, message, data) {
             try {
                 eventSource = new EventSource('/api/user_stream');
             } catch (e) {
+                sseConsecutiveErrors++;
                 eventSource = null;
                 eventSourceConnecting = false;
                 relinquishLeadershipIfOwned();
@@ -586,6 +685,8 @@ function debugLog(category, message, data) {
             }
             startConnectWatchdog();
             eventSource.onopen = () => {
+                sseConsecutiveErrors = 0;
+                pollConsecutiveErrors = 0;
                 stopUserStatePolling();
                 // Prefer an SSE-connected tab to lead BroadcastChannel fanout.
                 startUserEventLeaderElection();
@@ -606,6 +707,7 @@ function debugLog(category, message, data) {
                 }
             };
             eventSource.onerror = () => {
+                sseConsecutiveErrors++;
                 if (eventSource) {
                     eventSource.close();
                     eventSource = null;
@@ -787,7 +889,19 @@ function debugLog(category, message, data) {
     function handleApiError(error, context) {
         const ctx = context || 'API';
         const msg = error && error.message ? error.message : String(error || 'Unknown error');
-        console.error(`[${ctx}]`, error);
+
+        // Downgrade network errors to warn – they are expected when the server is
+        // temporarily unreachable and would otherwise flood the console.
+        const isNetworkError =
+            msg.includes('Failed to fetch') ||
+            msg.includes('NetworkError') ||
+            msg.includes('ERR_EMPTY_RESPONSE') ||
+            msg.includes('Load failed');
+        if (isNetworkError) {
+            console.warn(`[${ctx}] Network error (server may be temporarily unavailable)`);
+        } else {
+            console.error(`[${ctx}]`, error);
+        }
 
         // Return user-friendly error message
         if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
@@ -1185,6 +1299,7 @@ function debugLog(category, message, data) {
     let mathJaxRetryTimer = null;
     let mathJaxAttempt = 0;
     let mathJaxWatchdogTimer = null;
+    let mathJaxCandidateIndex = 0;
 
     function isMathJaxAvailable() {
         try {
@@ -1360,9 +1475,180 @@ function debugLog(category, message, data) {
             // Ensure MathJax web fonts resolve correctly in self-hosted deployments.
             // Without an explicit fontURL, some setups may request fonts from a wrong relative path,
             // causing missing glyphs in rendered formulas.
-            fontURL: staticUrl('lib/es5/output/chtml/fonts/woff-v2'),
+            // Prefer CDN fonts; can be overridden to local when CDN is unavailable.
+            fontURL: 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/output/chtml/fonts/woff-v2',
         },
     };
+
+    function getMathJaxScriptCandidates() {
+        const local = staticUrl('lib/es5/tex-chtml-full.js');
+        const cdn = npmCdnUrl('mathjax@3.2.2/es5/tex-chtml-full.js');
+        // Prefer CDN, but always keep local as fallback.
+        return isAssetCdnEnabled() ? [cdn, local] : [local];
+    }
+
+    function getMathJaxFontCandidates() {
+        const local = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+        const cdn = npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2');
+        return isAssetCdnEnabled() ? [cdn, local] : [local];
+    }
+
+    function ensureMathJaxFontUrlPreferred(sourceUrl) {
+        // If we are forcing local (e.g. CDN blocked), ensure config uses local fonts.
+        try {
+            const forceLocal =
+                global &&
+                (global.__arxivSanityMathJaxForceLocal === 1 ||
+                    global.__arxivSanityMathJaxForceLocal === true);
+            const preferLocal =
+                forceLocal || (sourceUrl && String(sourceUrl).indexOf('/static/') >= 0);
+            if (!preferLocal) return;
+
+            const localFontUrl = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+            if (typeof window !== 'undefined') {
+                if (typeof window.MathJax === 'undefined') {
+                    window.MathJax = defaultMathJaxConfig;
+                }
+                if (!window.MathJax.chtml) window.MathJax.chtml = {};
+                window.MathJax.chtml.fontURL = localFontUrl;
+            }
+        } catch (e) {}
+    }
+
+    // ---- CDN MathJax font probe & runtime fallback ----
+    // Proactively test whether CDN fonts are reachable.  If the probe fails
+    // before MathJax initialises (common_utils loads synchronously, MathJax is
+    // deferred), we switch fontURL to local so MathJax never requests CDN fonts.
+    // A document.fonts listener acts as a runtime safety-net for edge cases
+    // where the probe hasn't finished or fonts fail mid-render.
+
+    let _cdnFontProbeResult = null; // null = pending, true = ok, false = failed
+    let _cdnFontProbePromise = null;
+    let _fontFallbackApplied = false;
+
+    function _localMathJaxFontUrl() {
+        return staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+    }
+
+    function _applyLocalMathJaxFonts() {
+        if (_fontFallbackApplied) return;
+        _fontFallbackApplied = true;
+        try {
+            if (typeof global !== 'undefined') global.__arxivSanityMathJaxForceLocal = 1;
+            const localUrl = _localMathJaxFontUrl();
+            if (typeof window !== 'undefined' && window.MathJax) {
+                if (!window.MathJax.chtml) window.MathJax.chtml = {};
+                window.MathJax.chtml.fontURL = localUrl;
+                // Also patch runtime config if MathJax is already initialised
+                if (window.MathJax.config && window.MathJax.config.chtml) {
+                    window.MathJax.config.chtml.fontURL = localUrl;
+                }
+            }
+            console.warn('[CommonUtils] CDN MathJax fonts unreachable – using local fonts.');
+        } catch (e) {}
+    }
+
+    /** Rewrite any CDN font URLs already injected into @font-face rules. */
+    function _patchFontFaceRules() {
+        try {
+            const localUrl = _localMathJaxFontUrl();
+            const sheets = document.styleSheets;
+            const cdnRe =
+                /https?:\/\/cdn\.jsdelivr\.net\/npm\/mathjax@[^/]+\/es5\/output\/chtml\/fonts\/woff-v2/g;
+            for (let i = 0; i < sheets.length; i++) {
+                let rules;
+                try {
+                    rules = sheets[i].cssRules;
+                } catch (_) {
+                    continue;
+                }
+                if (!rules) continue;
+                for (let j = 0; j < rules.length; j++) {
+                    if (rules[j].type !== CSSRule.FONT_FACE_RULE) continue;
+                    const src = rules[j].style.getPropertyValue('src');
+                    if (src && cdnRe.test(src)) {
+                        cdnRe.lastIndex = 0;
+                        rules[j].style.setProperty('src', src.replace(cdnRe, localUrl));
+                    }
+                }
+            }
+        } catch (e) {}
+    }
+
+    function _startCdnFontProbe() {
+        if (_cdnFontProbePromise) return _cdnFontProbePromise;
+        if (!isAssetCdnEnabled() || typeof fetch === 'undefined') {
+            _cdnFontProbeResult = true;
+            _cdnFontProbePromise = Promise.resolve(true);
+            return _cdnFontProbePromise;
+        }
+        const testUrl =
+            npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2').replace(/\/+$/, '') +
+            '/MathJax_Main-Regular.woff';
+
+        _cdnFontProbePromise = new Promise(function (resolve) {
+            const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const tid = setTimeout(function () {
+                try {
+                    if (ctrl) ctrl.abort();
+                } catch (_) {}
+                resolve(false);
+            }, 5000);
+            const opts = { mode: 'cors' };
+            if (ctrl) opts.signal = ctrl.signal;
+            fetch(testUrl, opts)
+                .then(function (r) {
+                    if (!r.ok) throw new Error(r.status);
+                    return r.arrayBuffer();
+                })
+                .then(function (buf) {
+                    clearTimeout(tid);
+                    resolve(!!(buf && buf.byteLength > 1000));
+                })
+                .catch(function () {
+                    clearTimeout(tid);
+                    resolve(false);
+                });
+        });
+        _cdnFontProbePromise.then(function (ok) {
+            _cdnFontProbeResult = ok;
+            if (!ok) _applyLocalMathJaxFonts();
+        });
+        return _cdnFontProbePromise;
+    }
+
+    /** Runtime listener: catch font-load errors that slip past the probe. */
+    function _setupFontErrorListener() {
+        try {
+            if (typeof document === 'undefined' || !document.fonts) return;
+            document.fonts.addEventListener('loadingerror', function (evt) {
+                if (_fontFallbackApplied) return;
+                const faces = evt.fontfaces || [];
+                let isMjx = false;
+                for (let i = 0; i < faces.length; i++) {
+                    if (String(faces[i].family).indexOf('MathJax') >= 0) {
+                        isMjx = true;
+                        break;
+                    }
+                }
+                if (!isMjx) return;
+                _applyLocalMathJaxFonts();
+                _patchFontFaceRules();
+                // Re-typeset so MathJax picks up the patched fonts
+                setTimeout(function () {
+                    try {
+                        if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
+                            MathJax.typesetPromise().catch(function () {});
+                        }
+                    } catch (_) {}
+                }, 200);
+            });
+        } catch (e) {}
+    }
+
+    // Kick off probe & listener immediately
+    _startCdnFontProbe();
+    _setupFontErrorListener();
 
     /**
      * Check if text contains math expressions
@@ -1411,7 +1697,7 @@ function debugLog(category, message, data) {
             } catch (e) {}
             try {
                 if (mathJaxWatchdogTimer) {
-                    clearTimeout(mathJaxWatchdogTimer);
+                    clearInterval(mathJaxWatchdogTimer);
                     mathJaxWatchdogTimer = null;
                 }
             } catch (e) {}
@@ -1435,7 +1721,7 @@ function debugLog(category, message, data) {
 
         try {
             if (mathJaxWatchdogTimer) {
-                clearTimeout(mathJaxWatchdogTimer);
+                clearInterval(mathJaxWatchdogTimer);
                 mathJaxWatchdogTimer = null;
             }
         } catch (e) {}
@@ -1444,6 +1730,16 @@ function debugLog(category, message, data) {
         if (typeof window.MathJax === 'undefined') {
             window.MathJax = defaultMathJaxConfig;
         }
+
+        // Determine candidate URLs if not explicitly provided.
+        const candidates = getMathJaxScriptCandidates();
+        if (scriptUrl) {
+            // If caller provides explicit URL, treat it as the active choice.
+            mathJaxCandidateIndex = 0;
+        }
+        const chosenUrl =
+            scriptUrl || candidates[Math.min(mathJaxCandidateIndex, candidates.length - 1)];
+        ensureMathJaxFontUrlPreferred(chosenUrl);
 
         // Create and load script (avoid duplicates)
         let script = document.getElementById('MathJax-script');
@@ -1482,7 +1778,7 @@ function debugLog(category, message, data) {
             } catch (e) {}
             try {
                 if (mathJaxWatchdogTimer) {
-                    clearTimeout(mathJaxWatchdogTimer);
+                    clearInterval(mathJaxWatchdogTimer);
                     mathJaxWatchdogTimer = null;
                 }
             } catch (e) {}
@@ -1512,21 +1808,55 @@ function debugLog(category, message, data) {
             mathJaxLoadFailures += 1;
             try {
                 if (mathJaxWatchdogTimer) {
-                    clearTimeout(mathJaxWatchdogTimer);
+                    clearInterval(mathJaxWatchdogTimer);
                     mathJaxWatchdogTimer = null;
                 }
             } catch (e) {}
             try {
                 if (script && script.dataset) script.dataset.mjxFailed = '1';
             } catch (e) {}
+            // Only remove scripts we created ourselves.  External <script defer> tags
+            // (e.g. in summary.html) may still be loading; removing them corrupts
+            // MathJax state and prevents recovery even if the script eventually loads.
             try {
-                if (script && script.parentNode) script.parentNode.removeChild(script);
+                if (script && script.parentNode && !isExternalScript) {
+                    script.parentNode.removeChild(script);
+                }
             } catch (e) {}
-            console.warn('Failed to load MathJax');
+            console.warn('Failed to load MathJax (attempt ' + mathJaxLoadFailures + ')');
+
+            // Switch to the next candidate URL (e.g. CDN -> local) for subsequent retries.
+            try {
+                if (!scriptUrl && candidates && candidates.length > 1) {
+                    mathJaxCandidateIndex = Math.min(
+                        candidates.length - 1,
+                        Math.max(0, mathJaxCandidateIndex + 1)
+                    );
+                    if (mathJaxCandidateIndex > 0) {
+                        try {
+                            if (typeof global !== 'undefined')
+                                global.__arxivSanityMathJaxForceLocal = 1;
+                        } catch (e) {}
+                    }
+                }
+            } catch (e) {}
 
             if (mathJaxLoadFailures >= 3) {
                 // Give up auto-retry; clear pending callbacks to avoid hanging forever.
-                mathJaxCallbacks.length = 0;
+                // But schedule one final delayed check – the external script may still
+                // finish loading after our watchdog gave up.
+                if (isExternalScript) {
+                    setTimeout(() => {
+                        if (isMathJaxAvailable()) {
+                            mathJaxLoaded = true;
+                            mathJaxLoading = false;
+                            mathJaxLoadFailures = 0;
+                            runMathJaxCallbacks();
+                        }
+                    }, 5000);
+                } else {
+                    mathJaxCallbacks.length = 0;
+                }
                 return;
             }
 
@@ -1552,7 +1882,7 @@ function debugLog(category, message, data) {
             // Bind handlers before setting src/append to avoid missing fast load events.
             script.onload = finishOk;
             script.onerror = finishFail;
-            script.src = scriptUrl || staticUrl('lib/es5/tex-chtml-full.js');
+            script.src = chosenUrl;
             document.head.appendChild(script);
         } else {
             // Attach handlers to an existing script tag (e.g., summary.html).
@@ -1575,18 +1905,45 @@ function debugLog(category, message, data) {
         }
 
         // In some cases (cached, already-failed, or onload missed), the load/error events may not fire.
-        // Use a watchdog to avoid leaving the loader stuck in a "loading" state forever.
+        // Use a polling watchdog to avoid leaving the loader stuck in a "loading" state forever.
+        // For external scripts (e.g. <script defer> in summary.html), the load event may have
+        // already fired before we attached our listener, so we poll periodically to detect
+        // MathJax becoming available.  The old 2-second single-shot watchdog was far too short
+        // for the 1.3 MB tex-chtml-full.js on slower connections and caused "Failed to load
+        // MathJax" followed by permanent formula rendering loss after 3 failures.
         try {
-            const watchdogMs = isExternalScript ? 2000 : 30000;
-            mathJaxWatchdogTimer = setTimeout(() => {
-                if (attempt !== mathJaxAttempt) return;
-                // If MathJax became available, finalize success.
-                if (isMathJaxAvailable()) {
-                    finishOk();
-                    return;
-                }
-                finishFail();
-            }, watchdogMs);
+            const watchdogMs = isExternalScript ? 15000 : 30000;
+            const pollIntervalMs = 500;
+            let elapsed = 0;
+
+            // Immediately check – the script may already be loaded (browser cache hit).
+            if (isMathJaxAvailable()) {
+                finishOk();
+            } else {
+                const pollTimer = setInterval(() => {
+                    if (finished) {
+                        clearInterval(pollTimer);
+                        return;
+                    }
+                    if (attempt !== mathJaxAttempt) {
+                        clearInterval(pollTimer);
+                        return;
+                    }
+                    elapsed += pollIntervalMs;
+                    if (isMathJaxAvailable()) {
+                        clearInterval(pollTimer);
+                        finishOk();
+                        return;
+                    }
+                    if (elapsed >= watchdogMs) {
+                        clearInterval(pollTimer);
+                        finishFail();
+                    }
+                }, pollIntervalMs);
+
+                // Store the interval so it can be cleared on success/failure from event handlers.
+                mathJaxWatchdogTimer = pollTimer;
+            }
         } catch (e) {}
     }
 

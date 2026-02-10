@@ -363,9 +363,9 @@ def _parse_api_request(
         try:
             if os.path.exists(PAPERS_DB_FILE) and not paper_exists(raw_pid):
                 return None, _api_error("Paper not found", 404)
-        except Exception:
+        except Exception as e:
             # Be permissive here; downstream handlers can decide what to do.
-            pass
+            logger.debug("paper_exists check failed for {}: {}", raw_pid, e)
 
     if schema is not None:
         try:
@@ -1581,7 +1581,15 @@ def _inspect_uploaded_paper(pid: str):
         return "<h1>Error</h1><p>Paper not found.</p>", 404
 
     # Check if paper is parsed
-    if record.get("parse_status") != "ok":
+    from backend.services.upload_service import _normalize_upload_parse_status
+
+    parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+    if parse_status != "ok":
+        if parse_status in ("queued", "running"):
+            return (
+                "<h1>Error</h1><p>Paper is being parsed. Please wait for parsing to complete before inspection.</p>",
+                400,
+            )
         return "<h1>Error</h1><p>Paper must be parsed before inspection. Please parse the PDF first.</p>", 400
 
     # Check if metadata has been extracted
@@ -1862,11 +1870,34 @@ def api_trigger_paper_summary():
     """Trigger summary generation without returning content."""
     t_start = time.time()
     try:
+        # Enforce CSRF even for anonymous callers (tests and security),
+        # then apply login/owner checks below.
         data, err = _parse_api_request(require_pid=True, schema=SummaryTriggerRequest)
         if err:
             return err
 
         raw_pid = data["_raw_pid"]
+        # Uploaded papers are private: require owner to avoid leaking existence/triggering work.
+        from backend.utils.upload_utils import is_upload_pid
+
+        if is_upload_pid(raw_pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(raw_pid)
+            if not record or record.get("owner") != g.user:
+                return _api_error("Paper not found", 404)
+            from backend.services.upload_service import _normalize_upload_parse_status
+
+            parse_status, _parse_error = _normalize_upload_parse_status(raw_pid, record)
+            if parse_status != "ok":
+                if parse_status in ("queued", "running"):
+                    return _api_error("Paper is being parsed. Please wait.", 400)
+                return _api_error("Paper not parsed yet. Parse PDF first.", 400)
+        else:
+            # Non-upload summaries are shared resources; require login to enqueue work.
+            if not g.user:
+                return _api_error("Not logged in", 401)
+
         model = (data.get("model") or LLM_NAME or "").strip()
         force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
         logger.trace(f"[API] api_trigger_paper_summary: pid={raw_pid}, model={model}")
@@ -1956,7 +1987,7 @@ def api_task_status(task_id: str):
 
     Returns sanitized fields for security:
     - status, updated_time, queue_rank, queue_total are always returned
-    - pid, model, error are only returned if user owns the task or is admin
+    - pid, model, error are only returned if user owns the task
     """
     t_start = time.time()
     logger.trace(f"[API] api_task_status: task_id={task_id}")
@@ -2113,11 +2144,14 @@ def api_summary_status():
                     key = summary_status_key(raw_pid, model)
                     info = status_data.get(key)
                     if isinstance(info, dict):
+                        allow_sensitive = _allow_task_id(info)
                         payload = {
                             "status": info.get("status") or "",
-                            "last_error": info.get("last_error"),
+                            # Do not leak errors across users: only return last_error to the
+                            # task owner (or when task_user is unset).
+                            "last_error": info.get("last_error") if allow_sensitive else None,
                         }
-                        if _allow_task_id(info):
+                        if allow_sensitive:
                             task_id = info.get("task_id")
                             if task_id:
                                 payload["task_id"] = str(task_id)
@@ -2154,6 +2188,16 @@ def api_clear_model_summary():
         if not model:
             return _api_error("Model name is required", 400)
 
+        # Uploaded papers are private: only owner can clear caches.
+        from backend.utils.upload_utils import is_upload_pid
+
+        if is_upload_pid(pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(pid)
+            if not record or record.get("owner") != g.user:
+                return _api_error("Paper not found", 404)
+
         _clear_model_summary(pid, model, user=getattr(g, "user", None))
         logger.trace(f"[API] api_clear_model_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=pid, model=model)
@@ -2175,6 +2219,16 @@ def api_clear_paper_cache():
 
         pid = data.get("pid", "").strip()
         logger.trace(f"[API] api_clear_paper_cache: pid={pid}")
+        # Uploaded papers are private: only owner can clear caches.
+        from backend.utils.upload_utils import is_upload_pid
+
+        if is_upload_pid(pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(pid)
+            if not record or record.get("owner") != g.user:
+                return _api_error("Paper not found", 404)
+
         _clear_paper_cache(pid, user=getattr(g, "user", None))
         logger.trace(f"[API] api_clear_paper_cache: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=pid)
@@ -2200,12 +2254,23 @@ def _serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: 
 def api_paper_image(pid: str, filename: str):
     """Serve paper images from HTML markdown cache."""
     try:
+        # Uploaded papers are private. Avoid leaking existence to anonymous users
+        # or other users (keep behavior consistent with /api/mineru_image).
+        from backend.utils.upload_utils import is_upload_pid
+
+        if is_upload_pid(pid):
+            from aslite.repositories import UploadedPaperRepository
+
+            record = UploadedPaperRepository.get(pid)
+            if not record or record.get("owner") != g.user:
+                abort(404)
+
         return _serve_paper_image(pid, filename, Path(DATA_DIR) / "html_md")
     except Exception as e:
         if hasattr(e, "code"):
             raise
         logger.error(f"Failed to serve paper image: {e}")
-        abort(500, f"Server error: {str(e)}")
+        abort(500, "Server error")
 
 
 def api_mineru_image(pid: str, filename: str):
@@ -2226,7 +2291,7 @@ def api_mineru_image(pid: str, filename: str):
         if hasattr(e, "code"):
             raise
         logger.error(f"Failed to serve MinerU image: {e}")
-        abort(500, f"Server error: {str(e)}")
+        abort(500, "Server error")
 
 
 def api_llm_models():

@@ -191,6 +191,7 @@ def serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: l
 
     raw_pid, _ = split_pid_version(pid)
     image_path = None
+    image_dir = None
 
     if search_subdirs:
         # Search in multiple subdirectories (MinerU style)
@@ -198,15 +199,27 @@ def serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: l
             candidate = base_dir / raw_pid / subdir / "images" / filename
             if candidate.exists():
                 image_path = candidate
+                image_dir = candidate.parent
                 break
     else:
         # Direct path (HTML markdown style)
         image_path = base_dir / raw_pid / "images" / filename
         if not image_path.exists():
             image_path = None
+        else:
+            image_dir = image_path.parent
 
     if not image_path:
         abort(404, f"Image not found: {filename}")
 
+    # Ensure we serve an absolute path (avoid Flask root_path surprises) and
+    # prevent symlink escapes outside the expected images directory.
+    resolved_image_path = image_path.resolve()
+    resolved_image_dir = (image_dir or image_path.parent).resolve()
+    try:
+        resolved_image_path.relative_to(resolved_image_dir)
+    except Exception:
+        abort(400, "Invalid path")
+
     mimetype = IMAGE_MIME_TYPES.get(image_path.suffix.lower(), "application/octet-stream")
-    return send_file(image_path, mimetype=mimetype)
+    return send_file(str(resolved_image_path), mimetype=mimetype)

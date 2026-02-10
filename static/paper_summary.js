@@ -1,13 +1,64 @@
 'use strict';
 
 // Use shared utilities from common_utils.js
+var _commonUtilsLoaded = !!(typeof window !== 'undefined' && window.ArxivSanityCommon);
 var CommonUtils = window.ArxivSanityCommon;
-var csrfFetch = CommonUtils.csrfFetch;
-var formatAuthorsText = CommonUtils.formatAuthorsText;
-var escapeHtml = CommonUtils.escapeHtml;
-var checkSummaryFallback = CommonUtils.checkSummaryFallback;
-var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
-var triggerMathJax = CommonUtils.triggerMathJax;
+if (!CommonUtils) {
+    // common_utils.js failed to load (network error, cache mismatch, etc.).
+    // Show a user-visible error and provide stubs to prevent cascading TypeErrors.
+    console.error('[paper_summary] common_utils.js not loaded – page may not function correctly.');
+    CommonUtils = {};
+    document.addEventListener('DOMContentLoaded', function () {
+        var wrap = document.getElementById('wrap');
+        if (wrap) {
+            wrap.innerHTML =
+                '<div style="padding:2em;text-align:center;color:#d9534f;">' +
+                '<h2>Page failed to load</h2>' +
+                '<p>A required script (<code>common_utils.js</code>) could not be loaded. ' +
+                'This is usually caused by a network issue or browser cache mismatch.</p>' +
+                '<p>Please <a href="javascript:location.reload(true)">hard-refresh</a> the page ' +
+                '(Ctrl+Shift+R / Cmd+Shift+R) or try again later.</p></div>';
+        }
+    });
+}
+var csrfFetch =
+    CommonUtils.csrfFetch ||
+    function () {
+        return Promise.reject(new Error('CommonUtils not loaded'));
+    };
+var formatAuthorsText =
+    CommonUtils.formatAuthorsText ||
+    function (s) {
+        return s || '';
+    };
+var escapeHtml =
+    CommonUtils.escapeHtml ||
+    function (s) {
+        var d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    };
+var checkSummaryFallback =
+    CommonUtils.checkSummaryFallback ||
+    function () {
+        return { occurred: false };
+    };
+var renderAbstractMarkdown =
+    CommonUtils.renderAbstractMarkdown ||
+    function (s) {
+        return s || '';
+    };
+var triggerMathJax = CommonUtils.triggerMathJax || function () {};
+var handleApiError =
+    CommonUtils.handleApiError ||
+    function (err) {
+        return String((err && err.message) || err);
+    };
+var measurePerformanceAsync =
+    CommonUtils.measurePerformanceAsync ||
+    function (_label, fn) {
+        return fn();
+    };
 var fetchTaskStatus =
     typeof CommonUtils.fetchTaskStatus === 'function'
         ? CommonUtils.fetchTaskStatus
@@ -99,8 +150,8 @@ function renderSummaryMarkdown(markdown, container, tocContainer) {
 var sharedTagDropdownApi = null;
 
 // Shared event stream from common_utils
-var _setupUserEventStream = CommonUtils.setupUserEventStream;
-var _registerEventHandler = CommonUtils.registerEventHandler;
+var _setupUserEventStream = CommonUtils.setupUserEventStream || function () {};
+var _registerEventHandler = CommonUtils.registerEventHandler || function () {};
 
 function applyUserState(state) {
     if (!state || !state.success) return;
@@ -114,6 +165,7 @@ function applyUserState(state) {
 }
 
 function fetchUserStateAndApply() {
+    if (!CommonUtils.fetchUserState) return Promise.resolve();
     return CommonUtils.fetchUserState().then(applyUserState);
 }
 
@@ -163,6 +215,58 @@ function handleUserEvent(event, options = {}) {
             } else if (event.action === 'remove') {
                 summaryApp.setState({ inReadingList: false });
             }
+        }
+    } else if (event.type === 'upload_parse_status') {
+        // Keep uploaded paper parse status in sync on the summary page.
+        if (
+            event.pid &&
+            summaryApp.pid &&
+            String(event.pid) === String(summaryApp.pid) &&
+            summaryApp.paper &&
+            summaryApp.paper.kind === 'upload'
+        ) {
+            const newStatus = event.status || '';
+            summaryApp.paper.parse_status = newStatus;
+            if (event.error) summaryApp.paper.parse_error = event.error;
+            // Re-render to update Generate button disabled state and notice.
+            summaryApp.setState({});
+            // If parse just completed, auto-load summary (only if a model is selected).
+            const currentModel = summaryApp.getCurrentModel();
+            if (newStatus === 'ok' && summaryApp.pid && currentModel) {
+                summaryApp.loadSummary(summaryApp.pid, {
+                    model: currentModel,
+                    cache_only: true,
+                });
+            }
+        }
+    } else if (event.type === 'upload_extract_status') {
+        // Keep uploaded paper extract status in sync on the summary page.
+        if (
+            event.pid &&
+            summaryApp.pid &&
+            String(event.pid) === String(summaryApp.pid) &&
+            summaryApp.paper &&
+            summaryApp.paper.kind === 'upload'
+        ) {
+            if (event.status === 'ok' && event.meta_extracted_ok) {
+                summaryApp.paper.meta_extracted_ok = true;
+                if (event.title) summaryApp.paper.title = event.title;
+                if (event.authors) summaryApp.paper.authors = event.authors;
+            } else if (event.status === 'failed') {
+                // Show extract failure via toast if available.
+                const toast =
+                    CommonUtils && typeof CommonUtils.showToast === 'function'
+                        ? CommonUtils.showToast
+                        : null;
+                if (toast) {
+                    const errMsg = event.error
+                        ? String(event.error).slice(0, 200)
+                        : 'Unknown error';
+                    toast(`Metadata extraction failed: ${errMsg}`, { type: 'error' });
+                }
+            }
+            // Re-render to update Extract Info / Similar button states.
+            summaryApp.setState({});
         }
     }
 }
@@ -384,7 +488,12 @@ class SummaryState {
         this.autoRetryTimer = setTimeout(() => {
             const targetModel = String(options.model || '').trim();
             // Don't steal the UI back if user switched models.
+            // Clean up inflight state for the abandoned model so it doesn't
+            // appear stuck in "Generating..." when the user switches back.
             if (targetModel && String(this.getCurrentModel() || '') !== targetModel) {
+                if (this.inflightModels) this.inflightModels[targetModel] = false;
+                if (this.pendingGenerationModel === targetModel) this.pendingGenerationModel = '';
+                if (this.pendingRegenerations) delete this.pendingRegenerations[targetModel];
                 return;
             }
             if (
@@ -392,6 +501,8 @@ class SummaryState {
                 this.pendingGenerationModel &&
                 this.pendingGenerationModel !== targetModel
             ) {
+                if (this.inflightModels) this.inflightModels[targetModel] = false;
+                if (this.pendingRegenerations) delete this.pendingRegenerations[targetModel];
                 return;
             }
             this.refreshQueueRank();
@@ -459,8 +570,10 @@ class SummaryState {
 
         const isUploadedPaper = this.paper && this.paper.kind === 'upload';
         const uploadParseStatus =
-            this.paper && this.paper.parse_status ? String(this.paper.parse_status) : '';
-        const uploadNotParsed = isUploadedPaper && uploadParseStatus && uploadParseStatus !== 'ok';
+            this.paper && this.paper.parse_status !== undefined && this.paper.parse_status !== null
+                ? String(this.paper.parse_status)
+                : '';
+        const uploadNotParsed = isUploadedPaper && uploadParseStatus !== 'ok';
 
         // Allow clearing while generating; only block actions during clearing.
         // Keep Generate disabled during loading to avoid concurrent generations.
@@ -495,11 +608,14 @@ class SummaryState {
         const showQueueStatus = (this.loading || this.isCurrentModelGenerating()) && !this.content;
         let queueStatusNote = '';
         if (showQueueStatus) {
-            const total = this.globalQueued + this.globalRunning;
-            if (total > 0) {
-                // Show position in queue: "1/3 Queued" means position 1 of 3 total
-                const position = this.globalRunning > 0 ? this.globalRunning : 1;
-                queueStatusNote = `<div class="summary-note summary-queue-note" style="color: #6c757d; font-size: 12px;" role="status" aria-live="polite">${position}/${total} Queued</div>`;
+            // Prefer per-task queue rank when available; fall back to global stats.
+            if (this.queueRank > 0 && this.queueTotal > 0) {
+                queueStatusNote = `<div class="summary-note summary-queue-note" style="color: #6c757d; font-size: 12px;" role="status" aria-live="polite">${this.queueRank}/${this.queueTotal} in queue</div>`;
+            } else {
+                const total = this.globalQueued + this.globalRunning;
+                if (total > 0) {
+                    queueStatusNote = `<div class="summary-note summary-queue-note" style="color: #6c757d; font-size: 12px;" role="status" aria-live="polite">${total} task${total > 1 ? 's' : ''} in queue</div>`;
+                }
             }
         }
 
@@ -636,8 +752,12 @@ class SummaryState {
         const navLinksHTML = isUploadedPaper
             ? (() => {
                   const ps =
-                      this.paper && this.paper.parse_status ? String(this.paper.parse_status) : '';
-                  const disabled = ps && ps !== 'ok';
+                      this.paper &&
+                      this.paper.parse_status !== undefined &&
+                      this.paper.parse_status !== null
+                          ? String(this.paper.parse_status)
+                          : '';
+                  const disabled = ps !== 'ok';
                   const metaExtracted = this.paper && this.paper.meta_extracted_ok === true;
                   // Similar and Inspect require both parse and metadata extraction
                   const featureDisabled = disabled || !metaExtracted;
@@ -793,8 +913,10 @@ window.summaryApp = summaryApp;
 async function fetchSummary(pid, options = {}) {
     try {
         // Create AbortController for timeout control
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout (cache-only fetch should be fast)
+        const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const timeoutId = controller
+            ? setTimeout(() => controller.abort(), 60000) // 60s timeout (cache-only fetch should be fast)
+            : null;
 
         const response = await csrfFetch('/api/get_paper_summary', {
             method: 'POST',
@@ -804,10 +926,10 @@ async function fetchSummary(pid, options = {}) {
                 force_regenerate: Boolean(options.force_regenerate),
                 cache_only: Boolean(options.cache_only),
             }),
-            signal: controller.signal,
+            signal: controller ? controller.signal : undefined,
         });
 
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
 
         const data = await response.json().catch(() => null);
         if (response.ok && data && data.success) {
@@ -892,20 +1014,27 @@ async function triggerSummary(pid, options = {}) {
     if (options.priority !== undefined && options.priority !== null) {
         payload.priority = options.priority;
     }
-    const response = await csrfFetch('/api/trigger_paper_summary', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 30000) : null; // 30s timeout for trigger
+    try {
+        const response = await csrfFetch('/api/trigger_paper_summary', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            signal: controller ? controller.signal : undefined,
+        });
 
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
 
-    const data = await response.json();
-    if (!data.success) {
-        throw new Error(data.error || 'Failed to trigger summary');
+        const data = await response.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to trigger summary');
+        }
+        return data;
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
     }
-    return data;
 }
 
 async function fetchModels() {
@@ -1103,8 +1232,11 @@ summaryApp.regenerate = function () {
 
     // Guard: uploaded paper must be parsed before summary generation.
     if (this.paper && this.paper.kind === 'upload') {
-        const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
-        if (ps && ps !== 'ok') {
+        const ps =
+            this.paper.parse_status !== undefined && this.paper.parse_status !== null
+                ? String(this.paper.parse_status)
+                : '';
+        if (ps !== 'ok') {
             alert('Parse PDF first before generating summary.');
             return;
         }
@@ -1162,7 +1294,7 @@ summaryApp.confirmClearModel = async function () {
             notice: `Summary for model "${currentModel}" cleared. Click Generate to create a new one.`,
         });
     } catch (error) {
-        const friendlyMsg = CommonUtils.handleApiError(error, 'Clear Model Summary');
+        const friendlyMsg = handleApiError(error, 'Clear Model Summary');
         this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
     }
 };
@@ -1215,8 +1347,11 @@ summaryApp.queueSummary = async function (pid, options = {}) {
 
     // Guard: uploaded paper must be parsed before summary generation.
     if (this.paper && this.paper.kind === 'upload') {
-        const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
-        if (ps && ps !== 'ok') {
+        const ps =
+            this.paper.parse_status !== undefined && this.paper.parse_status !== null
+                ? String(this.paper.parse_status)
+                : '';
+        if (ps !== 'ok') {
             this.setState({
                 loading: false,
                 regenerating: false,
@@ -1290,7 +1425,7 @@ summaryApp.queueSummary = async function (pid, options = {}) {
         }
         this.scheduleAutoRetry(pid, { model: targetModel, cache_only: true });
     } catch (error) {
-        const friendlyMsg = CommonUtils.handleApiError(error, 'Trigger Summary');
+        const friendlyMsg = handleApiError(error, 'Trigger Summary');
         if (targetModel) {
             this.inflightModels[targetModel] = false;
         }
@@ -1339,7 +1474,7 @@ summaryApp.confirmClearAll = async function () {
             notice: 'All caches cleared. Click Generate to fetch a fresh summary.',
         });
     } catch (error) {
-        const friendlyMsg = CommonUtils.handleApiError(error, 'Clear All Caches');
+        const friendlyMsg = handleApiError(error, 'Clear All Caches');
         this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
     }
 };
@@ -1356,7 +1491,11 @@ summaryApp.findSimilarPapers = async function () {
 
     // Uploaded paper must be parsed before similarity can be computed.
     // Keep this aligned with readinglist.js behavior (disable when parse_status != 'ok').
-    if (this.paper.parse_status && this.paper.parse_status !== 'ok') {
+    const ps =
+        this.paper.parse_status !== undefined && this.paper.parse_status !== null
+            ? String(this.paper.parse_status)
+            : '';
+    if (ps !== 'ok') {
         alert('Parse PDF first to find similar papers.');
         return;
     }
@@ -1497,7 +1636,11 @@ summaryApp.extractInfo = async function () {
     }
 
     // Check if parsed
-    if (this.paper.parse_status && this.paper.parse_status !== 'ok') {
+    const ps =
+        this.paper.parse_status !== undefined && this.paper.parse_status !== null
+            ? String(this.paper.parse_status)
+            : '';
+    if (ps !== 'ok') {
         alert('Parse PDF first before extracting info.');
         return;
     }
@@ -1642,15 +1785,21 @@ summaryApp.exportMarkdownZip = async function () {
         zip.file('summary.md', markdown);
 
         // Create meta.json with essential metadata only
-        // Note: URLs use raw pid (without version), which automatically points to latest version on arXiv
+        // Note: For arXiv papers, URLs use raw pid (without version), which automatically points to latest version.
+        const isUploadedPaper = this.paper && this.paper.kind === 'upload';
         const metaJson = {
             id: pid,
+            kind: isUploadedPaper ? 'upload' : 'arxiv',
             title: this.paper.title || '',
             published: this.paper.time || '',
-            urls: {
-                arxiv: `https://arxiv.org/abs/${pid}`,
-                pdf: `https://arxiv.org/pdf/${pid}.pdf`,
-            },
+            urls: isUploadedPaper
+                ? {
+                      pdf: `${window.location.origin}/api/uploaded_papers/pdf/${encodeURIComponent(pid)}`,
+                  }
+                : {
+                      arxiv: `https://arxiv.org/abs/${pid}`,
+                      pdf: `https://arxiv.org/pdf/${pid}.pdf`,
+                  },
             summary: {
                 model: meta.llm_model || this.selectedModel || '',
                 generated_at: meta.generated_at || null,
@@ -1750,9 +1899,17 @@ async function downloadImageAsBlob(url) {
             return null;
         }
 
+        let isSameOrigin = false;
+        try {
+            isSameOrigin = new URL(fullUrl).origin === window.location.origin;
+        } catch (e) {
+            isSameOrigin = false;
+        }
         const response = await fetch(fullUrl, {
             mode: 'cors',
-            credentials: 'omit',
+            // For same-origin (including private uploaded-paper images), allow cookies so the user
+            // can export images from their own session. For cross-origin, never send credentials.
+            credentials: isSameOrigin ? 'same-origin' : 'omit',
         });
 
         if (!response.ok) {
@@ -1821,7 +1978,7 @@ summaryApp.clearCache = summaryApp.confirmClearAll;
 
 // Load summary function
 summaryApp.loadSummary = async function (pid, options = {}) {
-    return await CommonUtils.measurePerformanceAsync(
+    return await measurePerformanceAsync(
         `loadSummary(${pid}, model=${options.model || 'default'})`,
         async () => {
             if (this.clearing) {
@@ -1847,12 +2004,35 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             // Avoid making an API call that will fail with 404/400 and instead show
             // a clear action hint to the user.
             if (this.paper && this.paper.kind === 'upload') {
-                const ps = this.paper.parse_status ? String(this.paper.parse_status) : '';
-                if (ps && ps !== 'ok') {
+                const ps =
+                    this.paper.parse_status !== undefined && this.paper.parse_status !== null
+                        ? String(this.paper.parse_status)
+                        : '';
+                if (ps !== 'ok') {
+                    const rawErr =
+                        this.paper &&
+                        this.paper.parse_error !== undefined &&
+                        this.paper.parse_error !== null
+                            ? String(this.paper.parse_error)
+                            : '';
+                    const err = rawErr.replace(/\s+/g, ' ').trim();
+                    const errShort = err.length > 200 ? err.slice(0, 200) + '...' : err;
+                    let notice = 'Parse PDF first before generating summary.';
+                    if (ps === 'queued') {
+                        notice = 'PDF parsing is queued. Please wait...';
+                    } else if (ps === 'running') {
+                        notice = 'Parsing PDF... Please wait.';
+                    } else if (ps === 'failed') {
+                        notice = errShort
+                            ? `PDF parse failed: ${errShort}`
+                            : 'PDF parse failed. Please retry parsing.';
+                    } else if (errShort) {
+                        notice = errShort;
+                    }
                     this.setState({
                         loading: false,
                         regenerating: false,
-                        notice: 'Parse PDF first before generating summary.',
+                        notice,
                         error: null,
                         content: null,
                         meta: null,
@@ -1869,6 +2049,8 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             const modelChanged = chosenModelStr && chosenModelStr !== prevContentModel;
 
             const inFlight = Boolean(chosenModelStr && this.inflightModels[chosenModelStr]);
+            // Clear content when switching models to avoid showing another model's summary.
+            const clearContentOnSwitch = Boolean(modelChanged);
             // Show loading when: force regenerate, or no content yet, or in-flight generation,
             // or model changed (to avoid showing "No summary" flash before API returns)
             const hasRenderedContent = Boolean(!modelChanged && this.content);
@@ -1883,9 +2065,9 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                 regenerating: force,
                 selectedModel: chosenModel || '',
                 notice: cacheOnly ? (inFlight ? this.notice : '') : this.notice,
-                // Prevent showing another model's summary while fetching this model
-                content: modelChanged ? null : this.content,
-                meta: modelChanged ? null : this.meta,
+                // Prevent showing another model's summary while fetching this model.
+                content: clearContentOnSwitch ? null : this.content,
+                meta: clearContentOnSwitch ? null : this.meta,
             });
 
             try {
@@ -2051,7 +2233,7 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                     });
                     return;
                 }
-                const friendlyMsg = CommonUtils.handleApiError(error, 'Load Summary');
+                const friendlyMsg = handleApiError(error, 'Load Summary');
                 this.setState({ loading: false, regenerating: false, error: friendlyMsg });
                 if (
                     error.code === 'summary_timeout' ||
@@ -2068,14 +2250,14 @@ summaryApp.loadSummary = async function (pid, options = {}) {
 };
 
 summaryApp.loadModels = async function () {
-    return await CommonUtils.measurePerformanceAsync('loadModels', async () => {
+    return await measurePerformanceAsync('loadModels', async () => {
         try {
             const models = await fetchModels();
             // Keep model data immediately readable for init sequence
             // (selectInitialModel runs right after loadModels resolves).
             this.setStateSync({ models, modelsError: null });
         } catch (error) {
-            const friendlyMsg = CommonUtils.handleApiError(error, 'Load Models');
+            const friendlyMsg = handleApiError(error, 'Load Models');
             this.setStateSync({ modelsError: friendlyMsg });
         }
     });
@@ -2083,6 +2265,30 @@ summaryApp.loadModels = async function () {
 
 summaryApp.selectInitialModel = async function (pid) {
     try {
+        // Uploaded papers: if not parsed yet, skip checking available summaries (API may 404).
+        // Use default model selection without logging noisy errors.
+        const isUploaded = this.paper && this.paper.kind === 'upload';
+        if (isUploaded) {
+            const ps =
+                this.paper.parse_status !== undefined && this.paper.parse_status !== null
+                    ? String(this.paper.parse_status)
+                    : '';
+            if (ps !== 'ok') {
+                this.availableSummaries = [];
+                let selectedModel = '';
+                const preferred = String(this.defaultModel || '').trim();
+                if (preferred) {
+                    const matched = this.models.find(m => String(m.id || '') === preferred);
+                    selectedModel = matched ? matched.id || '' : preferred;
+                }
+                if (!selectedModel && this.models.length > 0) {
+                    selectedModel = this.models[0].id || '';
+                }
+                this.setState({ selectedModel });
+                return selectedModel;
+            }
+        }
+
         // Get available summaries for this paper
         const availableSummaries = await fetchAvailableSummaries(pid);
 
@@ -2145,6 +2351,11 @@ summaryApp.selectInitialModel = async function (pid) {
 // Initialize app
 async function initSummaryApp() {
     console.log('Initializing summary page...');
+
+    // common_utils.js missing: an earlier DOMContentLoaded handler already renders an error page.
+    if (!_commonUtilsLoaded) {
+        return;
+    }
 
     // Check required variables
     if (typeof paper === 'undefined') {

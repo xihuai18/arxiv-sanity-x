@@ -34,6 +34,7 @@ from backend.utils.upload_utils import (
 from config import settings
 
 DATA_DIR = str(settings.data_dir)
+SUMMARY_DIR = str(settings.summary_dir)
 
 # SSE enabled flag - check if we're in a web context
 _SSE_ENABLED = True
@@ -145,6 +146,66 @@ def _infer_meta_extracted_ok(record: Dict[str, Any], title: str, abstract: str, 
     inferred_authors = [str(a).strip() for a in inferred_authors if str(a).strip()]
 
     return bool(inferred_title or inferred_abs or inferred_authors)
+
+
+def _infer_upload_mineru_parsed_ok(pid: str) -> bool:
+    """Best-effort infer whether MinerU parsing is complete for an uploaded paper.
+
+    This is used for backward compatibility with older upload records that may
+    miss `parse_status` but already have MinerU cache on disk.
+    """
+    # Keep aligned with tools.paper_summarizer.PaperSummarizer._MINERU_MD_MIN_SIZE
+    min_size = 4096
+    base_dir = Path(DATA_DIR) / "mineru" / pid
+    candidates = [
+        base_dir / "auto" / f"{pid}.md",
+        base_dir / "vlm" / f"{pid}.md",
+        base_dir / "api" / f"{pid}.md",
+    ]
+    for p in candidates:
+        try:
+            if p.exists() and p.is_file() and p.stat().st_size >= min_size:
+                return True
+        except Exception:
+            continue
+
+    try:
+        if base_dir.exists() and base_dir.is_dir():
+            for p in base_dir.glob(f"*/{pid}.md"):
+                try:
+                    if p.exists() and p.is_file() and p.stat().st_size >= min_size:
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        return False
+
+    return False
+
+
+def _normalize_upload_parse_status(pid: str, record: Dict[str, Any]) -> tuple[str, str]:
+    """Return (parse_status, parse_error) with backward-compatible inference.
+
+    Older upload records may miss `parse_status` even if MinerU cache exists on disk.
+    """
+    parse_status_raw = record.get("parse_status")
+    parse_error_raw = record.get("parse_error") or ""
+
+    parse_status = str(parse_status_raw).strip() if parse_status_raw is not None else ""
+    parse_error = str(parse_error_raw).strip()
+
+    if parse_status:
+        return parse_status, parse_error
+
+    if _infer_upload_mineru_parsed_ok(pid):
+        try:
+            UploadedPaperRepository.update(pid, {"parse_status": "ok", "parse_error": None})
+        except Exception:
+            pass
+        return "ok", ""
+
+    # Keep UI consistent: treat unknown as pending (not ready).
+    return "pending", parse_error
 
 
 def _validate_meta_override_inputs(
@@ -951,13 +1012,31 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         except Exception as e:
             logger.warning(f"Failed to delete MinerU cache for {pid}: {e}")
 
+    # Delete HTML->Markdown cache
+    html_md_dir = Path(DATA_DIR) / "html_md" / pid
+    if html_md_dir.exists():
+        try:
+            shutil.rmtree(html_md_dir)
+        except Exception as e:
+            logger.warning(f"Failed to delete HTML cache for {pid}: {e}")
+
     # Delete summary cache
-    summary_dir = Path(DATA_DIR) / "summary" / pid
+    summary_root = Path(SUMMARY_DIR)
+    summary_dir = summary_root / pid
     if summary_dir.exists():
         try:
             shutil.rmtree(summary_dir)
         except Exception as e:
             logger.warning(f"Failed to delete summary cache for {pid}: {e}")
+    for legacy_path in (
+        summary_root / f"{pid}.md",
+        summary_root / f"{pid}.meta.json",
+        summary_root / f".{pid}.lock",
+    ):
+        try:
+            legacy_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Best-effort: clean up summary task/status records after delete.
     # Important: do NOT delete epoch markers here; they are used for cooperative cancellation
@@ -1421,6 +1500,8 @@ def get_upload_summary_context(pid: str, user: str) -> Optional[Dict[str, Any]]:
     abstract = override.get("abstract") or meta.get("abstract")
     meta_extracted_ok = _infer_meta_extracted_ok(record, title, abstract, authors_list)
 
+    parse_status, parse_error = _normalize_upload_parse_status(pid, record)
+
     # Format upload time for display
     created_time = record.get("created_time", 0)
     if created_time:
@@ -1457,7 +1538,8 @@ def get_upload_summary_context(pid: str, user: str) -> Optional[Dict[str, Any]]:
         "tags": "",
         "utags": utags,
         "ntags": ntags,
-        "parse_status": record.get("parse_status", ""),
+        "parse_status": parse_status,
+        "parse_error": parse_error,
         "meta_extracted_ok": meta_extracted_ok,
         "created_time": created_time,
     }

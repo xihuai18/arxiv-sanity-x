@@ -441,8 +441,11 @@ def api_uploaded_papers_extract_info():
             # Do not leak existence of private upload PIDs to other authenticated users.
             return _api_error("Paper not found", 404)
 
-        if record.get("parse_status") != "ok":
-            return _api_error(f"Paper not parsed yet (status: {record.get('parse_status')})", 400)
+        from backend.services.upload_service import _normalize_upload_parse_status
+
+        parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+        if parse_status != "ok":
+            return _api_error(f"Paper not parsed yet (status: {parse_status})", 400)
 
         if record.get("meta_extracted_ok") is True:
             return _api_error("Metadata already extracted", 400)
@@ -534,8 +537,11 @@ def api_uploaded_papers_similar(pid: str):
             return _api_error("Paper not found", 404)
 
         # Check if paper has been parsed
-        if record.get("parse_status") != "ok":
-            return _api_error("Paper must be parsed first", 400)
+        from backend.services.upload_service import _normalize_upload_parse_status
+
+        parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+        if parse_status != "ok":
+            return _api_error(f"Paper must be parsed first (status: {parse_status})", 400)
 
         # Similarity features rely on extracted metadata (title/authors/abstract).
         # Keep this aligned with frontend gating (readinglist.js disables Similar until meta_extracted_ok).

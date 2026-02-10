@@ -417,6 +417,27 @@ class WebSettings(BaseSettings):
     # Debug switch
     enable_cache_status: bool = Field(default=False, description="Enable /cache_status debug page")
 
+    # ---------------------------------------------------------------------
+    # Frontend asset CDN (optional)
+    #
+    # Motivation:
+    # - Some deployments serve large third-party assets (e.g. MathJax ES5 + fonts)
+    #   from the same gunicorn worker that serves HTML/API requests.
+    # - Under load, local static delivery may intermittently fail (e.g. ERR_EMPTY_RESPONSE),
+    #   causing React/MathJax to not load and summary pages to crash.
+    #
+    # We allow loading third-party libraries from a public CDN, with automatic
+    # fallback to local self-hosted files.
+    # ---------------------------------------------------------------------
+    asset_cdn_enabled: bool = Field(
+        default=True,
+        description="Enable public CDN for third-party frontend assets (with local fallback)",
+    )
+    asset_npm_cdn_base: str = Field(
+        default="https://cdn.jsdelivr.net/npm",
+        description="Base URL for npm package CDN (e.g. https://cdn.jsdelivr.net/npm)",
+    )
+
 
 class LockSettings(BaseSettings):
     """Lock configuration"""
@@ -630,11 +651,20 @@ class Settings(BaseSettings):
     @field_validator("data_dir", "summary_dir", "log_dir", mode="before")
     @classmethod
     def resolve_path(cls, v):
-        """Resolve path"""
+        """Resolve path.
+
+        Treat relative paths as relative to PROJECT_ROOT (repo root), not the
+        current working directory. This avoids surprising resolution differences
+        between Flask's `root_path` and the process CWD (e.g. when serving cached
+        paper images from `data/`).
+        """
         if v is None:
             return v
-        if isinstance(v, str):
-            return Path(v)
+        if isinstance(v, (str, Path)):
+            p = Path(v).expanduser()
+            if not p.is_absolute():
+                p = PROJECT_ROOT / p
+            return p.resolve()
         return v
 
 

@@ -6,6 +6,11 @@
 (function (global) {
     const NS = 'ArxivSanitySummaryMarkdownDom';
     const CommonUtils = global.ArxivSanityCommon;
+    if (!CommonUtils) {
+        console.error('[' + NS + '] common_utils.js not loaded – DOM utilities unavailable.');
+        global[NS] = {};
+        return;
+    }
     const escapeHtml = CommonUtils.escapeHtml;
 
     let tocObserver = null;

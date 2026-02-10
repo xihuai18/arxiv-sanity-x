@@ -2161,6 +2161,7 @@
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', '/api/upload_pdf', true);
+        xhr.timeout = 300000; // 5 minute timeout for large file uploads
 
         // Add CSRF token
         const csrfToken = CommonUtils.getCsrfToken();
@@ -2174,6 +2175,12 @@
                 progressFill.style.width = percent + '%';
                 progressText.textContent = 'Uploading... ' + percent + '%';
             }
+        };
+
+        xhr.ontimeout = function () {
+            uploadBtn.style.display = 'inline-flex';
+            uploadProgress.style.display = 'none';
+            alert('Upload failed: Request timed out. Please try again.');
         };
 
         xhr.onload = function () {

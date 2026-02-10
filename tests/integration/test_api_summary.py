@@ -29,6 +29,47 @@ class TestSummaryStatusApi:
         assert data.get("success") is True
         assert "statuses" in data
 
+    def test_summary_status_hides_last_error_for_other_user(self, client, csrf_token, monkeypatch):
+        """Do not leak last_error/task_id across users when task_user is set."""
+        from backend import legacy
+
+        # Force existence so the endpoint reaches the status DB path.
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+
+        class _FakeDB:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def get_many(self, keys):
+                return {
+                    k: {
+                        "status": "failed",
+                        "last_error": "secret failure details",
+                        "task_id": "task_abc",
+                        "task_user": "alice",
+                    }
+                    for k in keys
+                }
+
+        monkeypatch.setattr(legacy, "get_summary_status_db", lambda *args, **kwargs: _FakeDB())
+
+        pid = "9999.99999"
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": [pid], "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        info = (data.get("statuses") or {}).get(pid) or {}
+        assert info.get("status") == "failed"
+        assert info.get("last_error") is None
+        assert "task_id" not in info
+
 
 class TestSummaryGetApi:
     """Tests for get paper summary API."""

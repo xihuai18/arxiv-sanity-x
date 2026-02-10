@@ -170,6 +170,30 @@ def create_app() -> Flask:
 
         return {"hashed_static": hashed_static}
 
+    @app.context_processor
+    def inject_asset_cdn_config():
+        """Inject frontend asset CDN config and helpers.
+
+        Templates can use these values to load third-party libraries from a CDN
+        with a deterministic local fallback.
+        """
+
+        def npm_cdn_url(path: str) -> str:
+            base = (getattr(settings.web, "asset_npm_cdn_base", "") or "").strip()
+            if not base:
+                base = "https://cdn.jsdelivr.net/npm"
+            base = base.rstrip("/")
+            rel = (path or "").lstrip("/")
+            return f"{base}/{rel}"
+
+        return {
+            # Plain values for inline JS.
+            "asset_cdn_enabled": bool(getattr(settings.web, "asset_cdn_enabled", True)),
+            "asset_npm_cdn_base": (getattr(settings.web, "asset_npm_cdn_base", "") or "").strip(),
+            # Helper for templates.
+            "npm_cdn_url": npm_cdn_url,
+        }
+
     app.register_blueprint(web.bp)
     app.register_blueprint(api_user.bp)
     app.register_blueprint(api_sse.bp)

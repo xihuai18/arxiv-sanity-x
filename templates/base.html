@@ -47,6 +47,10 @@
 // Keep these in base.html so every page gets a consistent baseline.
 var user = {{ user | default('', true) | tojson }};
 var __arxivSanityStaticBase = {{ url_for('static', filename='') | tojson }};
+// Frontend third-party asset CDN config (optional).
+// Used by CommonUtils to load large assets (e.g., MathJax) with CDN->local fallback.
+var __arxivSanityAssetCdnEnabled = {{ asset_cdn_enabled | default(true) | tojson }};
+var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.jsdelivr.net/npm', true) | tojson }};
 </script>
 {% block variables %}
 {% endblock %}
