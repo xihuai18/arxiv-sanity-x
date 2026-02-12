@@ -19,7 +19,7 @@
     margin-bottom: 6px;
     padding: 5px 12px;
     border-radius: 20px;
-    cursor: pointer;
+    cursor: default;
     transition: all var(--transition-fast);
     font-weight: 500;
     font-size: 13px;
@@ -29,11 +29,9 @@
 }
 
 .rel_ukey:hover {
-    background-color: var(--keyword-hover-bg-light);
-    border-color: var(--keyword-hover-border-light);
-    color: var(--keyword-hover-text-light);
-    transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(245, 124, 0, 0.2);
+    background-color: var(--keyword-bg-light);
+    border-color: var(--keyword-border-light);
+    color: var(--keyword-text-light);
 }
 
 [data-theme='dark'] .rel_ukey {
@@ -43,10 +41,9 @@
 }
 
 [data-theme='dark'] .rel_ukey:hover {
-    background-color: var(--keyword-hover-bg-dark);
-    border-color: var(--keyword-hover-border-dark);
-    color: var(--keyword-hover-text-dark);
-    box-shadow: 0 2px 8px rgba(255, 166, 87, 0.2);
+    background-color: var(--keyword-bg-dark);
+    border-color: var(--keyword-border-dark);
+    color: var(--keyword-text-dark);
 }
 
 .rel_ukey_add {
@@ -75,15 +72,11 @@
     height: 22px;
 }
 
-/* Unified tag link text color: inherit in normal state, white on hover */
+/* Unified tag link text color: inherit */
 .rel_ukey a,
 .rel_ukey_all a {
     color: inherit;
     text-decoration: none;
-}
-.rel_ukey:hover a,
-.rel_ukey_all:hover a {
-    color: #fff;
 }
 
 .rel_ukey_all {
@@ -99,16 +92,16 @@
     box-sizing: border-box;
     margin-right: 4px;
     margin-bottom: 4px;
-    cursor: pointer;
+    cursor: default;
     transition:
         background-color 0.15s,
         color 0.15s,
         border-color 0.15s;
 }
 .rel_ukey_all:hover {
-    background-color: var(--keyword-hover-bg-light);
-    border-color: var(--keyword-hover-border-light);
-    color: var(--keyword-hover-text-light);
+    background-color: var(--keyword-bg-light);
+    border-color: var(--keyword-border-light);
+    color: var(--keyword-text-light);
 }
 [data-theme='dark'] .rel_ukey_all {
     background-color: var(--keyword-bg-dark);
@@ -116,9 +109,9 @@
     color: var(--keyword-text-dark);
 }
 [data-theme='dark'] .rel_ukey_all:hover {
-    background-color: var(--keyword-hover-bg-dark);
-    border-color: var(--keyword-hover-border-dark);
-    color: var(--keyword-hover-text-dark);
+    background-color: var(--keyword-bg-dark);
+    border-color: var(--keyword-border-dark);
+    color: var(--keyword-text-dark);
 }
 
 /* Original non-user tags, e.g. cs.CV */
@@ -240,7 +233,7 @@
     box-sizing: border-box;
     margin-right: 4px;
     margin-bottom: 4px;
-    cursor: pointer;
+    cursor: default;
     transition:
         background-color 0.15s,
         color 0.15s,
@@ -248,9 +241,11 @@
     box-shadow: none !important;
 }
 .rel_utag_all:hover {
-    background-color: var(--tag-hover-bg-light);
-    border-color: var(--tag-hover-border-light);
-    color: var(--tag-hover-text-light);
+    background-color: var(--tag-bg-light);
+    border-color: var(--tag-border-light);
+    color: var(--tag-text-light);
+    transform: none;
+    box-shadow: none !important;
 }
 [data-theme='dark'] .rel_utag_all {
     background-color: var(--tag-bg-dark);
@@ -258,9 +253,11 @@
     color: var(--tag-text-dark);
 }
 [data-theme='dark'] .rel_utag_all:hover {
-    background-color: var(--tag-hover-bg-dark);
-    border-color: var(--tag-hover-border-dark);
-    color: var(--tag-hover-text-dark);
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+    transform: none;
+    box-shadow: none !important;
 }
 
 .rel_utag_add {
@@ -335,14 +332,17 @@
 .tag-link:hover {
     text-decoration: none;
 }
-.rel_utag:hover a,
-.rel_utag_all:hover a {
+.rel_utag:hover a {
     color: #fff;
 }
 
 .tag-link-disabled {
     cursor: default;
     opacity: 0.8;
+}
+
+.tag-link-static {
+    cursor: default;
 }
 
 /* Keywords within combined tag containers use tag colors */
@@ -354,9 +354,9 @@
 }
 .enhanced-combined-tags .rel_ukey:hover,
 .enhanced-combined-tags .rel_ukey_all:hover {
-    background-color: var(--tag-hover-bg-light);
-    border-color: var(--tag-hover-border-light);
-    color: var(--tag-hover-text-light);
+    background-color: var(--tag-bg-light);
+    border-color: var(--tag-border-light);
+    color: var(--tag-text-light);
 }
 [data-theme='dark'] .enhanced-combined-tags .rel_ukey,
 [data-theme='dark'] .enhanced-combined-tags .rel_ukey_all {
@@ -366,9 +366,9 @@
 }
 [data-theme='dark'] .enhanced-combined-tags .rel_ukey:hover,
 [data-theme='dark'] .enhanced-combined-tags .rel_ukey_all:hover {
-    background-color: var(--tag-hover-bg-dark);
-    border-color: var(--tag-hover-border-dark);
-    color: var(--tag-hover-text-dark);
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
 }
 
 /* Tags within paper entries use tag colors (attempt to override inline styles) */

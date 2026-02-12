@@ -1130,9 +1130,15 @@ const Tag = props => {
     return (
         <div class={tag_class + ' enhanced-tag'} title={tooltip}>
             <span
-                class={isNegOnly ? 'tag-link tag-link-disabled' : 'tag-link'}
+                class={
+                    isEditable
+                        ? isNegOnly
+                            ? 'tag-link tag-link-disabled'
+                            : 'tag-link'
+                        : 'tag-link tag-link-static'
+                }
                 title={tooltip}
-                onClick={handleOpenManage}
+                onClick={isEditable ? handleOpenManage : undefined}
             >
                 <span class="tag-counts">
                     <span class="tag-count tag-count-pos" title="Positive count">
@@ -1144,19 +1150,21 @@ const Tag = props => {
                 </span>
                 <span class="tag-name">{t.name}</span>
             </span>
-            {isEditable && (
-                <div class="tag-actions">
-                    <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">
-                        ↗
-                    </span>
+            <div class="tag-actions">
+                <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">
+                    ↗
+                </span>
+                {isEditable && (
                     <span class="tag-edit" onClick={() => props.onEdit(t)} title="Edit tag">
                         ✎
                     </span>
+                )}
+                {isEditable && (
                     <span class="tag-delete" onClick={() => props.onDelete(t)} title="Delete tag">
                         ×
                     </span>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 };
@@ -2114,12 +2122,23 @@ const CombinedTag = props => {
     const turl = buildTagUrl(t.name, { logic: 'and' });
     const tag_class = 'rel_utag rel_utag_all enhanced-combined-tag';
 
+    const handleOpenReco = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.location.href = turl;
+    };
+
     return (
         <div class={tag_class}>
-            <a href={turl} class="combined-tag-link">
-                {t.name}
-            </a>
+            <span class="combined-tag-link combined-tag-link-static">{t.name}</span>
             <div class="combined-tag-actions">
+                <span
+                    class="combined-tag-reco"
+                    onClick={handleOpenReco}
+                    title="Open recommendations"
+                >
+                    ↗
+                </span>
                 <span
                     class="combined-tag-edit"
                     onClick={() => props.onEdit(t)}
@@ -2579,16 +2598,25 @@ const Key = props => {
         'rel_ukey' + (k.name === 'Artificial general intelligence' ? ' rel_ukey_all' : '');
     const isEditable = k.name !== 'Artificial general intelligence';
 
+    const handleOpenSearch = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.location.href = kurl;
+    };
+
     return (
         <div class={key_class + ' enhanced-keyword'}>
-            <a href={kurl} class="keyword-link">
-                {k.name}
-            </a>
-            {isEditable && (
-                <div class="keyword-actions">
+            <span class="keyword-link keyword-link-static">{k.name}</span>
+            <div class="keyword-actions">
+                <span class="keyword-reco" onClick={handleOpenSearch} title="Search keyword">
+                    ↗
+                </span>
+                {isEditable && (
                     <span class="keyword-edit" onClick={() => props.onEdit(k)} title="Edit keyword">
                         ✎
                     </span>
+                )}
+                {isEditable && (
                     <span
                         class="keyword-delete"
                         onClick={() => props.onDelete(k)}
@@ -2596,8 +2624,8 @@ const Key = props => {
                     >
                         ×
                     </span>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 };
