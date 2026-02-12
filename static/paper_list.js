@@ -572,6 +572,7 @@ const PaperList = props => {
             key={jpaper && jpaper.id ? jpaper.id : ix}
             paper={jpaper}
             tags={filtered_tags}
+            inReadingList={isInReadingList(jpaper && jpaper.id)}
         />
     ));
     return (
@@ -600,7 +601,10 @@ class PaperComponent extends React.Component {
             dropdownOpen: false,
             newTagValue: '',
             searchValue: '',
-            inReadingList: isInReadingList(props.paper.id),
+            inReadingList:
+                props.inReadingList !== undefined
+                    ? Boolean(props.inReadingList)
+                    : isInReadingList(props.paper.id),
             readingListPending: false,
             summaryStatus: props.paper.summary_status || '',
             summaryLastError: props.paper.summary_last_error || '',
@@ -652,6 +656,13 @@ class PaperComponent extends React.Component {
     componentDidUpdate(prevProps, prevState) {
         if (prevProps.tags !== this.props.tags) {
             this.setState({ tags: this.props.tags });
+        }
+        // Sync reading list state from props (handles cache updates + re-renders)
+        if (
+            prevProps.inReadingList !== this.props.inReadingList &&
+            !this.state.readingListPending
+        ) {
+            this.setState({ inReadingList: Boolean(this.props.inReadingList) });
         }
         if (
             prevProps.paper.summary_status !== this.props.paper.summary_status ||
