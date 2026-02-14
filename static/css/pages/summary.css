@@ -438,6 +438,14 @@
     background-size: 12px;
 }
 
+@media (max-width: 640px) {
+    .summary-model-select,
+    .summary-actions select {
+        min-width: 0;
+        width: 100%;
+    }
+}
+
 .summary-model-select:hover,
 .summary-actions select:hover {
     border-color: var(--link-color);
@@ -539,6 +547,22 @@ html[data-theme='dark'] .summary-actions select {
         0 8px 24px rgba(0, 0, 0, 0.15),
         0 4px 8px rgba(0, 0, 0, 0.1);
     animation: confirmSlideIn 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (max-width: 640px) {
+    .confirm-popup {
+        position: fixed;
+        left: 16px;
+        right: 16px;
+        top: auto;
+        bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+        min-width: 0;
+        max-width: none;
+    }
+    .confirm-popup::before,
+    .confirm-popup::after {
+        display: none;
+    }
 }
 
 .confirm-popup::before {
@@ -674,6 +698,34 @@ html[data-theme='dark'] .summary-actions select {
 .summary-note {
     font-size: 13px;
     opacity: 0.9;
+}
+
+.summary-note--error {
+    color: #b91c1c;
+    background-color: rgba(185, 28, 28, 0.08);
+    border-left: 3px solid #b91c1c;
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+[data-theme='dark'] .summary-note--error {
+    color: #fecaca;
+    background-color: rgba(248, 113, 113, 0.16);
+    border-left-color: #f87171;
+}
+
+.summary-note--notice {
+    color: #92400e;
+    background-color: rgba(245, 158, 11, 0.12);
+    border-left: 3px solid #d97706;
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+[data-theme='dark'] .summary-note--notice {
+    color: #fde68a;
+    background-color: rgba(251, 191, 36, 0.15);
+    border-left-color: #fbbf24;
 }
 
 /* Markdown content styling */
@@ -1685,6 +1737,15 @@ details[open] summary {
 
 .math-inline {
     white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+    .math-inline {
+        display: inline-block;
+        max-width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
 }
 
 /* Equation numbering */

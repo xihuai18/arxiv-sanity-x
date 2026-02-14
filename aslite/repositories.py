@@ -36,8 +36,9 @@ Migration strategy:
 - Maintain compatibility with direct database access
 """
 
+import re
 import time
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -60,6 +61,8 @@ from aslite.db import (
 # -----------------------------------------------------------------------------
 # Helper functions
 # -----------------------------------------------------------------------------
+
+_VALID_TABLENAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def readinglist_key(user: str, pid: str) -> str:
@@ -93,6 +96,28 @@ def parse_readinglist_key(key: str) -> Tuple[str, str]:
     if len(parts) == 2:
         return parts[0], parts[1]
     return "", ""
+
+
+def _ensure_kv_table(conn, tablename: str) -> None:
+    if not _VALID_TABLENAME_RE.match(tablename):
+        raise ValueError(f"Invalid table name: {tablename}")
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {tablename} (key TEXT PRIMARY KEY, value BLOB)")
+
+
+def _kv_get(conn, tablename: str, key: str, decode_fn) -> Any:
+    if not _VALID_TABLENAME_RE.match(tablename):
+        raise ValueError(f"Invalid table name: {tablename}")
+    row = conn.execute(f"SELECT value FROM {tablename} WHERE key=?", (key,)).fetchone()
+    return decode_fn(row[0]) if row else None
+
+
+def _kv_set(conn, tablename: str, key: str, value: Any, encode_fn) -> None:
+    if not _VALID_TABLENAME_RE.match(tablename):
+        raise ValueError(f"Invalid table name: {tablename}")
+    conn.execute(
+        f"INSERT OR REPLACE INTO {tablename} (key, value) VALUES (?, ?)",
+        (key, encode_fn(value)),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -426,12 +451,16 @@ class TagRepository:
             pid: Paper ID
             tag: Tag name
         """
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if tag not in tags:
-                tags[tag] = set()
-            tags[tag].add(pid)
-            tdb[user] = tags
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = tdb.get(user, {})
+                if not isinstance(tags, dict):
+                    tags = {}
+                tags = dict(tags)
+                if tag not in tags:
+                    tags[tag] = set()
+                tags[tag].add(pid)
+                tdb[user] = tags
 
     @staticmethod
     def add_paper_to_tag_and_remove_neg(user: str, pid: str, tag: str):
@@ -440,22 +469,31 @@ class TagRepository:
 
         This mirrors the legacy behavior in serve.py.
         """
-        # Avoid nesting multiple write connections to the same SQLite file; this reduces
-        # lock contention under concurrency (WAL still allows only one writer).
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if tag not in tags:
-                tags[tag] = set()
-            tags[tag].add(pid)
-            tdb[user] = tags
+        # Keep tags + neg_tags updates in one transaction to avoid lost updates.
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            conn = tdb.conn
+            decode = tdb._decode
+            encode = tdb._encode
+            _ensure_kv_table(conn, "neg_tags")
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = _kv_get(conn, "tags", user, decode) or {}
+                neg_tags = _kv_get(conn, "neg_tags", user, decode) or {}
+                if not isinstance(tags, dict):
+                    tags = {}
+                if not isinstance(neg_tags, dict):
+                    neg_tags = {}
 
-        with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user, {})
-            if tag in neg_tags and pid in neg_tags[tag]:
-                neg_tags[tag].discard(pid)
-                if not neg_tags[tag]:
-                    del neg_tags[tag]
-                ntdb[user] = neg_tags
+                tags = dict(tags)
+                neg_tags = dict(neg_tags)
+
+                tags.setdefault(tag, set()).add(pid)
+                if tag in neg_tags and pid in neg_tags[tag]:
+                    neg_tags[tag].discard(pid)
+                    if not neg_tags[tag]:
+                        del neg_tags[tag]
+
+                _kv_set(conn, "tags", user, tags, encode)
+                _kv_set(conn, "neg_tags", user, neg_tags, encode)
 
     @staticmethod
     def remove_paper_from_tag(user: str, pid: str, tag: str) -> bool:
@@ -470,15 +508,19 @@ class TagRepository:
         Returns:
             True if paper was removed, False if not found
         """
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if tag in tags and pid in tags[tag]:
-                tags[tag].discard(pid)
-                if not tags[tag]:  # Remove empty tag
-                    del tags[tag]
-                tdb[user] = tags
-                return True
-            return False
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = tdb.get(user, {})
+                if not isinstance(tags, dict):
+                    return False
+                tags = dict(tags)
+                if tag in tags and pid in tags[tag]:
+                    tags[tag].discard(pid)
+                    if not tags[tag]:
+                        del tags[tag]
+                    tdb[user] = tags
+                    return True
+                return False
 
     @staticmethod
     def remove_paper_from_tag_verbose(user: str, pid: str, tag: str) -> str:
@@ -517,13 +559,15 @@ class TagRepository:
         Returns:
             True if tag was deleted, False if not found
         """
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if tag in tags:
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = tdb.get(user, {})
+                if not isinstance(tags, dict) or tag not in tags:
+                    return False
+                tags = dict(tags)
                 del tags[tag]
                 tdb[user] = tags
                 return True
-            return False
 
     @staticmethod
     def delete_tag_full(user: str, tag: str) -> str:
@@ -533,32 +577,35 @@ class TagRepository:
         Returns:
             "ok" if deleted, otherwise legacy error message.
         """
-        # Avoid nesting multiple write connections to the same SQLite file; this reduces
-        # lock contention under concurrency (WAL still allows only one writer).
-        with get_tags_db(flag="c") as tdb:
-            if user not in tdb:
-                return "user does not have a library"
+        # Perform a single transaction across all related tables to avoid partial updates.
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            conn = tdb.conn
+            decode = tdb._decode
+            encode = tdb._encode
+            _ensure_kv_table(conn, "neg_tags")
+            _ensure_kv_table(conn, "combined_tags")
+            with tdb.transaction():
+                tags = _kv_get(conn, "tags", user, decode)
+                if tags is None:
+                    return "user does not have a library"
+                if tag not in tags:
+                    return "user does not have this tag"
+                del tags[tag]
+                _kv_set(conn, "tags", user, tags, encode)
 
-            tags = tdb[user]
-            if tag not in tags:
-                return "user does not have this tag"
+                combined = _kv_get(conn, "combined_tags", user, decode) or set()
+                if combined:
+                    combined = set(combined)
+                    for ctag in list(combined):
+                        if tag in map(str.strip, (ctag or "").split(",")):
+                            combined.discard(ctag)
+                    _kv_set(conn, "combined_tags", user, combined, encode)
 
-            del tags[tag]
-            tdb[user] = tags
-
-        with get_combined_tags_db(flag="c") as ctdb:
-            combined = ctdb.get(user)
-            if combined:
-                for ctag in list(combined):
-                    if tag in ctag.split(","):
-                        combined.remove(ctag)
-                ctdb[user] = combined
-
-        with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user)
-            if neg_tags and tag in neg_tags:
-                del neg_tags[tag]
-                ntdb[user] = neg_tags
+                neg_tags = _kv_get(conn, "neg_tags", user, decode) or {}
+                if neg_tags and tag in neg_tags:
+                    neg_tags = dict(neg_tags)
+                    del neg_tags[tag]
+                    _kv_set(conn, "neg_tags", user, neg_tags, encode)
 
         return "ok"
 
@@ -575,9 +622,12 @@ class TagRepository:
         Returns:
             True if tag was renamed, False if old tag not found
         """
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if old_tag in tags:
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = tdb.get(user, {})
+                if not isinstance(tags, dict) or old_tag not in tags:
+                    return False
+                tags = dict(tags)
                 pids = tags[old_tag]
                 del tags[old_tag]
                 if new_tag not in tags:
@@ -586,7 +636,6 @@ class TagRepository:
                     tags[new_tag] = tags[new_tag].union(pids)
                 tdb[user] = tags
                 return True
-            return False
 
     @staticmethod
     def rename_tag_full(user: str, old_tag: str, new_tag: str) -> str:
@@ -596,44 +645,51 @@ class TagRepository:
         Returns:
             "ok" if renamed, otherwise legacy error message.
         """
-        # Avoid nesting multiple write connections to the same SQLite file; this reduces
-        # lock contention under concurrency (WAL still allows only one writer).
-        with get_tags_db(flag="c") as tdb:
-            if user not in tdb:
-                return "user does not have a library"
+        # Perform a single transaction across all related tables to avoid partial updates.
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            conn = tdb.conn
+            decode = tdb._decode
+            encode = tdb._encode
+            _ensure_kv_table(conn, "neg_tags")
+            _ensure_kv_table(conn, "combined_tags")
+            with tdb.transaction():
+                tags = _kv_get(conn, "tags", user, decode)
+                if tags is None:
+                    return "user does not have a library"
+                if old_tag not in tags:
+                    return "user does not have this tag"
 
-            tags = tdb[user]
-            if old_tag not in tags:
-                return "user does not have this tag"
-
-            pids = tags[old_tag]
-            del tags[old_tag]
-            if new_tag not in tags:
-                tags[new_tag] = pids
-            else:
-                tags[new_tag] = tags[new_tag].union(pids)
-            tdb[user] = tags
-
-        with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user)
-            if neg_tags and old_tag in neg_tags:
-                o_pids = neg_tags[old_tag]
-                del neg_tags[old_tag]
-                if new_tag not in neg_tags:
-                    neg_tags[new_tag] = o_pids
+                tags = dict(tags)
+                pids = tags[old_tag]
+                del tags[old_tag]
+                if new_tag not in tags:
+                    tags[new_tag] = pids
                 else:
-                    neg_tags[new_tag] = neg_tags[new_tag].union(o_pids)
-                ntdb[user] = neg_tags
+                    tags[new_tag] = set(tags[new_tag]).union(set(pids))
+                _kv_set(conn, "tags", user, tags, encode)
 
-        with get_combined_tags_db(flag="c") as ctdb:
-            combined = ctdb.get(user)
-            if combined:
-                for ctag in list(combined):
-                    if old_tag in (ctag_split := ctag.split(",")):
-                        ctag_split = [ct_s if ct_s != old_tag else new_tag for ct_s in ctag_split]
-                        combined.remove(ctag)
-                        combined.add(",".join(ctag_split))
-                ctdb[user] = combined
+                neg_tags = _kv_get(conn, "neg_tags", user, decode) or {}
+                if neg_tags and old_tag in neg_tags:
+                    neg_tags = dict(neg_tags)
+                    o_pids = neg_tags[old_tag]
+                    del neg_tags[old_tag]
+                    if new_tag not in neg_tags:
+                        neg_tags[new_tag] = o_pids
+                    else:
+                        neg_tags[new_tag] = set(neg_tags[new_tag]).union(set(o_pids))
+                    _kv_set(conn, "neg_tags", user, neg_tags, encode)
+
+                combined = _kv_get(conn, "combined_tags", user, decode) or set()
+                if combined:
+                    out = set()
+                    for ctag in set(combined):
+                        parts = [p.strip() for p in (ctag or "").split(",")]
+                        if old_tag in parts:
+                            parts = [new_tag if p == old_tag else p for p in parts]
+                            out.add(",".join(parts))
+                        else:
+                            out.add(ctag)
+                    _kv_set(conn, "combined_tags", user, out, encode)
 
         return "ok"
 
@@ -645,12 +701,16 @@ class TagRepository:
         Returns:
             "ok" if created, or legacy error message.
         """
-        with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
-            if tag in tags:
-                return "user has repeated tag"
-            tags[tag] = set()
-            tdb[user] = tags
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                tags = tdb.get(user, {})
+                if not isinstance(tags, dict):
+                    tags = {}
+                tags = dict(tags)
+                if tag in tags:
+                    return "user has repeated tag"
+                tags[tag] = set()
+                tdb[user] = tags
         return "ok"
 
     @staticmethod
@@ -680,35 +740,44 @@ class TagRepository:
             tag: Tag name
             label: 1 for positive, -1 for negative, 0 for neutral (remove)
         """
-        # Avoid nesting multiple write connections to the same SQLite file; this reduces
-        # lock contention under concurrency (WAL still allows only one writer).
-        # Positive tags update
-        with get_tags_db(flag="c") as tags_db:
-            pos_d = tags_db.get(user) or {}
-            if label == 1:
-                if tag not in pos_d:
-                    pos_d[tag] = set()
-                pos_d[tag].add(pid)
-            else:
-                if tag in pos_d and pid in pos_d[tag]:
-                    pos_d[tag].discard(pid)
-                    if len(pos_d[tag]) == 0:
-                        del pos_d[tag]
-            tags_db[user] = pos_d
+        # Perform a single transaction across tags + neg_tags to avoid partial updates.
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            conn = tdb.conn
+            decode = tdb._decode
+            encode = tdb._encode
+            _ensure_kv_table(conn, "neg_tags")
+            with tdb.transaction():
+                pos_d = _kv_get(conn, "tags", user, decode) or {}
+                neg_d = _kv_get(conn, "neg_tags", user, decode) or {}
 
-        # Negative tags update
-        with get_neg_tags_db(flag="c") as neg_tags_db:
-            neg_d = neg_tags_db.get(user) or {}
-            if label == -1:
-                if tag not in neg_d:
-                    neg_d[tag] = set()
-                neg_d[tag].add(pid)
-            else:
-                if tag in neg_d and pid in neg_d[tag]:
-                    neg_d[tag].discard(pid)
-                    if len(neg_d[tag]) == 0:
-                        del neg_d[tag]
-            neg_tags_db[user] = neg_d
+                pos_d = dict(pos_d)
+                neg_d = dict(neg_d)
+
+                if label == 1:
+                    pos_d.setdefault(tag, set()).add(pid)
+                    # Mirror legacy behavior: adding positive removes negative.
+                    if tag in neg_d and pid in neg_d[tag]:
+                        neg_d[tag].discard(pid)
+                        if not neg_d[tag]:
+                            del neg_d[tag]
+                elif label == -1:
+                    neg_d.setdefault(tag, set()).add(pid)
+                    if tag in pos_d and pid in pos_d[tag]:
+                        pos_d[tag].discard(pid)
+                        if not pos_d[tag]:
+                            del pos_d[tag]
+                else:
+                    if tag in pos_d and pid in pos_d[tag]:
+                        pos_d[tag].discard(pid)
+                        if not pos_d[tag]:
+                            del pos_d[tag]
+                    if tag in neg_d and pid in neg_d[tag]:
+                        neg_d[tag].discard(pid)
+                        if not neg_d[tag]:
+                            del neg_d[tag]
+
+                _kv_set(conn, "tags", user, pos_d, encode)
+                _kv_set(conn, "neg_tags", user, neg_d, encode)
 
 
 # -----------------------------------------------------------------------------
@@ -964,7 +1033,29 @@ class ReadingListRepository:
                     rl_key = readinglist_key(user, pid)
                     if rl_key in fetched:
                         result[pid] = fetched[rl_key]
-                return result
+
+            # Self-heal the index if it contains stale PIDs (deleted) or if the
+            # index missed entries due to previous non-atomic writes.
+            try:
+                missing = [pid for pid in indexed_pids if pid not in result]
+                if missing:
+                    with get_readinglist_db() as rldb:
+                        prefix = f"{user}::"
+                        for key, value in rldb.items_with_prefix(prefix):
+                            _u, pid = parse_readinglist_key(key)
+                            if pid and pid not in result:
+                                result[pid] = value
+
+                desired = list(dict.fromkeys([pid for pid in indexed_pids if pid in result] + list(result.keys())))
+                current = list(dict.fromkeys(indexed_pids))
+                if desired != current:
+                    with get_readinglist_index_db(flag="c", autocommit=False) as idx_db:
+                        with idx_db.transaction(mode="IMMEDIATE"):
+                            idx_db[user] = desired
+            except Exception:
+                pass
+
+            return result
 
         # Fallback: prefix scan (and rebuild index)
         result = {}
@@ -1013,15 +1104,18 @@ class ReadingListRepository:
             item_data: Reading list item data
         """
         rl_key = readinglist_key(user, pid)
-        with get_readinglist_db(flag="c") as rldb:
-            rldb[rl_key] = item_data
-
-        # Update index
-        with get_readinglist_index_db(flag="c") as idx_db:
-            indexed_pids = idx_db.get(user, [])
-            if pid not in indexed_pids:
-                indexed_pids.append(pid)
-                idx_db[user] = indexed_pids
+        # Keep item + index in a single transaction to avoid index lost updates.
+        with get_readinglist_db(flag="c", autocommit=False) as rldb:
+            conn = rldb.conn
+            decode = rldb._decode
+            encode = rldb._encode
+            _ensure_kv_table(conn, "readinglist_index")
+            with rldb.transaction(mode="IMMEDIATE"):
+                rldb[rl_key] = item_data
+                indexed_pids = _kv_get(conn, "readinglist_index", user, decode) or []
+                if pid not in indexed_pids:
+                    indexed_pids = list(indexed_pids) + [pid]
+                    _kv_set(conn, "readinglist_index", user, indexed_pids, encode)
 
     @staticmethod
     def remove_from_reading_list(user: str, pid: str) -> bool:
@@ -1036,22 +1130,21 @@ class ReadingListRepository:
             True if item was removed, False if not found
         """
         rl_key = readinglist_key(user, pid)
-        removed = False
-
-        with get_readinglist_db(flag="c") as rldb:
-            if rl_key in rldb:
+        # Keep delete + index update in a single transaction to avoid index races.
+        with get_readinglist_db(flag="c", autocommit=False) as rldb:
+            conn = rldb.conn
+            decode = rldb._decode
+            encode = rldb._encode
+            _ensure_kv_table(conn, "readinglist_index")
+            with rldb.transaction(mode="IMMEDIATE"):
+                if rl_key not in rldb:
+                    return False
                 del rldb[rl_key]
-                removed = True
-
-        if removed:
-            # Update index
-            with get_readinglist_index_db(flag="c") as idx_db:
-                indexed_pids = idx_db.get(user, [])
+                indexed_pids = _kv_get(conn, "readinglist_index", user, decode) or []
                 if pid in indexed_pids:
-                    indexed_pids.remove(pid)
-                    idx_db[user] = indexed_pids
-
-        return removed
+                    next_pids = [p for p in list(indexed_pids) if p != pid]
+                    _kv_set(conn, "readinglist_index", user, next_pids, encode)
+        return True
 
     @staticmethod
     def update_reading_list_item(user: str, pid: str, updates: dict):
@@ -1064,10 +1157,16 @@ class ReadingListRepository:
             updates: Dictionary of fields to update
         """
         rl_key = readinglist_key(user, pid)
-        with get_readinglist_db(flag="c") as rldb:
-            item = rldb.get(rl_key, {})
-            item.update(updates)
-            rldb[rl_key] = item
+        # Use a transaction to avoid lost updates under concurrent read-modify-write.
+        with get_readinglist_db(flag="c", autocommit=False) as rldb:
+            with rldb.transaction(mode="IMMEDIATE"):
+                item = rldb.get(rl_key, {})
+                if not isinstance(item, dict):
+                    item = {}
+                next_item = dict(item)
+                if isinstance(updates, dict) and updates:
+                    next_item.update(updates)
+                rldb[rl_key] = next_item
 
 
 # -----------------------------------------------------------------------------
@@ -1120,42 +1219,43 @@ class SummaryStatusRepository:
             error: Error message if any
         """
         key = summary_status_key(pid, model)
-        with get_summary_status_db(flag="c") as sdb:
-            existing = sdb.get(key, {})
-            if not isinstance(existing, dict):
-                existing = {}
+        with get_summary_status_db(flag="c", autocommit=False) as sdb:
+            with sdb.transaction(mode="IMMEDIATE"):
+                existing = sdb.get(key, {})
+                if not isinstance(existing, dict):
+                    existing = {}
 
-            updates = {"status": status, "last_error": error}
-            if extra:
-                updates.update(extra)
+                updates = {"status": status, "last_error": error}
+                if extra:
+                    updates.update(extra)
 
-            # Preserve legacy behavior: allow caller to override updated_time via **extra.
-            explicit_updated_time = updates.pop("updated_time", None)
+                # Preserve legacy behavior: allow caller to override updated_time via **extra.
+                explicit_updated_time = updates.pop("updated_time", None)
 
-            desired = dict(existing)
-            changed = False
-            for field, value in updates.items():
-                if value is None:
-                    if field in desired:
-                        desired.pop(field, None)
-                        changed = True
-                else:
-                    if desired.get(field) != value:
-                        desired[field] = value
-                        changed = True
+                desired = dict(existing)
+                changed = False
+                for field, value in updates.items():
+                    if value is None:
+                        if field in desired:
+                            desired.pop(field, None)
+                            changed = True
+                    else:
+                        if desired.get(field) != value:
+                            desired[field] = value
+                            changed = True
 
-            # De-duplicate: if no fields change (excluding updated_time), do not write.
-            if not changed:
-                # If caller explicitly passes updated_time, treat it as a real update request.
-                if explicit_updated_time is None:
-                    if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
-                        return
-                else:
-                    if desired.get("updated_time") == explicit_updated_time:
-                        return
+                # De-duplicate: if no fields change (excluding updated_time), do not write.
+                if not changed:
+                    # If caller explicitly passes updated_time, treat it as a real update request.
+                    if explicit_updated_time is None:
+                        if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
+                            return
+                    else:
+                        if desired.get("updated_time") == explicit_updated_time:
+                            return
 
-            desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
-            sdb[key] = desired
+                desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
+                sdb[key] = desired
 
     @staticmethod
     def update_status(pid: str, model: str, updates: dict):
@@ -1253,42 +1353,43 @@ class SummaryStatusRepository:
             extra: Additional fields to store
         """
         key = f"task::{task_id}"
-        with get_summary_status_db(flag="c") as sdb:
-            existing = sdb.get(key, {})
-            if not isinstance(existing, dict):
-                existing = {}
+        with get_summary_status_db(flag="c", autocommit=False) as sdb:
+            with sdb.transaction(mode="IMMEDIATE"):
+                existing = sdb.get(key, {})
+                if not isinstance(existing, dict):
+                    existing = {}
 
-            updates = {"status": status, "error": error}
-            if extra:
-                updates.update(extra)
+                updates = {"status": status, "error": error}
+                if extra:
+                    updates.update(extra)
 
-            # Preserve legacy behavior: allow caller to override updated_time via **extra.
-            explicit_updated_time = updates.pop("updated_time", None)
+                # Preserve legacy behavior: allow caller to override updated_time via **extra.
+                explicit_updated_time = updates.pop("updated_time", None)
 
-            desired = dict(existing)
-            changed = False
-            for field, value in updates.items():
-                if value is None:
-                    if field in desired:
-                        desired.pop(field, None)
-                        changed = True
-                else:
-                    if desired.get(field) != value:
-                        desired[field] = value
-                        changed = True
+                desired = dict(existing)
+                changed = False
+                for field, value in updates.items():
+                    if value is None:
+                        if field in desired:
+                            desired.pop(field, None)
+                            changed = True
+                    else:
+                        if desired.get(field) != value:
+                            desired[field] = value
+                            changed = True
 
-            # De-duplicate: if no fields change (excluding updated_time), do not write.
-            if not changed:
-                # If caller explicitly passes updated_time, treat it as a real update request.
-                if explicit_updated_time is None:
-                    if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
-                        return
-                else:
-                    if desired.get("updated_time") == explicit_updated_time:
-                        return
+                # De-duplicate: if no fields change (excluding updated_time), do not write.
+                if not changed:
+                    # If caller explicitly passes updated_time, treat it as a real update request.
+                    if explicit_updated_time is None:
+                        if not SummaryStatusRepository._needs_updated_time_backfill(desired.get("updated_time")):
+                            return
+                    else:
+                        if desired.get("updated_time") == explicit_updated_time:
+                            return
 
-            desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
-            sdb[key] = desired
+                desired["updated_time"] = explicit_updated_time if explicit_updated_time is not None else time.time()
+                sdb[key] = desired
 
     @staticmethod
     def get_generation_epoch(pid: str, model: str) -> int:
@@ -1639,15 +1740,17 @@ class UploadedPaperRepository:
         Returns:
             True if record was updated, False if record doesn't exist
         """
-        with get_uploaded_papers_db(flag="c") as updb:
-            data = updb.get(pid)
-            # Only update if record exists and is a valid dict
-            if not isinstance(data, dict):
-                return False
-            data.update(updates)
-            data["updated_time"] = time.time()
-            updb[pid] = data
-            return True
+        with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+            with updb.transaction(mode="IMMEDIATE"):
+                data = updb.get(pid)
+                if not isinstance(data, dict):
+                    return False
+                next_data = dict(data)
+                if isinstance(updates, dict) and updates:
+                    next_data.update(updates)
+                next_data["updated_time"] = time.time()
+                updb[pid] = next_data
+                return True
 
     @staticmethod
     def exists(pid: str) -> bool:

@@ -11,12 +11,13 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from flask import g, session, url_for
+from flask import flash, g, session, url_for
 from loguru import logger
 
 from aslite.repositories import UserRepository
 
-from ..utils.validation import csrf_protect
+# Backward-compatible import for tests/patching (CSRF enforcement is done at API layer).
+from ..utils.validation import csrf_protect  # noqa: F401
 
 if TYPE_CHECKING:
     pass
@@ -31,14 +32,22 @@ def login_user(username: str) -> str:
     Returns:
         Redirect URL
     """
-    csrf_protect()
-
     # the user is logged out but wants to log in, ok
     username = (username or "").strip()
     if g.user is None and username:
         if len(username) > 0:  # one more paranoid check
-            session["user"] = username
-            logger.debug(f"User {username} logged in")
+            if not re.match(r"^[a-zA-Z0-9_]{3,64}$", username):
+                flash("Invalid username: use 3-64 chars of letters/numbers/_", "error")
+            else:
+                # Defensive: ensure no stale session fields leak across login boundary.
+                # Keep CSRF token stable across login so the next request in the same client
+                # session doesn't unexpectedly fail with 403.
+                existing_csrf = session.get("_csrf_token")
+                session.clear()
+                if existing_csrf:
+                    session["_csrf_token"] = existing_csrf
+                session["user"] = username
+                logger.debug(f"User {username} logged in")
 
     return url_for("web.profile")
 
@@ -49,9 +58,8 @@ def logout_user() -> str:
     Returns:
         Redirect URL
     """
-    csrf_protect()
-
-    user = session.pop("user", None)
+    user = session.get("user")
+    session.clear()
     if user:
         logger.debug(f"User {user} logged out")
 
@@ -67,8 +75,6 @@ def register_user_email(email: str) -> str:
     Returns:
         Redirect URL
     """
-    csrf_protect()
-
     raw = (email or "").strip()
 
     def _parse_emails(text: str) -> list[str]:
@@ -93,8 +99,14 @@ def register_user_email(email: str) -> str:
             UserRepository.set_emails(g.user, emails)
             if emails:
                 logger.debug(f"User {g.user} registered emails: {emails}")
+                flash("Email(s) updated.", "success")
             else:
                 logger.debug(f"User {g.user} cleared emails")
+                flash("Email(s) cleared.", "success")
+        else:
+            flash("Invalid email address(es).", "error")
+    else:
+        flash("Not logged in.", "error")
 
     return url_for("web.profile")
 

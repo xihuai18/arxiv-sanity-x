@@ -63,7 +63,7 @@ def build_user_tag_list():
             }
         )
     if rtags:
-        rtags.append({"name": "all"})
+        rtags.append({"name": "all", "n": 0, "pos_n": 0, "neg_n": 0, "neg_only": False})
     return rtags
 
 

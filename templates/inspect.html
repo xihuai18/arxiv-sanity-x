@@ -12,43 +12,6 @@
 <script defer src="{{ hashed_static('dist/markdown_renderer_utils.js') }}"></script>
 <script defer src="{{ hashed_static('dist/markdown_core_utils.js') }}"></script>
 <script defer src="{{ hashed_static('dist/tldr_utils.js') }}"></script>
-<script>
-var MJX_FONT_URL = {{ (asset_cdn_enabled and npm_cdn_url('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2') or url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2')) | tojson }};
-{% raw %}
-window.MathJax = {
-    loader: { load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat'] },
-    tex: {
-        inlineMath: [['\\(', '\\)'], ['$', '$']],
-        displayMath: [['\\[', '\\]'], ['$$', '$$']],
-        processEscapes: true,
-        processEnvironments: true,
-        packages: { '[+]': ['base', 'ams', 'boldsymbol', 'braket', 'cancel', 'color', 'enclose', 'mathtools', 'newcommand', 'noerrors', 'noundefined', 'physics', 'tagformat', 'textmacros', 'unicode', 'verb'] },
-        tags: 'ams',
-        macros: {
-            bm: ['\\mathbf{#1}', 1],
-            boldsymbol: ['\\mathbf{#1}', 1],
-            RR: '\\mathbb{R}',
-            NN: '\\mathbb{N}',
-            ZZ: '\\mathbb{Z}',
-            EE: '\\mathbb{E}',
-            abs: ['\\left|#1\\right|', 1],
-            norm: ['\\left\\|#1\\right\\|', 1],
-            argmax: '\\operatorname*{arg\\,max}',
-            argmin: '\\operatorname*{arg\\,min}',
-            textit: ['\\mathit{#1}', 1],
-            textbf: ['\\mathbf{#1}', 1],
-            textrm: ['\\mathrm{#1}', 1],
-            textsf: ['\\mathsf{#1}', 1],
-            texttt: ['\\mathtt{#1}', 1],
-            // Common spacing (note: do NOT redefine \\mid as it's a standard LaTeX relation symbol)
-            given: '\\\\,|\\\\,'
-        }
-    },
-    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'], ignoreHtmlClass: 'tex2jax_ignore', processHtmlClass: 'tex2jax_process' },
-    chtml: { scale: 1.0, displayAlign: 'center', fontURL: MJX_FONT_URL }
-};
-{% endraw %}
-</script>
 {% endblock %}
 
 {% block variables %}

@@ -126,12 +126,28 @@ def delete_tag(tag: str) -> str:
     if not tag:
         return "error, tag is required"
 
+    # Capture affected combined tags before deletion (repository may delete them as cascade).
+    deleted_ctags: list[str] = []
+    try:
+        combined = CombinedTagRepository.get_user_combined_tags(g.user) or set()
+        deleted_ctags = sorted([ct for ct in combined if tag in map(str.strip, (ct or "").split(","))])
+    except Exception:
+        deleted_ctags = []
+
     result = TagRepository.delete_tag_full(g.user, tag)
     if result != "ok":
         return result
 
     logger.debug(f"deleted tag {tag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "delete_tag", "tag": tag})
+    emit_user_event(
+        g.user,
+        {
+            "type": "user_state_changed",
+            "reason": "delete_tag",
+            "tag": tag,
+            "deleted_ctags": deleted_ctags,
+        },
+    )
     return "ok"
 
 
@@ -155,12 +171,33 @@ def rename_tag(old_tag: str, new_tag: str) -> str:
     if err:
         return err
 
+    # Capture affected combined tags so frontend can update caches.
+    renamed_ctags: list[dict] = []
+    try:
+        combined = CombinedTagRepository.get_user_combined_tags(g.user) or set()
+        for ct in sorted(combined):
+            parts = [p.strip() for p in (ct or "").split(",")]
+            if old_tag in parts:
+                new_parts = [new_tag if p == old_tag else p for p in parts]
+                renamed_ctags.append({"from": ct, "to": ",".join(new_parts)})
+    except Exception:
+        renamed_ctags = []
+
     result = TagRepository.rename_tag_full(g.user, old_tag, new_tag)
     if result != "ok":
         return result
 
     logger.debug(f"renamed tag {old_tag} to {new_tag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "rename_tag", "from": old_tag, "to": new_tag})
+    emit_user_event(
+        g.user,
+        {
+            "type": "user_state_changed",
+            "reason": "rename_tag",
+            "from": old_tag,
+            "to": new_tag,
+            "renamed_ctags": renamed_ctags,
+        },
+    )
     return "ok"
 
 
@@ -187,10 +224,17 @@ def create_combined_tag(ctag: str) -> str:
     if ctag == "null":
         return "error, cannot add the ctag 'null'"
 
-    # Validate that all component tags exist
-    tags = get_tags()
+    # Validate that all component tags exist (positive or negative tags are both allowed).
+    pos_tags = get_tags() or {}
+    neg_tags = get_neg_tags() or {}
+    all_tags = set(pos_tags.keys()) | set(neg_tags.keys())
     for tag in map(str.strip, ctag.split(",")):
-        if tag not in tags:
+        if not tag:
+            return "invalid ctag"
+        err = validate_tag_name(tag)
+        if err:
+            return err
+        if tag not in all_tags:
             return "invalid ctag"
 
     # Check if user already has this combined tag
@@ -257,10 +301,17 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
     if old_ctag == new_ctag:
         return "ok"
 
-    # Validate that all component tags exist
-    tags = get_tags()
+    # Validate that all component tags exist (positive or negative tags are both allowed).
+    pos_tags = get_tags() or {}
+    neg_tags = get_neg_tags() or {}
+    all_tags = set(pos_tags.keys()) | set(neg_tags.keys())
     for tag in map(str.strip, new_ctag.split(",")):
-        if tag not in tags:
+        if not tag:
+            return "invalid ctag"
+        err = validate_tag_name(tag)
+        if err:
+            return err
+        if tag not in all_tags:
             return "invalid ctag"
 
     # Check if old tag exists and new tag doesn't
@@ -294,6 +345,13 @@ def set_tag_feedback(pid: str, tag: str, label: int) -> None:
     Raises:
         Exception: If operation fails
     """
+    if g.user is None:
+        raise ValueError("not logged in")
+
+    err = validate_tag_name(tag)
+    if err:
+        raise ValueError(err)
+
     TagRepository.set_tag_label(g.user, pid, tag, label)
     emit_user_event(
         g.user,

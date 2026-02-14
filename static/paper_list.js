@@ -490,15 +490,23 @@ const Paper = props => {
         );
     }
 
-    const triggerDisabled = !canTriggerSummary(props.summaryStatus);
+    const triggerDisabled =
+        Boolean(props.summaryTriggerPending) || !canTriggerSummary(props.summaryStatus);
+    const triggerText = props.summaryTriggerPending ? '⏳ Queuing...' : '✨ Generate Summary';
     const triggerBtn = (
         <button
             class="summary-trigger-btn"
             onClick={props.onTriggerSummary}
             disabled={triggerDisabled}
-            title={triggerDisabled ? 'Summary already available or generating' : 'Generate summary'}
+            title={
+                props.summaryTriggerPending
+                    ? 'Queuing summary...'
+                    : triggerDisabled
+                      ? 'Summary already available or generating'
+                      : 'Generate summary'
+            }
         >
-            ✨ Generate Summary
+            {triggerText}
         </button>
     );
 
@@ -589,14 +597,11 @@ class PaperComponent extends React.Component {
         super(props);
         this._isMounted = false;
         this._readingListRequestInFlight = false;
-        if (!Array.isArray(props.paper.utags)) {
-            props.paper.utags = [];
-        }
-        if (!Array.isArray(props.paper.ntags)) {
-            props.paper.ntags = [];
-        }
+        const paper = Object.assign({}, props.paper || {});
+        paper.utags = Array.isArray(paper.utags) ? paper.utags.slice() : [];
+        paper.ntags = Array.isArray(paper.ntags) ? paper.ntags.slice() : [];
         this.state = {
-            paper: props.paper,
+            paper: paper,
             tags: props.tags,
             dropdownOpen: false,
             newTagValue: '',
@@ -604,15 +609,16 @@ class PaperComponent extends React.Component {
             inReadingList:
                 props.inReadingList !== undefined
                     ? Boolean(props.inReadingList)
-                    : isInReadingList(props.paper.id),
+                    : isInReadingList(paper.id),
             readingListPending: false,
-            summaryStatus: props.paper.summary_status || '',
-            summaryLastError: props.paper.summary_last_error || '',
-            summaryQueueRank: props.paper.summary_queue_rank || 0,
-            summaryQueueTotal: props.paper.summary_queue_total || 0,
-            summaryTaskId: props.paper.summary_task_id ? String(props.paper.summary_task_id) : '',
+            summaryTriggerPending: false,
+            summaryStatus: paper.summary_status || '',
+            summaryLastError: paper.summary_last_error || '',
+            summaryQueueRank: paper.summary_queue_rank || 0,
+            summaryQueueTotal: paper.summary_queue_total || 0,
+            summaryTaskId: paper.summary_task_id ? String(paper.summary_task_id) : '',
         };
-        this.dropdownId = 'dropdown-' + props.paper.id;
+        this.dropdownId = 'dropdown-' + paper.id;
         this.queueRankTimer = null;
         this.handleToggleDropdown = this.handleToggleDropdown.bind(this);
         this.handleTagCycle = this.handleTagCycle.bind(this);
@@ -818,9 +824,11 @@ class PaperComponent extends React.Component {
                     adjustTagStats(tagName, posDelta, negDelta);
                 }
 
-                paper.utags = Array.from(nextPos);
-                paper.ntags = Array.from(nextNeg);
-                this.setState({ paper: paper });
+                const nextPaper = Object.assign({}, paper, {
+                    utags: Array.from(nextPos),
+                    ntags: Array.from(nextNeg),
+                });
+                this.setState({ paper: nextPaper });
                 return true;
             });
     }
@@ -869,13 +877,7 @@ class PaperComponent extends React.Component {
         }
 
         this.applyTagFeedback(trimmedTag, 1)
-            .then(() => {
-                this.setState({
-                    paper: paper,
-                    newTagValue: '',
-                });
-                console.log(`Added new tag: ${trimmedTag}`);
-            })
+            .then(() => this.setState({ newTagValue: '' }))
             .catch(error => {
                 console.error('Error adding new tag:', error);
                 const c = (window && window.ArxivSanityCommon) || {};
@@ -893,7 +895,7 @@ class PaperComponent extends React.Component {
 
         if (inReadingList) {
             // Remove from reading list
-            this.setState({ readingListPending: true, inReadingList: false });
+            this.setState({ readingListPending: true });
             csrfFetch('/api/readinglist/remove', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -908,9 +910,7 @@ class PaperComponent extends React.Component {
                         } catch (e) {
                             console.warn('Failed to update readinglist cache (remove):', e);
                         }
-                        console.log(`Removed ${paper.id} from reading list`);
                     } else {
-                        this.setStateIfMounted({ inReadingList: true });
                         console.error('Failed to remove from reading list:', data.error);
                         const c = (window && window.ArxivSanityCommon) || {};
                         if (typeof c.showToast === 'function') {
@@ -924,7 +924,6 @@ class PaperComponent extends React.Component {
                     }
                 })
                 .catch(error => {
-                    this.setStateIfMounted({ inReadingList: true });
                     console.error('Error removing from reading list:', error);
                     const c = (window && window.ArxivSanityCommon) || {};
                     if (typeof c.showToast === 'function') {
@@ -939,7 +938,7 @@ class PaperComponent extends React.Component {
                 });
         } else {
             // Add to reading list
-            this.setState({ readingListPending: true, inReadingList: true });
+            this.setState({ readingListPending: true });
             csrfFetch('/api/readinglist/add', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -972,10 +971,8 @@ class PaperComponent extends React.Component {
                             undefined,
                             taskId
                         );
-                        console.log(`Added ${paper.id} to reading list, top_tags:`, data.top_tags);
                     } else {
                         console.error('Failed to add to reading list:', data.error);
-                        this.setStateIfMounted({ inReadingList: false });
                         const msg =
                             'Failed to add to reading list: ' + (data.error || 'Unknown error');
                         const c = (window && window.ArxivSanityCommon) || {};
@@ -988,7 +985,6 @@ class PaperComponent extends React.Component {
                 })
                 .catch(error => {
                     console.error('Error adding to reading list:', error);
-                    this.setStateIfMounted({ inReadingList: false });
                     const c = (window && window.ArxivSanityCommon) || {};
                     if (typeof c.showToast === 'function') {
                         c.showToast('Network error, failed to add to reading list', {
@@ -1006,11 +1002,11 @@ class PaperComponent extends React.Component {
     }
 
     handleTriggerSummary() {
-        const { paper, summaryStatus } = this.state;
+        const { paper, summaryStatus, summaryTriggerPending } = this.state;
         if (!canTriggerSummary(summaryStatus)) return;
+        if (summaryTriggerPending) return;
 
-        this.setState({ summaryStatus: 'queued', summaryLastError: '' });
-        markSummaryPending(paper.id);
+        this.setState({ summaryTriggerPending: true, summaryLastError: '' });
         csrfFetch('/api/trigger_paper_summary', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1020,22 +1016,23 @@ class PaperComponent extends React.Component {
             .then(data => {
                 if (data.success) {
                     const taskId = data.task_id ? String(data.task_id) : '';
+                    const nextStatus = data.status || 'queued';
                     this.setState({
-                        summaryStatus: data.status || 'queued',
+                        summaryStatus: nextStatus,
                         summaryLastError: data.last_error || '',
                         summaryTaskId: taskId,
                     });
                     if (taskId) {
                         this.startQueueRankPolling();
                     }
-                    if (data.status === 'queued' || data.status === 'running') {
+                    if (nextStatus === 'queued' || nextStatus === 'running') {
                         markSummaryPending(paper.id);
                     } else {
                         unmarkSummaryPending(paper.id);
                     }
                     updatePaperSummaryStatus(
                         paper.id,
-                        data.status || 'queued',
+                        nextStatus,
                         data.last_error || '',
                         undefined,
                         undefined,
@@ -1064,6 +1061,9 @@ class PaperComponent extends React.Component {
                 });
                 unmarkSummaryPending(paper.id);
                 alert('Network error, failed to trigger summary');
+            })
+            .finally(() => {
+                this.setStateIfMounted({ summaryTriggerPending: false });
             });
     }
 
@@ -1090,6 +1090,7 @@ class PaperComponent extends React.Component {
                 summaryLastError={this.state.summaryLastError}
                 summaryQueueRank={this.state.summaryQueueRank}
                 summaryQueueTotal={this.state.summaryQueueTotal}
+                summaryTriggerPending={this.state.summaryTriggerPending}
                 onTriggerSummary={this.handleTriggerSummary}
             />
         );
@@ -1171,6 +1172,8 @@ const Tag = props => {
 
 const TagList = props => {
     const lst = props.tags;
+    const mutationPending = Boolean(props.mutationPending);
+    const mutationAction = String(props.mutationAction || '');
     const tlst = lst.map((jtag, ix) => (
         <Tag
             key={ix}
@@ -1201,7 +1204,12 @@ const TagList = props => {
         <div class="enhanced-tag-list">
             <div class="tag-list-actions">
                 <span class="tag-stats-inline">({lst.length} tags)</span>
-                <button class="tag-action-btn add-btn" onClick={props.onAddTag} title="Add new tag">
+                <button
+                    class="tag-action-btn add-btn"
+                    onClick={props.onAddTag}
+                    title="Add new tag"
+                    disabled={mutationPending}
+                >
                     + Add
                 </button>
             </div>
@@ -1212,11 +1220,17 @@ const TagList = props => {
 
             {/* Edit Modal */}
             {props.showEditModal && (
-                <div class="modal-overlay" onClick={props.onCloseEditModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseEditModal}
+                >
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Edit Tag</h3>
-                            <span class="modal-close" onClick={props.onCloseEditModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseEditModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -1229,15 +1243,26 @@ const TagList = props => {
                                     onChange={props.onEditingTagNameChange}
                                     class="form-input"
                                     placeholder="Enter new tag name"
+                                    disabled={mutationPending}
                                 />
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseEditModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-primary" onClick={props.onSaveTagEdit}>
-                                Save
+                            <button
+                                class="btn btn-primary"
+                                onClick={props.onSaveTagEdit}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'edit'
+                                    ? '⏳ Saving...'
+                                    : 'Save'}
                             </button>
                         </div>
                     </div>
@@ -1246,11 +1271,14 @@ const TagList = props => {
 
             {/* Add Tag Modal */}
             {props.showAddModal && (
-                <div class="modal-overlay" onClick={props.onCloseAddModal}>
+                <div class="modal-overlay" onClick={mutationPending ? null : props.onCloseAddModal}>
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Add Tag</h3>
-                            <span class="modal-close" onClick={props.onCloseAddModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseAddModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -1263,15 +1291,26 @@ const TagList = props => {
                                     onChange={props.onNewTagNameChange}
                                     class="form-input"
                                     placeholder="Enter tag name"
+                                    disabled={mutationPending}
                                 />
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseAddModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-primary" onClick={props.onSaveNewTag}>
-                                Save
+                            <button
+                                class="btn btn-primary"
+                                onClick={props.onSaveNewTag}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'add'
+                                    ? '⏳ Saving...'
+                                    : 'Save'}
                             </button>
                         </div>
                     </div>
@@ -1280,11 +1319,17 @@ const TagList = props => {
 
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
-                <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseDeleteModal}
+                >
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseDeleteModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -1299,11 +1344,21 @@ const TagList = props => {
                             </p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseDeleteModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
-                                Delete
+                            <button
+                                class="btn btn-danger"
+                                onClick={props.onConfirmDelete}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'delete'
+                                    ? '⏳ Deleting...'
+                                    : 'Delete'}
                             </button>
                         </div>
                     </div>
@@ -1360,10 +1415,12 @@ const TagList = props => {
                                         placeholder="Enter PID(s), e.g. 2501.01234"
                                         value={props.manageAddPidsValue}
                                         onChange={props.onManageAddPidsChange}
+                                        disabled={props.manageLoading}
                                         onKeyDown={e => {
                                             if (
                                                 e.key === 'Enter' &&
-                                                props.manageAddPidsValue.trim()
+                                                props.manageAddPidsValue.trim() &&
+                                                !props.manageLoading
                                             ) {
                                                 e.preventDefault();
                                                 props.onManageAddPids(1);
@@ -1373,7 +1430,9 @@ const TagList = props => {
                                     <button
                                         class="btn btn-primary tag-manage-add-btn"
                                         onClick={() => props.onManageAddPids(1)}
-                                        disabled={!props.manageAddPidsValue.trim()}
+                                        disabled={
+                                            props.manageLoading || !props.manageAddPidsValue.trim()
+                                        }
                                         title="Add as positive (Enter)"
                                     >
                                         +
@@ -1381,7 +1440,9 @@ const TagList = props => {
                                     <button
                                         class="btn btn-danger tag-manage-add-btn"
                                         onClick={() => props.onManageAddPids(-1)}
-                                        disabled={!props.manageAddPidsValue.trim()}
+                                        disabled={
+                                            props.manageLoading || !props.manageAddPidsValue.trim()
+                                        }
                                         title="Add as negative"
                                     >
                                         −
@@ -1549,6 +1610,8 @@ class TagListComponent extends React.Component {
             editingTagName: '',
             deletingTag: null,
             newTagName: '',
+            mutationPending: false,
+            mutationAction: '',
 
             managingTag: null,
             manageLabelFilter: 'all',
@@ -1609,6 +1672,7 @@ class TagListComponent extends React.Component {
 
     handleKeyDown(event) {
         if (event.key === 'Escape') {
+            if (this.state.mutationPending) return;
             if (this.state.showEditModal) {
                 this.handleCloseEditModal();
             }
@@ -1622,6 +1686,7 @@ class TagListComponent extends React.Component {
     }
 
     handleEditTag(tag) {
+        if (this.state.mutationPending) return;
         this.setState({
             showEditModal: true,
             editingTag: tag,
@@ -1630,6 +1695,7 @@ class TagListComponent extends React.Component {
     }
 
     handleDeleteTag(tag) {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: true,
             deletingTag: tag,
@@ -1637,6 +1703,7 @@ class TagListComponent extends React.Component {
     }
 
     handleAddTag() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddModal: true,
             newTagName: '',
@@ -1644,6 +1711,7 @@ class TagListComponent extends React.Component {
     }
 
     handleCloseAddModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddModal: false,
             newTagName: '',
@@ -1655,6 +1723,7 @@ class TagListComponent extends React.Component {
     }
 
     handleSaveNewTag() {
+        if (this.state.mutationPending) return;
         const { newTagName } = this.state;
         const trimmedTag = newTagName.trim();
         if (!trimmedTag) {
@@ -1666,12 +1735,17 @@ class TagListComponent extends React.Component {
             alert('Tag name is reserved');
             return;
         }
+        if (trimmedTag.includes('/') || trimmedTag.includes('\\')) {
+            alert('Tag name cannot contain slashes');
+            return;
+        }
 
         if (this.state.tags.some(tag => tag.name === trimmedTag)) {
             alert('Tag already exists');
             return;
         }
 
+        this.setState({ mutationPending: true, mutationAction: 'add' });
         csrfFetch('/add_tag/' + encodeURIComponent(trimmedTag))
             .then(parseMutationResponse)
             .then(payload => {
@@ -1689,7 +1763,6 @@ class TagListComponent extends React.Component {
                             newTagName: '',
                         };
                     });
-                    console.log('Tag added successfully');
                 } else {
                     alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -1697,10 +1770,14 @@ class TagListComponent extends React.Component {
             .catch(error => {
                 console.error('Error adding tag:', error);
                 alert('Network error, add failed');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
     handleCloseEditModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showEditModal: false,
             editingTag: null,
@@ -1709,6 +1786,7 @@ class TagListComponent extends React.Component {
     }
 
     handleCloseDeleteModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: false,
             deletingTag: null,
@@ -1979,6 +2057,7 @@ class TagListComponent extends React.Component {
     }
 
     handleSaveTagEdit() {
+        if (this.state.mutationPending) return;
         const { editingTag, editingTagName } = this.state;
         if (!editingTagName.trim()) {
             alert('Tag name cannot be empty');
@@ -1986,11 +2065,20 @@ class TagListComponent extends React.Component {
         }
 
         const trimmedName = editingTagName.trim();
+        if (trimmedName === 'all' || trimmedName === 'null') {
+            alert('Tag name is reserved');
+            return;
+        }
+        if (trimmedName.includes('/') || trimmedName.includes('\\')) {
+            alert('Tag name cannot contain slashes');
+            return;
+        }
         if (this.state.tags.some(tag => tag.name === trimmedName && tag.name !== editingTag.name)) {
             alert('Tag already exists');
             return;
         }
 
+        this.setState({ mutationPending: true, mutationAction: 'edit' });
         csrfFetch(
             '/rename/' + encodeURIComponent(editingTag.name) + '/' + encodeURIComponent(trimmedName)
         )
@@ -2017,7 +2105,6 @@ class TagListComponent extends React.Component {
                             editingTagName: '',
                         };
                     });
-                    console.log('Tag renamed successfully');
                 } else {
                     alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -2025,12 +2112,17 @@ class TagListComponent extends React.Component {
             .catch(error => {
                 console.error('Error renaming tag:', error);
                 alert('Network error, rename failed');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
     handleConfirmDelete() {
+        if (this.state.mutationPending) return;
         const { deletingTag } = this.state;
 
+        this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del/' + encodeURIComponent(deletingTag.name))
             .then(parseMutationResponse)
             .then(payload => {
@@ -2051,7 +2143,6 @@ class TagListComponent extends React.Component {
                             deletingTag: null,
                         };
                     });
-                    console.log('Tag deleted successfully');
                 } else {
                     alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -2059,6 +2150,9 @@ class TagListComponent extends React.Component {
             .catch(error => {
                 console.error('Error deleting tag:', error);
                 alert('Network error, delete failed');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -2080,6 +2174,8 @@ class TagListComponent extends React.Component {
                 editingTagName={this.state.editingTagName}
                 newTagName={this.state.newTagName}
                 deletingTag={this.state.deletingTag}
+                mutationPending={this.state.mutationPending}
+                mutationAction={this.state.mutationAction}
                 onCloseEditModal={this.handleCloseEditModal}
                 onCloseDeleteModal={this.handleCloseDeleteModal}
                 onCloseAddModal={this.handleCloseAddModal}
@@ -2160,6 +2256,8 @@ const CombinedTag = props => {
 
 const CombinedTagList = props => {
     const lst = props.combined_tags;
+    const mutationPending = Boolean(props.mutationPending);
+    const mutationAction = String(props.mutationAction || '');
     const tlst = lst.map((jtag, ix) => (
         <CombinedTag
             key={ix}
@@ -2177,6 +2275,7 @@ const CombinedTagList = props => {
                     class="tag-action-btn add-btn"
                     onClick={props.onAddCombinedTag}
                     title="Add new combined tag"
+                    disabled={mutationPending}
                 >
                     + Add
                 </button>
@@ -2187,7 +2286,10 @@ const CombinedTagList = props => {
 
             {/* Add/Edit Combined Tag Modal */}
             {props.showAddEditModal && (
-                <div class="modal-overlay" onClick={props.onCloseAddEditModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseAddEditModal}
+                >
                     <div class="modal-content wide" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>
@@ -2195,7 +2297,10 @@ const CombinedTagList = props => {
                                     ? 'Edit Combined Tag'
                                     : 'Add Combined Tag'}
                             </h3>
-                            <span class="modal-close" onClick={props.onCloseAddEditModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseAddEditModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -2217,6 +2322,7 @@ const CombinedTagList = props => {
                                     searchValue={props.combinationSearchValue}
                                     onSearchChange={props.onCombinationSearchChange}
                                     showNewTagInput={false}
+                                    pending={mutationPending}
                                 />
                             </div>
                             {props.selectedTagsForCombination.length > 0 && (
@@ -2244,15 +2350,25 @@ const CombinedTagList = props => {
                             )}
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddEditModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseAddEditModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
                             <button
                                 class="btn btn-primary"
                                 onClick={props.onSaveCombinedTag}
-                                disabled={props.selectedTagsForCombination.length < 2}
+                                disabled={
+                                    mutationPending || props.selectedTagsForCombination.length < 2
+                                }
                             >
-                                {props.editingCombinedTag ? 'Save' : 'Create'}
+                                {mutationPending && mutationAction === 'addedit'
+                                    ? '⏳ Saving...'
+                                    : props.editingCombinedTag
+                                      ? 'Save'
+                                      : 'Create'}
                             </button>
                         </div>
                     </div>
@@ -2261,11 +2377,17 @@ const CombinedTagList = props => {
 
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
-                <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseDeleteModal}
+                >
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseDeleteModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -2280,11 +2402,21 @@ const CombinedTagList = props => {
                             <p class="warning-text">This action is irreversible.</p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseDeleteModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
-                                Delete
+                            <button
+                                class="btn btn-danger"
+                                onClick={props.onConfirmDelete}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'delete'
+                                    ? '⏳ Deleting...'
+                                    : 'Delete'}
                             </button>
                         </div>
                     </div>
@@ -2307,6 +2439,8 @@ class CombinedTagListComponent extends React.Component {
             selectedTagsForCombination: [],
             combinationDropdownOpen: false,
             combinationSearchValue: '',
+            mutationPending: false,
+            mutationAction: '',
         };
         this.handleAddCombinedTag = this.handleAddCombinedTag.bind(this);
         this.handleEditCombinedTag = this.handleEditCombinedTag.bind(this);
@@ -2346,6 +2480,7 @@ class CombinedTagListComponent extends React.Component {
 
     handleKeyDown(event) {
         if (event.key === 'Escape') {
+            if (this.state.mutationPending) return;
             if (this.state.showAddEditModal) {
                 this.handleCloseAddEditModal();
             }
@@ -2366,6 +2501,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleAddCombinedTag() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddEditModal: true,
             editingCombinedTag: null,
@@ -2375,6 +2511,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleEditCombinedTag(combinedTag) {
+        if (this.state.mutationPending) return;
         // Parse existing combined tags, compatible with "comma+space" or "comma only" formats
         const existingTags = combinedTag.name
             .split(',')
@@ -2389,6 +2526,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleDeleteCombinedTag(combinedTag) {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: true,
             deletingCombinedTag: combinedTag,
@@ -2396,6 +2534,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleCloseAddEditModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddEditModal: false,
             editingCombinedTag: null,
@@ -2406,6 +2545,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleCloseDeleteModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: false,
             deletingCombinedTag: null,
@@ -2413,6 +2553,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleSaveCombinedTag() {
+        if (this.state.mutationPending) return;
         const { editingCombinedTag, selectedTagsForCombination } = this.state;
 
         if (selectedTagsForCombination.length < 2) {
@@ -2421,13 +2562,13 @@ class CombinedTagListComponent extends React.Component {
         }
 
         const combinationName = selectedTagsForCombination.join(', ');
+        if (editingCombinedTag && editingCombinedTag.name === combinationName) {
+            this.handleCloseAddEditModal();
+            return;
+        }
 
+        this.setState({ mutationPending: true, mutationAction: 'addedit' });
         if (editingCombinedTag) {
-            if (editingCombinedTag.name === combinationName) {
-                this.handleCloseAddEditModal();
-                return;
-            }
-
             // Edit existing combined tag atomically
             csrfFetch(
                 '/rename_ctag/' +
@@ -2454,7 +2595,6 @@ class CombinedTagListComponent extends React.Component {
                                 combinationSearchValue: '',
                             };
                         });
-                        console.log('Combined tag edited successfully');
                     } else {
                         throw new Error(
                             'Rename failed: ' + ((payload && payload.error) || 'Unknown error')
@@ -2464,6 +2604,9 @@ class CombinedTagListComponent extends React.Component {
                 .catch(error => {
                     console.error('Error editing combined tag:', error);
                     alert('Edit failed: ' + error.message);
+                })
+                .finally(() => {
+                    this.setState({ mutationPending: false, mutationAction: '' });
                 });
         } else {
             // Add new combined tag
@@ -2484,7 +2627,6 @@ class CombinedTagListComponent extends React.Component {
                                 combinationSearchValue: '',
                             };
                         });
-                        console.log('Combined tag added successfully');
                     } else {
                         alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
                     }
@@ -2492,13 +2634,18 @@ class CombinedTagListComponent extends React.Component {
                 .catch(error => {
                     console.error('Error adding combined tag:', error);
                     alert('Network error, add failed');
+                })
+                .finally(() => {
+                    this.setState({ mutationPending: false, mutationAction: '' });
                 });
         }
     }
 
     handleConfirmDelete() {
+        if (this.state.mutationPending) return;
         const { deletingCombinedTag } = this.state;
 
+        this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del_ctag/' + encodeURIComponent(deletingCombinedTag.name))
             .then(parseMutationResponse)
             .then(payload => {
@@ -2514,7 +2661,6 @@ class CombinedTagListComponent extends React.Component {
                             deletingCombinedTag: null,
                         };
                     });
-                    console.log('Combined tag deleted successfully');
                 } else {
                     alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -2522,10 +2668,14 @@ class CombinedTagListComponent extends React.Component {
             .catch(error => {
                 console.error('Error deleting combined tag:', error);
                 alert('Network error, delete failed');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
     handleToggleCombinationDropdown() {
+        if (this.state.mutationPending) return;
         this.setState(prevState => ({
             combinationDropdownOpen: !prevState.combinationDropdownOpen,
             combinationSearchValue: !prevState.combinationDropdownOpen
@@ -2535,6 +2685,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleCombinationTagToggle(tagName) {
+        if (this.state.mutationPending) return;
         this.setState(prevState => {
             const isSelected = prevState.selectedTagsForCombination.includes(tagName);
             return {
@@ -2546,6 +2697,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleRemoveCombinationTag(tagName) {
+        if (this.state.mutationPending) return;
         this.setState(prevState => ({
             selectedTagsForCombination: prevState.selectedTagsForCombination.filter(
                 tag => tag !== tagName
@@ -2554,6 +2706,7 @@ class CombinedTagListComponent extends React.Component {
     }
 
     handleCombinationSearchChange(event) {
+        if (this.state.mutationPending) return;
         this.setState({
             combinationSearchValue: event.target.value,
         });
@@ -2574,6 +2727,8 @@ class CombinedTagListComponent extends React.Component {
                 showDeleteModal={this.state.showDeleteModal}
                 editingCombinedTag={this.state.editingCombinedTag}
                 deletingCombinedTag={this.state.deletingCombinedTag}
+                mutationPending={this.state.mutationPending}
+                mutationAction={this.state.mutationAction}
                 onCloseAddEditModal={this.handleCloseAddEditModal}
                 onCloseDeleteModal={this.handleCloseDeleteModal}
                 onSaveCombinedTag={this.handleSaveCombinedTag}
@@ -2594,9 +2749,8 @@ class CombinedTagListComponent extends React.Component {
 const Key = props => {
     const k = props.jkey;
     const kurl = buildKeywordUrl(k.name);
-    const key_class =
-        'rel_ukey' + (k.name === 'Artificial general intelligence' ? ' rel_ukey_all' : '');
-    const isEditable = k.name !== 'Artificial general intelligence';
+    const key_class = 'rel_ukey';
+    const isEditable = true;
 
     const handleOpenSearch = e => {
         e.preventDefault();
@@ -2632,6 +2786,8 @@ const Key = props => {
 
 const KeyList = props => {
     const lst = props.keys;
+    const mutationPending = Boolean(props.mutationPending);
+    const mutationAction = String(props.mutationAction || '');
     const klst = lst.map((jkey, ix) => (
         <Key key={ix} jkey={jkey} onEdit={props.onEditKey} onDelete={props.onDeleteKey} />
     ));
@@ -2644,6 +2800,7 @@ const KeyList = props => {
                     class="tag-action-btn add-btn"
                     onClick={props.onAddKey}
                     title="Add new keyword"
+                    disabled={mutationPending}
                 >
                     + Add
                 </button>
@@ -2654,11 +2811,14 @@ const KeyList = props => {
 
             {/* Add Keyword Modal */}
             {props.showAddModal && (
-                <div class="modal-overlay" onClick={props.onCloseAddModal}>
+                <div class="modal-overlay" onClick={mutationPending ? null : props.onCloseAddModal}>
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Add Keyword</h3>
-                            <span class="modal-close" onClick={props.onCloseAddModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseAddModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -2671,15 +2831,26 @@ const KeyList = props => {
                                     onChange={props.onNewKeyNameChange}
                                     class="form-input"
                                     placeholder="Enter keyword name"
+                                    disabled={mutationPending}
                                 />
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseAddModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseAddModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-primary" onClick={props.onSaveNewKey}>
-                                Save
+                            <button
+                                class="btn btn-primary"
+                                onClick={props.onSaveNewKey}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'add'
+                                    ? '⏳ Saving...'
+                                    : 'Save'}
                             </button>
                         </div>
                     </div>
@@ -2688,11 +2859,17 @@ const KeyList = props => {
 
             {/* Edit Modal */}
             {props.showEditModal && (
-                <div class="modal-overlay" onClick={props.onCloseEditModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseEditModal}
+                >
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Edit Keyword</h3>
-                            <span class="modal-close" onClick={props.onCloseEditModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseEditModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -2705,15 +2882,26 @@ const KeyList = props => {
                                     onChange={props.onEditingKeyNameChange}
                                     class="form-input"
                                     placeholder="Enter new keyword name"
+                                    disabled={mutationPending}
                                 />
                             </div>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseEditModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseEditModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-primary" onClick={props.onSaveKeyEdit}>
-                                Save
+                            <button
+                                class="btn btn-primary"
+                                onClick={props.onSaveKeyEdit}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'edit'
+                                    ? '⏳ Saving...'
+                                    : 'Save'}
                             </button>
                         </div>
                     </div>
@@ -2722,11 +2910,17 @@ const KeyList = props => {
 
             {/* Delete Confirmation Modal */}
             {props.showDeleteModal && (
-                <div class="modal-overlay" onClick={props.onCloseDeleteModal}>
+                <div
+                    class="modal-overlay"
+                    onClick={mutationPending ? null : props.onCloseDeleteModal}
+                >
                     <div class="modal-content" onClick={e => e.stopPropagation()}>
                         <div class="modal-header">
                             <h3>Confirm Delete</h3>
-                            <span class="modal-close" onClick={props.onCloseDeleteModal}>
+                            <span
+                                class="modal-close"
+                                onClick={mutationPending ? null : props.onCloseDeleteModal}
+                            >
                                 ×
                             </span>
                         </div>
@@ -2741,11 +2935,21 @@ const KeyList = props => {
                             </p>
                         </div>
                         <div class="modal-footer">
-                            <button class="btn btn-cancel" onClick={props.onCloseDeleteModal}>
+                            <button
+                                class="btn btn-cancel"
+                                onClick={props.onCloseDeleteModal}
+                                disabled={mutationPending}
+                            >
                                 Cancel
                             </button>
-                            <button class="btn btn-danger" onClick={props.onConfirmDelete}>
-                                Delete
+                            <button
+                                class="btn btn-danger"
+                                onClick={props.onConfirmDelete}
+                                disabled={mutationPending}
+                            >
+                                {mutationPending && mutationAction === 'delete'
+                                    ? '⏳ Deleting...'
+                                    : 'Delete'}
                             </button>
                         </div>
                     </div>
@@ -2767,6 +2971,8 @@ class KeyComponent extends React.Component {
             editingKeyName: '',
             deletingKey: null,
             newKeyName: '',
+            mutationPending: false,
+            mutationAction: '',
         };
         this.handleEditKey = this.handleEditKey.bind(this);
         this.handleDeleteKey = this.handleDeleteKey.bind(this);
@@ -2798,6 +3004,7 @@ class KeyComponent extends React.Component {
 
     handleKeyDown(event) {
         if (event.key === 'Escape') {
+            if (this.state.mutationPending) return;
             if (this.state.showEditModal) {
                 this.handleCloseEditModal();
             }
@@ -2811,6 +3018,7 @@ class KeyComponent extends React.Component {
     }
 
     handleEditKey(key) {
+        if (this.state.mutationPending) return;
         this.setState({
             showEditModal: true,
             editingKey: key,
@@ -2819,6 +3027,7 @@ class KeyComponent extends React.Component {
     }
 
     handleDeleteKey(key) {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: true,
             deletingKey: key,
@@ -2826,6 +3035,7 @@ class KeyComponent extends React.Component {
     }
 
     handleAddKey() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddModal: true,
             newKeyName: '',
@@ -2833,6 +3043,7 @@ class KeyComponent extends React.Component {
     }
 
     handleCloseAddModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showAddModal: false,
             newKeyName: '',
@@ -2844,6 +3055,7 @@ class KeyComponent extends React.Component {
     }
 
     handleSaveNewKey() {
+        if (this.state.mutationPending) return;
         const { newKeyName } = this.state;
         if (!newKeyName.trim()) {
             alert('Keyword name cannot be empty');
@@ -2851,6 +3063,14 @@ class KeyComponent extends React.Component {
         }
 
         const trimmedKey = newKeyName.trim();
+        if (trimmedKey === 'null') {
+            alert('Keyword name is reserved');
+            return;
+        }
+        if (trimmedKey.includes('/') || trimmedKey.includes('\\')) {
+            alert('Keyword cannot contain slashes');
+            return;
+        }
 
         // Check if keyword already exists
         if (this.state.keys.some(key => key.name === trimmedKey)) {
@@ -2858,6 +3078,7 @@ class KeyComponent extends React.Component {
             return;
         }
 
+        this.setState({ mutationPending: true, mutationAction: 'add' });
         csrfFetch('/add_key/' + encodeURIComponent(trimmedKey))
             .then(parseMutationResponse)
             .then(payload => {
@@ -2871,7 +3092,6 @@ class KeyComponent extends React.Component {
                             newKeyName: '',
                         };
                     });
-                    console.log('Keyword added successfully');
                 } else {
                     alert(
                         'Failed to add keyword: ' + ((payload && payload.error) || 'Unknown error')
@@ -2881,10 +3101,14 @@ class KeyComponent extends React.Component {
             .catch(error => {
                 console.error('Error adding keyword:', error);
                 alert('Network error, failed to add keyword');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
     handleCloseEditModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showEditModal: false,
             editingKey: null,
@@ -2893,6 +3117,7 @@ class KeyComponent extends React.Component {
     }
 
     handleCloseDeleteModal() {
+        if (this.state.mutationPending) return;
         this.setState({
             showDeleteModal: false,
             deletingKey: null,
@@ -2904,6 +3129,7 @@ class KeyComponent extends React.Component {
     }
 
     handleSaveKeyEdit() {
+        if (this.state.mutationPending) return;
         const { editingKey, editingKeyName } = this.state;
         if (!editingKeyName.trim()) {
             alert('Keyword name cannot be empty');
@@ -2911,6 +3137,14 @@ class KeyComponent extends React.Component {
         }
 
         const trimmedKeyName = editingKeyName.trim();
+        if (trimmedKeyName === 'null') {
+            alert('Keyword name is reserved');
+            return;
+        }
+        if (trimmedKeyName.includes('/') || trimmedKeyName.includes('\\')) {
+            alert('Keyword cannot contain slashes');
+            return;
+        }
 
         // Check if new name already exists
         if (
@@ -2920,6 +3154,7 @@ class KeyComponent extends React.Component {
             return;
         }
 
+        this.setState({ mutationPending: true, mutationAction: 'edit' });
         csrfFetch(
             '/rename_key/' +
                 encodeURIComponent(editingKey.name) +
@@ -2941,7 +3176,6 @@ class KeyComponent extends React.Component {
                             editingKeyName: '',
                         };
                     });
-                    console.log('Keyword renamed successfully');
                 } else {
                     alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -2949,12 +3183,17 @@ class KeyComponent extends React.Component {
             .catch(error => {
                 console.error('Error renaming keyword:', error);
                 alert('Rename failed: ' + error.message);
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
     handleConfirmDelete() {
+        if (this.state.mutationPending) return;
         const { deletingKey } = this.state;
 
+        this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del_key/' + encodeURIComponent(deletingKey.name))
             .then(parseMutationResponse)
             .then(payload => {
@@ -2970,7 +3209,6 @@ class KeyComponent extends React.Component {
                             deletingKey: null,
                         };
                     });
-                    console.log('Keyword deleted successfully');
                 } else {
                     alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
@@ -2978,6 +3216,9 @@ class KeyComponent extends React.Component {
             .catch(error => {
                 console.error('Error deleting keyword:', error);
                 alert('Network error, delete failed');
+            })
+            .finally(() => {
+                this.setState({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -2994,6 +3235,8 @@ class KeyComponent extends React.Component {
                 editingKeyName={this.state.editingKeyName}
                 newKeyName={this.state.newKeyName}
                 deletingKey={this.state.deletingKey}
+                mutationPending={this.state.mutationPending}
+                mutationAction={this.state.mutationAction}
                 onCloseEditModal={this.handleCloseEditModal}
                 onCloseDeleteModal={this.handleCloseDeleteModal}
                 onCloseAddModal={this.handleCloseAddModal}
@@ -3010,8 +3253,8 @@ class KeyComponent extends React.Component {
 function normalizeTags(list) {
     const base = (list || []).filter(tag => tag && tag.name && tag.name !== 'all');
     const normalized = base.map(tag => {
-        const pos_n = tag.pos_n !== undefined ? Number(tag.pos_n || 0) : undefined;
-        const neg_n = tag.neg_n !== undefined ? Number(tag.neg_n || 0) : undefined;
+        const pos_n = tag.pos_n !== undefined ? Number(tag.pos_n ?? 0) : undefined;
+        const neg_n = tag.neg_n !== undefined ? Number(tag.neg_n ?? 0) : undefined;
         const n = pos_n !== undefined && neg_n !== undefined ? pos_n + neg_n : Number(tag.n || 0);
         const neg_only =
             tag.neg_only !== undefined

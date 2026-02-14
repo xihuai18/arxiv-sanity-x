@@ -15,6 +15,7 @@ from aslite.repositories import (
     SummaryStatusRepository,
 )
 from config import settings
+from config.sentry import initialize_sentry
 from tools.paper_summarizer import (
     acquire_summary_lock,
     atomic_write_json,
@@ -37,6 +38,9 @@ from tools.paper_summarizer import (
 DATA_DIR = str(settings.data_dir)
 LLM_NAME = settings.llm.name
 SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
+
+# Optional Sentry error reporting (no-op unless configured).
+initialize_sentry()
 
 
 class SummaryCanceled(Exception):
@@ -518,6 +522,7 @@ def _generate_and_cache_summary(
     *,
     cancel_check: Callable[[], bool] | None = None,
     force_refresh: bool = False,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[str, dict]:
     cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, None)
     if not _paper_exists(raw_pid):
@@ -547,6 +552,9 @@ def _generate_and_cache_summary(
     if cancel_check and cancel_check():
         raise SummaryCanceled("Canceled before lock acquisition")
 
+    if progress_cb:
+        progress_cb("acquiring_lock")
+
     lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
     if lock_fd is None:
         if cached_summary and not force_refresh:
@@ -557,6 +565,9 @@ def _generate_and_cache_summary(
     acquired_lock_file = lock_file
 
     try:
+        if progress_cb:
+            progress_cb("lock_acquired")
+
         if cancel_check and cancel_check():
             raise SummaryCanceled("Canceled after lock acquisition")
 
@@ -572,6 +583,9 @@ def _generate_and_cache_summary(
 
         if cancel_check and cancel_check():
             raise SummaryCanceled("Canceled before LLM request")
+
+        if progress_cb:
+            progress_cb("llm_request")
 
         summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
         summary_content, summary_meta = normalize_summary_result(summary_result)
@@ -592,6 +606,9 @@ def _generate_and_cache_summary(
 
         if cancel_check and cancel_check():
             raise SummaryCanceled("Canceled before cache write")
+
+        if progress_cb:
+            progress_cb("writing_cache")
 
         if not _is_error_summary(summary_content):
             meta = {}
@@ -614,6 +631,8 @@ def _generate_and_cache_summary(
                     invalidate_summary_cache_stats()
             except Exception:
                 pass
+            if progress_cb:
+                progress_cb("done")
             return summary_content, meta
 
         return summary_content, summary_meta
@@ -733,11 +752,16 @@ def generate_summary_task(
             except Exception:
                 return False
 
+        def _progress(stage: str) -> None:
+            # Persist a coarse-grained stage for UI polling (best effort).
+            _update_task_status(task_id, "running", stage=stage)
+
         summary_content, summary_meta = _generate_and_cache_summary(
             pid,
             model,
             cancel_check=_cancel_check,
             force_refresh=bool(force_refresh),
+            progress_cb=_progress,
         )
 
         if _cancel_check():

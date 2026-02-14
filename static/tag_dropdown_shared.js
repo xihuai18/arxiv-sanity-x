@@ -42,7 +42,13 @@
             dropdownId,
             searchValue,
             onSearchChange,
+            filteredTags = [],
+            focusedOptionIndex = -1,
+            onTriggerKeyDown,
+            onMenuKeyDown,
             showNewTagInput = true,
+            pending = false,
+            pendingTag = '',
         } = props;
 
         const getTagState = tag => {
@@ -54,18 +60,24 @@
         const selectedTagElements = [
             ...(selectedTags || []).map(tag => ({ tag, state: 1 })),
             ...(negativeTags || []).map(tag => ({ tag, state: -1 })),
-        ].map((item, ix) =>
-            React.createElement(
+        ].map((item, ix) => {
+            const isTagPending =
+                Boolean(pending) && String(pendingTag || '') === String(item.tag || '');
+            return React.createElement(
                 'div',
                 {
                     key: `${item.tag}-${item.state}-${ix}`,
-                    class: `multi-select-selected-tag ${item.state === -1 ? 'tag-negative' : 'tag-positive'}`,
-                    title: 'Click to cycle: Unlabeled → Positive → Negative → Unlabeled',
+                    class: `multi-select-selected-tag ${item.state === -1 ? 'tag-negative' : 'tag-positive'}${
+                        isTagPending ? ' pending' : ''
+                    }`,
+                    title: pending
+                        ? 'Updating...'
+                        : 'Click to cycle: Unlabeled → Positive → Negative → Unlabeled',
                 },
                 React.createElement(
                     'span',
                     { class: 'tag-state-icon' },
-                    item.state === 1 ? '+' : '−'
+                    isTagPending ? '⏳' : item.state === 1 ? '+' : '−'
                 ),
                 React.createElement('span', null, item.tag),
                 React.createElement(
@@ -74,13 +86,14 @@
                         class: 'remove-tag',
                         onClick: e => {
                             e.stopPropagation();
+                            if (pending) return;
                             onClearTag(item.tag);
                         },
                     },
                     '×'
                 )
-            )
-        );
+            );
+        });
 
         const hasAny = (selectedTags || []).length > 0 || (negativeTags || []).length > 0;
         const triggerContent = hasAny
@@ -91,54 +104,136 @@
               )
             : React.createElement('div', { class: 'multi-select-placeholder' }, 'Select tags...');
 
-        const filteredTags = (availableTags || []).filter(tag =>
-            String(tag || '')
-                .toLowerCase()
-                .includes(String(searchValue || '').toLowerCase())
-        );
+        const focusedOptionId =
+            focusedOptionIndex >= 0 ? `${dropdownId}-option-${focusedOptionIndex}` : null;
 
         const optionElements = filteredTags.map((tag, ix) => {
             const state = getTagState(tag);
+            const isTagPending = Boolean(pending) && String(pendingTag || '') === String(tag || '');
             const stateClass =
                 state === 1
                     ? 'tag-state-positive'
                     : state === -1
                       ? 'tag-state-negative'
                       : 'tag-state-neutral';
+            const isFocused = focusedOptionIndex === ix;
             return React.createElement(
                 'div',
                 {
                     key: ix,
-                    class: `multi-select-option ${stateClass}`,
-                    onClick: () => onTagCycle(tag),
+                    id: `${dropdownId}-option-${ix}`,
+                    role: 'option',
+                    tabIndex: isFocused ? 0 : -1,
+                    'aria-selected': state === 0 ? 'false' : 'true',
+                    class: `multi-select-option ${stateClass}${isFocused ? ' is-focused' : ''}${
+                        isTagPending ? ' pending' : ''
+                    }`,
+                    onClick: pending ? null : () => onTagCycle(tag),
+                    'aria-disabled': pending ? 'true' : 'false',
                     title: 'Click to cycle: Unlabeled → Positive → Negative → Unlabeled',
                 },
                 React.createElement(
                     'span',
                     { class: `tag-state-badge ${stateClass}` },
-                    state === 1 ? '+' : state === -1 ? '−' : ''
+                    isTagPending ? '⏳' : state === 1 ? '+' : state === -1 ? '−' : ''
                 ),
                 React.createElement('span', { class: 'multi-select-option-text' }, tag)
             );
         });
 
+        const arrowText = pending ? '⏳' : isOpen ? '▲' : '▼';
+        const liveMessage =
+            pending && pendingTag
+                ? `Updating tag ${String(pendingTag)}`
+                : pending
+                  ? 'Updating tags'
+                  : '';
+
         return React.createElement(
             'div',
-            { class: `multi-select-dropdown ${isOpen ? 'open' : ''}`, id: dropdownId },
+            {
+                class: `multi-select-dropdown ${isOpen ? 'open' : ''}${pending ? ' pending' : ''}`,
+                id: dropdownId,
+            },
             React.createElement(
                 'div',
                 {
-                    class: `multi-select-trigger ${isOpen ? 'active' : ''}`,
-                    onClick: onToggle,
+                    id: `${dropdownId}-live`,
+                    role: 'status',
+                    'aria-live': 'polite',
+                    'aria-atomic': 'true',
+                    style: {
+                        position: 'absolute',
+                        width: '1px',
+                        height: '1px',
+                        padding: 0,
+                        margin: '-1px',
+                        overflow: 'hidden',
+                        clip: 'rect(0, 0, 0, 0)',
+                        whiteSpace: 'nowrap',
+                        border: 0,
+                    },
+                },
+                liveMessage
+            ),
+            isOpen
+                ? React.createElement('div', {
+                      class: 'multi-select-backdrop',
+                      onClick: pending ? null : onToggle,
+                      'aria-hidden': 'true',
+                  })
+                : null,
+            React.createElement(
+                'div',
+                {
+                    class: `multi-select-trigger ${isOpen ? 'active' : ''}${pending ? ' pending' : ''}`,
+                    role: 'button',
+                    tabIndex: 0,
+                    'aria-haspopup': 'listbox',
+                    'aria-expanded': isOpen ? 'true' : 'false',
+                    'aria-controls': `${dropdownId}-menu`,
+                    onClick: pending ? null : onToggle,
+                    onKeyDown: pending ? null : onTriggerKeyDown,
                     title: 'Click to cycle: Unlabeled → Positive → Negative → Unlabeled',
                 },
                 React.createElement('div', { class: 'multi-select-content' }, triggerContent),
-                React.createElement('span', { class: 'multi-select-arrow' }, isOpen ? '▲' : '▼')
+                React.createElement('span', { class: 'multi-select-arrow' }, arrowText)
             ),
             isOpen
                 ? React.createElement(
                       'div',
-                      { class: 'multi-select-dropdown-menu' },
+                      {
+                          class: 'multi-select-dropdown-menu',
+                          id: `${dropdownId}-menu`,
+                          role: 'listbox',
+                          'aria-label': 'Tag suggestions',
+                          'aria-activedescendant': focusedOptionId,
+                          'aria-multiselectable': 'true',
+                          tabIndex: -1,
+                          onKeyDown: onMenuKeyDown,
+                      },
+                      React.createElement(
+                          'div',
+                          { class: 'multi-select-sheet-header' },
+                          React.createElement('div', {
+                              class: 'multi-select-sheet-handle',
+                              'aria-hidden': 'true',
+                          }),
+                          React.createElement(
+                              'button',
+                              {
+                                  type: 'button',
+                                  class: 'multi-select-sheet-close',
+                                  onClick: e => {
+                                      e.stopPropagation();
+                                      if (pending) return;
+                                      onToggle();
+                                  },
+                                  disabled: pending,
+                              },
+                              'Close'
+                          )
+                      ),
                       React.createElement(
                           'div',
                           { class: 'multi-select-search' },
@@ -148,6 +243,22 @@
                               value: searchValue,
                               onChange: onSearchChange,
                               onClick: e => e.stopPropagation(),
+                              disabled: pending,
+                              'aria-label': 'Search tags',
+                              id: `${dropdownId}-search`,
+                              onKeyDown: e => {
+                                  if (
+                                      onMenuKeyDown &&
+                                      e &&
+                                      (e.key === 'ArrowDown' ||
+                                          e.key === 'ArrowUp' ||
+                                          e.key === 'Home' ||
+                                          e.key === 'End' ||
+                                          e.key === 'Escape')
+                                  ) {
+                                      onMenuKeyDown(e);
+                                  }
+                              },
                           })
                       ),
                       React.createElement('div', { class: 'multi-select-options' }, optionElements),
@@ -160,16 +271,33 @@
                                     placeholder: 'Enter new tag...',
                                     value: newTagValue,
                                     onChange: onNewTagChange,
-                                    onKeyPress: e => {
-                                        if (e.key === 'Enter') onAddNewTag();
+                                    onKeyDown: e => {
+                                        if (e && e.key === 'Enter') {
+                                            e.preventDefault();
+                                            onAddNewTag();
+                                            return;
+                                        }
+                                        if (
+                                            onMenuKeyDown &&
+                                            e &&
+                                            (e.key === 'ArrowDown' ||
+                                                e.key === 'ArrowUp' ||
+                                                e.key === 'Home' ||
+                                                e.key === 'End' ||
+                                                e.key === 'Escape')
+                                        ) {
+                                            onMenuKeyDown(e);
+                                        }
                                     },
                                     onClick: e => e.stopPropagation(),
+                                    disabled: pending,
+                                    'aria-label': 'New tag name',
                                 }),
                                 React.createElement(
                                     'button',
                                     {
                                         onClick: onAddNewTag,
-                                        disabled: !String(newTagValue || '').trim(),
+                                        disabled: pending || !String(newTagValue || '').trim(),
                                     },
                                     'Add'
                                 )
@@ -215,6 +343,9 @@
             open: Boolean(opts.open),
             searchValue: String(opts.searchValue || ''),
             newTagValue: String(opts.newTagValue || ''),
+            pending: false,
+            pendingTag: '',
+            focusedOptionIndex: -1,
         };
 
         function emit() {
@@ -260,53 +391,232 @@
         async function applyRemote(tagName, label) {
             if (!pid) throw new Error('pid is required for tag dropdown');
             const t = String(tagName || '').trim();
-            const prevSelected = state.selectedTags.slice();
-            const prevNegative = state.negativeTags.slice();
-            ensureAvailable(t);
-            applyLocal(t, label);
+            if (!t) return;
+            if (state.pending) return;
+            state.pending = true;
+            state.pendingTag = t;
             render();
-            const resp = await csrfFetch('/api/tag_feedback', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: pid, tag: t, label: label }),
-            });
-            const data = await resp.json().catch(() => null);
-            if (!data || !data.success) {
-                state.selectedTags = prevSelected;
-                state.negativeTags = prevNegative;
+            try {
+                const resp = await csrfFetch('/api/tag_feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pid: pid, tag: t, label: label }),
+                });
+                const data = await resp.json().catch(() => null);
+                if (!data || !data.success) {
+                    throw new Error(data && data.error ? data.error : 'Failed to update tag');
+                }
+                ensureAvailable(t);
+                applyLocal(t, label);
+            } finally {
+                state.pending = false;
+                state.pendingTag = '';
                 render();
-                emit();
-                throw new Error(data && data.error ? data.error : 'Failed to update tag');
+            }
+        }
+
+        const requestFrame =
+            typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+                ? window.requestAnimationFrame
+                : callback => callback();
+
+        function focusTrigger() {
+            const dropdown = document.getElementById(dropdownId);
+            if (!dropdown) return;
+            const trigger = dropdown.querySelector('.multi-select-trigger');
+            if (!trigger || typeof trigger.focus !== 'function') return;
+            requestFrame(() => trigger.focus());
+        }
+
+        function clampOptionIndex(index, length) {
+            if (!length) return -1;
+            if (index < 0) return 0;
+            if (index >= length) return length - 1;
+            return index;
+        }
+
+        function syncFocusedOption(filteredTags) {
+            const tags = Array.isArray(filteredTags) ? filteredTags : [];
+            if (!state.open || !tags.length) {
+                state.focusedOptionIndex = -1;
+                return;
+            }
+            const dropdown = document.getElementById(dropdownId);
+            if (!dropdown) return;
+            const options = dropdown.querySelectorAll('.multi-select-option');
+            if (!options || !options.length) return;
+            const nextIndex = clampOptionIndex(state.focusedOptionIndex, tags.length);
+            state.focusedOptionIndex = nextIndex;
+            if (nextIndex < 0) return;
+            const target = options[nextIndex];
+            if (target && typeof target.focus === 'function') {
+                requestFrame(() => target.focus());
+            }
+        }
+
+        function setFocusIndex(index, filteredTags) {
+            const tags = Array.isArray(filteredTags) ? filteredTags : [];
+            const next = clampOptionIndex(index, tags.length);
+            state.focusedOptionIndex = next;
+            render();
+        }
+
+        function moveFocus(delta, filteredTags) {
+            const tags = Array.isArray(filteredTags) ? filteredTags : [];
+            const len = tags.length;
+            if (!len) {
+                state.focusedOptionIndex = -1;
+                render();
+                return;
+            }
+            let next = state.focusedOptionIndex;
+            if (next < 0) {
+                next = delta > 0 ? 0 : len - 1;
+            } else {
+                next = (next + delta + len) % len;
+            }
+            setFocusIndex(next, filteredTags);
+        }
+
+        function selectFocusedOption(filteredTags) {
+            if (state.pending) return;
+            const tags = Array.isArray(filteredTags) ? filteredTags : [];
+            const idx = state.focusedOptionIndex;
+            if (idx < 0 || idx >= tags.length) return;
+            const tag = tags[idx];
+            const isPos = state.selectedTags.includes(tag);
+            const isNeg = state.negativeTags.includes(tag);
+            const next = isPos ? -1 : isNeg ? 0 : 1;
+            applyRemote(tag, next).catch(err => {
+                console.error('Failed to update tag feedback:', err);
+                const msg =
+                    'Failed to update tag feedback: ' +
+                    (err && err.message ? err.message : String(err));
+                const c = (window && window.ArxivSanityCommon) || {};
+                if (typeof c.showToast === 'function') c.showToast(msg, { type: 'error' });
+            });
+        }
+
+        function setDropdownOpen(nextOpen, focusIndex) {
+            if (state.pending) return;
+            const target = Boolean(nextOpen);
+            if (state.open !== target) {
+                state.open = target;
+                if (!state.open) {
+                    state.searchValue = '';
+                    state.newTagValue = '';
+                    state.focusedOptionIndex = -1;
+                }
+            } else if (!state.open) {
+                return;
+            }
+            if (state.open && Number.isFinite(focusIndex) && focusIndex >= 0) {
+                state.focusedOptionIndex = focusIndex;
+            }
+            // Toggle overflow class on parent card so the dropdown menu isn't clipped.
+            const dropdown = document.getElementById(dropdownId);
+            if (dropdown) {
+                const paperCard =
+                    dropdown.closest('.rel_paper') || dropdown.closest('.rl-paper-card');
+                if (paperCard) {
+                    if (state.open) {
+                        paperCard.classList.add('dropdown-open');
+                    } else {
+                        paperCard.classList.remove('dropdown-open');
+                    }
+                }
+            }
+            render();
+            emit();
+            if (!state.open) {
+                focusTrigger();
+            }
+        }
+
+        function toggleDropdown() {
+            setDropdownOpen(!state.open);
+        }
+
+        function handleTriggerKeyDown(event, filteredTags) {
+            if (state.pending) return;
+            if (!event || !event.key) return;
+            const key = event.key;
+            if (key === 'Enter' || key === ' ') {
+                event.preventDefault();
+                toggleDropdown();
+                return;
+            }
+            if (key === 'ArrowDown' || key === 'ArrowUp') {
+                event.preventDefault();
+                const tags = Array.isArray(filteredTags) ? filteredTags : [];
+                if (!tags.length) {
+                    setDropdownOpen(true);
+                    return;
+                }
+                const focusIndex = key === 'ArrowDown' ? 0 : tags.length - 1;
+                setDropdownOpen(true, focusIndex);
+                return;
+            }
+            if (key === 'Escape' && state.open) {
+                event.preventDefault();
+                setDropdownOpen(false);
+            }
+        }
+
+        function handleOptionsKeyDown(event, filteredTags) {
+            if (state.pending) return;
+            if (!state.open) return;
+            if (!event || !event.key) return;
+            const key = event.key;
+            const tags = Array.isArray(filteredTags) ? filteredTags : [];
+            if (key === 'ArrowDown') {
+                event.preventDefault();
+                moveFocus(1, tags);
+                return;
+            }
+            if (key === 'ArrowUp') {
+                event.preventDefault();
+                moveFocus(-1, tags);
+                return;
+            }
+            if (key === 'Home') {
+                event.preventDefault();
+                setFocusIndex(0, tags);
+                return;
+            }
+            if (key === 'End') {
+                event.preventDefault();
+                setFocusIndex(tags.length - 1, tags);
+                return;
+            }
+            if (key === 'Enter' || key === ' ') {
+                event.preventDefault();
+                selectFocusedOption(tags);
+                return;
+            }
+            if (key === 'Escape') {
+                event.preventDefault();
+                setDropdownOpen(false);
             }
         }
 
         function render() {
+            const normalizedSearch = String(state.searchValue || '').toLowerCase();
+            const filteredTags = (state.availableTags || []).filter(tag =>
+                String(tag || '')
+                    .toLowerCase()
+                    .includes(normalizedSearch)
+            );
+
             ReactDOM.render(
                 React.createElement(MultiSelectDropdown, {
                     selectedTags: state.selectedTags,
                     negativeTags: state.negativeTags,
                     availableTags: state.availableTags,
                     isOpen: state.open,
-                    onToggle: () => {
-                        state.open = !state.open;
-                        if (!state.open) {
-                            state.searchValue = '';
-                            state.newTagValue = '';
-                        }
-                        const dropdown = document.getElementById(dropdownId);
-                        if (dropdown) {
-                            const paperCard = dropdown.closest('.rel_paper');
-                            if (paperCard) {
-                                if (state.open) {
-                                    paperCard.classList.add('dropdown-open');
-                                } else {
-                                    paperCard.classList.remove('dropdown-open');
-                                }
-                            }
-                        }
-                        render();
-                        emit();
-                    },
+                    pending: state.pending,
+                    pendingTag: state.pendingTag,
+                    onToggle: toggleDropdown,
                     onTagCycle: tag => {
                         const isPos = state.selectedTags.includes(tag);
                         const isNeg = state.negativeTags.includes(tag);
@@ -334,11 +644,14 @@
                     },
                     newTagValue: state.newTagValue,
                     onNewTagChange: e => {
+                        if (state.pending) return;
                         state.newTagValue = e && e.target ? e.target.value : '';
+                        state.focusedOptionIndex = -1;
                         render();
                         emit();
                     },
                     onAddNewTag: () => {
+                        if (state.pending) return;
                         const t = String(state.newTagValue || '').trim();
                         if (!t) return;
                         applyRemote(t, 1)
@@ -360,32 +673,28 @@
                     dropdownId: dropdownId,
                     searchValue: state.searchValue,
                     onSearchChange: e => {
+                        if (state.pending) return;
                         state.searchValue = e && e.target ? e.target.value : '';
+                        state.focusedOptionIndex = -1;
                         render();
                         emit();
                     },
+                    filteredTags: filteredTags,
+                    focusedOptionIndex: state.focusedOptionIndex,
+                    onTriggerKeyDown: e => handleTriggerKeyDown(e, filteredTags),
+                    onMenuKeyDown: e => handleOptionsKeyDown(e, filteredTags),
                 }),
                 el
             );
+
+            syncFocusedOption(filteredTags);
         }
 
         // register close handlers
         registerDropdown(dropdownId, {
             isOpen: () => !!state.open,
             close: () => {
-                if (!state.open) return;
-                state.open = false;
-                state.searchValue = '';
-                state.newTagValue = '';
-                const dropdown = document.getElementById(dropdownId);
-                if (dropdown) {
-                    const paperCard = dropdown.closest('.rel_paper');
-                    if (paperCard) {
-                        paperCard.classList.remove('dropdown-open');
-                    }
-                }
-                render();
-                emit();
+                setDropdownOpen(false);
             },
         });
 
@@ -415,6 +724,9 @@
                 if (!from || !to) return;
                 state.selectedTags = state.selectedTags.map(t => (t === from ? to : t));
                 state.negativeTags = state.negativeTags.map(t => (t === from ? to : t));
+                state.availableTags = normalizeTagList(
+                    (state.availableTags || []).map(t => (t === from ? to : t))
+                );
                 ensureAvailable(to);
                 render();
                 emit();
@@ -424,11 +736,21 @@
                 if (!t) return;
                 state.selectedTags = state.selectedTags.filter(x => x !== t);
                 state.negativeTags = state.negativeTags.filter(x => x !== t);
+                state.availableTags = normalizeTagList(
+                    (state.availableTags || []).filter(x => x !== t)
+                );
                 render();
                 emit();
             },
             unmount: () => {
                 try {
+                    // Clean up dropdown-open class on parent card
+                    const dropdown = document.getElementById(dropdownId);
+                    if (dropdown) {
+                        const paperCard =
+                            dropdown.closest('.rel_paper') || dropdown.closest('.rl-paper-card');
+                        if (paperCard) paperCard.classList.remove('dropdown-open');
+                    }
                     ReactDOM.unmountComponentAtNode(el);
                 } catch (e) {}
                 unregisterDropdown(dropdownId);

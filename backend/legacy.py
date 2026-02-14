@@ -28,7 +28,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 import numpy as np
 import requests
@@ -44,7 +44,9 @@ from flask import (  # global session-level object
     stream_with_context,
     url_for,
 )
+from flask.typing import ResponseReturnValue
 from loguru import logger
+from markupsafe import escape
 from pydantic import BaseModel, ValidationError
 from werkzeug.exceptions import HTTPException
 
@@ -91,9 +93,10 @@ from .schemas.summary import (
     SummaryGetRequest,
     SummaryPidRequest,
     SummaryStatusRequest,
+    SummaryTriggerBulkRequest,
     SummaryTriggerRequest,
 )
-from .schemas.tags import PaperTitlesRequest, TagFeedbackRequest
+from .schemas.tags import PaperTitlesRequest, TagFeedbackBulkRequest, TagFeedbackRequest
 from .services.search_service import apply_limit as _apply_limit
 from .services.summary_service import SummaryCacheMiss
 from .services.summary_service import clear_model_summary as _clear_model_summary_impl
@@ -211,7 +214,7 @@ _LLM_MODELS_CACHE_TTL_S = 300.0
 # Cookie & request hardening (can be overridden via env vars)
 
 
-def add_security_headers(resp):
+def add_security_headers(resp: Response) -> Response:
     # Basic hardening headers (CSP intentionally not set due to inline scripts/CDNs)
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
@@ -247,7 +250,7 @@ def _is_same_origin_request() -> bool:
     return is_same_origin()
 
 
-def _csrf_protect():
+def _csrf_protect() -> None:
     """CSRF protection for state-changing endpoints."""
     from backend.utils.validation import csrf_protect
 
@@ -268,21 +271,21 @@ def _normalize_name(value: Optional[str]) -> str:
 # API Response Helpers (reduce code duplication in API endpoints)
 
 
-def _api_error(error: str, status: int = 400, **extra):
+def _api_error(error: str, status: int = 400, **extra) -> ResponseReturnValue:
     """Return a standardized JSON error response."""
     from backend.services.api_helpers import api_error
 
     return api_error(error, status, **extra)
 
 
-def _api_success(**data):
+def _api_success(**data: Any) -> ResponseReturnValue:
     """Return a standardized JSON success response."""
     from backend.services.api_helpers import api_success
 
     return api_success(**data)
 
 
-def _legacy_mutation_result_to_json(result):
+def _legacy_mutation_result_to_json(result: Any) -> ResponseReturnValue:
     """Convert legacy mutation text result to JSON success/error payload."""
     if isinstance(result, Response):
         return result
@@ -308,7 +311,7 @@ def _parse_api_request(
     require_csrf_for_session: bool = False,
     require_pid: bool = False,
     schema: Optional[Type[BaseModel]] = None,
-):
+) -> tuple[dict | None, ResponseReturnValue | None]:
     """
     Common API request parsing and validation.
 
@@ -490,50 +493,49 @@ def _get_queue_snapshot_cached() -> dict:
 
 
 # globals that manage the (lazy) loading of various state for a request
-def get_tags():
+def get_tags() -> Any:
     """Get user tags using Repository layer with request-level caching."""
     from backend.services.user_service import get_tags as _get_tags
 
     return _get_tags()
 
 
-def get_neg_tags():
+def get_neg_tags() -> Any:
     """Get user negative tags using Repository layer with request-level caching."""
     from backend.services.user_service import get_neg_tags as _get_neg_tags
 
     return _get_neg_tags()
 
 
-def get_combined_tags():
+def get_combined_tags() -> Any:
     """Get user combined tags using Repository layer with request-level caching."""
     from backend.services.user_service import get_combined_tags as _get_combined_tags
 
     return _get_combined_tags()
 
 
-def get_keys():
+def get_keys() -> Any:
     """Get user keywords with caching."""
     from backend.services.user_service import get_keys as _get_keys
 
     return _get_keys()
 
 
-def _build_user_tag_list():
+def _build_user_tag_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_tag_list
 
     rtags = build_user_tag_list()
     return sorted(rtags, key=lambda item: item["name"])
 
 
-def _build_user_key_list():
+def _build_user_key_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_key_list
 
     rkeys = build_user_key_list()
-    rkeys.append({"name": "Artificial general intelligence"})
     return sorted(rkeys, key=lambda item: item["name"])
 
 
-def _build_user_combined_tag_list():
+def _build_user_combined_tag_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_combined_tag_list
 
     rctags = build_user_combined_tag_list()
@@ -544,7 +546,7 @@ def _build_user_combined_tag_list():
 # Intelligent unified data caching functionality
 
 
-def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None):
+def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None) -> tuple[Any, dict[str, Any], list[str]]:
     """Load papers/metas/pids caches (delegates to backend.services.data_service).
 
     Returns:
@@ -560,14 +562,14 @@ def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None):
 # Cached data access functions
 
 
-def get_pids():
+def get_pids() -> list[str]:
     """Get all paper ID list"""
     from backend.services.data_service import get_pids as _get_pids
 
     return _get_pids()
 
 
-def get_papers():
+def get_papers() -> Any:
     """Get papers database"""
     # Preserve legacy semantics: return None unless ARXIV_SANITY_CACHE_PAPERS=1.
     papers, _metas, _pids = get_data_cached()
@@ -598,7 +600,7 @@ def paper_exists(pid: str) -> bool:
     return pid in mdb
 
 
-def get_paper(pid: str):
+def get_paper(pid: str) -> Any:
     """
     Get one paper record by pid.
 
@@ -629,7 +631,7 @@ def get_paper(pid: str):
         return None
 
 
-def get_papers_bulk(pids):
+def get_papers_bulk(pids) -> dict[str, Any]:
     """
     Fetch a batch of papers efficiently using Repository layer.
 
@@ -658,34 +660,34 @@ def get_papers_bulk(pids):
     return out
 
 
-def get_metas():
+def get_metas() -> Any:
     """Get metadata database"""
     from backend.services.data_service import get_metas as _get_metas
 
     return _get_metas()
 
 
-def _warmup_data_cache():
+def _warmup_data_cache() -> None:
     """Warm up data cache in background."""
     from backend.services.background import _warmup_data_cache as _warmup
 
     _warmup()
 
 
-def _ensure_background_services_started():
+def _ensure_background_services_started() -> None:
     """Start background threads/schedulers lazily (per worker process)."""
     from backend.services.background import ensure_background_services_started
 
     ensure_background_services_started()
 
 
-def before_request():
+def before_request() -> None:
     from backend.services.user_service import before_request as _before_request
 
     _before_request()
 
 
-def close_connection(_error=None):
+def close_connection(_error=None) -> None:
     from backend.services.user_service import close_connection as _close_connection
 
     return _close_connection(_error)
@@ -695,7 +697,7 @@ def close_connection(_error=None):
 # Intelligent feature caching functionality
 
 
-def get_features_cached():
+def get_features_cached() -> Any:
     """Load features with caching (delegates to backend.services.data_service)."""
     from backend.services.data_service import (
         get_features_cached as _get_features_cached,
@@ -726,7 +728,7 @@ def render_pid(
     *,
     include_tldr: bool = True,
     include_summary_status: bool = True,
-):
+) -> ResponseReturnValue:
     """Render a single paper for the UI - delegates to render_service."""
     from backend.services.render_service import render_pid as _render_pid
 
@@ -746,21 +748,21 @@ def render_pid(
 # _apply_limit is imported from search_service
 
 
-def random_rank(limit=None):
+def random_rank(limit=None) -> Any:
     pids_all = get_pids()
     from backend.services.search_service import random_rank as _random_rank
 
     return _random_rank(pids_all, limit)
 
 
-def time_rank(limit=None):
+def time_rank(limit=None) -> Any:
     mdb = get_metas()
     from backend.services.search_service import time_rank as _time_rank
 
     return _time_rank(mdb, limit)
 
 
-def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
+def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None) -> Any:
     """
     Smart time filtering: keep tagged papers (even if outside time window) and papers within time window
     Filter papers by time but keep tagged papers even if outside time window
@@ -774,7 +776,7 @@ def _filter_by_time_with_tags(pids, time_filter, user_tagged_pids=None):
     return filter_by_time(pids, mdb, time_filter, user_tagged_pids)
 
 
-def _filter_by_time(pids, time_filter):
+def _filter_by_time(pids, time_filter) -> Any:
     """Original time filtering function, maintain backward compatibility"""
     return _filter_by_time_with_tags(pids, time_filter, None)
 
@@ -786,7 +788,7 @@ def svm_rank(
     logic: str = "and",
     time_filter: str = "",
     limit=None,
-):
+) -> Any:
     """SVM-based paper ranking - delegates to search_service.svm_rank."""
     from backend.services.search_service import svm_rank as _svm_rank
 
@@ -828,7 +830,7 @@ def _title_candidate_scan(
     max_candidates: int = 500,
     max_scan: int = 120000,
     time_budget_s: float = 0.6,
-):
+) -> Any:
     from backend.services.search_service import title_candidate_scan
 
     return title_candidate_scan(
@@ -854,7 +856,7 @@ def _compute_paper_score_parsed(parsed: dict, p: dict, pid: str) -> float:
     )
 
 
-def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = None):
+def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = None) -> Any:
     from backend.services.search_service import lexical_rank_over_pids
 
     return lexical_rank_over_pids(
@@ -868,7 +870,7 @@ def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = Non
     )
 
 
-def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None):
+def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None) -> Any:
     from backend.services.search_service import lexical_rank_fullscan
 
     return lexical_rank_fullscan(
@@ -889,13 +891,13 @@ def _compute_paper_score(q: str, qs: list, q_norm: str, qs_norm: list, p: dict, 
     return compute_paper_score_simple(q, list(qs or []), q_norm, list(qs_norm or []), p, pid)
 
 
-def count_match(q, pid_start, n_pids):
+def count_match(q, pid_start, n_pids) -> int:
     from backend.services.search_service import count_match as _count_match
 
     return _count_match(q, int(pid_start), int(n_pids))
 
 
-def legacy_search_rank(q: str = "", limit=None):
+def legacy_search_rank(q: str = "", limit=None) -> Any:
     from backend.services.search_service import (
         legacy_search_rank as _legacy_search_rank,
     )
@@ -904,14 +906,14 @@ def legacy_search_rank(q: str = "", limit=None):
 
 
 # Query-side TF-IDF vectorizer - delegates to search_service
-def _get_query_vectorizer(features):
+def _get_query_vectorizer(features) -> Any:
     """Reconstruct a query-side TF-IDF encoder from cached features."""
     from backend.services.search_service import get_query_vectorizer
 
     return get_query_vectorizer(features, FEATURES_FILE)
 
 
-def search_rank(q: str = "", limit=None):
+def search_rank(q: str = "", limit=None) -> Any:
     """Fast keyword search - delegates to search_service.search_rank."""
     from backend.services.search_service import search_rank as _search_rank
 
@@ -927,7 +929,7 @@ def search_rank(q: str = "", limit=None):
     )
 
 
-def get_semantic_model():
+def get_semantic_model() -> Any:
     """Get semantic model instance (delegates to backend.services.semantic_service)."""
     from backend.services.semantic_service import (
         get_semantic_model as _get_semantic_model,
@@ -936,7 +938,7 @@ def get_semantic_model():
     return _get_semantic_model()
 
 
-def get_paper_embeddings():
+def get_paper_embeddings() -> Any:
     """Get paper embedding vectors (delegates to backend.services.semantic_service)."""
     from backend.services.semantic_service import (
         get_paper_embeddings as _get_paper_embeddings,
@@ -945,7 +947,7 @@ def get_paper_embeddings():
     return _get_paper_embeddings()
 
 
-def _get_query_embedding(q: str, embed_dim: int):
+def _get_query_embedding(q: str, embed_dim: int) -> Any:
     """Backwards-compatible wrapper for query embedding caching."""
     from backend.services.semantic_service import (
         get_query_embedding as _get_query_embedding,
@@ -954,7 +956,7 @@ def _get_query_embedding(q: str, embed_dim: int):
     return _get_query_embedding(q, embed_dim)
 
 
-def semantic_search_rank(q: str = "", limit=None):
+def semantic_search_rank(q: str = "", limit=None) -> Any:
     """Execute pure semantic search (delegates to backend.services.semantic_service)."""
     from backend.services.semantic_service import (
         semantic_search_rank as _semantic_search_rank,
@@ -963,7 +965,7 @@ def semantic_search_rank(q: str = "", limit=None):
     return _semantic_search_rank(q, limit)
 
 
-def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT):
+def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT) -> Any:
     """Hybrid search - delegates to search_service.hybrid_search_rank."""
     from backend.services.search_service import (
         hybrid_search_rank as _hybrid_search_rank,
@@ -983,7 +985,7 @@ def enhanced_search_rank(
     limit=None,
     search_mode="keyword",
     semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
-):
+) -> Any:
     """Enhanced search - delegates to search_service.enhanced_search_rank."""
     from backend.services.search_service import (
         enhanced_search_rank as _enhanced_search_rank,
@@ -1001,7 +1003,7 @@ def enhanced_search_rank(
 # primary application endpoints
 
 
-def default_context():
+def default_context() -> dict[str, Any]:
     # any global context across all pages, e.g. related to the current user
     context = {}
     context["user"] = g.user if g.user is not None else ""
@@ -1009,7 +1011,7 @@ def default_context():
     return context
 
 
-def main():
+def main() -> ResponseReturnValue:
     t_request_start = time.time()
     logger.trace(f"[API] main(): request started, args={dict(request.args)}")
     # default settings
@@ -1057,6 +1059,14 @@ def main():
     if opt_skip_have not in allowed_skip_have:
         form_errors.append("Skip seen must be 'yes' or 'no'; using default.")
         opt_skip_have = default_skip_have
+    # If URL doesn't explicitly set search_mode, allow cookie-based preference.
+    if "search_mode" not in request.args:
+        try:
+            cookie_search_mode = _normalize_name(request.cookies.get("arxiv_sanity_pref.search_mode", "")).lower()
+            if cookie_search_mode in allowed_search_modes:
+                opt_search_mode = cookie_search_mode
+        except Exception:
+            pass
     if opt_search_mode not in allowed_search_modes:
         form_errors.append("Search mode must be keyword, semantic, or hybrid; using hybrid.")
         opt_search_mode = "hybrid"
@@ -1120,25 +1130,15 @@ def main():
                 semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
     opt_semantic_weight = str(semantic_weight)
 
-    # Calculate required number of results (considering pagination and possible need for more results after filtering)
+    # Calculate required number of results for pagination (page slicing only).
     try:
         page_number = max(1, int(opt_page_number))
     except ValueError:
         page_number = 1
 
-    # Calculate how many results to get to support current page display
-    # Basic requirement: results needed for current page = RET_NUM * page_number
-    base_needed = RET_NUM * page_number
-
-    # Consider that filtering conditions will reduce available results, so need to get more
-    buffer_multiplier = 1
-    if opt_time_filter:
-        buffer_multiplier += 2  # Time filtering may remove many results, take 2x more
-    if opt_skip_have == "yes":
-        buffer_multiplier += 1  # skip_have will also remove some, take 1x more
-
-    # Final limit = basic requirement * buffer multiplier, but not exceeding maximum
-    dynamic_limit = min(MAX_RESULTS, base_needed * buffer_multiplier)
+    # Use a stable corpus scan size so max_pages doesn't change across page_number.
+    RET_NUM * page_number
+    dynamic_limit = int(MAX_RESULTS)
 
     # logger.trace(
     #     f"Page {page_number}, base_needed={base_needed}, buffer_multiplier={buffer_multiplier}, dynamic_limit={dynamic_limit}"
@@ -1151,20 +1151,12 @@ def main():
     if opt_rank == "search":
         t_s = time.time()
         # Use enhanced search function
-        if opt_search_mode == "hybrid":
-            pids, scores, score_details = enhanced_search_rank(
-                q=opt_q,
-                limit=dynamic_limit,
-                search_mode=opt_search_mode,
-                semantic_weight=semantic_weight,
-            )
-        else:
-            pids, scores = enhanced_search_rank(
-                q=opt_q,
-                limit=dynamic_limit,
-                search_mode=opt_search_mode,
-                semantic_weight=semantic_weight,
-            )
+        pids, scores, score_details = enhanced_search_rank(
+            q=opt_q,
+            limit=dynamic_limit,
+            search_mode=opt_search_mode,
+            semantic_weight=semantic_weight,
+        )
         logger.debug(
             f"User {g.user} {opt_search_mode} search '{opt_q}' weight={semantic_weight}, time {time.time() - t_s:.3f}s"
         )
@@ -1198,17 +1190,12 @@ def main():
         t_s = time.time()
         if opt_q:
             # If there's a search query, first search then sort by time
-            search_result = enhanced_search_rank(
+            search_pids, _, _ = enhanced_search_rank(
                 q=opt_q,
-                limit=dynamic_limit * 2,
+                limit=MAX_RESULTS,
                 search_mode=opt_search_mode,
                 semantic_weight=semantic_weight,
             )
-            # Handle both 2 and 3 return values (hybrid mode returns 3)
-            if len(search_result) == 3:
-                search_pids, _, _ = search_result
-            else:
-                search_pids, _ = search_result
             # Re-sort by time
             mdb = get_metas()
             tnow = time.time()
@@ -1382,7 +1369,7 @@ def main():
     return render_template("index.html", **context)
 
 
-def api_user_state():
+def api_user_state() -> ResponseReturnValue:
     t_start = time.time()
     logger.trace(f"[API] api_user_state: request started, user={g.user}")
     if g.user is None:
@@ -1400,7 +1387,7 @@ def api_user_state():
         return _api_error("Server error", 500)
 
 
-def api_user_stream():
+def api_user_stream() -> ResponseReturnValue:
     if g.user is None:
         return _api_error("Not logged in", 401)
 
@@ -1478,7 +1465,7 @@ def api_user_stream():
     return resp
 
 
-def api_sse_stats():
+def api_sse_stats() -> ResponseReturnValue:
     """Return process-local SSE stats (debug/monitoring)."""
     if g.user is None:
         return _api_error("Not logged in", 401)
@@ -1492,10 +1479,10 @@ def api_sse_stats():
         return _api_success(sse=stats, bus=bus_stats)
     except Exception as e:
         logger.error(f"SSE stats API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def inspect():
+def inspect() -> ResponseReturnValue:
     t_start = time.time()
     # fetch the paper of interest based on the pid
     pid = request.args.get("pid", "")
@@ -1511,7 +1498,8 @@ def inspect():
         return "<h1>Error</h1><p>papers.db not found.</p>", 200
 
     if not paper_exists(pid):
-        return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
+        safe_pid = escape(pid or "")
+        return f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>", 404
 
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
@@ -1552,7 +1540,7 @@ def inspect():
     return render_template("inspect.html", **context)
 
 
-def _inspect_uploaded_paper(pid: str):
+def _inspect_uploaded_paper(pid: str) -> ResponseReturnValue:
     """Inspect TF-IDF features for an uploaded paper.
 
     Similar to the arXiv paper inspect, but uses computed upload features.
@@ -1575,7 +1563,8 @@ def _inspect_uploaded_paper(pid: str):
     # Check if paper exists and belongs to user
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return f"<h1>Error</h1><p>Uploaded paper with ID '{pid}' not found.</p>", 404
+        safe_pid = escape(pid or "")
+        return f"<h1>Error</h1><p>Uploaded paper with ID '{safe_pid}' not found.</p>", 404
 
     if record.get("owner") != g.user:
         return "<h1>Error</h1><p>Paper not found.</p>", 404
@@ -1652,7 +1641,8 @@ def _inspect_uploaded_paper(pid: str):
         words.sort(key=lambda w: w["weight"], reverse=True)
     except Exception as e:
         logger.error(f"Failed to compute/load features for uploaded paper {pid}: {e}")
-        return f"<h1>Error</h1><p>Failed to process features: {str(e)}</p>", 500
+        safe_err = escape(str(e))
+        return f"<h1>Error</h1><p>Failed to process features: {safe_err}</p>", 500
 
     # Build paper info for display
     authors = override.get("authors") or meta.get("authors") or []
@@ -1690,7 +1680,7 @@ def _inspect_uploaded_paper(pid: str):
     return render_template("inspect.html", **context)
 
 
-def summary():
+def summary() -> ResponseReturnValue:
     """
     Display AI-generated markdown format summary of the paper.
 
@@ -1735,7 +1725,8 @@ def summary():
         return "<h1>Error</h1><p>papers.db not found.</p>", 200
 
     if not paper_exists(raw_pid):
-        return f"<h1>Error</h1><p>Paper with ID '{pid}' not found in database.</p>", 404
+        safe_pid = escape(pid or "")
+        return f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>", 404
 
     # Get basic paper information with user tags (positive + negative)
     pid_to_utags = None
@@ -1780,7 +1771,7 @@ def summary():
     return render_template("summary.html", **context)
 
 
-def api_get_paper_summary():
+def api_get_paper_summary() -> ResponseReturnValue:
     """API endpoint: Get paper summary asynchronously"""
     t_start = time.time()
     try:
@@ -1836,10 +1827,10 @@ def api_get_paper_summary():
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
         logger.error(f"Paper summary API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_get_paper_tldr():
+def api_get_paper_tldr() -> ResponseReturnValue:
     """API endpoint: Get cached TL;DR (best-effort) for a paper."""
     t_start = time.time()
     try:
@@ -1866,7 +1857,7 @@ def api_get_paper_tldr():
         return _api_error("Server error", 500)
 
 
-def api_trigger_paper_summary():
+def api_trigger_paper_summary() -> ResponseReturnValue:
     """Trigger summary generation without returning content."""
     t_start = time.time()
     try:
@@ -1893,10 +1884,7 @@ def api_trigger_paper_summary():
                 if parse_status in ("queued", "running"):
                     return _api_error("Paper is being parsed. Please wait.", 400)
                 return _api_error("Paper not parsed yet. Parse PDF first.", 400)
-        else:
-            # Non-upload summaries are shared resources; require login to enqueue work.
-            if not g.user:
-                return _api_error("Not logged in", 401)
+        # Non-upload summaries are public resources. Allow anonymous callers to enqueue work.
 
         model = (data.get("model") or LLM_NAME or "").strip()
         force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
@@ -1979,10 +1967,166 @@ def api_trigger_paper_summary():
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
         logger.error(f"Trigger summary API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_task_status(task_id: str):
+def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
+    """Trigger summary generation in batch without returning content.
+
+    Semantics:
+    - Returns per-item results; invalid items do not fail the whole request.
+    - Upload PIDs are treated as private resources (owner-only).
+    """
+    t_start = time.time()
+    try:
+        data, err = _parse_api_request(require_csrf=True, schema=SummaryTriggerBulkRequest)
+        if err:
+            return err
+
+        raw_items = data.get("items") or []
+        if not isinstance(raw_items, list):
+            return _api_error("items must be a list", 400)
+        if len(raw_items) > 50:
+            return _api_error("Too many items (max 50)", 400)
+
+        from backend.utils.upload_utils import is_upload_pid
+
+        results = []
+        for ix, item in enumerate(raw_items):
+            try:
+                validated = SummaryTriggerRequest.model_validate(item or {})
+                payload = validated.model_dump()
+            except ValidationError as exc:
+                errors = []
+                for e in exc.errors():
+                    errors.append(
+                        {
+                            "loc": e.get("loc", []),
+                            "msg": e.get("msg", ""),
+                            "type": e.get("type", ""),
+                        }
+                    )
+                results.append({"index": ix, "success": False, "error": "Invalid item", "details": errors})
+                continue
+
+            pid = payload.get("pid") or ""
+            raw_pid, _ = split_pid_version(pid)
+
+            model = (payload.get("model") or LLM_NAME or "").strip()
+            if not model:
+                results.append({"index": ix, "success": False, "pid": raw_pid, "error": "Model is required"})
+                continue
+
+            force_regen = bool(payload.get("force", False) or payload.get("force_regenerate", False))
+
+            # Uploaded papers are private: require owner and parse ok.
+            if is_upload_pid(raw_pid):
+                from aslite.repositories import UploadedPaperRepository
+                from backend.services.upload_service import (
+                    _normalize_upload_parse_status,
+                )
+
+                record = UploadedPaperRepository.get(raw_pid)
+                if not record or record.get("owner") != g.user:
+                    results.append({"index": ix, "success": False, "pid": raw_pid, "error": "Paper not found"})
+                    continue
+                parse_status, _parse_error = _normalize_upload_parse_status(raw_pid, record)
+                if parse_status != "ok":
+                    if parse_status in ("queued", "running"):
+                        results.append(
+                            {
+                                "index": ix,
+                                "success": False,
+                                "pid": raw_pid,
+                                "error": "Paper is being parsed. Please wait.",
+                            }
+                        )
+                        continue
+                    results.append(
+                        {
+                            "index": ix,
+                            "success": False,
+                            "pid": raw_pid,
+                            "error": "Paper not parsed yet. Parse PDF first.",
+                        }
+                    )
+                    continue
+
+            # Fast path: respect existing status unless forced.
+            try:
+                status, _last_error = get_summary_status(raw_pid, model)
+            except Exception:
+                status = ""
+
+            if not force_regen:
+                if status == "ok":
+                    results.append({"index": ix, "success": True, "pid": raw_pid, "status": "ok", "task_id": None})
+                    continue
+                if status in ("running", "queued"):
+                    task_id = None
+                    try:
+                        info = SummaryStatusRepository.get_status(raw_pid, model)
+                        if isinstance(info, dict):
+                            task_user = info.get("task_user")
+                            if task_user is None or (g.user and task_user == g.user):
+                                task_id = info.get("task_id")
+                    except Exception:
+                        task_id = None
+                    results.append({"index": ix, "success": True, "pid": raw_pid, "status": status, "task_id": task_id})
+                    continue
+
+            priority = payload.get("priority")
+            try:
+                priority = int(priority) if priority is not None else None
+            except Exception:
+                priority = None
+
+            task_id = _trigger_summary_async(
+                g.user,
+                raw_pid,
+                model=model,
+                priority=priority,
+                force_refresh=force_regen,
+            )
+
+            if task_id == "":
+                ret_status = "queued"
+                try:
+                    info = SummaryStatusRepository.get_status(raw_pid, model)
+                    if isinstance(info, dict) and info.get("status") in ("queued", "running"):
+                        ret_status = info.get("status") or ret_status
+                except Exception:
+                    pass
+                results.append({"index": ix, "success": True, "pid": raw_pid, "status": ret_status, "task_id": None})
+                continue
+
+            if task_id is None and not settings.huey.allow_thread_fallback:
+                err_msg = None
+                try:
+                    info = SummaryStatusRepository.get_status(raw_pid, model)
+                    if isinstance(info, dict):
+                        err_msg = info.get("last_error")
+                except Exception:
+                    err_msg = None
+                err_msg = err_msg or "Failed to enqueue summary task"
+                results.append({"index": ix, "success": False, "pid": raw_pid, "error": err_msg})
+                continue
+
+            # Thread fallback: no task_id.
+            results.append({"index": ix, "success": True, "pid": raw_pid, "status": "queued", "task_id": task_id})
+
+        logger.trace(
+            f"[API] api_trigger_paper_summary_bulk: completed in {time.time() - t_start:.2f}s ({len(results)} items)"
+        )
+        return _api_success(results=results)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Trigger summary bulk API error: {e}")
+        return _api_error("Server error", 500)
+
+
+def api_task_status(task_id: str) -> ResponseReturnValue:
     """Return status for a queued task.
 
     Returns sanitized fields for security:
@@ -2015,6 +2159,7 @@ def api_task_status(task_id: str):
             payload["model"] = info.get("model")
             payload["error"] = info.get("error")
             payload["priority"] = info.get("priority")
+            payload["stage"] = info.get("stage")
 
         try:
             priority = info.get("priority")
@@ -2038,10 +2183,10 @@ def api_task_status(task_id: str):
         return _api_success(task_id=task_id, **payload)
     except Exception as e:
         logger.error(f"Task status API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_queue_stats():
+def api_queue_stats() -> ResponseReturnValue:
     """Return global queue statistics (queued count, running count)."""
     t_start = time.time()
     logger.trace("[API] api_queue_stats: starting")
@@ -2053,10 +2198,10 @@ def api_queue_stats():
         return _api_success(queued=queued_count, running=running_count)
     except Exception as e:
         logger.error(f"Queue stats API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_summary_status():
+def api_summary_status() -> ResponseReturnValue:
     """Return summary generation status for one or more papers (optimized with batch queries)."""
     t_start = time.time()
     try:
@@ -2171,10 +2316,10 @@ def api_summary_status():
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
         logger.error(f"Summary status API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_clear_model_summary():
+def api_clear_model_summary() -> ResponseReturnValue:
     """API endpoint: Clear summary for a specific model only"""
     t_start = time.time()
     try:
@@ -2206,10 +2351,10 @@ def api_clear_model_summary():
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
         logger.error(f"Failed to clear model summary: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
-def api_clear_paper_cache():
+def api_clear_paper_cache() -> ResponseReturnValue:
     """API endpoint: Clear all caches for a paper (all models, HTML, MinerU, etc.)"""
     t_start = time.time()
     try:
@@ -2237,21 +2382,21 @@ def api_clear_paper_cache():
         raise  # Let Flask handle HTTP exceptions (e.g., CSRF 403)
     except Exception as e:
         logger.error(f"Failed to clear paper cache: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
 # -----------------------------------------------------------------------------
 # Image serving helpers (reduce duplication between paper_image and mineru_image)
 
 
-def _serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: list = None):
+def _serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: list = None) -> ResponseReturnValue:
     """Common logic for serving paper images from cache directories."""
     from backend.services.render_service import serve_paper_image
 
     return serve_paper_image(pid, filename, base_dir, search_subdirs)
 
 
-def api_paper_image(pid: str, filename: str):
+def api_paper_image(pid: str, filename: str) -> ResponseReturnValue:
     """Serve paper images from HTML markdown cache."""
     try:
         # Uploaded papers are private. Avoid leaking existence to anonymous users
@@ -2273,7 +2418,7 @@ def api_paper_image(pid: str, filename: str):
         abort(500, "Server error")
 
 
-def api_mineru_image(pid: str, filename: str):
+def api_mineru_image(pid: str, filename: str) -> ResponseReturnValue:
     """Serve paper images from MinerU parsed cache."""
     try:
         # Check upload pid permission
@@ -2294,7 +2439,7 @@ def api_mineru_image(pid: str, filename: str):
         abort(500, "Server error")
 
 
-def api_llm_models():
+def api_llm_models() -> ResponseReturnValue:
     try:
         base_url = (LLM_BASE_URL or "").rstrip("/")
         if not base_url:
@@ -2445,7 +2590,7 @@ def api_llm_models():
         return _api_error("Failed to load model list", 502, models=[])
 
 
-def api_check_paper_summaries():
+def api_check_paper_summaries() -> ResponseReturnValue:
     """
     API endpoint: Check which models have existing summaries for a paper
     Returns a list of model names that have cached summaries
@@ -2485,7 +2630,7 @@ def api_check_paper_summaries():
 
     except Exception as e:
         logger.error(f"Check paper summaries API error: {e}")
-        return _api_error(f"Server error: {str(e)}", 500)
+        return _api_error("Server error", 500)
 
 
 def _write_summary_meta(meta_path: Path, data: dict) -> None:
@@ -2512,7 +2657,7 @@ def generate_paper_summary(
     model: Optional[str] = None,
     force_refresh: bool = False,
     cache_only: bool = False,
-):
+) -> Any:
     """Generate paper summary - delegates to summary_service.generate_paper_summary."""
     from backend.services.summary_service import (
         generate_paper_summary as _generate_paper_summary,
@@ -2528,23 +2673,27 @@ def generate_paper_summary(
     )
 
 
-def _clear_model_summary(pid: str, model: str, user: str | None = None):
+def _clear_model_summary(pid: str, model: str, user: str | None = None) -> None:
     """Clear summary cache for a specific model only."""
     _clear_model_summary_impl(pid, model, metas_getter=get_metas, user=user)
 
 
-def _clear_paper_cache(pid: str, user: str | None = None):
+def _clear_paper_cache(pid: str, user: str | None = None) -> None:
     """Clear all caches for a paper."""
     _clear_paper_cache_impl(pid, metas_getter=get_metas, user=user)
 
 
-def profile():
+def profile() -> ResponseReturnValue:
     """Render profile page - delegates to auth_service for email."""
     t_start = time.time()
     logger.trace("[API] profile: starting")
+    context = default_context()
+    if not g.user:
+        logger.trace(f"[API] profile: anonymous in {time.time() - t_start:.2f}s")
+        return render_template("profile.html", **context)
+
     from backend.services.auth_service import get_user_email, get_user_emails
 
-    context = default_context()
     emails = get_user_emails(g.user)
     context["email"] = get_user_email(g.user)
     context["emails"] = emails
@@ -2553,7 +2702,7 @@ def profile():
     return render_template("profile.html", **context)
 
 
-def stats():
+def stats() -> ResponseReturnValue:
     t_start = time.time()
     logger.trace("[API] stats: starting")
     context = default_context()
@@ -2727,7 +2876,7 @@ def stats():
     return render_template("stats.html", **context)
 
 
-def about():
+def about() -> ResponseReturnValue:
     context = default_context()
     try:
         from tools.arxiv_daemon import ALL_TAGS
@@ -2743,7 +2892,7 @@ def about():
 # -----------------------------------------------------------------------------
 
 
-def _resolve_time_delta(time_delta, time_filter):
+def _resolve_time_delta(time_delta, time_filter) -> Any:
     """Resolve time_delta from time_filter string or return provided time_delta.
 
     Args:
@@ -2769,7 +2918,7 @@ def _resolve_time_delta(time_delta, time_filter):
 
 
 @contextmanager
-def _temporary_user_context(user):
+def _temporary_user_context(user) -> Any:
     """Context manager to temporarily set g.user and g._tags for API calls."""
     from backend.services.user_service import temporary_user_context
 
@@ -2782,7 +2931,7 @@ def _temporary_user_context(user):
 # -----------------------------------------------------------------------------
 
 
-def api_keyword_search():
+def api_keyword_search() -> ResponseReturnValue:
     """API interface: single keyword search"""
     t_start = time.time()
     try:
@@ -2821,7 +2970,7 @@ def api_keyword_search():
 
         # Use enhanced search
         search_limit = min(limit * 5, MAX_RESULTS)  # Get more because time filtering is needed
-        pids, scores = enhanced_search_rank(q=keyword, limit=search_limit, search_mode="keyword")
+        pids, scores, _ = enhanced_search_rank(q=keyword, limit=search_limit, search_mode="keyword")
 
         # Apply time filtering
         if time_delta:
@@ -2849,10 +2998,10 @@ def api_keyword_search():
 
     except Exception as e:
         logger.error(f"API keyword search error: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def api_tag_search():
+def api_tag_search() -> ResponseReturnValue:
     """API interface: single tag recommendation"""
     t_start = time.time()
     try:
@@ -2940,10 +3089,10 @@ def api_tag_search():
         raise
     except Exception as e:
         logger.error(f"API tag search error: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def api_tags_search():
+def api_tags_search() -> ResponseReturnValue:
     """API interface: joint tag recommendation"""
     t_start = time.time()
     try:
@@ -3039,10 +3188,10 @@ def api_tags_search():
         raise
     except Exception as e:
         logger.error(f"API tags search error: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def cache_status():
+def cache_status() -> ResponseReturnValue:
     """Debug endpoint to display cache status"""
     if not settings.web.enable_cache_status:
         abort(404)
@@ -3181,7 +3330,7 @@ def cache_status():
 # tag related endpoints: add, delete tags for any paper
 
 
-def api_tag_feedback():
+def api_tag_feedback() -> ResponseReturnValue:
     """Submit tag feedback - delegates to tag_service."""
     t_start = time.time()
     if g.user is None:
@@ -3210,10 +3359,83 @@ def api_tag_feedback():
         raise
     except Exception as e:
         logger.error(f"Tag feedback error: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def api_tag_members():
+def api_tag_feedback_bulk() -> ResponseReturnValue:
+    """Submit tag feedback in batch - delegates to tag_service.
+
+    Semantics:
+    - Returns per-item results; invalid items do not fail the whole request.
+    """
+    t_start = time.time()
+    if g.user is None:
+        return _api_error("Not logged in", 401)
+
+    try:
+        data, err = _parse_api_request(require_csrf=True, schema=TagFeedbackBulkRequest)
+        if err:
+            return err
+
+        raw_items = data.get("items") or []
+        if not isinstance(raw_items, list):
+            return _api_error("items must be a list", 400)
+        if len(raw_items) > 200:
+            return _api_error("Too many items (max 200)", 400)
+
+        from backend.services.tag_service import set_tag_feedback
+
+        results = []
+        for ix, item in enumerate(raw_items):
+            try:
+                validated = TagFeedbackRequest.model_validate(item or {})
+                payload = validated.model_dump()
+            except ValidationError as exc:
+                errors = []
+                for e in exc.errors():
+                    errors.append(
+                        {
+                            "loc": e.get("loc", []),
+                            "msg": e.get("msg", ""),
+                            "type": e.get("type", ""),
+                        }
+                    )
+                results.append({"index": ix, "success": False, "error": "Invalid item", "details": errors})
+                continue
+
+            pid = payload["pid"]
+            tag = payload["tag"]
+            label = payload["label"]
+
+            err_name = _validate_tag_name(tag)
+            if err_name:
+                results.append({"index": ix, "success": False, "pid": pid, "tag": tag, "error": err_name})
+                continue
+
+            try:
+                set_tag_feedback(pid, tag, label)
+                results.append({"index": ix, "success": True, "pid": pid, "tag": tag})
+            except Exception as e:
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "pid": pid,
+                        "tag": tag,
+                        "error": str(e),
+                    }
+                )
+
+        logger.trace(f"[API] api_tag_feedback_bulk: completed in {time.time() - t_start:.2f}s ({len(results)} items)")
+        return _api_success(results=results)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Tag feedback bulk error: {e}")
+        return _api_error("Server error", 500)
+
+
+def api_tag_members() -> ResponseReturnValue:
     """List papers under a tag - delegates to tag_service."""
     t_start = time.time()
     if g.user is None:
@@ -3257,7 +3479,7 @@ def api_tag_members():
         return _api_error("Server error", 500)
 
 
-def api_paper_titles():
+def api_paper_titles() -> ResponseReturnValue:
     """Resolve paper titles - delegates to tag_service."""
     t_start = time.time()
     if g.user is None:
@@ -3298,20 +3520,26 @@ def api_paper_titles():
         raise
     except Exception as e:
         logger.error(f"Paper titles error: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def add_tag(tag=None):
+def add_tag(tag=None) -> ResponseReturnValue:
     """Add an empty tag - delegates to tag_service."""
     from backend.services.tag_service import create_empty_tag
 
     _csrf_protect()
     tag = _normalize_name(tag)
     logger.trace(f"[API] add_tag: tag={tag}")
-    return _legacy_mutation_result_to_json(create_empty_tag(tag))
+    try:
+        return _legacy_mutation_result_to_json(create_empty_tag(tag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"add_tag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def add(pid=None, tag=None):
+def add(pid=None, tag=None) -> ResponseReturnValue:
     """Add paper to tag - delegates to tag_service."""
     from backend.services.tag_service import add_paper_to_tag
 
@@ -3319,10 +3547,16 @@ def add(pid=None, tag=None):
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
     logger.trace(f"[API] add: pid={pid}, tag={tag}")
-    return _legacy_mutation_result_to_json(add_paper_to_tag(pid, tag))
+    try:
+        return _legacy_mutation_result_to_json(add_paper_to_tag(pid, tag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"add error: {e}")
+        return _api_error("Server error", 500)
 
 
-def sub(pid=None, tag=None):
+def sub(pid=None, tag=None) -> ResponseReturnValue:
     """Remove paper from tag - delegates to tag_service."""
     from backend.services.tag_service import remove_paper_from_tag
 
@@ -3330,20 +3564,32 @@ def sub(pid=None, tag=None):
     pid = _normalize_name(pid)
     tag = _normalize_name(tag)
     logger.trace(f"[API] sub: pid={pid}, tag={tag}")
-    return _legacy_mutation_result_to_json(remove_paper_from_tag(pid, tag))
+    try:
+        return _legacy_mutation_result_to_json(remove_paper_from_tag(pid, tag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"sub error: {e}")
+        return _api_error("Server error", 500)
 
 
-def delete_tag(tag=None):
+def delete_tag(tag=None) -> ResponseReturnValue:
     """Delete a tag - delegates to tag_service."""
     from backend.services.tag_service import delete_tag as _delete_tag
 
     _csrf_protect()
     tag = _normalize_name(tag)
     logger.trace(f"[API] delete_tag: tag={tag}")
-    return _legacy_mutation_result_to_json(_delete_tag(tag))
+    try:
+        return _legacy_mutation_result_to_json(_delete_tag(tag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_tag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def rename_tag(otag=None, ntag=None):
+def rename_tag(otag=None, ntag=None) -> ResponseReturnValue:
     """Rename a tag - delegates to tag_service."""
     from backend.services.tag_service import rename_tag as _rename_tag
 
@@ -3351,59 +3597,97 @@ def rename_tag(otag=None, ntag=None):
     otag = _normalize_name(otag)
     ntag = _normalize_name(ntag)
     logger.trace(f"[API] rename_tag: otag={otag}, ntag={ntag}")
-    return _legacy_mutation_result_to_json(_rename_tag(otag, ntag))
+    try:
+        return _legacy_mutation_result_to_json(_rename_tag(otag, ntag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"rename_tag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def add_ctag(ctag=None):
+def add_ctag(ctag=None) -> ResponseReturnValue:
     """Add a combined tag - delegates to tag_service."""
     from backend.services.tag_service import create_combined_tag
 
     _csrf_protect()
     ctag = _normalize_name(ctag)
     logger.trace(f"[API] add_ctag: ctag={ctag}")
-    return _legacy_mutation_result_to_json(create_combined_tag(ctag))
+    try:
+        return _legacy_mutation_result_to_json(create_combined_tag(ctag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"add_ctag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def delete_ctag(ctag=None):
+def delete_ctag(ctag=None) -> ResponseReturnValue:
     """Delete a combined tag - delegates to tag_service."""
     from backend.services.tag_service import delete_combined_tag
 
     _csrf_protect()
     ctag = _normalize_name(ctag)
     logger.trace(f"[API] delete_ctag: ctag={ctag}")
-    return _legacy_mutation_result_to_json(delete_combined_tag(ctag))
+    try:
+        return _legacy_mutation_result_to_json(delete_combined_tag(ctag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_ctag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def rename_ctag(otag=None, ntag=None):
+def rename_ctag(otag=None, ntag=None) -> ResponseReturnValue:
     """Rename a combined tag - delegates to tag_service."""
     from backend.services.tag_service import rename_combined_tag
 
     _csrf_protect()
+    otag = _normalize_name(otag)
+    ntag = _normalize_name(ntag)
     logger.trace(f"[API] rename_ctag: otag={otag}, ntag={ntag}")
-    return _legacy_mutation_result_to_json(rename_combined_tag(otag, ntag))
+    try:
+        return _legacy_mutation_result_to_json(rename_combined_tag(otag, ntag))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"rename_ctag error: {e}")
+        return _api_error("Server error", 500)
 
 
-def add_key(keyword=None):
+def add_key(keyword=None) -> ResponseReturnValue:
     """Add keyword - delegates to keyword_service."""
     from backend.services.keyword_service import add_keyword
 
     _csrf_protect()
     keyword = _normalize_name(keyword)
     logger.trace(f"[API] add_key: keyword={keyword}")
-    return _legacy_mutation_result_to_json(add_keyword(keyword))
+    try:
+        return _legacy_mutation_result_to_json(add_keyword(keyword))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"add_key error: {e}")
+        return _api_error("Server error", 500)
 
 
-def delete_key(keyword=None):
+def delete_key(keyword=None) -> ResponseReturnValue:
     """Delete keyword - delegates to keyword_service."""
     from backend.services.keyword_service import delete_keyword
 
     _csrf_protect()
     keyword = _normalize_name(keyword)
     logger.trace(f"[API] delete_key: keyword={keyword}")
-    return _legacy_mutation_result_to_json(delete_keyword(keyword))
+    try:
+        return _legacy_mutation_result_to_json(delete_keyword(keyword))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"delete_key error: {e}")
+        return _api_error("Server error", 500)
 
 
-def rename_key(okey=None, nkey=None):
+def rename_key(okey=None, nkey=None) -> ResponseReturnValue:
     """Rename keyword - delegates to keyword_service."""
     from backend.services.keyword_service import rename_keyword
 
@@ -3411,14 +3695,20 @@ def rename_key(okey=None, nkey=None):
     okey = _normalize_name(okey)
     nkey = _normalize_name(nkey)
     logger.trace(f"[API] rename_key: okey={okey}, nkey={nkey}")
-    return _legacy_mutation_result_to_json(rename_keyword(okey, nkey))
+    try:
+        return _legacy_mutation_result_to_json(rename_keyword(okey, nkey))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"rename_key error: {e}")
+        return _api_error("Server error", 500)
 
 
 # -----------------------------------------------------------------------------
 # endpoints to log in and out
 
 
-def login():
+def login() -> ResponseReturnValue:
     """Log in user - delegates to auth_service."""
     from backend.services.auth_service import login_user
 
@@ -3428,7 +3718,7 @@ def login():
     return redirect(login_user(username))
 
 
-def logout():
+def logout() -> ResponseReturnValue:
     """Log out user - delegates to auth_service."""
     from backend.services.auth_service import logout_user
 
@@ -3441,14 +3731,16 @@ def logout():
 # user settings and configurations
 
 
-def register_email():
+def register_email() -> ResponseReturnValue:
     """Register email - delegates to auth_service."""
     from backend.services.auth_service import register_user_email
 
-    if g.user is None:
-        return _api_error("Not logged in", 401)
-
     _csrf_protect()
+    if g.user is None:
+        from backend.services.api_helpers import api_error
+
+        return api_error("Not logged in", 401)
+
     email = (request.form.get("email") or "").strip()
     logger.trace(f"[API] register_email: email={email}")
     return redirect(register_user_email(email))
@@ -3458,7 +3750,7 @@ def register_email():
 # Reading List functionality
 
 
-def get_readinglist():
+def get_readinglist() -> ResponseReturnValue:
     """Get reading list - delegates to readinglist_service."""
     from backend.services.readinglist_service import get_user_readinglist
 
@@ -3524,7 +3816,7 @@ def _trigger_summary_async(
     )
 
 
-def readinglist_page():
+def readinglist_page() -> ResponseReturnValue:
     """Display reading list page"""
     t_start = time.time()
     logger.trace("[API] readinglist_page: starting")
@@ -3622,7 +3914,7 @@ def readinglist_page():
                 }
             )
         if rtags:
-            rtags.append({"name": "all"})
+            rtags.append({"name": "all", "n": 0, "pos_n": 0, "neg_n": 0, "neg_only": False})
         context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
     else:
         context["tags"] = []
@@ -3630,7 +3922,7 @@ def readinglist_page():
     return render_template("readinglist.html", **context)
 
 
-def api_readinglist_add():
+def api_readinglist_add() -> ResponseReturnValue:
     """Add paper to reading list - delegates to readinglist_service."""
     t_start = time.time()
     try:
@@ -3686,10 +3978,10 @@ def api_readinglist_add():
         raise
     except Exception as e:
         logger.error(f"Failed to add to reading list: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def api_readinglist_remove():
+def api_readinglist_remove() -> ResponseReturnValue:
     """Remove paper from reading list - delegates to readinglist_service."""
     t_start = time.time()
     try:
@@ -3715,18 +4007,74 @@ def api_readinglist_remove():
         raise
     except Exception as e:
         logger.error(f"Failed to remove from reading list: {e}")
-        return _api_error(str(e), 500)
+        return _api_error("Server error", 500)
 
 
-def api_readinglist_list():
+def api_readinglist_list() -> ResponseReturnValue:
     """Get reading list - delegates to readinglist_service."""
     t_start = time.time()
     logger.trace("[API] api_readinglist_list: starting")
     if g.user is None:
         return _api_error("Not logged in", 401)
 
-    from backend.services.readinglist_service import list_readinglist
+    try:
+        from backend.services.readinglist_service import list_readinglist
 
-    items = list_readinglist()
-    logger.trace(f"[API] api_readinglist_list: completed in {time.time() - t_start:.2f}s, {len(items)} items")
-    return _api_success(items=items)
+        items = list_readinglist()
+        logger.trace(f"[API] api_readinglist_list: completed in {time.time() - t_start:.2f}s, {len(items)} items")
+        return _api_success(items=items)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list reading list: {e}")
+        return _api_error("Server error", 500)
+
+
+def api_readinglist_paper() -> ResponseReturnValue:
+    """Get a single paper payload for reading list incremental UI updates."""
+    t_start = time.time()
+    logger.trace("[API] api_readinglist_paper: starting")
+    if g.user is None:
+        return _api_error("Not logged in", 401)
+
+    pid = _normalize_name(request.args.get("pid", ""))
+    if not pid:
+        return _api_error("pid is required", 400)
+
+    try:
+        readinglist = get_readinglist()
+        info = (readinglist or {}).get(pid)
+        if not info:
+            return _api_error("Paper not in reading list", 404)
+
+        pid_to_paper = get_papers_bulk([pid])
+        paper = (pid_to_paper or {}).get(pid)
+        if not paper:
+            return _api_error("Paper not found", 404)
+
+        tags_db = get_tags() or {}
+        neg_tags_db = get_neg_tags() or {}
+        utags = [t for t, pids in tags_db.items() if pids and pid in pids]
+        ntags = [t for t, pids in neg_tags_db.items() if pids and pid in pids]
+        rendered = render_pid(
+            pid,
+            paper=paper,
+            pid_to_utags={pid: utags},
+            pid_to_ntags={pid: ntags},
+            include_summary_status=False,
+        )
+        rendered["added_time"] = info.get("added_time", 0)
+        rendered["top_tags"] = info.get("top_tags", [])
+        rendered["summary_status"] = info.get("summary_status")
+        rendered["summary_last_error"] = info.get("summary_last_error")
+        rendered["summary_updated_time"] = info.get("summary_updated_time")
+        rendered["summary_task_id"] = info.get("summary_task_id")
+        rendered["in_readinglist"] = True
+
+        logger.trace(f"[API] api_readinglist_paper: completed in {time.time() - t_start:.2f}s")
+        return _api_success(paper=rendered)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get reading list paper {pid}: {e}")
+        return _api_error("Server error", 500)

@@ -214,7 +214,9 @@ class TestUploadedPapersParseApi:
     def test_parse_success_returns_task_id(self, logged_in_client, csrf_token):
         """Parse endpoint should return task_id on successful enqueue."""
         with patch("backend.services.upload_service.trigger_parse_only") as parse_mock:
-            parse_mock.return_value = (True, "queued", "task_parse_001")
+            from backend.services.upload_service import UploadEnqueueResult
+
+            parse_mock.return_value = UploadEnqueueResult(status="queued", task_id="task_parse_001")
 
             resp = logged_in_client.post(
                 "/api/uploaded_papers/parse",
@@ -381,7 +383,7 @@ class TestUploadedPapersExtractInfoApi:
         )
 
         with patch("backend.services.upload_service.trigger_extract_info") as extract_mock:
-            extract_mock.return_value = (True, "task_extract_001")
+            extract_mock.return_value = "task_extract_001"
 
             resp = logged_in_client.post(
                 "/api/uploaded_papers/extract_info",
@@ -475,7 +477,9 @@ class TestUploadedPapersRetryParseApi:
     def test_retry_parse_success_returns_task_id(self, logged_in_client, csrf_token):
         """Retry endpoint should return task_id on successful enqueue."""
         with patch("backend.services.upload_service.retry_parse_uploaded_paper") as retry_mock:
-            retry_mock.return_value = (True, "queued", "task_retry_001")
+            from backend.services.upload_service import UploadEnqueueResult
+
+            retry_mock.return_value = UploadEnqueueResult(status="queued", task_id="task_retry_001")
 
             resp = logged_in_client.post(
                 "/api/uploaded_papers/retry_parse",

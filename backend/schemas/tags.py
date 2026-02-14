@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -20,6 +22,10 @@ class TagFeedbackRequest(TagBaseModel):
         if v not in (-1, 0, 1):
             raise ValueError("label must be -1, 0, or 1")
         return v
+
+
+class TagFeedbackBulkRequest(TagBaseModel):
+    items: list[dict[str, Any]]
 
 
 class PaperTitlesRequest(TagBaseModel):

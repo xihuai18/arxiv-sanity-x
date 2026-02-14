@@ -538,6 +538,24 @@
     z-index: 10;
 }
 
+.multi-select-dropdown.pending .multi-select-trigger {
+    cursor: progress;
+    opacity: 0.85;
+}
+
+.multi-select-dropdown.pending .multi-select-trigger:hover {
+    border-color: var(--border-color);
+    box-shadow: none;
+}
+
+.multi-select-dropdown.pending .multi-select-dropdown-menu {
+    opacity: 0.9;
+}
+
+.multi-select-option.pending {
+    opacity: 0.85;
+}
+
 /* When dropdown is open, raise z-index above other paper cards */
 .multi-select-dropdown.open {
     z-index: 100;
@@ -927,6 +945,83 @@
     overflow: hidden; /* Keep border-radius intact */
 }
 
+.multi-select-backdrop {
+    /* Only visible on mobile (bottom sheet mode) */
+    display: none;
+}
+
+.multi-select-sheet-header {
+    /* Only visible on mobile (bottom sheet mode) */
+    display: none;
+}
+
+@media (max-width: 640px) {
+    /* Mobile bottom-sheet: larger touch targets + more stable positioning */
+    .multi-select-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.35);
+        z-index: 1000;
+    }
+
+    .multi-select-dropdown-menu {
+        position: fixed;
+        left: 12px;
+        right: 12px;
+        top: auto;
+        bottom: calc(12px + env(safe-area-inset-bottom));
+        max-height: min(75vh, 560px);
+        border-radius: 16px;
+        border-top: 2px solid var(--link-color);
+        z-index: 1001;
+    }
+
+    /* In bottom-sheet mode, keep trigger rounded (menu is separate) */
+    .multi-select-trigger.active {
+        border-radius: 10px;
+    }
+
+    .multi-select-sheet-header {
+        display: block;
+        position: relative;
+        padding: 10px 12px 6px;
+        background: var(--card-bg);
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .multi-select-sheet-handle {
+        width: 48px;
+        height: 4px;
+        border-radius: 999px;
+        margin: 0 auto;
+        background: rgba(127, 127, 127, 0.35);
+    }
+
+    .multi-select-sheet-close {
+        position: absolute;
+        right: 8px;
+        top: 6px;
+        padding: 8px 12px;
+        min-height: 40px;
+        border-radius: 10px;
+        border: 1px solid var(--border-color);
+        background: var(--card-bg);
+        color: var(--text-color);
+        cursor: pointer;
+    }
+
+    .multi-select-sheet-close:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    /* Let the sheet decide its own height; options scroll inside. */
+    .multi-select-options {
+        max-height: none;
+    }
+}
+
 /* Inner scrollable container for options */
 .multi-select-options {
     flex: 1;
@@ -1001,6 +1096,13 @@
     color: var(--text-color); /* Ensure initial text color is correct */
 }
 
+@media (max-width: 640px) {
+    .multi-select-option {
+        padding: 14px 16px;
+        font-size: 16px;
+    }
+}
+
 /* Dark mode: brighter separator line */
 [data-theme='dark'] .multi-select-option {
     border-bottom: 1px solid rgba(255, 255, 255, 0.15);
@@ -1020,6 +1122,21 @@
 /* Dark mode hover style - more visible background */
 [data-theme='dark'] .multi-select-option:hover {
     background-color: rgba(96, 165, 250, 0.2); /* More visible blue glow */
+    border-left: 3px solid var(--link-color);
+}
+
+/* Keyboard focus style - mirrors hover for accessibility */
+.multi-select-option.is-focused,
+.multi-select-option:focus-visible {
+    background-color: rgba(37, 99, 235, 0.12);
+    border-left: 3px solid var(--link-color);
+    padding-left: 13px;
+    outline: none;
+}
+
+[data-theme='dark'] .multi-select-option.is-focused,
+[data-theme='dark'] .multi-select-option:focus-visible {
+    background-color: rgba(96, 165, 250, 0.2);
     border-left: 3px solid var(--link-color);
 }
 
@@ -1053,51 +1170,6 @@
     color: var(--tag-neg-text-dark) !important;
     border-color: var(--tag-neg-border-dark) !important;
     box-shadow: 0 1px 4px rgba(248, 113, 113, 0.18) !important;
-}
-
-.multi-select-search {
-    padding: 12px;
-    border-bottom: 1px solid var(--border-color);
-    background-color: var(--body-bg);
-}
-
-[data-theme='dark'] .multi-select-search {
-    background-color: rgba(255, 255, 255, 0.02);
-}
-
-.multi-select-search input {
-    width: 100%;
-    padding: 8px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    font-size: 0.875rem;
-    box-sizing: border-box;
-    background-color: var(--card-bg);
-    color: var(--text-color);
-    transition: border-color 0.15s ease;
-}
-
-.multi-select-search input:focus {
-    outline: none;
-    border-color: #009;
-}
-
-.multi-select-option {
-    display: flex;
-    align-items: center;
-    padding: 8px 12px;
-    cursor: pointer;
-    font-size: 13px;
-    border-bottom: 1px solid #f0f0f0;
-    transition: background-color 0.1s ease;
-}
-
-.multi-select-option:hover {
-    background-color: #f0f8ff;
-}
-
-.multi-select-option:last-child {
-    border-bottom: none;
 }
 
 .multi-select-checkbox {
@@ -1189,6 +1261,21 @@
     gap: 2px;
     opacity: 0;
     transition: opacity 0.2s ease;
+}
+
+@media (hover: none) and (pointer: coarse) {
+    .tag-actions {
+        opacity: 1;
+        top: -4px;
+        right: -4px;
+    }
+
+    .tag-edit,
+    .tag-delete {
+        width: 32px;
+        height: 32px;
+        font-size: 14px;
+    }
 }
 
 .tag-edit,

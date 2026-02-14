@@ -12,61 +12,6 @@
 <script defer src="{{ hashed_static('dist/markdown_renderer_utils.js') }}"></script>
 <script defer src="{{ hashed_static('dist/markdown_core_utils.js') }}"></script>
 <script defer src="{{ hashed_static('dist/tldr_utils.js') }}"></script>
-<script>
-var MJX_FONT_URL = {{ (asset_cdn_enabled and npm_cdn_url('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2') or url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2')) | tojson }};
-{% raw %}
-window.MathJax = {
-    loader: {
-        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat']
-    },
-    tex: {
-        inlineMath: [['\\(', '\\)'], ['$', '$']],
-        displayMath: [['\\[', '\\]'], ['$$', '$$']],
-        processEscapes: true,
-        processEnvironments: true,
-        processRefs: true,
-        packages: {
-            '[+]': [
-                'base', 'ams', 'boldsymbol', 'braket', 'cancel', 'color',
-                'enclose', 'mathtools', 'newcommand', 'noerrors', 'noundefined',
-                'physics', 'tagformat', 'textmacros', 'unicode', 'verb'
-            ]
-        },
-        tags: 'ams',
-        macros: {
-            bm: ['\\mathbf{#1}', 1],
-            boldsymbol: ['\\mathbf{#1}', 1],
-            RR: '\\mathbb{R}',
-            NN: '\\mathbb{N}',
-            ZZ: '\\mathbb{Z}',
-            EE: '\\mathbb{E}',
-            abs: ['\\left|#1\\right|', 1],
-            norm: ['\\left\\|#1\\right\\|', 1],
-            argmax: '\\operatorname*{arg\\,max}',
-            argmin: '\\operatorname*{arg\\,min}',
-            // Text in math mode - use math variants for compatibility
-            textit: ['\\mathit{#1}', 1],
-            textbf: ['\\mathbf{#1}', 1],
-            textrm: ['\\mathrm{#1}', 1],
-            textsf: ['\\mathsf{#1}', 1],
-            texttt: ['\\mathtt{#1}', 1],
-            // Common spacing (note: do NOT redefine \mid as it's a standard LaTeX relation symbol)
-            given: '\\\\,|\\\\,'
-        }
-    },
-    options: {
-        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
-        ignoreHtmlClass: 'tex2jax_ignore',
-        processHtmlClass: 'tex2jax_process'
-    },
-    chtml: {
-        scale: 1.0,
-        displayAlign: 'center',
-        fontURL: MJX_FONT_URL
-    }
-};
-{% endraw %}
-</script>
 {% endblock %}
 
 {% block variables %}
@@ -114,6 +59,12 @@ var SearchBoxController = {
     restorePreferences: function() {
         try {
             var params = new URLSearchParams(window.location.search);
+            var setCookie = function(name, value) {
+                try {
+                    var v = encodeURIComponent(String(value || ''));
+                    document.cookie = name + '=' + v + '; max-age=' + (365 * 24 * 60 * 60) + '; path=/; samesite=lax';
+                } catch (e) {}
+            };
             var setIfMissing = function(paramName, elementId, storageKey, validator) {
                 if (params.has(paramName)) return;
                 var el = document.getElementById(elementId);
@@ -163,6 +114,33 @@ var SearchBoxController = {
             var semanticWeightContainer = document.getElementById('semantic_weight_container');
             if (searchModeSelect && semanticWeightContainer) {
                 semanticWeightContainer.style.display = (searchModeSelect.value === 'hybrid') ? '' : 'none';
+
+                // Persist search_mode to cookie so backend default can match UI.
+                if (!params.has('search_mode')) {
+                    setCookie('arxiv_sanity_pref.search_mode', searchModeSelect.value);
+                }
+
+                // If UI preference differs from server-rendered mode and there is a query, re-submit once.
+                var initial = (searchModeSelect.getAttribute('data-initial') || '').trim();
+                if (!params.has('search_mode') && initial && initial !== searchModeSelect.value && params.has('q')) {
+                    var form = document.querySelector('#cbox form');
+                    if (form) {
+                        // Guard against accidental infinite loops when cookie/session storage are unavailable.
+                        var resubmitKey = 'arxiv_sanity_pref.search_mode_resubmitted';
+                        var shouldResubmit = true;
+                        try {
+                            shouldResubmit = sessionStorage.getItem(resubmitKey) !== '1';
+                        } catch (e) {}
+                        if (shouldResubmit) {
+                            try {
+                                sessionStorage.setItem(resubmitKey, '1');
+                            } catch (e) {}
+                            document.body.classList.add('search-loading');
+                            if (form.requestSubmit) form.requestSubmit();
+                            else form.submit();
+                        }
+                    }
+                }
             }
         } catch (e) {
             // ignore storage errors (private mode, etc.)
@@ -182,7 +160,9 @@ var SearchBoxController = {
 
         // Auto focus search box (if no query)
         if (searchInput && !searchInput.value.trim()) {
-            searchInput.focus();
+            if (window.innerWidth > 768) {
+                searchInput.focus();
+            }
         }
 
         // Press Enter to search quickly
@@ -246,6 +226,23 @@ var SearchBoxController = {
                     semanticWeightContainer.style.display = 'none';
                 }
                 try { localStorage.setItem('arxiv_sanity_pref.search_mode', this.value); } catch (e) {}
+                try {
+                    document.cookie = 'arxiv_sanity_pref.search_mode=' + encodeURIComponent(this.value) + '; max-age=' + (365 * 24 * 60 * 60) + '; path=/; samesite=lax';
+                } catch (e) {}
+
+                // Auto-submit when switching search mode with a non-empty query.
+                var qfield = document.getElementById('qfield');
+                if (qfield && qfield.value && qfield.value.trim()) {
+                    var form = document.querySelector('#cbox form');
+                    if (form) {
+                        document.body.classList.add('search-loading');
+                        if (form.requestSubmit) {
+                            form.requestSubmit();
+                        } else {
+                            form.submit();
+                        }
+                    }
+                }
             });
         }
 
@@ -467,15 +464,6 @@ var SearchBoxController = {
                         modal.click(); // Trigger mask layer click event
                     }
                 });
-
-                // Close all multi-select dropdowns
-                var dropdowns = document.querySelectorAll('.multi-select-dropdown-menu');
-                dropdowns.forEach(function(dropdown) {
-                    var trigger = dropdown.parentNode.querySelector('.multi-select-trigger');
-                    if (trigger && dropdown.style.display !== 'none') {
-                        trigger.click(); // Trigger dropdown close
-                    }
-                });
             }
         });
     },
@@ -657,7 +645,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     <div class="filter-group primary-filters">
                         <div class="filter-item">
                             <label for="search_mode_select">Search Mode:</label>
-                            <select name="search_mode" id="search_mode_select">
+                            <select name="search_mode" id="search_mode_select" data-initial="{{ gvars.search_mode }}">
                                 <option value="keyword" {{ gvars.search_mode == 'keyword' and 'selected' }}>Keyword</option>
                                 <option value="semantic" {{ gvars.search_mode == 'semantic' and 'selected' }}>Semantic</option>
                                 <option value="hybrid" {{ gvars.search_mode == 'hybrid' and 'selected' }}>Hybrid</option>
@@ -753,8 +741,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 
-{% if user and words %}
 <div id="wordwrap" style="display:none;">
+</div>
+
+{% if not user and words %}
+<div
+    id="inspect_svm"
+    onclick="(function(){var w=document.getElementById('wordwrap'); if(!w) return; w.style.display=(w.style.display==='block'?'none':'block');})();"
+>
+    inspect
 </div>
 {% endif %}
 

@@ -1,5 +1,7 @@
 'use strict';
 
+/* global JSZip */
+
 // Use shared utilities from common_utils.js
 var _commonUtilsLoaded = !!(typeof window !== 'undefined' && window.ArxivSanityCommon);
 var CommonUtils = window.ArxivSanityCommon;
@@ -69,6 +71,156 @@ var fetchTaskStatus =
                   .then(data => (data && data.success ? data : null))
                   .catch(() => null);
           };
+
+// ---------------------------------------------------------------------------
+// Resource readiness gate – delay content rendering until critical libraries
+// (markdown-it, MathJax, renderer utils) AND MathJax fonts are ready.
+// ---------------------------------------------------------------------------
+var _renderResourcesReady = false;
+var _renderResourcesPromise = null;
+
+// Critical MathJax font files that must be preloaded for formula rendering.
+// These cover the vast majority of mathematical symbols in typical papers.
+// family: the @font-face family name MathJax 3.2.2 CHTML actually uses.
+// file:   the woff file name on disk / CDN.
+var _CRITICAL_MATHJAX_FONTS = [
+    { family: 'MJXTEX', file: 'MathJax_Main-Regular.woff', style: 'normal' },
+    { family: 'MJXTEX-I', file: 'MathJax_Math-Italic.woff', style: 'italic' },
+    { family: 'MJXTEX-S1', file: 'MathJax_Size1-Regular.woff', style: 'normal' },
+    { family: 'MJXTEX-A', file: 'MathJax_AMS-Regular.woff', style: 'normal' },
+];
+
+function _checkRenderResourcesLoaded() {
+    // markdown-it must be available for markdown parsing
+    if (typeof markdownit === 'undefined') return false;
+    // Our renderer wrapper must be available
+    if (!window.ArxivSanityMarkdownRenderer) return false;
+    // Summary-specific renderer must be available
+    if (!window.ArxivSanitySummaryMarkdown) return false;
+    // MathJax library must have loaded (not just the config object)
+    if (typeof MathJax === 'undefined' || !MathJax.startup) return false;
+    return true;
+}
+
+/**
+ * Hint the browser to preload critical MathJax font files using
+ * <link rel="preload">.  This puts the font files into the HTTP cache so
+ * that when MathJax later injects its own @font-face CSS rules, the browser
+ * can satisfy them from cache instead of making new network requests.
+ *
+ * IMPORTANT: We intentionally do NOT use the FontFace API here because
+ * MathJax dynamically injects its own @font-face rules for the same family
+ * names (MJXTEX, MJXTEX-I, etc.).  Creating duplicate FontFace objects via
+ * the API causes the browser to have two competing registrations for the
+ * same family, which can result in the browser picking MathJax's (not-yet-
+ * loaded) entry over our preloaded one, making formulas invisible.
+ *
+ * @param {string} fontBaseUrl - Base URL for MathJax fonts (CDN or local)
+ * @returns {Promise<void>}  Resolves immediately (preload is fire-and-forget).
+ */
+function _preloadMathJaxFonts(fontBaseUrl) {
+    if (!fontBaseUrl) return Promise.resolve();
+    var baseUrl = fontBaseUrl.replace(/\/+$/, '');
+    _CRITICAL_MATHJAX_FONTS.forEach(function (entry) {
+        try {
+            var url = baseUrl + '/' + entry.file;
+            // Avoid duplicate preload links
+            if (document.querySelector('link[rel="preload"][href="' + url + '"]')) return;
+            var link = document.createElement('link');
+            link.rel = 'preload';
+            link.as = 'font';
+            link.type = 'font/woff';
+            link.href = url;
+            // crossorigin is required for font preloads (even same-origin)
+            link.crossOrigin = 'anonymous';
+            document.head.appendChild(link);
+        } catch (e) {}
+    });
+    return Promise.resolve();
+}
+
+/**
+ * Returns a Promise that resolves when all critical rendering resources are
+ * loaded and ready, including MathJax fonts.
+ * Resolves with `true` on success, `false` on timeout.
+ * @param {number} [timeout=20000] - Maximum wait time in ms.
+ */
+function waitForRenderResources(timeout) {
+    if (_renderResourcesReady) return Promise.resolve(true);
+    if (_renderResourcesPromise) return _renderResourcesPromise;
+
+    timeout = timeout || 20000;
+
+    _renderResourcesPromise = new Promise(function (resolve) {
+        var startTime = Date.now();
+        var settled = false; // guard: once resolved, stop all further work
+
+        function check() {
+            if (settled) return;
+            if (_checkRenderResourcesLoaded()) {
+                settled = true;
+                // Phase 1: Wait for MathJax startup
+                var mjxReady =
+                    MathJax.startup && MathJax.startup.promise
+                        ? MathJax.startup.promise
+                        : Promise.resolve();
+                mjxReady
+                    .then(function () {
+                        // Phase 2: Wait for CDN font probe to determine correct font URL
+                        var fontProbe =
+                            CommonUtils && typeof CommonUtils.waitForCdnFontProbe === 'function'
+                                ? CommonUtils.waitForCdnFontProbe()
+                                : Promise.resolve(true);
+                        return fontProbe;
+                    })
+                    .then(function () {
+                        // Phase 3: Preload critical MathJax fonts
+                        var fontUrl =
+                            CommonUtils && typeof CommonUtils.getMathJaxFontUrl === 'function'
+                                ? CommonUtils.getMathJaxFontUrl()
+                                : '';
+                        return _preloadMathJaxFonts(fontUrl);
+                    })
+                    .then(function () {
+                        _renderResourcesReady = true;
+                        resolve(true);
+                    })
+                    .catch(function () {
+                        _renderResourcesReady = true;
+                        console.warn('[summary] Resource init had errors, proceeding anyway');
+                        resolve(true);
+                    });
+                return;
+            }
+            if (Date.now() - startTime > timeout) {
+                settled = true;
+                console.warn(
+                    '[summary] Resource loading timeout (' +
+                        timeout +
+                        'ms). ' +
+                        'markdown-it=' +
+                        (typeof markdownit !== 'undefined') +
+                        ', Renderer=' +
+                        !!window.ArxivSanityMarkdownRenderer +
+                        ', SummaryMd=' +
+                        !!window.ArxivSanitySummaryMarkdown +
+                        ', MathJax.startup=' +
+                        !!(typeof MathJax !== 'undefined' && MathJax.startup)
+                );
+                // Still allow rendering to proceed with whatever is available,
+                // otherwise the render gate in render() would block forever.
+                _renderResourcesReady = true;
+                resolve(false);
+                return;
+            }
+            setTimeout(check, 80);
+        }
+
+        check();
+    });
+
+    return _renderResourcesPromise;
+}
 
 // Resolve summary markdown renderer at call-time so we can fall back gracefully
 // when some frontend bundles fail to load (e.g., transient 404 / cache mismatch).
@@ -179,10 +331,17 @@ function handleUserEvent(event, options = {}) {
             summaryApp.negativeTags = (summaryApp.negativeTags || []).map(t =>
                 t === event.from ? event.to : t
             );
+            summaryApp.availableTags = (summaryApp.availableTags || [])
+                .map(t => (t === event.from ? event.to : t))
+                .filter((v, i, a) => a.indexOf(v) === i)
+                .sort();
             renderTagDropdown();
         } else if (event.reason === 'delete_tag' && event.tag) {
             summaryApp.userTags = (summaryApp.userTags || []).filter(t => t !== event.tag);
             summaryApp.negativeTags = (summaryApp.negativeTags || []).filter(t => t !== event.tag);
+            summaryApp.availableTags = (summaryApp.availableTags || []).filter(
+                t => t !== event.tag
+            );
             renderTagDropdown();
         } else if (
             event.reason === 'tag_feedback' &&
@@ -268,6 +427,24 @@ function handleUserEvent(event, options = {}) {
             // Re-render to update Extract Info / Similar button states.
             summaryApp.setState({});
         }
+    } else if (event.type === 'upload_deleted') {
+        if (
+            event.pid &&
+            summaryApp.pid &&
+            String(event.pid) === String(summaryApp.pid) &&
+            summaryApp.paper &&
+            summaryApp.paper.kind === 'upload'
+        ) {
+            try {
+                summaryApp.paper.parse_status = 'deleted';
+            } catch (e) {}
+            // Stop showing stale content and disable generate actions.
+            summaryApp.setState({
+                loading: false,
+                content: null,
+                error: 'This uploaded paper was deleted (maybe in another tab).',
+            });
+        }
     }
 }
 
@@ -290,7 +467,7 @@ class SummaryState {
         this.autoRetryTimer = null;
         this.maxAutoRetries = 20;
         this.notice = '';
-        this.clearing = false;
+        this.clearing = null;
         this.defaultModel = '';
         this.pendingConfirm = null; // 'clearModel' or 'clearAll'
 
@@ -325,6 +502,12 @@ class SummaryState {
         // Batch setState optimization: pending state updates and render frame
         this._pendingState = null;
         this._renderFrame = null;
+
+        // Resource gate: pending wait flag for render()
+        this._resourceWaitPending = false;
+
+        // Font retypeset: cleanup function for loadingdone listener
+        this._fontRetypesetCleanup = null;
 
         // Reading list state (arXiv papers only; uploaded papers do not use reading list)
         this.inReadingList = false;
@@ -380,6 +563,32 @@ class SummaryState {
         const htmlContent = this.getHTML();
 
         if (this.content) {
+            // Gate: do not render markdown/math until critical resources are loaded.
+            // Show the page skeleton with a "loading resources" hint instead, and
+            // schedule a re-render once resources become available.
+            if (!_renderResourcesReady) {
+                container.innerHTML = htmlContent;
+                const markdownContainer = container.querySelector('.summary-markdown');
+                if (markdownContainer) {
+                    markdownContainer.innerHTML =
+                        '<div class="loading-placeholder" style="padding:2em;text-align:center;opacity:0.7;">' +
+                        '<p>Waiting for rendering resources (MathJax, markdown-it)...</p></div>';
+                }
+                // Wait for resources then re-render (only one pending wait at a time)
+                if (!this._resourceWaitPending) {
+                    this._resourceWaitPending = true;
+                    waitForRenderResources().then(() => {
+                        this._resourceWaitPending = false;
+                        this.render();
+                    });
+                }
+                // Still render tag dropdown while waiting for math resources
+                if (typeof user !== 'undefined' && user) {
+                    renderTagDropdown();
+                }
+                return;
+            }
+
             container.innerHTML = htmlContent;
             const markdownContainer = container.querySelector('.summary-markdown');
             const tocContainer = container.querySelector('.summary-toc');
@@ -393,6 +602,12 @@ class SummaryState {
             if (abstractContainer && triggerMathJax) {
                 triggerMathJax(abstractContainer);
             }
+            // After initial render, set up font-aware re-render.
+            // MathJax CHTML uses MJXZERO (zero-width fallback) in its font-family
+            // stack, so formulas are invisible until the real MJXTEX* fonts load.
+            // We listen for font loading events and re-render the summary when
+            // MathJax fonts finish loading.
+            this._setupFontRetypeset(markdownContainer, tocContainer);
         } else {
             container.innerHTML = htmlContent;
             this.renderMath();
@@ -402,6 +617,154 @@ class SummaryState {
         if (typeof user !== 'undefined' && user) {
             renderTagDropdown();
         }
+    }
+
+    /**
+     * Set up a font-loading listener that re-renders the summary markdown
+     * when MathJax fonts (MJXTEX*) finish loading.
+     *
+     * MathJax CHTML uses `font-family: MJXZERO, MJXTEX-*` where MJXZERO is
+     * a zero-width fallback font.  Until the real MJXTEX font loads, all
+     * formula characters are invisible (zero width).  This method ensures
+     * that once the real fonts arrive, the summary is re-rendered so the
+     * formulas become visible.
+     */
+    _setupFontRetypeset(markdownContainer, tocContainer) {
+        // Avoid setting up multiple listeners
+        if (this._fontRetypesetCleanup) {
+            this._fontRetypesetCleanup();
+            this._fontRetypesetCleanup = null;
+        }
+        if (!markdownContainer || typeof document === 'undefined' || !document.fonts) return;
+
+        var self = this;
+        var debounceTimer = null;
+        var retypesetCount = 0;
+        var maxRetypesets = 5; // safety cap
+        // Exponential-backoff fallback timers (covers slow networks / cache misses)
+        var fallbackTimers = [];
+        var FALLBACK_DELAYS = [1500, 4000, 9000, 18000];
+
+        function doRetypeset(reason) {
+            if (retypesetCount >= maxRetypesets) return;
+            retypesetCount++;
+            if (self.content && markdownContainer && markdownContainer.isConnected) {
+                renderSummaryMarkdown(self.content, markdownContainer, tocContainer);
+            }
+        }
+
+        // Check whether any critical MJXTEX font is available for rendering.
+        function isMjxFontReady() {
+            try {
+                // Test multiple critical families – any one being ready means
+                // MathJax CHTML can render at least some formulas correctly.
+                return (
+                    document.fonts.check('1em MJXTEX') ||
+                    document.fonts.check('1em MJXTEX-I') ||
+                    document.fonts.check('1em MJXTEX-S1') ||
+                    document.fonts.check('1em MJXTEX-A')
+                );
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function onFontsLoaded(evt) {
+            if (retypesetCount >= maxRetypesets) return;
+
+            // fontfaces may be a FontFaceSet (iterable, no .length) in some
+            // browsers, so normalise to an array first.
+            var faces;
+            try {
+                faces = evt && evt.fontfaces ? Array.from(evt.fontfaces) : [];
+            } catch (e) {
+                faces = [];
+            }
+
+            // Only react when real MathJax text fonts (MJXTEX*) are in the
+            // batch.  Exclude MJXZERO (zero-width fallback).
+            if (faces.length > 0) {
+                var hasMjxTex = false;
+                for (var i = 0; i < faces.length; i++) {
+                    var fam = String(faces[i].family || '');
+                    if (fam.indexOf('MJXTEX') >= 0) {
+                        hasMjxTex = true;
+                        break;
+                    }
+                }
+                if (!hasMjxTex) return; // not a MathJax text font event, skip
+            }
+
+            // Debounce: fonts often load in batches
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(function () {
+                debounceTimer = null;
+                // Only consume retypeset quota and cancel fallbacks when the
+                // font is actually ready.  Otherwise let fallbacks continue.
+                if (isMjxFontReady()) {
+                    cancelFallbacks();
+                    doRetypeset('Font loadingdone, re-rendering summary');
+                }
+            }, 300);
+        }
+
+        // Wrap addEventListener in try/catch for environments where
+        // document.fonts exists but addEventListener is not available.
+        try {
+            document.fonts.addEventListener('loadingdone', onFontsLoaded);
+        } catch (e) {}
+
+        // Deterministic trigger: explicitly request font loading via the
+        // existing @font-face rules.  This does NOT create new FontFace
+        // objects – it simply asks the browser to load the font and resolves
+        // when it's available.  Provides a reliable signal even when
+        // loadingdone events are missed.
+        try {
+            document.fonts
+                .load('1em MJXTEX')
+                .then(function () {
+                    if (retypesetCount === 0 && isMjxFontReady()) {
+                        cancelFallbacks();
+                        doRetypeset('document.fonts.load resolved, re-rendering summary');
+                    }
+                })
+                .catch(function () {});
+        } catch (e) {}
+
+        // Exponential-backoff fallback: schedule multiple checks in case
+        // loadingdone never fires (fonts from cache, browser quirks, etc.).
+        // Each check verifies MJXTEX availability before re-rendering.
+        // The last attempt fires unconditionally as a final safety net.
+        function scheduleFallbacks() {
+            FALLBACK_DELAYS.forEach(function (delay, idx) {
+                var tid = setTimeout(function () {
+                    if (retypesetCount > 0) return; // already handled
+                    var isLast = idx === FALLBACK_DELAYS.length - 1;
+                    if (isMjxFontReady() || isLast) {
+                        doRetypeset('Fallback timer (' + delay + 'ms), re-rendering summary');
+                    }
+                }, delay);
+                fallbackTimers.push(tid);
+            });
+        }
+
+        function cancelFallbacks() {
+            for (var i = 0; i < fallbackTimers.length; i++) {
+                clearTimeout(fallbackTimers[i]);
+            }
+            fallbackTimers = [];
+        }
+
+        scheduleFallbacks();
+
+        // Store cleanup function so we can remove the listener on next render
+        this._fontRetypesetCleanup = function () {
+            try {
+                document.fonts.removeEventListener('loadingdone', onFontsLoaded);
+            } catch (e) {}
+            if (debounceTimer) clearTimeout(debounceTimer);
+            cancelFallbacks();
+        };
     }
 
     renderMath() {
@@ -598,10 +961,10 @@ class SummaryState {
               : 'Generate summary';
         const modelOptions = this.renderModelOptions();
         const errorNote = this.modelsError
-            ? `<div class="summary-note" style="color: #d9534f;" role="status" aria-live="polite">${escapeHtml(this.modelsError)}</div>`
+            ? `<div class="summary-note summary-note--error" role="status" aria-live="polite">${escapeHtml(this.modelsError)}</div>`
             : '';
         const notice = this.notice
-            ? `<div class="summary-note" style="color: #b8860b;" role="status" aria-live="polite">${escapeHtml(this.notice)}</div>`
+            ? `<div class="summary-note summary-note--notice" role="status" aria-live="polite">${escapeHtml(this.notice)}</div>`
             : '';
 
         // Queue status display - only show when loading/generating and no content
@@ -610,11 +973,11 @@ class SummaryState {
         if (showQueueStatus) {
             // Prefer per-task queue rank when available; fall back to global stats.
             if (this.queueRank > 0 && this.queueTotal > 0) {
-                queueStatusNote = `<div class="summary-note summary-queue-note" style="color: #6c757d; font-size: 12px;" role="status" aria-live="polite">${this.queueRank}/${this.queueTotal} in queue</div>`;
+                queueStatusNote = `<div class="summary-note summary-queue-note" style="color: var(--text-muted); font-size: 12px;" role="status" aria-live="polite">${this.queueRank}/${this.queueTotal} in queue</div>`;
             } else {
                 const total = this.globalQueued + this.globalRunning;
                 if (total > 0) {
-                    queueStatusNote = `<div class="summary-note summary-queue-note" style="color: #6c757d; font-size: 12px;" role="status" aria-live="polite">${total} task${total > 1 ? 's' : ''} in queue</div>`;
+                    queueStatusNote = `<div class="summary-note summary-queue-note" style="color: var(--text-muted); font-size: 12px;" role="status" aria-live="polite">${total} task${total > 1 ? 's' : ''} in queue</div>`;
                 }
             }
         }
@@ -1143,8 +1506,7 @@ summaryApp.toggleReadingList = function () {
     this._readingListRequestInFlight = true;
     const currentlyIn = Boolean(this.inReadingList);
     if (currentlyIn) {
-        // Optimistic remove
-        this.setState({ readingListPending: true, inReadingList: false });
+        this.setState({ readingListPending: true });
         csrfFetch('/api/readinglist/remove', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1156,14 +1518,12 @@ summaryApp.toggleReadingList = function () {
                     this.setStateSync({ inReadingList: false });
                     if (toast) toast('Removed from reading list', { type: 'success' });
                 } else {
-                    this.setStateSync({ inReadingList: true });
                     const msg =
                         'Failed to remove from reading list: ' + ((data && data.error) || '');
                     if (toast) toast(msg, { type: 'error' });
                 }
             })
             .catch(err => {
-                this.setStateSync({ inReadingList: true });
                 if (toast) {
                     toast('Network error: failed to remove from reading list', { type: 'error' });
                 }
@@ -1174,8 +1534,7 @@ summaryApp.toggleReadingList = function () {
                 this.setState({ readingListPending: false });
             });
     } else {
-        // Optimistic add
-        this.setState({ readingListPending: true, inReadingList: true });
+        this.setState({ readingListPending: true });
         csrfFetch('/api/readinglist/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1194,13 +1553,11 @@ summaryApp.toggleReadingList = function () {
                         this.refreshQueueRank();
                     }
                 } else {
-                    this.setStateSync({ inReadingList: false });
                     const msg = 'Failed to add to reading list: ' + ((data && data.error) || '');
                     if (toast) toast(msg, { type: 'error' });
                 }
             })
             .catch(err => {
-                this.setStateSync({ inReadingList: false });
                 if (toast) toast('Network error: failed to add to reading list', { type: 'error' });
                 console.error('Error adding to reading list:', err);
             })
@@ -1220,6 +1577,8 @@ summaryApp.retry = function () {
 
 summaryApp.handleModelChange = function (event) {
     const value = event && event.target ? event.target.value : '';
+    this.clearAutoRetry();
+    this.autoRetryCount = 0;
     this.lastTaskId = '';
     this.setState({ selectedModel: value, queueRank: 0, queueTotal: 0 });
     if (this.pid) {
@@ -1285,7 +1644,7 @@ summaryApp.confirmClearModel = async function () {
         }
 
         this.setState({
-            clearing: false,
+            clearing: null,
             content: null,
             meta: null,
             queueRank: 0,
@@ -1295,7 +1654,7 @@ summaryApp.confirmClearModel = async function () {
         });
     } catch (error) {
         const friendlyMsg = handleApiError(error, 'Clear Model Summary');
-        this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
+        this.setState({ clearing: null, error: friendlyMsg, pendingConfirm: null });
     }
 };
 
@@ -1465,7 +1824,7 @@ summaryApp.confirmClearAll = async function () {
         this.pendingRegenerations = Object.create(null);
 
         this.setState({
-            clearing: false,
+            clearing: null,
             content: null,
             meta: null,
             queueRank: 0,
@@ -1475,7 +1834,7 @@ summaryApp.confirmClearAll = async function () {
         });
     } catch (error) {
         const friendlyMsg = handleApiError(error, 'Clear All Caches');
-        this.setState({ clearing: false, error: friendlyMsg, pendingConfirm: null });
+        this.setState({ clearing: null, error: friendlyMsg, pendingConfirm: null });
     }
 };
 
@@ -1547,16 +1906,12 @@ summaryApp.showSimilarPapersModal = function (papers) {
         }
     }
 
-    const escapeHtml = text => {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    };
-
     const buildPaperItem = (p, i) => {
         const titleSafe = escapeHtml(p.title || p.id);
         const authorsSafe = escapeHtml(p.authors || '');
         const timeSafe = escapeHtml(p.time || '');
+        const scoreNum = Number(p && p.score);
+        const scoreSafe = Number.isFinite(scoreNum) ? scoreNum.toFixed(3) : '—';
         // Prefer TL;DR over abstract
         const contentText = p.tldr || p.abstract || '';
         const contentSafe = escapeHtml(contentText);
@@ -1570,7 +1925,7 @@ summaryApp.showSimilarPapersModal = function (papers) {
                     ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
                     <div class="similar-paper-meta-line">
                         ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
-                        <span class="similar-paper-score">Score: ${p.score.toFixed(3)}</span>
+                        <span class="similar-paper-score">Score: ${scoreSafe}</span>
                     </div>
                     ${
                         contentSafe
@@ -1661,11 +2016,10 @@ summaryApp.extractInfo = async function () {
         const data = await resp.json();
 
         if (data.success) {
-            // Refresh the page to show updated info
-            alert('Metadata extraction started. The page will refresh shortly.');
-            setTimeout(() => {
-                window.location.reload();
-            }, 2000);
+            this.setState({
+                notice: 'Metadata extraction started. Waiting for updates...',
+                error: null,
+            });
         } else {
             alert('Failed to extract: ' + (data.error || 'Unknown error'));
             if (btn) {
@@ -2350,8 +2704,6 @@ summaryApp.selectInitialModel = async function (pid) {
 
 // Initialize app
 async function initSummaryApp() {
-    console.log('Initializing summary page...');
-
     // common_utils.js missing: an earlier DOMContentLoaded handler already renders an error page.
     if (!_commonUtilsLoaded) {
         return;
@@ -2387,7 +2739,7 @@ async function initSummaryApp() {
         modelsError: null,
         selectedModel: initialDefaultModel,
         notice: '',
-        clearing: false,
+        clearing: null,
         defaultModel: initialDefaultModel,
         userTags: paper.utags || [],
         negativeTags: paper.ntags || [],
@@ -2401,9 +2753,17 @@ async function initSummaryApp() {
         readingListPending: false,
     });
 
+    // Start resource readiness check early (runs in parallel with model loading)
+    var resourcesPromise = waitForRenderResources();
+
     await summaryApp.loadModels();
     // Select initial model based on available summaries
     const initialModel = await summaryApp.selectInitialModel(pid);
+
+    // Ensure rendering resources are ready before triggering summary load,
+    // which will call render() when the API response arrives.
+    await resourcesPromise;
+
     // Start loading summary after model selection
     summaryApp.loadSummary(pid, {
         model: initialModel,

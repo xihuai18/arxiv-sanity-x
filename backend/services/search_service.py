@@ -610,7 +610,12 @@ def lexical_rank_fullscan(
 
     heap: list[tuple[float, str]] = []
     now = time.time()
-    papers_cache = get_papers_fn()
+    papers_cache = None
+    if get_papers_fn is not None:
+        try:
+            papers_cache = get_papers_fn()
+        except Exception:
+            papers_cache = None
     if isinstance(papers_cache, dict) and papers_cache:
         for pid in all_pids:
             p = papers_cache.get(pid)
@@ -1393,7 +1398,6 @@ def search_rank(
     Returns:
         Tuple of (pids, scores)
     """
-    time.time()
     from tools.paper_summarizer import split_pid_version
 
     q = (q or "").strip()
@@ -1747,7 +1751,7 @@ def enhanced_search_rank(
     limit: int | None = None,
     search_mode: str = "keyword",
     semantic_weight: float = None,
-) -> tuple[list[str], list[float]] | tuple[list[str], list[float], dict]:
+) -> tuple[list[str], list[float], dict]:
     """
     Enhanced search function supporting multiple search modes.
 
@@ -1758,8 +1762,8 @@ def enhanced_search_rank(
         semantic_weight: Semantic search weight (0-1), only used in hybrid mode
 
     Returns:
-        (paper_ids, scores) tuple for keyword/semantic modes
-        (paper_ids, scores, score_details) tuple for hybrid mode
+        Always returns a 3-tuple: (paper_ids, scores, score_details).
+        For non-hybrid modes, score_details is an empty dict.
     """
     t_start = time.time()
     q = (q or "").strip()
@@ -1769,25 +1773,26 @@ def enhanced_search_rank(
         semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
 
     if not q:
-        if search_mode == "hybrid":
-            return [], [], {}
-        return [], []
+        return [], [], {}
 
     if bool(getattr(settings.search, "semantic_disabled", False)):
         if search_mode == "hybrid":
             pids, scores = search_rank(q, limit)
             return pids, scores, {}
         if search_mode == "semantic":
-            return search_rank(q, limit)
+            pids, scores = search_rank(q, limit)
+            return pids, scores, {}
 
     result = None
     if search_mode == "keyword":
-        result = search_rank(q, limit)
+        pids, scores = search_rank(q, limit)
+        result = (pids, scores, {})
 
     elif search_mode == "semantic":
         from backend.services.semantic_service import semantic_search_rank
 
-        result = semantic_search_rank(q, limit)
+        pids, scores = semantic_search_rank(q, limit)
+        result = (pids, scores, {})
 
     elif search_mode == "hybrid":
         result = hybrid_search_rank(q, limit, semantic_weight)

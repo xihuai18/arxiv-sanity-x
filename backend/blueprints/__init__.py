@@ -8,6 +8,7 @@ from . import (
     api_summary,
     api_tags,
     api_user,
+    metrics,
     web,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "api_summary",
     "api_tags",
     "api_user",
+    "metrics",
     "web",
 ]

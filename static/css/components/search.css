@@ -55,6 +55,14 @@
     .filter-group.primary-filters .filter-item {
         flex: 1 1 100%;
     }
+
+    .shortcut-btn {
+        max-width: 160px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 13px;
+    }
 }
 
 .score_breakdown {
@@ -482,6 +490,12 @@ input[type='range']::-moz-range-thumb {
     min-width: 280px;
 }
 
+@media (max-width: 640px) {
+    .search-input-wrapper {
+        min-width: 0;
+    }
+}
+
 .search-input-wrapper .search-input,
 .search-input-wrapper #qfield {
     width: 100%;
@@ -647,9 +661,11 @@ input[type='range']::-moz-range-thumb {
 
     /* Paper Actions Mobile Optimization */
     .paper-actions-footer {
-        flex-direction: column; /* Vertical layout */
+        flex-direction: row;
+        flex-wrap: wrap;
         gap: 8px;
-        align-items: center; /* Center alignment */
+        align-items: stretch;
+        justify-content: flex-start;
     }
 
     .rel_more,
@@ -657,7 +673,7 @@ input[type='range']::-moz-range-thumb {
     .rel_summary,
     .rel_alphaxiv,
     .rel_cool {
-        flex: 0 0 auto;
+        flex: 1 1 140px;
         width: auto;
         display: block;
         margin: 0;

@@ -6,6 +6,8 @@ Tests daemon functions using mocks to avoid running actual subprocesses.
 from __future__ import annotations
 
 import datetime
+import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 
@@ -185,6 +187,99 @@ class TestBackupUserData:
         d.backup_user_data()
 
         mock_subprocess.run.assert_not_called()
+
+    def test_backup_user_data_detached_head_pushes_head_to_branch(self, tmp_path: Path, monkeypatch):
+        """When backup repo is detached HEAD (common for submodules), push should use HEAD:<branch>."""
+        import tools.daemon as d
+
+        # Make paths resolvable under a temp root.
+        repo_root = tmp_path / "repo"
+        (repo_root / "data").mkdir(parents=True, exist_ok=True)
+        (repo_root / "data-repo").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(d, "PROJECT_ROOT", repo_root)
+
+        # Arrange settings (monkeypatch nested attributes defensively).
+        monkeypatch.setattr(d.settings.daemon, "enable_git_backup", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "backup_repo_dir", "data-repo", raising=False)
+        monkeypatch.setattr(d.settings.daemon, "backup_push", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "backup_push_remote", "origin", raising=False)
+        monkeypatch.setattr(d.settings.daemon, "backup_push_branch", "main", raising=False)
+        monkeypatch.setattr(d.settings.daemon, "backup_push_retries", 0, raising=False)
+
+        # Avoid touching real git/sqlite; focus on command shape.
+        monkeypatch.setattr(d, "_sqlite_snapshot_copy", lambda _s, _d: True)
+        monkeypatch.setattr(d, "_is_git_repo", lambda _p: True)
+        monkeypatch.setattr(d, "_ensure_git_identity", lambda _p: None)
+        monkeypatch.setattr(d, "_git_current_branch", lambda _p: "HEAD")
+        monkeypatch.setattr(d, "_ensure_on_branch", lambda _p, _b: True)
+
+        # Pretend source exists.
+        monkeypatch.setattr(d.os.path, "isfile", lambda _p: True)
+
+        calls: list[list[str]] = []
+
+        class R:
+            def __init__(self, rc=0, out="", err=""):
+                self.returncode = rc
+                self.stdout = out
+                self.stderr = err
+
+        def fake_run(cmd, **kwargs):
+            cmd = list(map(str, cmd))
+            calls.append(cmd)
+            # git diff --quiet returns 1 when there are staged changes
+            if cmd[:3] == ["git", "diff", "--cached"]:
+                return R(rc=1)
+            return R(rc=0)
+
+        monkeypatch.setattr(d.subprocess, "run", fake_run)
+
+        d.backup_user_data()
+
+        assert ["git", "push", "origin", "HEAD:main"] in calls
+
+
+class TestSqliteSnapshotCopy:
+    """Tests for _sqlite_snapshot_copy helper."""
+
+    def _make_sqlite_db(self, path: Path) -> None:
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("create table if not exists kv (k text primary key, v text)")
+            conn.execute("insert or replace into kv(k, v) values(?, ?)", ("a", "1"))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _mutate_sqlite_db(self, path: Path) -> None:
+        conn = sqlite3.connect(str(path))
+        try:
+            conn.execute("insert or replace into kv(k, v) values(?, ?)", ("b", "2"))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_sqlite_snapshot_copy_skips_when_unchanged(self, tmp_path: Path):
+        import tools.daemon as d
+
+        src = tmp_path / "dict.db"
+        dst = tmp_path / "backup" / "dict.db"
+        self._make_sqlite_db(src)
+
+        assert d._sqlite_snapshot_copy(src, dst) is True
+        # Second run should skip if hashes match.
+        assert d._sqlite_snapshot_copy(src, dst) is False
+
+    def test_sqlite_snapshot_copy_detects_change(self, tmp_path: Path):
+        import tools.daemon as d
+
+        src = tmp_path / "dict.db"
+        dst = tmp_path / "backup" / "dict.db"
+        self._make_sqlite_db(src)
+
+        assert d._sqlite_snapshot_copy(src, dst) is True
+        self._mutate_sqlite_db(src)
+        assert d._sqlite_snapshot_copy(src, dst) is True
 
 
 class TestCreateScheduler:

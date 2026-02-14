@@ -1,6 +1,10 @@
 import datetime
 import os
+import re
 import shutil
+
+# SQLite is used for user state (dict.db). Use sqlite3 backup API to snapshot safely.
+import sqlite3
 import subprocess
 import subprocess as _real_subprocess
 import sys
@@ -17,12 +21,16 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import settings
+from config.sentry import initialize_sentry
 
 PYTHON = sys.executable
 TOOLS_DIR = PROJECT_ROOT / "tools"
 
 logger.remove()
 logger.add(sys.stdout, level=settings.log_level.upper())
+
+# Optional Sentry error reporting (no-op unless configured).
+initialize_sentry()
 
 # Guardrail: avoid daemon getting stuck forever on a hung child process.
 SUBPROCESS_TIMEOUT_S = int(getattr(settings.daemon, "subprocess_timeout_s", 7200) or 7200)
@@ -40,34 +48,237 @@ PRIORITY_DAYS = settings.daemon.priority_days
 PRIORITY_LIMIT = settings.daemon.priority_limit
 
 _LAST_RUN_REASON: dict[str, str] = {}
+_LAST_RUN_OUTPUT: dict[str, str] = {}
 
 
-def _run_cmd(cmd, name: str, fail_level: str = "error") -> bool:
-    logger.debug(f"{name}: {' '.join(cmd)}")
-    log_fn = getattr(logger, fail_level, logger.error)
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Compute SHA-256 for a file (best-effort)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sqlite_snapshot_copy(src_file: Path, dst_file: Path) -> bool:
+    """Create a consistent snapshot copy of an SQLite database file.
+
+    Writes to a temp file then atomically replaces dst_file.
+    Falls back to shutil.copy2 on any failure.
+    """
+
     try:
-        t0 = time.time()
-        logger.trace(f"[BLOCKING] daemon._run_cmd: starting {name}")
-        subprocess.run(cmd, check=True, timeout=SUBPROCESS_TIMEOUT_S)
-        logger.trace(f"[BLOCKING] daemon._run_cmd: completed {name} in {time.time() - t0:.2f}s")
-        _LAST_RUN_REASON[str(name)] = "ok"
+        dst_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Do not fail early; fallback copy might still work.
+        pass
+
+    tmp_file = dst_file.with_name(dst_file.name + ".tmp")
+
+    try:
+        # Use SQLite backup API for consistency even while the DB is being written.
+        # Use read-only URI to avoid creating new DB files accidentally.
+        src_uri = f"file:{src_file.as_posix()}?mode=ro"
+        src_conn = sqlite3.connect(src_uri, uri=True, timeout=30)
+        try:
+            tmp_file.unlink(missing_ok=True)  # py3.11+; guarded by try
+        except Exception:
+            pass
+        dst_conn = sqlite3.connect(str(tmp_file), timeout=30)
+        try:
+            with dst_conn:
+                src_conn.backup(dst_conn)
+        finally:
+            try:
+                dst_conn.close()
+            except Exception:
+                pass
+            try:
+                src_conn.close()
+            except Exception:
+                pass
+
+        # If snapshot matches existing dst_file, skip replacing to avoid noisy commits.
+        try:
+            if dst_file.exists() and _sha256_file(tmp_file) == _sha256_file(dst_file):
+                return False
+        except Exception:
+            pass
+
+        # Ensure data is on disk before replace (best-effort).
+        try:
+            fd = os.open(str(tmp_file), os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except Exception:
+            pass
+
+        os.replace(tmp_file, dst_file)
         return True
-    except _real_subprocess.CalledProcessError as e:
-        # arxiv_daemon returns exit code 1 if no new papers (not a real error).
-        if name == "fetch" and e.returncode == 1:
-            logger.info("[BLOCKING] daemon._run_cmd: fetch returned code 1 (no new papers)")
-            _LAST_RUN_REASON[str(name)] = "no_new_papers"
+    except Exception as e:
+        logger.warning(f"SQLite snapshot copy failed; falling back to raw copy: {e}")
+        try:
+            shutil.copy2(src_file, tmp_file)
+            try:
+                if dst_file.exists() and _sha256_file(tmp_file) == _sha256_file(dst_file):
+                    return False
+            except Exception:
+                pass
+            os.replace(tmp_file, dst_file)
+            return True
+        except Exception as e2:
+            logger.warning(f"Failed to copy dict.db: {e2}")
             return False
-        log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed with code {e.returncode}")
-        _LAST_RUN_REASON[str(name)] = f"exit_{int(e.returncode)}"
+    finally:
+        try:
+            if tmp_file.exists():
+                tmp_file.unlink()
+        except Exception:
+            pass
+
+
+def _is_git_repo(repo_dir: Path) -> bool:
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        return r.returncode == 0 and (r.stdout or "").strip() == "true"
+    except Exception:
         return False
+
+
+def _ensure_git_identity(repo_dir: Path) -> None:
+    """Ensure git user.name/user.email exist (local repo config)."""
+    name = str(getattr(settings.daemon, "backup_git_user_name", "") or "").strip()
+    email = str(getattr(settings.daemon, "backup_git_user_email", "") or "").strip()
+    if not name:
+        name = "arxiv-sanity-daemon"
+    if not email:
+        email = "daemon@localhost"
+
+    def _get(key: str) -> str:
+        try:
+            r = subprocess.run(
+                ["git", "config", "--get", key],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=SUBPROCESS_TIMEOUT_S,
+            )
+            if r.returncode != 0:
+                return ""
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    if not _get("user.name"):
+        subprocess.run(
+            ["git", "config", "user.name", name],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+    if not _get("user.email"):
+        subprocess.run(
+            ["git", "config", "user.email", email],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+
+
+def _git_current_branch(repo_dir: Path) -> str:
+    """Return current branch name, or 'HEAD' when detached."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            return ""
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _ensure_on_branch(repo_dir: Path, branch: str) -> bool:
+    """Ensure repo is attached to a branch (best-effort)."""
+    b = (branch or "").strip()
+    if not b:
+        return True
+    try:
+        r = subprocess.run(
+            ["git", "checkout", "-B", b],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_S,
+        )
+        if r.returncode != 0:
+            logger.warning(f"git checkout -B {b} failed in backup repo: {(r.stderr or '').strip()}")
+            return False
+        return True
     except _real_subprocess.TimeoutExpired:
-        log_fn(f"[BLOCKING] daemon._run_cmd: {name} timed out after {SUBPROCESS_TIMEOUT_S}s")
-        _LAST_RUN_REASON[str(name)] = "timeout"
+        logger.warning(f"[pipeline] backup: git checkout timed out after {SUBPROCESS_TIMEOUT_S}s")
         return False
     except Exception as e:
-        log_fn(f"[BLOCKING] daemon._run_cmd: {name} failed: {e}")
-        _LAST_RUN_REASON[str(name)] = "error"
+        logger.warning(f"git checkout failed in backup repo: {e}")
+        return False
+
+
+def _run_cmd(cmd: list[str], name: str, fail_level: str = "error", capture: bool = False) -> bool:
+    logger.info(f"[pipeline] {name}: starting")
+    logger.debug(f"{name}: {' '.join(cmd)}")
+    log_fn = getattr(logger, fail_level, logger.error)
+    _LAST_RUN_OUTPUT.pop(name, None)
+    try:
+        t0 = time.time()
+        kw: dict = dict(check=True, timeout=SUBPROCESS_TIMEOUT_S)
+        if capture:
+            kw.update(capture_output=True, text=True)
+        result = subprocess.run(cmd, **kw)
+        elapsed = time.time() - t0
+        if capture and result.stdout:
+            _LAST_RUN_OUTPUT[name] = result.stdout
+        logger.info(f"[pipeline] {name}: ok ({elapsed:.1f}s)")
+        _LAST_RUN_REASON[name] = "ok"
+        return True
+    except _real_subprocess.CalledProcessError as e:
+        if capture and getattr(e, "stdout", None):
+            _LAST_RUN_OUTPUT[name] = e.stdout if isinstance(e.stdout, str) else e.stdout.decode()
+        # arxiv_daemon returns exit code 1 if no new papers (not a real error).
+        if name == "fetch" and e.returncode == 1:
+            logger.info("[pipeline] fetch: no new papers (exit 1)")
+            _LAST_RUN_REASON[name] = "no_new_papers"
+            return False
+        log_fn(f"[pipeline] {name}: failed (exit {e.returncode})")
+        _LAST_RUN_REASON[name] = f"exit_{int(e.returncode)}"
+        return False
+    except _real_subprocess.TimeoutExpired as e:
+        if capture and getattr(e, "stdout", None):
+            _LAST_RUN_OUTPUT[name] = e.stdout if isinstance(e.stdout, str) else e.stdout.decode()
+        log_fn(f"[pipeline] {name}: timed out after {SUBPROCESS_TIMEOUT_S}s")
+        _LAST_RUN_REASON[name] = "timeout"
+        return False
+    except Exception as e:
+        log_fn(f"[pipeline] {name}: failed: {e}")
+        _LAST_RUN_REASON[name] = "error"
         return False
 
 
@@ -121,18 +332,29 @@ def gen_summary():
 
 
 def fetch_compute():
-    logger.debug("Fetch and compute")
+    logger.info("[pipeline] === fetch_compute started ===")
     fetch_ok = _run_cmd(
-        [PYTHON, str(TOOLS_DIR / "arxiv_daemon.py"), "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)], "fetch"
+        [PYTHON, str(TOOLS_DIR / "arxiv_daemon.py"), "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)],
+        "fetch",
+        capture=True,
     )
 
-    # arxiv_daemon returns exit code 1 if no new papers, skip compute and summary
+    # Log paper stats parsed from captured stdout
+    fetch_output = _LAST_RUN_OUTPUT.get("fetch", "")
+    if fetch_output:
+        total_new = total_replaced = 0
+        for line in fetch_output.splitlines():
+            m = re.match(r"\s*\S+:\s*\+(\d+)\s+new,\s*~(\d+)\s+replaced", line)
+            if m:
+                total_new += int(m.group(1))
+                total_replaced += int(m.group(2))
+        if total_new or total_replaced:
+            logger.info(f"[pipeline] fetch: +{total_new} new, ~{total_replaced} replaced")
+
     if not fetch_ok:
         reason = _LAST_RUN_REASON.get("fetch") or "unknown"
-        if reason == "no_new_papers":
-            logger.debug("No new papers fetched, skipping compute and summary")
-        else:
-            logger.warning(f"Fetch did not complete successfully ({reason}); skipping compute and summary")
+        if reason != "no_new_papers":
+            logger.warning(f"[pipeline] Fetch failed ({reason}); skipping compute and summary")
         return
 
     compute_cmd = [PYTHON, str(TOOLS_DIR / "compute.py")]
@@ -143,6 +365,7 @@ def fetch_compute():
     _run_cmd(compute_cmd, "compute")
 
     gen_summary()
+    logger.info("[pipeline] === fetch_compute completed ===")
 
 
 def send_email():
@@ -165,7 +388,7 @@ def send_email():
 
     now = datetime.datetime.now()
     weekday_int = now.weekday() + 1
-    logger.debug("Send emails")
+    logger.info("[pipeline] send_email started")
 
     time_param = "2" if weekday_int not in [1, 2] else "4"
     if is_post_holiday(now):
@@ -173,7 +396,6 @@ def send_email():
         time_param = str(float(time_param) + holiday_duration)
 
     t0 = time.time()
-    logger.trace("[BLOCKING] daemon.send_email: starting send_emails.py ...")
     try:
         rc = subprocess.call(
             [
@@ -186,23 +408,27 @@ def send_email():
             timeout=SUBPROCESS_TIMEOUT_S,
         )
         if rc not in (0, 1):
-            logger.warning(f"[BLOCKING] daemon.send_email: send_emails.py returned code {rc}")
+            logger.warning(f"[pipeline] send_email: returned code {rc}")
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[BLOCKING] daemon.send_email: timed out after {SUBPROCESS_TIMEOUT_S}s")
-    logger.trace(f"[BLOCKING] daemon.send_email: completed in {time.time() - t0:.2f}s")
+        logger.warning(f"[pipeline] send_email: timed out after {SUBPROCESS_TIMEOUT_S}s")
+    logger.info(f"[pipeline] send_email: done ({time.time() - t0:.1f}s)")
 
 
 def backup_user_data():
-    logger.debug("Backup user data to submodule")
+    logger.info("[pipeline] backup_user_data started")
 
     if not settings.daemon.enable_git_backup:
         logger.debug("Git backup disabled; set ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true to enable")
         return
 
-    # Source: data/dict.db (actual file used by the application)
-    # Destination: data-repo/dict.db (submodule for backup)
-    src_file = PROJECT_ROOT / "data" / "dict.db"
-    data_repo_dir = PROJECT_ROOT / "data-repo"
+    # Source: <data_dir>/dict.db (actual file used by the application)
+    # Destination: <backup_repo_dir>/dict.db (git repo for backup; can be a submodule or standalone repo)
+    try:
+        src_file = Path(settings.data_dir) / "dict.db"
+    except Exception:
+        src_file = PROJECT_ROOT / "data" / "dict.db"
+    backup_repo_dir_name = str(getattr(settings.daemon, "backup_repo_dir", "") or "data-repo").strip() or "data-repo"
+    data_repo_dir = PROJECT_ROOT / backup_repo_dir_name
     dst_file = data_repo_dir / "dict.db"
 
     # NOTE: Use os.path.isfile so unit tests can patch tools.daemon.os reliably.
@@ -211,20 +437,30 @@ def backup_user_data():
         return
 
     if not data_repo_dir.is_dir():
-        logger.warning(f"Submodule directory not found: {data_repo_dir}")
+        logger.warning(f"Backup repo directory not found: {data_repo_dir}")
         return
 
-    # Copy dict.db to submodule
-    try:
-        shutil.copy2(src_file, dst_file)
-    except Exception as e:
-        logger.warning(f"Failed to copy dict.db to submodule: {e}")
+    if not _is_git_repo(data_repo_dir):
+        logger.warning(f"Backup repo is not a git repository: {data_repo_dir}")
+        return
+
+    # Snapshot copy dict.db to backup repo
+    copied = _sqlite_snapshot_copy(src_file, dst_file)
+    if not copied:
+        logger.debug("No changes to back up (dict.db unchanged)")
         return
 
     # Stage dict.db in submodule
     t0 = time.time()
-    logger.trace("[BLOCKING] daemon.backup_user_data: git add dict.db ...")
     try:
+        _ensure_git_identity(data_repo_dir)
+        # Submodules are often checked out in detached HEAD state. If a push branch
+        # is configured, attach HEAD to it to avoid "not currently on a branch".
+        configured_branch = str(getattr(settings.daemon, "backup_push_branch", "") or "").strip()
+        if configured_branch:
+            cur = _git_current_branch(data_repo_dir)
+            if cur == "HEAD":
+                _ensure_on_branch(data_repo_dir, configured_branch)
         add_result = subprocess.run(
             ["git", "add", "dict.db"],
             cwd=data_repo_dir,
@@ -233,9 +469,9 @@ def backup_user_data():
             timeout=SUBPROCESS_TIMEOUT_S,
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[BLOCKING] daemon.backup_user_data: git add timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git add timed out after {SUBPROCESS_TIMEOUT_S}s")
         return
-    logger.trace(f"[BLOCKING] daemon.backup_user_data: git add completed in {time.time() - t0:.2f}s")
+    logger.debug(f"[pipeline] backup: git add ({time.time() - t0:.1f}s)")
     if add_result.returncode != 0:
         logger.warning(f"git add failed in submodule: {add_result.stderr.strip()}")
         return
@@ -249,9 +485,9 @@ def backup_user_data():
             timeout=SUBPROCESS_TIMEOUT_S,
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[BLOCKING] daemon.backup_user_data: git diff timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git diff timed out after {SUBPROCESS_TIMEOUT_S}s")
         return
-    logger.trace(f"[BLOCKING] daemon.backup_user_data: git diff completed in {time.time() - t0:.2f}s")
+    logger.debug(f"[pipeline] backup: git diff ({time.time() - t0:.1f}s)")
     if diff_result.returncode == 0:
         logger.debug("No changes to back up")
         return
@@ -271,29 +507,56 @@ def backup_user_data():
             timeout=SUBPROCESS_TIMEOUT_S,
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[BLOCKING] daemon.backup_user_data: git commit timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git commit timed out after {SUBPROCESS_TIMEOUT_S}s")
         return
-    logger.trace(f"[BLOCKING] daemon.backup_user_data: git commit completed in {time.time() - t0:.2f}s")
+    logger.debug(f"[pipeline] backup: git commit ({time.time() - t0:.1f}s)")
     if commit_result.returncode != 0:
         logger.warning(f"git commit failed in submodule: {commit_result.stderr.strip()}")
         return
 
-    # Push submodule
-    t0 = time.time()
-    try:
-        push_result = subprocess.run(
-            ["git", "push"],
-            cwd=data_repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
-        )
-    except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[BLOCKING] daemon.backup_user_data: git push timed out after {SUBPROCESS_TIMEOUT_S}s")
+    # Push backup commits (optional)
+    if not bool(getattr(settings.daemon, "backup_push", True)):
+        logger.info("[pipeline] backup: push disabled (backup_push=false)")
         return
-    logger.trace(f"[BLOCKING] daemon.backup_user_data: git push completed in {time.time() - t0:.2f}s")
-    if push_result.returncode != 0:
-        logger.warning(f"git push failed in submodule: {push_result.stderr.strip()}")
+
+    remote = str(getattr(settings.daemon, "backup_push_remote", "") or "").strip()
+    branch = str(getattr(settings.daemon, "backup_push_branch", "") or "").strip()
+    retries = int(getattr(settings.daemon, "backup_push_retries", 3) or 3)
+    retries = max(0, retries)
+
+    # Default: respect upstream configured in the backup repo.
+    # For detached HEAD (common in submodules), pushing needs an explicit refspec.
+    push_cmd = ["git", "push"]
+    if remote and branch:
+        push_cmd = ["git", "push", remote, f"HEAD:{branch}"]
+    elif remote:
+        push_cmd = ["git", "push", remote]
+    elif branch:
+        push_cmd = ["git", "push", "origin", f"HEAD:{branch}"]
+
+    for attempt in range(retries + 1):
+        t0 = time.time()
+        try:
+            push_result = subprocess.run(
+                push_cmd,
+                cwd=data_repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=SUBPROCESS_TIMEOUT_S,
+            )
+        except _real_subprocess.TimeoutExpired:
+            logger.warning(f"[pipeline] backup: git push timed out after {SUBPROCESS_TIMEOUT_S}s")
+            return
+        logger.debug(f"[pipeline] backup: git push ({time.time() - t0:.1f}s) attempt={attempt+1}")
+        if push_result.returncode == 0:
+            return
+        err = (push_result.stderr or push_result.stdout or "").strip()
+        logger.warning(f"git push failed in backup repo: {err}")
+        if attempt < retries:
+            sleep_s = min(60.0, 2.0**attempt)
+            time.sleep(sleep_s)
+        else:
+            logger.warning("[pipeline] backup: giving up on push; will retry next schedule")
 
 
 def cleanup_task_records():
@@ -329,67 +592,40 @@ def create_scheduler() -> BlockingScheduler:
 
 
 def _log_startup_info():
-    """Print daemon configuration and schedule on startup (always visible)."""
-    lines = [
-        "=" * 60,
-        "Arxiv-Sanity Daemon Starting",
-        "=" * 60,
-        "",
-        "Configuration:",
-        f"  Timezone: {settings.daemon.timezone}",
-        f"  Log level: {settings.log_level.upper()}",
-        "",
-        "Fetch Settings:",
-        f"  Papers per fetch: {FETCH_NUM}",
-        f"  Max per API call: {FETCH_MAX}",
-        "",
-        "Summary Settings:",
-        f"  Summary generation: {'enabled' if ENABLE_SUMMARY else 'disabled'}",
-    ]
-
+    """Print daemon configuration summary on startup (always visible)."""
+    summary = "off"
     if ENABLE_SUMMARY:
-        lines.extend(
-            [
-                f"  Papers per batch: {SUMMARY_NUM}",
-                f"  Workers: {SUMMARY_WORKERS}",
-                f"  Summary queue: {'enabled' if ENABLE_SUMMARY_QUEUE else 'disabled'}",
-                f"  Priority queue: {'enabled' if ENABLE_PRIORITY_QUEUE else 'disabled'}",
-            ]
-        )
+        parts = [f"{SUMMARY_NUM}/batch", f"{SUMMARY_WORKERS}w"]
+        if ENABLE_SUMMARY_QUEUE:
+            parts.append("queue")
         if ENABLE_PRIORITY_QUEUE:
-            if PRIORITY_DAYS == 2.0:
-                # Show dynamic rule explanation
-                current_days = _get_email_time_delta()
-                lines.extend(
-                    [
-                        f"    Priority days: {PRIORITY_DAYS} (dynamic mode)",
-                        f"      Current value: {current_days} days",
-                        "      Rule: Mon/Tue=4d, Wed-Fri=2d, +holidays",
-                    ]
-                )
-            else:
-                lines.append(f"    Priority days: {PRIORITY_DAYS} (fixed)")
-            lines.append(f"    Priority limit: {PRIORITY_LIMIT}")
+            parts.append(f"priority(limit={PRIORITY_LIMIT})")
+        summary = ", ".join(parts)
 
-    lines.extend(
-        [
-            "",
-            "Feature Flags:",
-            f"  Embeddings: {'enabled' if ENABLE_EMBEDDINGS else 'disabled'}",
-            f"  Email dry-run: {'yes' if settings.daemon.email_dry_run else 'no'}",
-            f"  Git backup: {'enabled' if settings.daemon.enable_git_backup else 'disabled'}",
-            "",
-            "Scheduled Tasks:",
-            "  fetch_compute:    Mon-Fri at 08:00, 12:00, 16:00, 20:00",
-            "  send_email:       Mon-Fri at 18:00",
-            "  backup_user_data: Daily at 20:00",
-            "",
-            "=" * 60,
-            "Daemon is now running. Press Ctrl+C to stop.",
-            "=" * 60,
-        ]
-    )
+    flags = []
+    if ENABLE_EMBEDDINGS:
+        flags.append("embeddings")
+    if settings.daemon.email_dry_run:
+        flags.append("email-dry-run")
+    if settings.daemon.enable_git_backup:
+        flags.append("git-backup")
 
+    lines = [
+        "=" * 50,
+        "Arxiv-Sanity Daemon",
+        f"  TZ={settings.daemon.timezone}  Log={settings.log_level.upper()}",
+        f"  Fetch: {FETCH_NUM} papers (max {FETCH_MAX}/query)",
+        f"  Summary: {summary}",
+        f"  Flags: {', '.join(flags) or 'none'}",
+        "Schedule:",
+        "  fetch_compute  Mon-Fri 08,12,16,20",
+        "  send_email     Mon-Fri 18:00",
+        "  backup         Daily   20:00",
+        "  cleanup        Daily   03:00",
+    ]
+    if settings.log_level.upper() in ("WARNING", "ERROR", "CRITICAL"):
+        lines.append("  (set ARXIV_SANITY_LOG_LEVEL=INFO to see pipeline activity)")
+    lines.append("=" * 50)
     print("\n".join(lines), flush=True)
 
 

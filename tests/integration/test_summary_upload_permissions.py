@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 
-def test_trigger_paper_summary_with_csrf_requires_login(client, csrf_token):
+def test_trigger_paper_summary_with_csrf_allows_anonymous_for_public_pid(client, csrf_token):
     resp = client.post(
         "/api/trigger_paper_summary",
         json={"pid": "2301.00001", "model": "test-model"},
         headers={"X-CSRF-Token": csrf_token},
     )
-    assert resp.status_code == 401
+    assert resp.status_code == 200
     payload = resp.get_json(silent=True) or {}
-    assert payload.get("success") is False
+    assert payload.get("success") is True
+    assert payload.get("pid") == "2301.00001"
+    assert payload.get("status") in ("queued", "running", "ok")
 
 
 def test_trigger_paper_summary_upload_pid_requires_owner(logged_in_client, csrf_token, monkeypatch):

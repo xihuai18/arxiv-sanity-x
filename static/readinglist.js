@@ -36,6 +36,22 @@
     const readinglistDropdowns = new Map();
     const readinglistSummaryUI = new Map();
 
+    function escapeCssAttrValue(value) {
+        const text = String(value == null ? '' : value);
+        try {
+            if (global.CSS && typeof global.CSS.escape === 'function')
+                return global.CSS.escape(text);
+        } catch (e) {}
+        // Fallback: ensure the value cannot break out of the quoted attribute selector.
+        return text
+            .replace(/\\/g, '\\\\')
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r')
+            .replace(/\f/g, '\\f')
+            .replace(/\0/g, '\ufffd');
+    }
+
     // Register callback for summary status updates
     CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId) {
         updateSummaryStatusFromEvent(pid, status, lastError, { task_id: taskId });
@@ -217,9 +233,35 @@
     function handleReadingListEvent(event) {
         if (!event || !event.pid) return;
         if (event.action === 'add') {
-            const existing = document.querySelector(`.rl-paper-card[data-pid="${event.pid}"]`);
+            const safePid = escapeCssAttrValue(event.pid);
+            const existing = document.querySelector(`.rl-paper-card[data-pid="${safePid}"]`);
             if (!existing) {
-                global.location.reload();
+                const container = document.getElementById('rl-papers');
+                if (!container) return;
+                fetch('/api/readinglist/paper?pid=' + encodeURIComponent(event.pid))
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (!data || !data.success || !data.paper) return;
+                        if (!Array.isArray(papers)) papers = [];
+                        papers = [data.paper].concat(
+                            papers.filter(x => x && x.id !== data.paper.id)
+                        );
+                        const card = createReadingListCard(data.paper, container, {
+                            prepend: true,
+                        });
+                        if (
+                            card &&
+                            (data.paper.summary_status === 'queued' ||
+                                data.paper.summary_status === 'running')
+                        ) {
+                            markSummaryPending(data.paper.id);
+                            if (data.paper.summary_task_id) {
+                                startQueueRankPolling(data.paper.id);
+                            }
+                        }
+                        updateEmptyState();
+                    })
+                    .catch(() => {});
             }
             return;
         }
@@ -290,6 +332,8 @@
             handleUploadParseStatusEvent(event);
         } else if (event.type === 'upload_extract_status') {
             handleUploadExtractStatusEvent(event);
+        } else if (event.type === 'upload_deleted') {
+            handleUploadDeletedEvent(event);
         }
         void options;
     }
@@ -390,6 +434,13 @@
     });
 
     function performRemoveFromReadingList(pid, element) {
+        const card = element ? element.closest('.rl-paper-card') : null;
+        const removeBtn = card ? card.querySelector('.rl-remove-btn') : null;
+        if (removeBtn) {
+            removeBtn.classList.add('disabled');
+            removeBtn.setAttribute('aria-disabled', 'true');
+            removeBtn.title = 'Removing...';
+        }
         csrfFetch('/api/readinglist/remove', {
             method: 'POST',
             body: JSON.stringify({ pid: pid }),
@@ -397,9 +448,14 @@
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    const card = element.closest('.rl-paper-card');
                     if (card) {
                         stopQueueRankPolling(pid);
+                        const dropdownApi = readinglistDropdowns.get(pid);
+                        if (dropdownApi && typeof dropdownApi.unregister === 'function') {
+                            try {
+                                dropdownApi.unregister();
+                            } catch (e) {}
+                        }
                         readinglistDropdowns.delete(pid);
                         readinglistSummaryUI.delete(pid);
                         unmarkSummaryPending(pid);
@@ -412,11 +468,21 @@
                         }, 300);
                     }
                 } else {
+                    if (removeBtn) {
+                        removeBtn.classList.remove('disabled');
+                        removeBtn.removeAttribute('aria-disabled');
+                        removeBtn.title = '';
+                    }
                     alert('Failed to remove: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
                 console.error('Error removing from reading list:', err);
+                if (removeBtn) {
+                    removeBtn.classList.remove('disabled');
+                    removeBtn.removeAttribute('aria-disabled');
+                    removeBtn.title = '';
+                }
                 alert('Failed to remove paper');
             });
     }
@@ -599,7 +665,11 @@
         tagsList.forEach(tag => {
             const tagWrap = document.createElement('div');
             tagWrap.className = 'rel_utag rl-related-tag-pill';
-            tagWrap.appendChild(createLinkElement(buildTagUrl(tag), null, tag));
+            tagWrap.style.cursor = 'default';
+
+            const tagText = createTextElement('span', null, tag);
+            tagWrap.appendChild(tagText);
+
             tagsWrap.appendChild(tagWrap);
         });
 
@@ -675,7 +745,7 @@
         return container;
     }
 
-    function createReadingListCard(p, container) {
+    function createReadingListCard(p, container, options = {}) {
         if (!container || !p) return;
 
         const card = document.createElement('div');
@@ -691,6 +761,12 @@
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', function (event) {
             event.stopPropagation();
+            if (
+                removeBtn.classList.contains('disabled') ||
+                removeBtn.getAttribute('aria-disabled') === 'true'
+            ) {
+                return;
+            }
             openRemoveConfirm(p.id, this);
         });
 
@@ -948,7 +1024,12 @@
         actions.appendChild(coolWrap);
         card.appendChild(actions);
 
-        container.appendChild(card);
+        if (options && options.prepend && container.firstChild) {
+            container.insertBefore(card, container.firstChild);
+        } else {
+            container.appendChild(card);
+        }
+        return card;
     }
 
     // =========================================================================
@@ -1088,17 +1169,17 @@
             if (status === 'ok') {
                 ui.parseBtn.disabled = true;
                 ui.parseBtn.classList.add('disabled');
-                ui.parseBtn.textContent = '📄 Parse';
+                ui.parseBtn.textContent = '⚡ Process';
                 ui.parseBtn.title = 'Already parsed';
             } else if (status === 'running' || status === 'queued') {
                 ui.parseBtn.disabled = true;
                 ui.parseBtn.classList.add('disabled');
-                ui.parseBtn.textContent = '⏳ Parsing...';
+                ui.parseBtn.textContent = '⏳ Processing...';
             } else if (status === 'failed') {
-                ui.parseBtn.disabled = false;
-                ui.parseBtn.classList.remove('disabled');
-                ui.parseBtn.textContent = '📄 Parse';
-                ui.parseBtn.title = 'Parse PDF to Markdown with MinerU';
+                ui.parseBtn.disabled = true;
+                ui.parseBtn.classList.add('disabled');
+                ui.parseBtn.textContent = '⚡ Process';
+                ui.parseBtn.title = 'Parse failed: use Retry Parse';
             }
         }
 
@@ -1221,6 +1302,42 @@
         }
     }
 
+    function handleUploadDeletedEvent(event) {
+        if (!event || !event.pid) return;
+        const pid = String(event.pid || '').trim();
+        if (!pid) return;
+
+        const dropdownApi = uploadedDropdowns.get(pid);
+        if (dropdownApi && typeof dropdownApi.unregister === 'function') {
+            try {
+                dropdownApi.unregister();
+            } catch (e) {}
+        }
+        uploadedDropdowns.delete(pid);
+
+        const ui = uploadedSummaryUI.get(pid);
+        uploadedSummaryUI.delete(pid);
+
+        // Stop pollers to prevent timer leaks.
+        uploadedPendingOps.delete(pid);
+        if (!uploadedPendingOps.size) {
+            stopUploadedPendingPolling();
+        }
+        stopQueueRankPolling(pid);
+        unmarkSummaryPending(pid);
+
+        const safePid = escapeCssAttrValue(pid);
+        const card =
+            (ui && ui.card) ||
+            document.querySelector(`.rl-paper-card.uploaded-paper-card[data-pid="${safePid}"]`);
+        if (card && card.parentNode) {
+            card.parentNode.removeChild(card);
+        }
+
+        uploadedPapers = (uploadedPapers || []).filter(p => p && p.id !== pid);
+        updateUploadedEmptyState();
+    }
+
     function updateUploadedEmptyState() {
         const container = document.getElementById('uploaded-papers');
         const emptyState = document.getElementById('uploaded-empty-state');
@@ -1260,18 +1377,62 @@
     function renderUploadedPapers() {
         const container = document.getElementById('uploaded-papers');
         if (!container) return;
+        const nextById = new Map();
+        (uploadedPapers || []).forEach(p => {
+            if (p && p.id) nextById.set(String(p.id), p);
+        });
 
-        uploadedDropdowns.forEach(api => {
-            if (api && typeof api.unregister === 'function') {
-                api.unregister();
+        // Remove cards that no longer exist.
+        Array.from(uploadedSummaryUI.keys()).forEach(pid => {
+            if (!nextById.has(String(pid))) {
+                handleUploadDeletedEvent({ pid });
             }
         });
-        uploadedDropdowns.clear();
-        container.innerHTML = '';
-        uploadedSummaryUI.clear();
 
-        uploadedPapers.forEach(p => {
-            createUploadedPaperCard(p, container);
+        // Add or update cards.
+        (uploadedPapers || []).forEach(p => {
+            if (!p || !p.id) return;
+            const pid = String(p.id);
+            const ui = uploadedSummaryUI.get(pid);
+            if (!ui) {
+                createUploadedPaperCard(p, container);
+                return;
+            }
+
+            // Best-effort state sync for cases where SSE is delayed/missed.
+            if (ui.paperData) {
+                ui.paperData.title = p.title;
+                ui.paperData.authors = p.authors;
+                ui.paperData.parse_status = p.parse_status;
+                ui.paperData.parse_error = p.parse_error;
+                ui.paperData.meta_extracted_ok = p.meta_extracted_ok;
+            }
+
+            // Keep parse/extract UI in sync.
+            if (p.parse_status) {
+                handleUploadParseStatusEvent({
+                    pid,
+                    status: p.parse_status,
+                    error: p.parse_error || '',
+                });
+            }
+            if (p.meta_extracted_ok === true) {
+                handleUploadExtractStatusEvent({
+                    pid,
+                    status: 'ok',
+                    meta_extracted_ok: true,
+                    title: p.title || '',
+                    authors: p.authors || '',
+                    abstract: p.summary || '',
+                });
+            }
+
+            // Keep summary status badge in sync (shared handler supports uploaded cards).
+            if (p.summary_status) {
+                updateSummaryStatusFromEvent(pid, p.summary_status, p.summary_last_error || '', {
+                    task_id: p.summary_task_id || '',
+                });
+            }
         });
 
         updateUploadedEmptyState();
@@ -1453,15 +1614,18 @@
             'Inspect',
             '_blank'
         );
+        inspectLink.addEventListener('click', function (e) {
+            if (inspectLink.classList.contains('disabled-link')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        });
         if (featureDisabled) {
             inspectLink.classList.add('disabled-link');
             inspectLink.title =
                 p.parse_status !== 'ok'
                     ? 'Parse PDF first to inspect features'
                     : 'Extract metadata first to inspect features';
-            inspectLink.addEventListener('click', function (e) {
-                e.preventDefault();
-            });
         } else {
             inspectLink.title = 'Inspect TF-IDF features';
         }
@@ -1476,15 +1640,18 @@
             'Summary',
             '_blank'
         );
+        summaryLink.addEventListener('click', function (e) {
+            if (summaryLink.classList.contains('disabled-link')) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        });
         if (featureDisabled) {
             summaryLink.classList.add('disabled-link');
             summaryLink.title =
                 p.parse_status !== 'ok'
                     ? 'Parse PDF first to view summary'
                     : 'Extract metadata first to view summary';
-            summaryLink.addEventListener('click', function (e) {
-                e.preventDefault();
-            });
         } else {
             summaryLink.title = 'View summary';
         }
@@ -1671,17 +1838,22 @@
         actions.appendChild(similarWrap);
         actions.appendChild(inspectWrap);
 
-        // Parse button (disabled if already parsed)
+        // Process button (parse + extract + summary). Disabled once parsed.
         const parseWrap = document.createElement('div');
         parseWrap.className = 'rel_parse';
         const parseBtn = document.createElement('button');
         parseBtn.className = 'action-btn parse-btn';
-        parseBtn.textContent = '📄 Parse';
-        parseBtn.title = 'Parse PDF to Markdown with MinerU';
+        parseBtn.textContent = '⚡ Process';
+        parseBtn.title = 'Parse + Extract Info + Summary (one-click)';
         if (p.parse_status === 'ok') {
             parseBtn.disabled = true;
             parseBtn.classList.add('disabled');
             parseBtn.title = 'Already parsed';
+        } else if (p.parse_status === 'failed') {
+            // Prefer the dedicated retry button for failed state to avoid confusion.
+            parseBtn.disabled = true;
+            parseBtn.classList.add('disabled');
+            parseBtn.title = 'Parse failed: use Retry Parse';
         } else if (p.parse_status === 'running' || p.parse_status === 'queued') {
             parseBtn.disabled = true;
             parseBtn.classList.add('disabled');
@@ -1727,7 +1899,7 @@
             retryBtn.className = 'retry-parse-btn';
             retryBtn.textContent = '🔄 Retry Parse';
             retryBtn.addEventListener('click', function () {
-                retryParse(p.id, parseStatusBadge, retryBtn);
+                retryParse(p.id, parseStatusBadge, retryBtn, parseBtn, extractBtn);
             });
             retryWrap.appendChild(retryBtn);
             actions.appendChild(retryWrap);
@@ -1857,6 +2029,26 @@
     }
 
     function deleteUploadedPaper(pid, cardElement) {
+        let reverted = false;
+        const rollback = () => {
+            if (reverted) return;
+            reverted = true;
+            if (!cardElement) return;
+            try {
+                delete cardElement.dataset.deleting;
+            } catch (e) {}
+            cardElement.style.opacity = '';
+            cardElement.style.pointerEvents = '';
+        };
+
+        if (cardElement) {
+            try {
+                cardElement.dataset.deleting = '1';
+            } catch (e) {}
+            cardElement.style.opacity = '0.6';
+            cardElement.style.pointerEvents = 'none';
+        }
+
         csrfFetch('/api/uploaded_papers/delete', {
             method: 'POST',
             body: JSON.stringify({ pid: pid }),
@@ -1888,11 +2080,13 @@
                     }
                     uploadedPapers = uploadedPapers.filter(p => p.id !== pid);
                 } else {
+                    rollback();
                     alert('Failed to delete: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
                 console.error('Error deleting uploaded paper:', err);
+                rollback();
                 alert('Failed to delete paper: ' + err.message);
             });
     }
@@ -1903,7 +2097,7 @@
             parseBtn.textContent = '⏳ Parsing...';
         }
 
-        csrfFetch('/api/uploaded_papers/parse', {
+        csrfFetch('/api/uploaded_papers/process', {
             method: 'POST',
             body: JSON.stringify({ pid: pid }),
         })
@@ -1916,19 +2110,19 @@
                         statusBadge.className = 'parse-status-badge running';
                     }
                 } else {
-                    alert('Failed to parse: ' + (data.error || 'Unknown error'));
+                    alert('Failed to process: ' + (data.error || 'Unknown error'));
                     if (parseBtn) {
                         parseBtn.disabled = false;
-                        parseBtn.textContent = '📄 Parse';
+                        parseBtn.textContent = '⚡ Process';
                     }
                 }
             })
             .catch(err => {
                 console.error('Error triggering parse:', err);
-                alert('Failed to trigger parse');
+                alert('Failed to start processing');
                 if (parseBtn) {
                     parseBtn.disabled = false;
-                    parseBtn.textContent = '📄 Parse';
+                    parseBtn.textContent = '⚡ Process';
                 }
             });
     }
@@ -1947,10 +2141,6 @@
             .then(data => {
                 if (data.success) {
                     markUploadedPending(pid, 'extract');
-                    // Refresh the list to show updated info
-                    setTimeout(function () {
-                        fetchUploadedPapers();
-                    }, 2000);
                 } else {
                     alert('Failed to extract: ' + (data.error || 'Unknown error'));
                     if (extractBtn) {
@@ -2021,6 +2211,8 @@
             const titleSafe = escapeHtml(p.title || p.id);
             const authorsSafe = escapeHtml(p.authors || '');
             const timeSafe = escapeHtml(p.time || '');
+            const scoreNum = Number(p && p.score);
+            const scoreSafe = Number.isFinite(scoreNum) ? scoreNum.toFixed(3) : '—';
             // Prefer TL;DR over abstract
             const contentText = p.tldr || p.abstract || '';
             const contentSafe = escapeHtml(contentText);
@@ -2034,7 +2226,7 @@
                         ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
                         <div class="similar-paper-meta-line">
                             ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
-                            <span class="similar-paper-score">Score: ${p.score.toFixed(3)}</span>
+                            <span class="similar-paper-score">Score: ${scoreSafe}</span>
                         </div>
                         ${
                             contentSafe
@@ -2090,8 +2282,17 @@
         return div.innerHTML;
     }
 
-    function retryParse(pid, statusBadge, retryBtn) {
+    function retryParse(pid, statusBadge, retryBtn, parseBtn, extractBtn) {
         if (retryBtn) retryBtn.disabled = true;
+        if (parseBtn) {
+            parseBtn.disabled = true;
+            parseBtn.classList.add('disabled');
+            parseBtn.textContent = '⏳ Processing...';
+        }
+        if (extractBtn) {
+            extractBtn.disabled = true;
+            extractBtn.classList.add('disabled');
+        }
 
         csrfFetch('/api/uploaded_papers/retry_parse', {
             method: 'POST',
@@ -2109,12 +2310,24 @@
                 } else {
                     alert('Failed to retry: ' + (data.error || 'Unknown error'));
                     if (retryBtn) retryBtn.disabled = false;
+                    if (parseBtn) {
+                        parseBtn.disabled = true;
+                        parseBtn.classList.add('disabled');
+                        parseBtn.textContent = '⚡ Process';
+                        parseBtn.title = 'Parse failed: use Retry Parse';
+                    }
                 }
             })
             .catch(err => {
                 console.error('Error retrying parse:', err);
                 alert('Failed to retry parse');
                 if (retryBtn) retryBtn.disabled = false;
+                if (parseBtn) {
+                    parseBtn.disabled = true;
+                    parseBtn.classList.add('disabled');
+                    parseBtn.textContent = '⚡ Process';
+                    parseBtn.title = 'Parse failed: use Retry Parse';
+                }
             });
     }
 
@@ -2184,16 +2397,17 @@
         };
 
         xhr.onload = function () {
-            uploadBtn.style.display = 'inline-flex';
-            uploadProgress.style.display = 'none';
-
             // Handle HTTP error status codes
             if (xhr.status === 413) {
+                uploadBtn.style.display = 'inline-flex';
+                uploadProgress.style.display = 'none';
                 alert('Upload failed: File too large. Please upload a smaller file.');
                 return;
             }
 
             if (xhr.status >= 400) {
+                uploadBtn.style.display = 'inline-flex';
+                uploadProgress.style.display = 'none';
                 try {
                     const data = JSON.parse(xhr.responseText);
                     alert('Upload failed: ' + (data.error || `Server error (${xhr.status})`));
@@ -2207,12 +2421,23 @@
                 const data = JSON.parse(xhr.responseText);
                 if (data.success) {
                     if (data.pid) markUploadedPending(data.pid, 'parse');
+                    uploadBtn.style.display = 'inline-flex';
+                    // Keep progress visible briefly so "Processing..." is actually visible.
+                    progressFill.style.width = '100%';
                     progressText.textContent = 'Processing...';
-                    fetchUploadedPapers();
+                    fetchUploadedPapers()
+                        .catch(() => {})
+                        .finally(() => {
+                            uploadProgress.style.display = 'none';
+                        });
                 } else {
+                    uploadBtn.style.display = 'inline-flex';
+                    uploadProgress.style.display = 'none';
                     alert('Upload failed: ' + (data.error || 'Unknown error'));
                 }
             } catch (e) {
+                uploadBtn.style.display = 'inline-flex';
+                uploadProgress.style.display = 'none';
                 alert('Upload failed: Invalid response');
             }
         };

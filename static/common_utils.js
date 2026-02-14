@@ -112,7 +112,9 @@ function debugLog(category, message, data) {
         const method = (opts.method || 'POST').toUpperCase();
         const headers = new Headers(opts.headers || {});
         const tok = getCsrfToken();
-        if (tok) headers.set('X-CSRF-Token', tok);
+        if (tok && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+            headers.set('X-CSRF-Token', tok);
+        }
         if (method !== 'GET' && !headers.has('Content-Type') && opts.body) {
             headers.set('Content-Type', 'application/json');
         }
@@ -762,11 +764,18 @@ function debugLog(category, message, data) {
             }
         });
 
-        // Best-effort: on tab close, release leadership so other tabs can connect immediately.
+        // Best-effort: on tab close, close SSE and release leadership so other tabs can connect immediately.
         if (!userEventUnloadBound) {
             userEventUnloadBound = true;
             try {
                 window.addEventListener('beforeunload', () => {
+                    if (eventSource) {
+                        try {
+                            eventSource.close();
+                        } catch (e) {}
+                        eventSource = null;
+                        eventSourceConnecting = false;
+                    }
                     relinquishLeadershipIfOwned();
                 });
             } catch (e) {}
@@ -811,8 +820,13 @@ function debugLog(category, message, data) {
 
         document.addEventListener('mousedown', event => {
             dropdownRegistry.forEach((api, id) => {
-                if (!api || !api.isOpen || !api.isOpen()) return;
                 const dropdown = document.getElementById(id);
+                // Auto-clean stale registrations to avoid memory leaks when DOM is replaced.
+                if (!dropdown || !dropdown.isConnected) {
+                    dropdownRegistry.delete(id);
+                    return;
+                }
+                if (!api || !api.isOpen || !api.isOpen()) return;
                 if (dropdown && !dropdown.contains(event.target)) {
                     api.close();
                 }
@@ -821,7 +835,12 @@ function debugLog(category, message, data) {
 
         document.addEventListener('keydown', event => {
             if (event.key !== 'Escape') return;
-            dropdownRegistry.forEach(api => {
+            dropdownRegistry.forEach((api, id) => {
+                const dropdown = document.getElementById(id);
+                if (!dropdown || !dropdown.isConnected) {
+                    dropdownRegistry.delete(id);
+                    return;
+                }
                 if (api && api.isOpen && api.isOpen()) api.close();
             });
         });
@@ -1230,6 +1249,7 @@ function debugLog(category, message, data) {
         function _typesetNow() {
             if (typeof MathJax === 'undefined') return;
             const nodes = element ? [element] : undefined;
+            _mjxTypesetting++;
             try {
                 if (MathJax.startup && MathJax.startup.promise) {
                     MathJax.startup.promise
@@ -1240,26 +1260,38 @@ function debugLog(category, message, data) {
                         })
                         .catch(err => {
                             console.warn('MathJax typeset error:', err);
+                        })
+                        .then(() => {
+                            _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
                         });
                     return;
                 }
                 if (MathJax.typesetPromise) {
-                    MathJax.typesetPromise(nodes).catch(function (err) {
-                        console.warn('MathJax typeset error:', err);
-                    });
+                    MathJax.typesetPromise(nodes)
+                        .catch(function (err) {
+                            console.warn('MathJax typeset error:', err);
+                        })
+                        .then(function () {
+                            _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
+                        });
                     return;
                 }
                 if (MathJax.typeset) {
                     MathJax.typeset(nodes);
                 }
+                _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
             } catch (err) {
+                _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
                 console.warn('MathJax typeset error:', err);
             }
         }
 
         // If MathJax is fully loaded (has typeset methods), typeset immediately.
         if (typeof MathJax !== 'undefined' && (MathJax.typesetPromise || MathJax.typeset)) {
+            _preloadMjxFonts(); // ensure font preload even if MathJax loaded externally
             _typesetNow();
+            // Queue element for re-typeset if MJXTEX fonts aren't ready yet
+            _queueMjxRetypeset(element);
             return;
         }
 
@@ -1285,6 +1317,8 @@ function debugLog(category, message, data) {
 
         loadMathJaxOnDemand(function () {
             _typesetNow();
+            // Queue element for re-typeset if MJXTEX fonts aren't ready yet
+            _queueMjxRetypeset(element);
         });
     }
 
@@ -1329,10 +1363,47 @@ function debugLog(category, message, data) {
         }
     }
 
+    function _isPlainObject(v) {
+        return !!v && typeof v === 'object' && !Array.isArray(v);
+    }
+
+    function _mergeDeep(target, source) {
+        if (!_isPlainObject(target) || !_isPlainObject(source)) return target;
+        Object.keys(source).forEach(k => {
+            const sv = source[k];
+            const tv = target[k];
+            if (_isPlainObject(sv) && _isPlainObject(tv)) {
+                _mergeDeep(tv, sv);
+            } else {
+                target[k] = sv;
+            }
+        });
+        return target;
+    }
+
+    function _cloneJson(obj) {
+        return JSON.parse(JSON.stringify(obj));
+    }
+
     /**
-     * Default MathJax configuration
+     * Default MathJax configuration.
+     *
+     * IMPORTANT:
+     * - Do NOT enable inline '$...$' math. It conflicts with markdown-it's '$' parsing on several pages.
+     * - Keep this config as the single source of truth; templates should not duplicate MathJax config blocks.
      */
     const defaultMathJaxConfig = {
+        loader: {
+            // Extensions are included in tex-chtml-full.js, but explicitly listing them makes config
+            // consistent across pages and future-proof if the bundle changes.
+            load: [
+                '[tex]/boldsymbol',
+                '[tex]/mathtools',
+                '[tex]/physics',
+                '[tex]/tagformat',
+                '[tex]/textmacros',
+            ],
+        },
         options: {
             enableMenu: false,
             enableAssistiveMml: false,
@@ -1341,10 +1412,7 @@ function debugLog(category, message, data) {
             processHtmlClass: 'tex2jax_process',
         },
         tex: {
-            inlineMath: [
-                ['\\(', '\\)'],
-                ['$', '$'],
-            ],
+            inlineMath: [['\\(', '\\)']],
             displayMath: [
                 ['\\[', '\\]'],
                 ['$$', '$$'],
@@ -1480,6 +1548,61 @@ function debugLog(category, message, data) {
         },
     };
 
+    /**
+     * Ensure window.MathJax is initialised using the default config, optionally overriding parts.
+     * This must run before MathJax script loads to take effect.
+     *
+     * @param {Object} [overrides]
+     * @returns {Object} The resulting config object.
+     */
+    function ensureMathJaxConfig(overrides) {
+        if (typeof window === 'undefined') return defaultMathJaxConfig;
+        const base = _cloneJson(defaultMathJaxConfig);
+        const existing = _isPlainObject(window.MathJax) ? window.MathJax : null;
+        if (existing) _mergeDeep(base, existing);
+        if (_isPlainObject(overrides)) _mergeDeep(base, overrides);
+
+        // Ensure MathJax fontURL respects runtime CDN settings.
+        // Rationale: the CDN base / fallback flags may change at runtime
+        // (custom `asset_npm_cdn_base`, probe-triggered local fallback), so we
+        // choose the preferred font URL at call-time to stay consistent.
+        try {
+            if (!base.chtml) base.chtml = {};
+            const curFontUrl = String((base.chtml && base.chtml.fontURL) || '');
+            const defaultJsdelivrRe =
+                /https?:\/\/cdn\.jsdelivr\.net\/npm\/mathjax@[^/]+\/es5\/output\/chtml\/fonts\/woff-v2/;
+
+            // If we already know fonts must be local (e.g. CDN blocked), keep it local.
+            // Use the global flag only to avoid temporal-dead-zone hazards with internal `let` vars.
+            const forceLocal =
+                typeof global !== 'undefined' &&
+                (global.__arxivSanityMathJaxForceLocal === 1 ||
+                    global.__arxivSanityMathJaxForceLocal === true);
+
+            if (forceLocal) {
+                base.chtml.fontURL = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+            } else if (!curFontUrl || defaultJsdelivrRe.test(curFontUrl)) {
+                // Prefer the configured npm CDN base when enabled; otherwise local.
+                base.chtml.fontURL = isAssetCdnEnabled()
+                    ? npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2')
+                    : staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+            }
+        } catch (e) {}
+
+        // Defensive: enforce no inline '$...$' even if a page accidentally re-adds it.
+        try {
+            const im =
+                base && base.tex && Array.isArray(base.tex.inlineMath) ? base.tex.inlineMath : [];
+            base.tex.inlineMath = im.filter(pair => {
+                if (!Array.isArray(pair) || pair.length < 2) return true;
+                return !(pair[0] === '$' && pair[1] === '$');
+            });
+        } catch (e) {}
+
+        window.MathJax = base;
+        return base;
+    }
+
     function getMathJaxScriptCandidates() {
         const local = staticUrl('lib/es5/tex-chtml-full.js');
         const cdn = npmCdnUrl('mathjax@3.2.2/es5/tex-chtml-full.js');
@@ -1553,8 +1676,11 @@ function debugLog(category, message, data) {
         try {
             const localUrl = _localMathJaxFontUrl();
             const sheets = document.styleSheets;
-            const cdnRe =
-                /https?:\/\/cdn\.jsdelivr\.net\/npm\/mathjax@[^/]+\/es5\/output\/chtml\/fonts\/woff-v2/g;
+            // Patch any npm CDN base (not only jsDelivr). This matters when users configure
+            // a custom `asset_npm_cdn_base`: MathJax may have already injected @font-face
+            // rules pointing at that CDN, and we need to rewrite them to our local fonts.
+            // We keep the pattern narrow to MathJax CHTML woff-v2 fonts.
+            const cdnRe = /https?:\/\/[^"')]+\/mathjax@[^/]+\/es5\/output\/chtml\/fonts\/woff-v2/g;
             for (let i = 0; i < sheets.length; i++) {
                 let rules;
                 try {
@@ -1638,7 +1764,12 @@ function debugLog(category, message, data) {
                 setTimeout(function () {
                     try {
                         if (typeof MathJax !== 'undefined' && MathJax.typesetPromise) {
-                            MathJax.typesetPromise().catch(function () {});
+                            _mjxTypesetting++;
+                            MathJax.typesetPromise()
+                                .catch(function () {})
+                                .then(function () {
+                                    _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
+                                });
                         }
                     } catch (_) {}
                 }, 200);
@@ -1649,6 +1780,250 @@ function debugLog(category, message, data) {
     // Kick off probe & listener immediately
     _startCdnFontProbe();
     _setupFontErrorListener();
+
+    // ---- MathJax font preload & retypeset for non-summary pages ----
+    // When triggerMathJax() typesets an element before MJXTEX fonts are ready,
+    // the element is queued.  Once fonts load, queued elements are re-typeset
+    // so formulas become visible (same MJXZERO issue as the summary page).
+
+    const _CRITICAL_MJX_FONTS = [
+        { family: 'MJXTEX', file: 'MathJax_Main-Regular.woff' },
+        { family: 'MJXTEX-I', file: 'MathJax_Math-Italic.woff' },
+        { family: 'MJXTEX-S1', file: 'MathJax_Size1-Regular.woff' },
+        { family: 'MJXTEX-A', file: 'MathJax_AMS-Regular.woff' },
+    ];
+
+    let _mjxFontPreloaded = false;
+    let _mjxRetypesetQueue = []; // elements to re-typeset when fonts ready
+    let _mjxRetypesetCount = 0;
+    const _MJX_MAX_RETYPESETS = 3;
+    let _mjxFontListenerSetup = false;
+    let _mjxFallbackTimers = [];
+    let _mjxDebounceTimer = null;
+    let _mjxTypesetting = 0; // reference count for concurrent typeset operations
+    let _mjxDeferredFlushTimer = null; // single deferred flush to avoid timer storm
+
+    /** Inject <link rel="preload"> hints for critical MathJax fonts. */
+    function _preloadMjxFonts() {
+        if (_mjxFontPreloaded) return;
+        _mjxFontPreloaded = true;
+        try {
+            const baseUrl = (getMathJaxFontUrl() || '').replace(/\/+$/, '');
+            if (!baseUrl) return;
+            _CRITICAL_MJX_FONTS.forEach(function (entry) {
+                try {
+                    const url = baseUrl + '/' + entry.file;
+                    if (document.querySelector('link[rel="preload"][href="' + url + '"]')) return;
+                    const link = document.createElement('link');
+                    link.rel = 'preload';
+                    link.as = 'font';
+                    link.type = 'font/woff';
+                    link.href = url;
+                    link.crossOrigin = 'anonymous';
+                    document.head.appendChild(link);
+                } catch (e) {}
+            });
+        } catch (e) {}
+    }
+
+    function getMathJaxFontUrl() {
+        if (
+            _fontFallbackApplied ||
+            (typeof window !== 'undefined' && window.__arxivSanityMathJaxForceLocal)
+        ) {
+            return _localMathJaxFontUrl();
+        }
+        if (_cdnFontProbeResult === false) return _localMathJaxFontUrl();
+        if (typeof window !== 'undefined' && window.MathJax && window.MathJax.chtml) {
+            return window.MathJax.chtml.fontURL || _localMathJaxFontUrl();
+        }
+        return _localMathJaxFontUrl();
+    }
+
+    /** Check whether any critical MJXTEX font is available. */
+    function _isMjxFontReady() {
+        try {
+            if (typeof document === 'undefined' || !document.fonts || !document.fonts.check) {
+                return true; // can't check, assume ready
+            }
+            return (
+                document.fonts.check('1em MJXTEX') ||
+                document.fonts.check('1em MJXTEX-I') ||
+                document.fonts.check('1em MJXTEX-S1') ||
+                document.fonts.check('1em MJXTEX-A')
+            );
+        } catch (e) {
+            return true;
+        }
+    }
+
+    /** Re-typeset all queued elements and clear the queue. */
+    function _flushMjxRetypesetQueue(_reason) {
+        // Clear any pending deferred flush
+        if (_mjxDeferredFlushTimer) {
+            clearTimeout(_mjxDeferredFlushTimer);
+            _mjxDeferredFlushTimer = null;
+        }
+        if (_mjxRetypesetCount >= _MJX_MAX_RETYPESETS) {
+            _mjxRetypesetQueue = []; // prevent leak when cap reached
+            _cancelMjxFallbacks();
+            return;
+        }
+        // Defer if another typeset is in progress to avoid typesetClear conflicts
+        if (_mjxTypesetting > 0) {
+            if (!_mjxDeferredFlushTimer) {
+                _mjxDeferredFlushTimer = setTimeout(function () {
+                    _mjxDeferredFlushTimer = null;
+                    _flushMjxRetypesetQueue(_reason);
+                }, 200);
+            }
+            return;
+        }
+        const elements = _mjxRetypesetQueue.filter(function (el) {
+            return el && el.isConnected !== false;
+        });
+        _mjxRetypesetQueue = [];
+        // Clear fallback timers so they can be re-scheduled for future queues
+        _cancelMjxFallbacks();
+        if (elements.length === 0) return;
+        try {
+            if (typeof MathJax === 'undefined') return;
+            if (!MathJax.typesetPromise && !MathJax.typeset) return; // no typeset method
+            // Only consume quota after confirming MathJax can typeset
+            _mjxRetypesetCount++;
+            _mjxTypesetting++;
+            if (MathJax.typesetClear) MathJax.typesetClear(elements);
+            if (MathJax.typesetPromise) {
+                MathJax.typesetPromise(elements)
+                    .catch(function () {})
+                    .then(function () {
+                        _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
+                    });
+            } else if (MathJax.typeset) {
+                MathJax.typeset(elements);
+                _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
+            }
+        } catch (e) {
+            _mjxTypesetting = Math.max(0, _mjxTypesetting - 1);
+        }
+    }
+
+    function _cancelMjxFallbacks() {
+        for (let i = 0; i < _mjxFallbackTimers.length; i++) {
+            clearTimeout(_mjxFallbackTimers[i]);
+        }
+        _mjxFallbackTimers = [];
+    }
+
+    /**
+     * Set up font-ready listeners (loadingdone + fonts.load).
+     * Called once when the first element is queued for retypeset.
+     */
+    function _setupMjxFontRetypeset() {
+        if (_mjxFontListenerSetup) return;
+        _mjxFontListenerSetup = true;
+
+        function onFontsLoaded(evt) {
+            if (_mjxRetypesetCount >= _MJX_MAX_RETYPESETS) return;
+            if (_mjxRetypesetQueue.length === 0) return;
+
+            let faces;
+            try {
+                faces = evt && evt.fontfaces ? Array.from(evt.fontfaces) : [];
+            } catch (e) {
+                faces = [];
+            }
+            if (faces.length > 0) {
+                let hasMjxTex = false;
+                for (let i = 0; i < faces.length; i++) {
+                    if (String(faces[i].family || '').indexOf('MJXTEX') >= 0) {
+                        hasMjxTex = true;
+                        break;
+                    }
+                }
+                if (!hasMjxTex) return;
+            }
+
+            if (_mjxDebounceTimer) clearTimeout(_mjxDebounceTimer);
+            _mjxDebounceTimer = setTimeout(function () {
+                _mjxDebounceTimer = null;
+                if (_isMjxFontReady()) {
+                    _cancelMjxFallbacks();
+                    _flushMjxRetypesetQueue('loadingdone');
+                }
+            }, 300);
+        }
+
+        // Trigger 1: loadingdone listener
+        try {
+            document.fonts.addEventListener('loadingdone', onFontsLoaded);
+        } catch (e) {}
+
+        // Trigger 2: document.fonts.load() deterministic trigger
+        try {
+            document.fonts
+                .load('1em MJXTEX')
+                .then(function () {
+                    if (_mjxRetypesetQueue.length > 0 && _isMjxFontReady()) {
+                        _cancelMjxFallbacks();
+                        _flushMjxRetypesetQueue('fonts.load resolved');
+                    }
+                })
+                .catch(function () {});
+        } catch (e) {}
+    }
+
+    /**
+     * Ensure fallback timers are scheduled.  Called every time an element is
+     * queued so that late-arriving elements still get a safety-net flush even
+     * if the one-shot listeners/fonts.load have already fired.
+     */
+    function _ensureMjxFallbacks() {
+        // Set up the one-time listeners (loadingdone + fonts.load) if not yet done
+        _setupMjxFontRetypeset();
+
+        if (_mjxRetypesetCount >= _MJX_MAX_RETYPESETS) return;
+
+        // Cancel any existing timers and reschedule.  This ensures late-arriving
+        // elements get a fresh fallback window and avoids stale timer IDs
+        // lingering in the array (which would block future scheduling).
+        _cancelMjxFallbacks();
+
+        const DELAYS = [1500, 4000, 9000, 18000];
+        DELAYS.forEach(function (delay, idx) {
+            const tid = setTimeout(function () {
+                if (_mjxRetypesetCount >= _MJX_MAX_RETYPESETS) return;
+                if (_mjxRetypesetQueue.length === 0) return;
+                const isLast = idx === DELAYS.length - 1;
+                if (_isMjxFontReady() || isLast) {
+                    _flushMjxRetypesetQueue('fallback ' + delay + 'ms');
+                }
+            }, delay);
+            _mjxFallbackTimers.push(tid);
+        });
+    }
+
+    /**
+     * Queue an element for re-typeset when MJXTEX fonts become ready.
+     * Called by triggerMathJax after initial typeset if fonts aren't loaded yet.
+     */
+    function _queueMjxRetypeset(element) {
+        if (_mjxRetypesetCount >= _MJX_MAX_RETYPESETS) return;
+        if (_isMjxFontReady()) return; // fonts already ready, no need
+        // Use document.body as fallback for full-document typeset calls
+        const target = element || document.body;
+        if (!target) return;
+        // If queueing document.body, collapse queue to just body (avoids
+        // redundant typesetClear on overlapping parent+child nodes)
+        if (target === document.body) {
+            _mjxRetypesetQueue = [document.body];
+        } else if (_mjxRetypesetQueue.indexOf(document.body) >= 0) {
+            // body already covers everything, skip child
+        } else if (_mjxRetypesetQueue.indexOf(target) < 0) {
+            _mjxRetypesetQueue.push(target);
+        }
+        _ensureMjxFallbacks();
+    }
 
     /**
      * Check if text contains math expressions
@@ -1683,6 +2058,9 @@ function debugLog(category, message, data) {
     function loadMathJaxOnDemand(callback, scriptUrl) {
         // Queue callback first so we can consistently drain the queue when MathJax becomes ready.
         if (callback) mathJaxCallbacks.push(callback);
+
+        // Preload MathJax fonts in parallel with script loading
+        _preloadMjxFonts();
 
         // Already loaded / ready (covers cases where a script tag was loaded outside this helper)
         if (mathJaxLoaded || isMathJaxAvailable()) {
@@ -1727,9 +2105,7 @@ function debugLog(category, message, data) {
         } catch (e) {}
 
         // Set config before loading script
-        if (typeof window.MathJax === 'undefined') {
-            window.MathJax = defaultMathJaxConfig;
-        }
+        ensureMathJaxConfig();
 
         // Determine candidate URLs if not explicitly provided.
         const candidates = getMathJaxScriptCandidates();
@@ -1912,7 +2288,10 @@ function debugLog(category, message, data) {
         // for the 1.3 MB tex-chtml-full.js on slower connections and caused "Failed to load
         // MathJax" followed by permanent formula rendering loss after 3 failures.
         try {
-            const watchdogMs = isExternalScript ? 15000 : 30000;
+            // External scripts (e.g. <script defer> in templates/summary.html) may take a long
+            // time on slow networks; keep a longer watchdog to avoid false failures and
+            // unnecessary retry logic.
+            const watchdogMs = isExternalScript ? 60000 : 30000;
             const pollIntervalMs = 500;
             let elapsed = 0;
 
@@ -2351,6 +2730,7 @@ function debugLog(category, message, data) {
         // MathJax lazy loading
         hasMathContent,
         pageHasMathContent,
+        ensureMathJaxConfig,
         loadMathJaxOnDemand,
         loadMathJaxIfNeeded,
         // Summary
@@ -2371,5 +2751,8 @@ function debugLog(category, message, data) {
         copyTextToClipboard,
         // Toast
         showToast,
+        // CDN font probe (for summary page resource gate)
+        waitForCdnFontProbe: _startCdnFontProbe,
+        getMathJaxFontUrl: getMathJaxFontUrl,
     };
 })(typeof window !== 'undefined' ? window : this);

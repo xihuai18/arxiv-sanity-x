@@ -39,9 +39,9 @@ var tags = {{ tags | tojson }};
 var MJX_FONT_URL = {{ (asset_cdn_enabled and npm_cdn_url('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2') or url_for('static', filename='lib/es5/output/chtml/fonts/woff-v2')) | tojson }};
 {% raw %}
 window.MathJax = {
-    // Load textmacros extension for \texttt, \textbf etc. in math mode
+    // Load extensions for extended LaTeX support (aligned with index/readinglist/inspect pages)
     loader: {
-        load: ['[tex]/textmacros']
+        load: ['[tex]/boldsymbol', '[tex]/mathtools', '[tex]/physics', '[tex]/tagformat', '[tex]/textmacros']
     },
     options: {
         // Avoid Edge/Chromium warning: focus inside an aria-hidden subtree.
@@ -53,7 +53,7 @@ window.MathJax = {
         processHtmlClass: 'tex2jax_process'
     },
     tex: {
-        inlineMath: [['\\(', '\\)'], ['$', '$']],
+        inlineMath: [['\\(', '\\)']],
         displayMath: [['\\[', '\\]'], ['$$', '$$']],
         processEscapes: true,
         processEnvironments: true,
@@ -397,6 +397,16 @@ window.MathJax = {
     }
 };
 {% endraw %}
+</script>
+
+<script>
+// Merge summary-specific MathJax config into the shared defaults from common_utils.js.
+(function () {
+    try {
+        var c = window.ArxivSanityCommon;
+        if (c && typeof c.ensureMathJaxConfig === 'function') c.ensureMathJaxConfig(window.MathJax || {});
+    } catch (e) {}
+})();
 </script>
 
 <!-- Ensure MathJax script is actually loaded on summary page.

@@ -260,9 +260,24 @@
     color: var(--text-muted);
 }
 
-.rl-related-tag-pill a {
-    color: var(--link-color);
-    text-decoration: none;
+.rl-related-tag-pill {
+    cursor: default;
+}
+
+.rl-related-tag-pill:hover {
+    background-color: var(--tag-bg-light);
+    border-color: var(--tag-border-light);
+    color: var(--tag-text-light);
+    transform: none;
+    box-shadow: none;
+}
+
+[data-theme='dark'] .rl-related-tag-pill:hover {
+    background-color: var(--tag-bg-dark);
+    border-color: var(--tag-border-dark);
+    color: var(--tag-text-dark);
+    transform: none;
+    box-shadow: none;
 }
 
 .rl-remove-btn {

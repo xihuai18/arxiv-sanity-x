@@ -21,7 +21,12 @@
         const CommonUtils = _getCommonUtils();
         if (CommonUtils && typeof CommonUtils.escapeHtml === 'function')
             return CommonUtils.escapeHtml(text);
-        return String(text || '');
+        return String(text || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     function isSafeUrl(href) {
@@ -168,53 +173,98 @@
     function sanitizeHtmlContent(html) {
         if (!html) return '';
 
-        // Simple regex-based sanitization for inline HTML
-        // This handles common cases like <sub>, <sup>, <mark>, etc.
-        let result = html;
+        const DROP_TAGS = new Set([
+            'script',
+            'style',
+            'iframe',
+            'object',
+            'embed',
+            'link',
+            'meta',
+            'base',
+            'form',
+            'input',
+            'textarea',
+            'button',
+            'select',
+            'option',
+        ]);
 
-        // Match HTML tags
-        result = result.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/gi, (match, tag, attrs) => {
-            const tagLower = tag.toLowerCase();
+        const stripNullBytes = value =>
+            String(value || '')
+                .split('\u0000')
+                .join('');
 
-            // Check if tag is safe
-            if (!SAFE_HTML_TAGS.has(tagLower)) {
-                // Escape the entire tag
-                return escapeHtml(match);
+        const sanitizeInto = (parentOut, nodeIn) => {
+            if (!nodeIn) return;
+
+            // Text nodes
+            if (nodeIn.nodeType === Node.TEXT_NODE) {
+                parentOut.appendChild(document.createTextNode(nodeIn.nodeValue || ''));
+                return;
             }
 
-            // For closing tags, just return them
-            if (match.startsWith('</')) {
-                return `</${tagLower}>`;
+            // Ignore comments and other nodes.
+            if (nodeIn.nodeType !== Node.ELEMENT_NODE) {
+                return;
             }
 
-            // Parse and filter attributes
-            const safeAttrs = [];
-            const attrRegex = /([a-zA-Z][a-zA-Z0-9-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi;
-            let attrMatch;
-            while ((attrMatch = attrRegex.exec(attrs)) !== null) {
-                const attrName = attrMatch[1].toLowerCase();
-                const attrValue = attrMatch[2] || attrMatch[3] || attrMatch[4] || '';
+            const elIn = /** @type {Element} */ (nodeIn);
+            const tag = String(elIn.tagName || '').toLowerCase();
 
-                // Only allow safe attributes
-                if (SAFE_ATTRS.has(attrName) || attrName.startsWith('data-')) {
-                    // Escape attribute value to prevent XSS
-                    const escapedValue = attrValue
-                        .replace(/&/g, '&amp;')
-                        .replace(/"/g, '&quot;')
-                        .replace(/</g, '&lt;')
-                        .replace(/>/g, '&gt;');
-                    safeAttrs.push(`${attrName}="${escapedValue}"`);
-                }
+            // Hard-drop high-risk tags.
+            if (DROP_TAGS.has(tag)) return;
+
+            // Unwrap unknown tags: keep their (sanitized) children.
+            if (!SAFE_HTML_TAGS.has(tag)) {
+                const children = Array.from(elIn.childNodes || []);
+                children.forEach(child => sanitizeInto(parentOut, child));
+                return;
             }
 
-            // Check for self-closing tags
-            const selfClosing = /\/>$/.test(match) || ['br', 'hr', 'wbr', 'col'].includes(tagLower);
-            const attrStr = safeAttrs.length > 0 ? ' ' + safeAttrs.join(' ') : '';
+            const elOut = document.createElement(tag);
 
-            return selfClosing ? `<${tagLower}${attrStr} />` : `<${tagLower}${attrStr}>`;
-        });
+            // Copy allowlisted attributes only.
+            try {
+                const attrs = elIn.attributes ? Array.from(elIn.attributes) : [];
+                attrs.forEach(a => {
+                    const name = String(a && a.name ? a.name : '').toLowerCase();
+                    if (!name) return;
+                    if (!(SAFE_ATTRS.has(name) || name.startsWith('data-'))) return;
+                    // Disallow inline event handlers regardless.
+                    if (name.startsWith('on')) return;
+                    const value = stripNullBytes(a && a.value ? a.value : '');
+                    elOut.setAttribute(name, value);
+                });
+            } catch (e) {}
 
-        return result;
+            // Sanitize children.
+            const children = Array.from(elIn.childNodes || []);
+            children.forEach(child => sanitizeInto(elOut, child));
+
+            parentOut.appendChild(elOut);
+        };
+
+        // DOM-based allowlist sanitization.
+        // Regex-based sanitizers are brittle against malformed HTML; DOM parsing is more robust.
+        try {
+            if (typeof DOMParser === 'undefined' || typeof document === 'undefined') {
+                return escapeHtml(String(html || ''));
+            }
+
+            const parser = new DOMParser();
+            // Wrap into a container to preserve top-level nodes.
+            const doc = parser.parseFromString(`<div>${String(html)}</div>`, 'text/html');
+            const container = doc && doc.body ? doc.body.firstElementChild : null;
+            if (!container) return '';
+
+            const out = document.createElement('div');
+
+            Array.from(container.childNodes || []).forEach(n => sanitizeInto(out, n));
+            return out.innerHTML;
+        } catch (e) {
+            return escapeHtml(String(html || ''));
+        }
     }
 
     /**
@@ -316,96 +366,200 @@ ${qed}</div>`;
      */
     function preprocessLatexTextCommands(text) {
         if (!text) return text;
-        let s = String(text);
+        const input = String(text);
 
-        // Convert \textbf{...} to <strong>...</strong>
-        s = s.replace(/\\textbf\{([^}]*)\}/g, '<strong>$1</strong>');
+        function applyOnText(s) {
+            let out = String(s);
 
-        // Convert \textit{...} and \emph{...} to <em>...</em>
-        s = s.replace(/\\textit\{([^}]*)\}/g, '<em>$1</em>');
-        s = s.replace(/\\emph\{([^}]*)\}/g, '<em>$1</em>');
+            out = out.replace(
+                /\\textbf\{([^}]*)\}/g,
+                (m, inner) => `<strong>${escapeHtml(inner)}</strong>`
+            );
+            out = out.replace(
+                /\\textit\{([^}]*)\}/g,
+                (m, inner) => `<em>${escapeHtml(inner)}</em>`
+            );
+            out = out.replace(/\\emph\{([^}]*)\}/g, (m, inner) => `<em>${escapeHtml(inner)}</em>`);
+            out = out.replace(
+                /\\texttt\{([^}]*)\}/g,
+                (m, inner) => `<code>${escapeHtml(inner)}</code>`
+            );
 
-        // Convert \texttt{...} to <code>...</code>
-        s = s.replace(/\\texttt\{([^}]*)\}/g, '<code>$1</code>');
+            out = out.replace(/\\textrm\{([^}]*)\}/g, (m, inner) => escapeHtml(inner));
+            out = out.replace(/\\textsf\{([^}]*)\}/g, (m, inner) => escapeHtml(inner));
 
-        // Convert \textrm{...} and \textsf{...} to plain text
-        s = s.replace(/\\textrm\{([^}]*)\}/g, '$1');
-        s = s.replace(/\\textsf\{([^}]*)\}/g, '$1');
+            out = out.replace(
+                /\\underline\{([^}]*)\}/g,
+                (m, inner) => `<u>${escapeHtml(inner)}</u>`
+            );
+            out = out.replace(
+                /\\textsc\{([^}]*)\}/g,
+                (m, inner) => `<span class="latex-smallcaps">${escapeHtml(inner)}</span>`
+            );
+            out = out.replace(
+                /\\textsuperscript\{([^}]*)\}/g,
+                (m, inner) => `<sup>${escapeHtml(inner)}</sup>`
+            );
+            out = out.replace(
+                /\\textsubscript\{([^}]*)\}/g,
+                (m, inner) => `<sub>${escapeHtml(inner)}</sub>`
+            );
 
-        // Convert \underline{...} to <u>...</u>
-        s = s.replace(/\\underline\{([^}]*)\}/g, '<u>$1</u>');
+            out = out.replace(/\\url\{([^}]*)\}/g, (match, url) => {
+                const u = String(url || '');
+                if (isSafeUrl(u)) {
+                    const safe = escapeHtml(u);
+                    return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${safe}</a>`;
+                }
+                return escapeHtml(u);
+            });
+            out = out.replace(/\\href\{([^}]*)\}\{([^}]*)\}/g, (match, url, t) => {
+                const u = String(url || '');
+                const txt = String(t || '');
+                if (isSafeUrl(u)) {
+                    return `<a href="${escapeHtml(u)}" target="_blank" rel="noopener noreferrer">${escapeHtml(txt)}</a>`;
+                }
+                return escapeHtml(txt);
+            });
 
-        // Convert \textsc{...} (small caps) to span with style
-        s = s.replace(/\\textsc\{([^}]*)\}/g, '<span class="latex-smallcaps">$1</span>');
+            out = out.replace(
+                /\\footnote\{([^}]*)\}/g,
+                (m, inner) =>
+                    `<span class="latex-footnote" title="${escapeHtmlAttr(inner)}">†</span>`
+            );
+            out = out.replace(
+                /\\cite\{([^}]*)\}/g,
+                (m, inner) => `<span class="latex-cite">[${escapeHtml(inner)}]</span>`
+            );
+            out = out.replace(
+                /\\eqref\{([^}]*)\}/g,
+                (m, inner) => `<span class="latex-ref">(${escapeHtml(inner)})</span>`
+            );
+            out = out.replace(
+                /\\ref\{([^}]*)\}/g,
+                (m, inner) => `<span class="latex-ref">${escapeHtml(inner)}</span>`
+            );
 
-        // Convert \textsuperscript{...} and \textsubscript{...}
-        s = s.replace(/\\textsuperscript\{([^}]*)\}/g, '<sup>$1</sup>');
-        s = s.replace(/\\textsubscript\{([^}]*)\}/g, '<sub>$1</sub>');
+            out = out.replace(/\\textcolor\{([^}]*)\}\{([^}]*)\}/g, (match, color, inner) => {
+                const colorLower = String(color || '').toLowerCase();
+                const colorClass = /^[a-zA-Z]+$/.test(colorLower)
+                    ? `latex-color-${colorLower}`
+                    : 'latex-color-default';
+                return `<span class="${colorClass}">${escapeHtml(inner)}</span>`;
+            });
+            out = out.replace(/\\colorbox\{([^}]*)\}\{([^}]*)\}/g, (match, color, inner) => {
+                const colorLower = String(color || '').toLowerCase();
+                const colorClass = /^[a-zA-Z]+$/.test(colorLower)
+                    ? `latex-colorbox-${colorLower}`
+                    : 'latex-colorbox-default';
+                return `<span class="${colorClass}">${escapeHtml(inner)}</span>`;
+            });
 
-        // Convert \url{...} to clickable links
-        s = s.replace(/\\url\{([^}]*)\}/g, (match, url) => {
-            if (isSafeUrl(url)) {
-                return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
+            out = out.replace(
+                /\\sout\{([^}]*)\}/g,
+                (m, inner) => `<del>${escapeHtml(inner)}</del>`
+            );
+            out = out.replace(/\\uline\{([^}]*)\}/g, (m, inner) => `<u>${escapeHtml(inner)}</u>`);
+
+            out = out.replace(
+                /\\paragraph\{([^}]*)\}/g,
+                (m, inner) => `<strong class="latex-paragraph">${escapeHtml(inner)}</strong> `
+            );
+            out = out.replace(
+                /\\subparagraph\{([^}]*)\}/g,
+                (m, inner) => `<strong class="latex-subparagraph">${escapeHtml(inner)}</strong> `
+            );
+
+            return out;
+        }
+
+        // Apply replacements only outside math segments ($...$, $$...$$, \\(...\\), \\[...\\]).
+        let i = 0;
+        let out = '';
+        while (i < input.length) {
+            const rest = input.slice(i);
+            const candidates = [
+                { k: 'dollar2', s: '$$', ix: rest.indexOf('$$') },
+                { k: 'paren', s: '\\\\(', ix: rest.indexOf('\\(') },
+                { k: 'bracket', s: '\\\\[', ix: rest.indexOf('\\[') },
+                { k: 'dollar1', s: '$', ix: rest.indexOf('$') },
+            ].filter(x => x.ix >= 0);
+            if (!candidates.length) {
+                out += applyOnText(input.slice(i));
+                break;
             }
-            return escapeHtml(url);
-        });
+            // Prefer longer delimiters when ties occur (e.g., '$$' vs '$') for deterministic parsing.
+            candidates.sort((a, b) => a.ix - b.ix || b.s.length - a.s.length);
+            const next = i + candidates[0].ix;
+            const kind = candidates[0].k;
+            out += applyOnText(input.slice(i, next));
 
-        // Convert \href{url}{text} to clickable links
-        s = s.replace(/\\href\{([^}]*)\}\{([^}]*)\}/g, (match, url, text) => {
-            if (isSafeUrl(url)) {
-                return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+            if (kind === 'dollar2') {
+                const end = input.indexOf('$$', next + 2);
+                if (end < 0) {
+                    out += applyOnText(input.slice(next));
+                    break;
+                }
+                out += input.slice(next, end + 2);
+                i = end + 2;
+                continue;
             }
-            return escapeHtml(text);
-        });
+            if (kind === 'paren') {
+                const end = input.indexOf('\\)', next + 2);
+                if (end < 0) {
+                    out += applyOnText(input.slice(next));
+                    break;
+                }
+                out += input.slice(next, end + 2);
+                i = end + 2;
+                continue;
+            }
+            if (kind === 'bracket') {
+                const end = input.indexOf('\\]', next + 2);
+                if (end < 0) {
+                    out += applyOnText(input.slice(next));
+                    break;
+                }
+                out += input.slice(next, end + 2);
+                i = end + 2;
+                continue;
+            }
+            // Single '$' math: ignore escaped '$' and '$$' start.
+            if (input.startsWith('$$', next)) {
+                out += '$$';
+                i = next + 2;
+                continue;
+            }
+            if (next > 0 && input[next - 1] === '\\') {
+                out += '$';
+                i = next + 1;
+                continue;
+            }
+            let j = next + 1;
+            let end = -1;
+            while (j < input.length) {
+                const k = input.indexOf('$', j);
+                if (k < 0) break;
+                if (k > 0 && input[k - 1] === '\\') {
+                    j = k + 1;
+                    continue;
+                }
+                if (input.startsWith('$$', k)) {
+                    j = k + 2;
+                    continue;
+                }
+                end = k;
+                break;
+            }
+            if (end < 0) {
+                out += applyOnText(input.slice(next));
+                break;
+            }
+            out += input.slice(next, end + 1);
+            i = end + 1;
+        }
 
-        // Convert \footnote{...} to a styled span (simplified)
-        s = s.replace(/\\footnote\{([^}]*)\}/g, '<span class="latex-footnote" title="$1">†</span>');
-
-        // Convert \cite{...} to a styled citation reference
-        s = s.replace(/\\cite\{([^}]*)\}/g, '<span class="latex-cite">[$1]</span>');
-
-        // Convert \ref{...} and \eqref{...} to reference placeholders
-        s = s.replace(/\\eqref\{([^}]*)\}/g, '<span class="latex-ref">($1)</span>');
-        s = s.replace(/\\ref\{([^}]*)\}/g, '<span class="latex-ref">$1</span>');
-
-        // Convert \textcolor{color}{text} to colored text using CSS classes
-        // Note: We use CSS classes instead of inline style because inline style
-        // is stripped by the HTML sanitizer for security
-        s = s.replace(/\\textcolor\{([^}]*)\}\{([^}]*)\}/g, (match, color, text) => {
-            // Map common LaTeX color names to CSS classes
-            const colorLower = color.toLowerCase();
-            const colorClass = /^[a-zA-Z]+$/.test(colorLower)
-                ? `latex-color-${colorLower}`
-                : 'latex-color-default';
-            return `<span class="${colorClass}">${text}</span>`;
-        });
-
-        // Convert \colorbox{color}{text} to highlighted text using CSS classes
-        s = s.replace(/\\colorbox\{([^}]*)\}\{([^}]*)\}/g, (match, color, text) => {
-            const colorLower = color.toLowerCase();
-            const colorClass = /^[a-zA-Z]+$/.test(colorLower)
-                ? `latex-colorbox-${colorLower}`
-                : 'latex-colorbox-default';
-            return `<span class="${colorClass}">${text}</span>`;
-        });
-
-        // Convert \sout{...} (strikeout from ulem package) to strikethrough
-        s = s.replace(/\\sout\{([^}]*)\}/g, '<del>$1</del>');
-
-        // Convert \uline{...} (underline from ulem package)
-        s = s.replace(/\\uline\{([^}]*)\}/g, '<u>$1</u>');
-
-        // Convert \textsubscript and \textsuperscript shortcuts (^{} and _{} outside math)
-        // Note: Be careful not to interfere with math mode
-
-        // Convert \paragraph{...} and \subparagraph{...} to bold headers
-        s = s.replace(/\\paragraph\{([^}]*)\}/g, '<strong class="latex-paragraph">$1</strong> ');
-        s = s.replace(
-            /\\subparagraph\{([^}]*)\}/g,
-            '<strong class="latex-subparagraph">$1</strong> '
-        );
-
-        return s;
+        return out;
     }
 
     /**
@@ -441,7 +595,10 @@ ${qed}</div>`;
         s = s.replace(
             /\\begin\{description\}([\s\S]*?)\\end\{description\}/gi,
             (match, content) => {
-                let items = content.replace(/\\item\[([^\]]*)\]\s*/g, '</dd><dt>$1</dt><dd>');
+                let items = content.replace(
+                    /\\item\[([^\]]*)\]\s*/g,
+                    (m, term) => `</dd><dt>${escapeHtml(term)}</dt><dd>`
+                );
                 items = items.replace(/^<\/dd>/, '');
                 if (items.trim()) {
                     items = items + '</dd>';

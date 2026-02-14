@@ -249,6 +249,23 @@ class DaemonSettings(BaseSettings):
 
     # Backup configuration
     enable_git_backup: bool = Field(default=True, description="Enable git backup")
+    # Backup repository directory (can be a git submodule or a standalone git repo).
+    backup_repo_dir: str = Field(
+        default="data-repo",
+        description="Directory (relative to project root) used for git backups of dict.db",
+    )
+    backup_push: bool = Field(default=True, description="Whether to push backup commits to remote")
+    backup_push_remote: str = Field(
+        default="",
+        description="Optional git remote name to push to (empty = default upstream)",
+    )
+    backup_push_branch: str = Field(
+        default="",
+        description="Optional git branch to push to (empty = default upstream)",
+    )
+    backup_push_retries: int = Field(default=3, description="git push retry count")
+    backup_git_user_name: str = Field(default="arxiv-sanity-daemon", description="git user.name for backup commits")
+    backup_git_user_email: str = Field(default="daemon@localhost", description="git user.email for backup commits")
 
     # Subprocess guardrail (avoid daemon getting stuck forever on a hung child process).
     # Intentionally long: these jobs can legitimately take a long time, but should not hang forever.
@@ -417,6 +434,13 @@ class WebSettings(BaseSettings):
     # Debug switch
     enable_cache_status: bool = Field(default=False, description="Enable /cache_status debug page")
 
+    # Observability (disabled by default)
+    enable_metrics: bool = Field(default=False, description="Enable Prometheus /metrics endpoint")
+    metrics_key: str = Field(
+        default="",
+        description="Optional shared secret for /metrics (X-ARXIV-SANITY-METRICS-KEY)",
+    )
+
     # ---------------------------------------------------------------------
     # Frontend asset CDN (optional)
     #
@@ -546,6 +570,24 @@ class RecommendationSettings(BaseSettings):
     web_name: str = Field(default="Arxiv Sanity X", description="Brand name in email templates")
 
 
+class SentrySettings(BaseSettings):
+    """Sentry error reporting configuration (optional)."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ARXIV_SANITY_SENTRY_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=False, description="Enable Sentry initialization when DSN is set")
+    dsn: str = Field(default="", description="Sentry DSN")
+    environment: str = Field(default="", description="Sentry environment (optional)")
+    release: str = Field(default="", description="Sentry release (optional)")
+    traces_sample_rate: float = Field(default=0.0, description="Sentry tracing sample rate (0 disables)")
+    profiles_sample_rate: float = Field(default=0.0, description="Sentry profiling sample rate (0 disables)")
+
+
 class ArxivSettings(BaseSettings):
     """arXiv data collection configuration"""
 
@@ -597,6 +639,10 @@ class Settings(BaseSettings):
 
     # Log configuration
     log_level: str = "WARNING"
+    log_format: Literal["text", "json"] = Field(
+        default="text",
+        description="Log output format (text/json). When json, loguru outputs structured JSON.",
+    )
 
     # Feature switches
     enable_swagger: bool = False
@@ -622,6 +668,7 @@ class Settings(BaseSettings):
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
     reco: RecommendationSettings = Field(default_factory=RecommendationSettings)
+    sentry: SentrySettings = Field(default_factory=SentrySettings)
     arxiv: ArxivSettings = Field(default_factory=ArxivSettings)
 
     # Backward-compatible alias: older code referenced settings.access_log.

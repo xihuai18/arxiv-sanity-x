@@ -366,7 +366,9 @@ class _TLDRCache:
     def __init__(self, maxsize: int = 2000, ttl_s: float = 600.0):
         self._maxsize = maxsize
         self._ttl_s = ttl_s
-        self._data = {}
+        from collections import OrderedDict
+
+        self._data = OrderedDict()
         self._lock = Lock()
 
     def get(self, key: str) -> str | None:
@@ -378,13 +380,24 @@ class _TLDRCache:
             if time.time() - ts > self._ttl_s:
                 del self._data[key]
                 return None
+            try:
+                self._data.move_to_end(key)
+            except Exception:
+                pass
             return value
 
     def set(self, key: str, value: str):
         with self._lock:
-            if len(self._data) >= self._maxsize:
-                oldest = min(self._data.items(), key=lambda x: x[1][0])
-                del self._data[oldest[0]]
+            if key in self._data:
+                try:
+                    del self._data[key]
+                except Exception:
+                    pass
+            while len(self._data) >= self._maxsize:
+                try:
+                    self._data.popitem(last=False)
+                except Exception:
+                    break
             self._data[key] = (time.time(), value)
 
 
@@ -1149,8 +1162,8 @@ def generate_paper_summary(
                             invalidate_summary_cache_stats()
                     except Exception:
                         invalidate_summary_cache_stats()
-                except Exception as e:
-                    logger.error(f"Failed to cache paper summary: {e}")
+                except Exception:
+                    logger.opt(exception=True).error("Failed to cache paper summary")
             else:
                 logger.warning(f"Summary generation failed, not caching: {pid}")
 
@@ -1161,5 +1174,5 @@ def generate_paper_summary(
     except SummaryCacheMiss:
         raise
     except Exception as e:
-        logger.error(f"Error occurred while generating paper summary: {e}")
+        logger.opt(exception=True).error("Error occurred while generating paper summary")
         return f"# Error\n\nFailed to generate summary: {str(e)}", {}

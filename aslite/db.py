@@ -169,18 +169,25 @@ class SqliteKV:
 
         # Create table if needed (only for write mode)
         if flag == "c":
-            self._conn.execute(f"CREATE TABLE IF NOT EXISTS {tablename} (key TEXT PRIMARY KEY, value BLOB)")
+            self._execute_with_retry(f"CREATE TABLE IF NOT EXISTS {tablename} (key TEXT PRIMARY KEY, value BLOB)")
             if self.autocommit:
-                self._conn.commit()
+                self._commit_with_retry()
         elif flag == "r":
             # Verify table exists for read-only mode
-            cursor = self._conn.execute(
+            cursor = self._execute_with_retry(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (tablename,),
             )
             if cursor.fetchone() is None:
                 self._conn.close()
                 raise sqlite3.OperationalError(f"no such table: {tablename}")
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """Return the underlying SQLite connection (advanced/transactional usage)."""
+        if not self._conn:
+            raise RuntimeError("Database connection is closed")
+        return self._conn
 
     def _encode(self, obj):
         """Encode object to bytes for storage."""

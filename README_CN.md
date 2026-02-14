@@ -11,6 +11,7 @@
 ### 入门
 - [核心功能概览](#-核心功能概览)
 - [快速开始](#-快速开始)
+- [Docs](#docs)
 
 ### 使用
 - [用户使用指南](#-用户使用指南)
@@ -38,6 +39,15 @@
 - [致谢](#-致谢)
 
 ---
+
+## Docs
+
+- 入口：[docs/INDEX.md](docs/INDEX.md)
+- 运维：[docs/OPERATIONS.md](docs/OPERATIONS.md)
+- 安全：[docs/SECURITY.md](docs/SECURITY.md)
+- 开发：[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
+- 安全策略：[SECURITY.md](SECURITY.md)
 
 ## 🎯 核心功能概览
 
@@ -93,7 +103,7 @@ arxiv-sanity-x/
 │
 ├── backend/              # Flask 应用
 │   ├── app.py            # 应用工厂 & 初始化
-│   ├── blueprints/       # 路由处理器（9 个 Blueprint）
+│   ├── blueprints/       # 路由处理器（10 个 Blueprint）
 │   │   ├── web.py        # 页面路由（/, /summary, /profile 等）
 │   │   ├── api_user.py   # 登录/登出、用户状态、邮箱登记
 │   │   ├── api_search.py # 搜索端点
@@ -102,7 +112,8 @@ arxiv-sanity-x/
 │   │   ├── api_papers.py # 论文数据 & 图片
 │   │   ├── api_readinglist.py # 阅读列表
 │   │   ├── api_uploads.py# 上传 PDF + 解析/抽取/相似度
-│   │   └── api_sse.py    # Server-Sent Events
+│   │   ├── api_sse.py    # Server-Sent Events
+│   │   └── metrics.py    # /metrics（Prometheus，可选）
 │   ├── services/         # 业务逻辑层
 │   │   ├── data_service.py    # 缓存 & 数据管理
 │   │   ├── search_service.py  # TF-IDF、语义、混合搜索
@@ -133,6 +144,7 @@ arxiv-sanity-x/
 ├── bin/                  # 服务启动器
 │   ├── run_services.py   # 一键多服务启动器
 │   ├── up.sh             # Gunicorn 启动脚本
+│   ├── huey_consumer.py  # Huey consumer 封装（内存限制 + worker 角色）
 │   ├── embedding_serve.sh# Ollama 嵌入服务
 │   ├── mineru_serve.sh   # MinerU VLM 服务
 │   └── litellm.sh        # LiteLLM 网关
@@ -231,18 +243,19 @@ arxiv-sanity-x/
 
 - `data/papers.db`：论文与元信息（由 arXiv 拉取）
 - `data/dict.db`：用户数据（标签/负反馈/关键词/阅读列表/邮箱登记/总结状态等）
-- `data/features.p`：由 [compute.py](compute.py) 生成的 TF‑IDF/混合特征
+- `data/features.p`：由 [tools/compute.py](tools/compute.py) 生成的 TF‑IDF/混合特征
 - `data/summary/`：LLM 总结缓存
 - `data/pdfs/`、`data/mineru/`、`data/html_md/`：解析相关的中间缓存
 - `data/uploads/`：上传的私有 PDF 与派生产物（如果使用上传功能）
 - `data/huey.db`：Huey 任务队列数据库
+- `data/sse_events.db`：SSE 跨进程事件总线（SQLite，启用时创建）
 - `data-repo/`（可选）：daemon 用于备份 `data/dict.db` 的 git submodule
 
 迁移到新机器时，通常至少复制：
 
 - `data/papers.db`
 - `data/dict.db`
-- `data/features.p`（或在新环境重新运行 [compute.py](compute.py) 生成）
+- `data/features.p`（或在新环境重新运行 [tools/compute.py](tools/compute.py) 生成）
 - `data/summary/`（可选：想保留已缓存总结时再带上）
 
 如果启用了 `data-repo/` 备份，也可以从这里恢复：
@@ -263,17 +276,17 @@ arxiv-sanity-x/
 
 ## 🧩 常见问题与排错
 
-- **网站空白/没有论文**：通常是还没跑 [arxiv_daemon.py](arxiv_daemon.py) + [compute.py](compute.py)。
+- **网站空白/没有论文**：通常是还没跑 [tools/arxiv_daemon.py](tools/arxiv_daemon.py) + [tools/compute.py](tools/compute.py)。
 - **总结一直失败**：检查 `.env` 里的 `ARXIV_SANITY_LLM_API_KEY`、`ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`。
-- **总结不自动开始生成**：总结页在“缓存缺失”时不会自动入队，请手动点击 **Generate**；同时确保 Huey consumer 在跑（推荐：`python3 bin/run_services.py` 一键启动）。
-- **语义/混合检索没效果**：确认嵌入（Embedding）已启用，并用 [compute.py](compute.py) 重新生成特征（混合特征需要包含嵌入）。
+- **总结不自动开始生成**：总结页在“缓存缺失”时不会自动入队，请手动点击 **Generate**；同时确保 Huey consumer 在跑（推荐：`python bin/run_services.py` 一键启动；或只启动 consumer：`python bin/huey_consumer.py`）。
+- **语义/混合检索没效果**：确认嵌入（Embedding）已启用，并用 [tools/compute.py](tools/compute.py) 重新生成特征（混合特征需要包含嵌入）。
 - **按时间排序异常/变慢**：重建元数据时间索引：`python -m tools rebuild_time_index`。
 - **MinerU 报错**：
     - API 后端：检查 `MINERU_API_KEY`（或 `ARXIV_SANITY_MINERU_API_KEY`）
     - 本地后端：检查 `ARXIV_SANITY_MINERU_BACKEND`，以及服务是否能在 `MINERU_PORT` 访问
-- **崩溃后卡住（锁文件）**：运行 [cleanup_locks.py](cleanup_locks.py)，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
+- **崩溃后卡住（锁文件）**：运行 [scripts/cleanup_locks.py](scripts/cleanup_locks.py)，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
 - **总结任务“卡死/幽灵任务”（Huey）**：先 dry-run `python scripts/cleanup_tasks.py`，确认无误后加 `--force`；必要时用 `--flush-huey` 清空队列（谨慎）。
-- **features.p 读取失败（NumPy 版本不匹配）**：在当前环境重新运行 [compute.py](compute.py) 生成特征文件。
+- **features.p 读取失败（NumPy 版本不匹配）**：在当前环境重新运行 [tools/compute.py](tools/compute.py) 生成特征文件。
 - **Gunicorn 报 `WORKER TIMEOUT` / `SIGKILL`**：若日志里先出现 `WORKER TIMEOUT`，通常是 gunicorn 默认超时太短或冷启动/初始化阻塞。可通过 `ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"` 提高超时；并避免在开启大缓存时配置过多 worker。`bin/up.sh` 在 SSE 场景会优先选择 `gevent` 并自动设置较长超时。
 - **gevent 的 MonkeyPatchWarning（ssl/urllib3）**：常见于 `--preload` 场景；若仍出现，可尝试 `ARXIV_SANITY_GUNICORN_PRELOAD=false` 或强制 `ARXIV_SANITY_GUNICORN_WORKER_CLASS=gthread`。
 - **实时推送不工作（SSE）**：确认 `ARXIV_SANITY_SSE_ENABLED=true`，并访问 `GET /api/sse_stats` 查看每个进程的 SSE 队列/总线状态。
@@ -746,7 +759,7 @@ print(settings.email.smtp_server)
 
 #### 网络 / 代理
 
-- `http_proxy`、`https_proxy`：被 [arxiv_daemon.py](arxiv_daemon.py) 等出网请求使用。
+- `http_proxy`、`https_proxy`：被 [tools/arxiv_daemon.py](tools/arxiv_daemon.py) 等出网请求使用。
 
 #### Gunicorn（up.sh）
 
@@ -901,6 +914,10 @@ python -m tools daemon
 
 路由由 `backend/blueprints/` 下的 Flask Blueprint 提供。
 
+如需查看 Swagger/OpenAPI 文档（默认关闭以减少暴露面），可设置 `ARXIV_SANITY_ENABLE_SWAGGER=true`，然后访问 `GET /apidocs/`。
+如需开启 Prometheus 指标，可设置 `ARXIV_SANITY_ENABLE_METRICS=true`（可选鉴权：`ARXIV_SANITY_METRICS_KEY`，请求头 `X-ARXIV-SANITY-METRICS-KEY`）。
+如需启用 Sentry（可选），可设置 `ARXIV_SANITY_SENTRY_ENABLED=true` 且配置 `ARXIV_SANITY_SENTRY_DSN=...`（可选：`ARXIV_SANITY_SENTRY_ENVIRONMENT`、`ARXIV_SANITY_SENTRY_RELEASE`、`ARXIV_SANITY_SENTRY_TRACES_SAMPLE_RATE`、`ARXIV_SANITY_SENTRY_PROFILES_SAMPLE_RATE`）。
+
 ### 页面路由（`web.py`）
 
 | 路由               | 说明                 |
@@ -913,6 +930,9 @@ python -m tools daemon
 | `GET /stats`       | 系统统计页面         |
 | `GET /about`       | 关于页面             |
 | `GET /readinglist` | 阅读列表页面         |
+| `GET /metrics`     | Prometheus 指标（可选） |
+
+说明：`GET /health` 冷启动阶段会返回 `503`（如 `{"status":"loading"}`），就绪后返回 `200`（如 `{"status":"ok","papers":<count>,"deps":{...}}`）。
 
 ### 搜索与推荐（`api_search.py`）
 
@@ -944,6 +964,7 @@ python -m tools daemon
 | --------------------------------- | ---------------------- |
 | `POST /api/get_paper_summary`     | 获取/生成论文总结      |
 | `POST /api/trigger_paper_summary` | 触发异步总结任务       |
+| `POST /api/trigger_paper_summary_bulk` | 批量触发异步总结任务 |
 | `GET /api/task_status/<task_id>`  | 查询 Huey 任务状态     |
 | `GET /api/queue_stats`            | Huey 队列统计          |
 | `POST /api/summary_status`        | 获取总结状态（JSON）   |
@@ -951,11 +972,14 @@ python -m tools daemon
 | `POST /api/clear_paper_cache`     | 清除论文所有缓存       |
 | `GET /api/check_paper_summaries`  | 校验/重查缓存摘要      |
 
+说明：对任务 owner，`GET /api/task_status/<task_id>` 会额外返回 `pid`、`model`、`error`、`priority`、`stage` 等字段（其中 `stage` 为粗粒度进度标记）；部分排队任务还可能返回 `queue_rank` / `queue_total`。
+
 ### 标签管理（`api_tags.py`）
 
 | 端点                              | 说明                      |
 | --------------------------------- | ------------------------- |
 | `POST /api/tag_feedback`          | 添加/移除正负反馈（JSON） |
+| `POST /api/tag_feedback_bulk`     | 批量添加/移除正负反馈（JSON） |
 | `GET /api/tag_members`            | 获取标签成员              |
 | `POST /api/paper_titles`          | 批量获取论文标题          |
 | `POST /add_tag/<tag>`             | 创建标签                  |
@@ -1006,16 +1030,17 @@ python -m tools daemon
 
 | 端点                                 | 说明                                     |
 | ------------------------------------ | ---------------------------------------- |
-| `POST /upload_pdf`                   | 上传私有 PDF                             |
-| `GET /uploaded_papers/list`          | 列出已上传论文                           |
-| `POST /uploaded_papers/update_meta`  | 更新上传论文元信息                       |
-| `POST /uploaded_papers/delete`       | 删除上传论文                             |
-| `POST /uploaded_papers/retry_parse`  | 重试解析                                 |
-| `POST /uploaded_papers/parse`        | 解析上传 PDF                             |
-| `POST /uploaded_papers/extract_info` | 用 LLM 抽取元信息                        |
-| `GET /uploaded_papers/pdf/<pid>`     | 下载上传 PDF                             |
-| `GET /uploaded_papers/similar/<pid>` | 上传论文相似度搜索                       |
-| `GET /uploaded_papers/tldr/<pid>`    | 获取上传论文 TL;DR（若有缓存摘要则复用） |
+| `POST /api/upload_pdf`                   | 上传私有 PDF                             |
+| `GET /api/uploaded_papers/list`          | 列出已上传论文                           |
+| `POST /api/uploaded_papers/process`      | 处理上传（解析 + 抽取 + 总结）           |
+| `POST /api/uploaded_papers/parse`        | 解析上传 PDF                             |
+| `POST /api/uploaded_papers/extract_info` | 用 LLM 抽取元信息                        |
+| `POST /api/uploaded_papers/update_meta`  | 更新上传论文元信息                       |
+| `POST /api/uploaded_papers/delete`       | 删除上传论文                             |
+| `POST /api/uploaded_papers/retry_parse`  | 重试解析                                 |
+| `GET /api/uploaded_papers/pdf/<pid>`     | 下载上传 PDF                             |
+| `GET /api/uploaded_papers/similar/<pid>` | 上传论文相似度搜索                       |
+| `GET /api/uploaded_papers/tldr/<pid>`    | 获取上传论文 TL;DR（若有缓存摘要则复用） |
 
 ---
 
@@ -1161,6 +1186,13 @@ arXiv API → arxiv_daemon.py → papers.db/dict.db
 ---
 
 ## 📈 更新日志
+
+### Unreleased
+
+- 文档：新增 `docs/`（运维/安全/开发）并在 README 中链接
+- API 文档：补充 `/api/task_status/<task_id>` owner-only 字段说明（包括 `stage`）
+- API 文档：修正上传相关端点补齐 `/api` 前缀，并补充 `/api/uploaded_papers/process`
+- 可观测性：补充可选 Sentry（`ARXIV_SANITY_SENTRY_*`）与 Prometheus metrics（`/metrics`）说明
 
 ### v3.2 - 上传功能、测试增强与安全加固
 

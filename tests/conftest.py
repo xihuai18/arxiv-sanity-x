@@ -31,8 +31,8 @@ def configure_test_env() -> None:
 
     Data directory strategy:
     - If ARXIV_SANITY_DATA_DIR is already set, use it (user override)
-    - If real data/ directory exists with papers.db, use it (development environment)
-    - Otherwise, use a temporary directory (CI or fresh environment)
+    - Otherwise, default to an isolated temporary directory to avoid modifying real data/
+    - Opt-in to real data/ by setting ARXIV_SANITY_TEST_USE_REAL_DATA=1 (and papers.db exists)
 
     This ensures:
     1. Tests don't accidentally modify real data (dict.db writes go to temp)
@@ -40,17 +40,19 @@ def configure_test_env() -> None:
     3. Tests gracefully skip in CI environments without data
     """
     if "ARXIV_SANITY_DATA_DIR" not in os.environ:
-        # Check if real data directory exists with papers.db
+        use_real = str(os.environ.get("ARXIV_SANITY_TEST_USE_REAL_DATA", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
         real_data_dir = os.path.join(REPO_ROOT, "data")
         real_papers_db = os.path.join(real_data_dir, "papers.db")
 
-        if os.path.exists(real_papers_db):
-            # Use real data directory for read operations
-            # Note: dict.db tables will be created in real data/ if they don't exist
-            # This is acceptable for development but not ideal for CI
+        if use_real and os.path.exists(real_papers_db):
             os.environ["ARXIV_SANITY_DATA_DIR"] = real_data_dir
         else:
-            # Use temporary directory to isolate tests
+            # Use temporary directory to isolate tests.
             _test_data_dir = tempfile.mkdtemp(prefix="arxiv_sanity_test_")
             os.environ["ARXIV_SANITY_DATA_DIR"] = _test_data_dir
 

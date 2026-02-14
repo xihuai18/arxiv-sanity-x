@@ -34,6 +34,30 @@ class TestValidateTagName:
         error = validate_tag_name("tag123")
         assert error is None
 
+    def test_validate_tag_name_rejects_forward_slash(self):
+        """Tag names with forward slash are rejected."""
+        from backend.utils.validation import validate_tag_name
+
+        error = validate_tag_name("tag/")
+        assert error is not None
+        assert "slash" in error.lower()
+
+    def test_validate_tag_name_rejects_backslash(self):
+        """Tag names with backslash are rejected."""
+        from backend.utils.validation import validate_tag_name
+
+        error = validate_tag_name("tag\\name")
+        assert error is not None
+        assert "slash" in error.lower()
+
+    def test_validate_tag_name_rejects_slash_in_middle(self):
+        """Tag names with slash in the middle are rejected."""
+        from backend.utils.validation import validate_tag_name
+
+        error = validate_tag_name("tag/name")
+        assert error is not None
+        assert "slash" in error.lower()
+
 
 class TestValidateKeywordName:
     """Tests for validate_keyword_name function."""
@@ -58,6 +82,22 @@ class TestValidateKeywordName:
 
         error = validate_keyword_name("valid_keyword")
         assert error is None
+
+    def test_validate_keyword_name_rejects_slash(self):
+        """Keyword names with slashes are rejected."""
+        from backend.utils.validation import validate_keyword_name
+
+        error = validate_keyword_name("key/word")
+        assert error is not None
+        assert "slash" in error.lower()
+
+    def test_validate_keyword_name_rejects_backslash(self):
+        """Keyword names with backslash are rejected."""
+        from backend.utils.validation import validate_keyword_name
+
+        error = validate_keyword_name("key\\word")
+        assert error is not None
+        assert "slash" in error.lower()
 
 
 class TestApiHelpers:

@@ -121,6 +121,9 @@ def validate_tag_name(tag: str) -> str | None:
     """Validate tag name. Returns error message or None if valid."""
     if not tag:
         return "error, tag is required"
+    # Tag names are used in URL paths by some legacy endpoints; disallow slashes to avoid routing ambiguity.
+    if "/" in tag or "\\" in tag:
+        return "error, tag cannot contain slashes"
     if tag in ("all", "null"):
         return f"error, cannot use the protected tag '{tag}'"
     return None
@@ -130,6 +133,8 @@ def validate_keyword_name(keyword: str) -> str | None:
     """Validate keyword name. Returns error message or None if valid."""
     if not keyword:
         return "error, keyword is required"
+    if "/" in keyword or "\\" in keyword:
+        return "error, keyword cannot contain slashes"
     if keyword == "null":
         return "error, cannot use the protected keyword 'null'"
     return None

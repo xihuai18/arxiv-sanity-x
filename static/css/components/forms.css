@@ -75,6 +75,13 @@
     min-width: 280px;
 }
 
+@media (max-width: 640px) {
+    .search-row .search-input,
+    #qfield {
+        min-width: 0;
+    }
+}
+
 .search-row .primary-btn {
     flex: 0 0 auto;
     margin-left: 0;

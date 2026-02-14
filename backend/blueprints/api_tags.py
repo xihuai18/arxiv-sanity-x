@@ -45,6 +45,43 @@ def api_tag_feedback():
     return legacy.api_tag_feedback()
 
 
+@bp.route("/api/tag_feedback_bulk", methods=["POST"])
+def api_tag_feedback_bulk():
+    """Submit tag feedback in batch
+    ---
+    tags:
+      - Tags
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                required: [pid, tag, label]
+                properties:
+                  pid:
+                    type: string
+                  tag:
+                    type: string
+                  label:
+                    type: integer
+                    enum: [-1, 0, 1]
+    responses:
+      200:
+        description: Feedback recorded
+      401:
+        description: Not logged in
+    """
+    return legacy.api_tag_feedback_bulk()
+
+
 @bp.route("/api/tag_members", methods=["GET"])
 def api_tag_members():
     """List papers under a tag

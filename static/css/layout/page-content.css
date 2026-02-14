@@ -9,7 +9,8 @@
 .page-content {
     max-width: var(--content-max-width);
     margin: 0 auto;
-    padding: 0 20px;
+    padding: 0 calc(20px + env(safe-area-inset-right, 0px)) 0
+        calc(20px + env(safe-area-inset-left, 0px));
     width: 100%;
     box-sizing: border-box;
 }

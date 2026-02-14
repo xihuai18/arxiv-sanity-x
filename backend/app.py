@@ -7,7 +7,7 @@ import mimetypes
 import os
 import sys
 
-from flask import Flask, request
+from flask import Flask, render_template, request
 from loguru import logger
 
 from config import settings
@@ -21,13 +21,15 @@ from .blueprints import (
     api_tags,
     api_uploads,
     api_user,
+    metrics,
     web,
 )
 from .utils.manifest import static_url as manifest_static_url
 from .utils.validation import get_or_set_csrf_token
 
 logger.remove()
-logger.add(sys.stdout, level=settings.log_level.upper())
+_serialize_logs = str(getattr(settings, "log_format", "text") or "text").strip().lower() == "json"
+logger.add(sys.stdout, level=settings.log_level.upper(), serialize=_serialize_logs)
 
 if not settings.access_log:
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -86,6 +88,14 @@ def create_app() -> Flask:
     )
     app.secret_key = _load_secret_key()
 
+    # Optional Sentry error reporting (no-op unless configured).
+    try:
+        from config.sentry import initialize_sentry
+
+        initialize_sentry()
+    except Exception:
+        pass
+
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE=settings.web.cookie_samesite,
@@ -109,6 +119,36 @@ def create_app() -> Flask:
             Swagger(app)
         except ImportError:
             logger.warning("flasgger not installed, Swagger UI disabled")
+
+    @app.errorhandler(404)
+    def _handle_404(_err):
+        try:
+            return (
+                render_template(
+                    "error.html",
+                    title="Not Found",
+                    status_code=404,
+                    message="The requested page does not exist.",
+                ),
+                404,
+            )
+        except Exception:
+            return "Not Found", 404
+
+    @app.errorhandler(500)
+    def _handle_500(_err):
+        try:
+            return (
+                render_template(
+                    "error.html",
+                    title="Server Error",
+                    status_code=500,
+                    message="An unexpected error occurred.",
+                ),
+                500,
+            )
+        except Exception:
+            return "Internal Server Error", 500
 
     @app.after_request
     def add_security_headers(resp):
@@ -203,11 +243,16 @@ def create_app() -> Flask:
     app.register_blueprint(api_papers.bp)
     app.register_blueprint(api_readinglist.bp)
     app.register_blueprint(api_uploads.bp)
+    app.register_blueprint(metrics.bp)
 
     from . import legacy
 
     app.before_request(legacy.before_request)
     app.teardown_request(legacy.close_connection)
+
+    # Prometheus request metrics (no-op unless enabled).
+    app.before_request(metrics.before_request_hook)
+    app.after_request(metrics.after_request_hook)
 
     # Start SSE IPC runtime lazily (safe under gunicorn --preload).
     @app.before_request

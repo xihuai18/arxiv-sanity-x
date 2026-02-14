@@ -1,26 +1,6 @@
 {% extends "base.html" %}
 
-{% block variables %}
-<script>
-var statsData = {
-    total: {{ num_papers }},
-    flow: [
-        { label: '1h', value: {{ thr_1 }}, color: '#ef4444' },
-        { label: '6h', value: {{ thr_6 }}, color: '#f97316' },
-        { label: '12h', value: {{ thr_12 }}, color: '#eab308' },
-        { label: '24h', value: {{ thr_24 }}, color: '#84cc16' },
-        { label: '48h', value: {{ thr_48 }}, color: '#22c55e' },
-        { label: '72h', value: {{ thr_72 }}, color: '#14b8a6' },
-        { label: '96h', value: {{ thr_96 }}, color: '#06b6d4' },
-        { label: 'Week', value: {{ thr_week }}, color: '#3b82f6' },
-        { label: 'Month', value: {{ thr_month }}, color: '#6366f1' },
-        { label: 'Quarter', value: {{ thr_quarter }}, color: '#8b5cf6' },
-        { label: '6 Months', value: {{ thr_semiannual }}, color: '#a855f7' },
-        { label: 'Year', value: {{ thr_year }}, color: '#ec4899' }
-    ]
-};
-</script>
-{% endblock %}
+{% block variables %}{% endblock %}
 
 {% block content %}
 <div id="statswrap" class="stats-container">

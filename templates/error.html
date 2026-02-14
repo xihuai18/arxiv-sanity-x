@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container" role="main" style="max-width: 820px; margin: 24px auto; padding: 0 16px;">
+    <h1 style="margin: 0 0 8px; font-size: 24px;">{{ status_code }}{% if title %} - {{ title }}{% endif %}</h1>
+    <p style="margin: 0 0 16px; color: var(--text-muted);">{{ message }}</p>
+    <p style="margin: 0;">
+        <a href="/" class="btn btn-primary">Go Home</a>
+        <a href="/profile" class="btn btn-secondary" style="margin-left: 8px;">Profile</a>
+    </p>
+</div>
+{% endblock %}

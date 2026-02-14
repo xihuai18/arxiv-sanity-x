@@ -95,3 +95,25 @@ def api_readinglist_list():
         description: Not logged in
     """
     return legacy.api_readinglist_list()
+
+
+@bp.route("/api/readinglist/paper", methods=["GET"])
+def api_readinglist_paper():
+    """Get a single reading list paper card payload
+    ---
+    tags:
+      - Reading List
+    parameters:
+      - in: query
+        name: pid
+        type: string
+        required: true
+    responses:
+      200:
+        description: Paper payload
+      401:
+        description: Not logged in
+      404:
+        description: Not in reading list / paper not found
+    """
+    return legacy.api_readinglist_paper()

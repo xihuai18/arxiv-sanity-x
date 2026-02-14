@@ -183,6 +183,21 @@
     transition: opacity 0.15s ease;
 }
 
+@media (hover: none) and (pointer: coarse) {
+    .keyword-actions {
+        opacity: 1;
+        top: -4px;
+        right: -4px;
+    }
+
+    .keyword-edit,
+    .keyword-delete {
+        width: 32px;
+        height: 32px;
+        font-size: 14px;
+    }
+}
+
 .keyword-edit,
 .keyword-delete {
     background-color: var(--card-bg);

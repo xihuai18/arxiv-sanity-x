@@ -278,9 +278,10 @@ class TestSearchDowngradeSwitches:
         sentinel.__getattr__ = _missing_attr  # type: ignore[attr-defined]
         monkeypatch.setitem(sys.modules, "backend.services.semantic_service", sentinel)
 
-        pids, scores = search_service.enhanced_search_rank(q="test query", limit=10, search_mode="semantic")
+        pids, scores, details = search_service.enhanced_search_rank(q="test query", limit=10, search_mode="semantic")
         assert pids == ["p1", "p2"]
         assert scores == [10.0, 9.0]
+        assert details == {}
 
         pids, scores, details = search_service.enhanced_search_rank(q="test query", limit=10, search_mode="hybrid")
         assert pids == ["p1", "p2"]

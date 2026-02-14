@@ -1,10 +1,10 @@
 <!DOCTYPE HTML>
-<html>
+<html lang="en">
 
 <head>
 <!-- meta info -->
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% if title %}{{ title }}{% else %}arxiv-sanity-X{% endif %}</title>
 <meta name="csrf-token" content="{{ csrf_token }}">
 
@@ -24,6 +24,16 @@
 
 <!-- CSS - Use built files with hash filenames -->
 <link rel="stylesheet" type="text/css" href="{{ hashed_static('dist/main.css') }}">
+<script>
+// Injected globals for frontend modules.
+// Keep these in base.html so every page gets a consistent baseline.
+var user = {{ user | default('', true) | tojson }};
+var __arxivSanityStaticBase = {{ url_for('static', filename='') | tojson }};
+// Frontend third-party asset CDN config (optional).
+// Used by CommonUtils to load large assets (e.g., MathJax) with CDN->local fallback.
+var __arxivSanityAssetCdnEnabled = {{ asset_cdn_enabled | default(true) | tojson }};
+var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.jsdelivr.net/npm', true) | tojson }};
+</script>
 <!-- Common utilities (CSRF, events, dropdown registry) - Must load synchronously as other scripts depend on it -->
 <script src="{{ hashed_static('dist/common_utils.js') }}"></script>
 <!-- Google Fonts - Inter -->
@@ -41,17 +51,6 @@
 </noscript>
 <!-- Favicon -->
 <link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon-x.png') }}" />
-
-<script>
-// Injected globals for frontend modules.
-// Keep these in base.html so every page gets a consistent baseline.
-var user = {{ user | default('', true) | tojson }};
-var __arxivSanityStaticBase = {{ url_for('static', filename='') | tojson }};
-// Frontend third-party asset CDN config (optional).
-// Used by CommonUtils to load large assets (e.g., MathJax) with CDN->local fallback.
-var __arxivSanityAssetCdnEnabled = {{ asset_cdn_enabled | default(true) | tojson }};
-var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.jsdelivr.net/npm', true) | tojson }};
-</script>
 {% block variables %}
 {% endblock %}
 {% block head_extra %}
@@ -97,6 +96,25 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
     </div>
 </div>
 
+{% set _flashes = get_flashed_messages(with_categories=true) %}
+{% if _flashes %}
+<div class="flash-container" role="status" aria-live="polite" style="max-width: 1100px; margin: 12px auto 0; padding: 0 16px;">
+    {% for category, message in _flashes %}
+    {% set kind = category or 'info' %}
+    <div class="flash flash-{{ kind }}" style="
+        margin: 8px 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(127,127,127,0.2);
+        background: rgba(127,127,127,0.08);
+        color: var(--text-color);
+        ">
+        {{ message }}
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
 <div class="page-content">
 {% block content %}
 {% endblock %}
@@ -130,6 +148,14 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
             setButtonState();
         });
     }
+
+    // Cross-tab sync: apply theme changes made in other tabs.
+    window.addEventListener('storage', (e) => {
+        if (!e || e.key !== 'theme') return;
+        const next = e.newValue || 'light';
+        document.documentElement.setAttribute('data-theme', next);
+        setButtonState();
+    });
 })();
 </script>
 

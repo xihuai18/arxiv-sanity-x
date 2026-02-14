@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from unittest.mock import patch
 
 
@@ -19,6 +20,10 @@ class _DummyDB(dict):
     def __setitem__(self, key, value):
         self.write_count += 1
         return super().__setitem__(key, value)
+
+    @contextmanager
+    def transaction(self, mode: str = "IMMEDIATE"):
+        yield self
 
 
 def test_set_status_skips_write_when_no_effective_change():

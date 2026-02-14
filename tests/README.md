@@ -1,6 +1,6 @@
 # Test Directory Structure
 
-This directory contains all tests for the arxiv-sanity project, organized by type into three subdirectories.
+This directory contains tests for arxiv-sanity-X, organized by scope and runtime requirements.
 
 ## Directory Structure
 
@@ -11,34 +11,14 @@ tests/
 ├── __init__.py              # Package documentation
 ├── README.md                # This file
 │
-├── unit/                    # Unit tests
-│   ├── test_cache.py        # Cache utility tests
-│   ├── test_data_service.py # Data service tests
-│   ├── test_manifest.py     # Static resource manifest tests
-│   ├── test_render_service.py   # Render service tests
-│   ├── test_schemas.py      # Pydantic schema tests
-│   ├── test_search_service.py   # Search service function tests
-│   ├── test_sse.py          # SSE event utility tests
-│   ├── test_summary_service.py  # Summary service function tests
-│   ├── test_user_service.py # User service tests
-│   └── test_validation.py   # Validation function tests
+├── unit/                    # Unit tests (no real services)
+│   └── ...                  # Pure logic, repositories, config, SSE bus, etc.
 │
-├── integration/             # Integration tests (using Flask test_client)
-│   ├── test_app.py          # App creation, blueprints, route tests
-│   ├── test_api_auth.py     # Authentication and CSRF protection tests
-│   ├── test_api_login.py    # Login/logout API tests
-│   ├── test_api_papers.py   # Paper-related API tests
-│   ├── test_api_readinglist.py  # Reading list API tests
-│   ├── test_api_search.py   # Search API tests (keyword/tag search)
-│   ├── test_api_summary.py  # Summary API tests (status/clear/check)
-│   ├── test_api_tags.py     # Tag API tests
-│   ├── test_api_tag_management.py  # Tag/keyword management API tests
-│   └── test_api_user.py     # User API tests
+├── integration/             # Integration tests (Flask test_client)
+│   └── ...                  # API contracts, auth/CSRF, uploads, concurrency, etc.
 │
 ├── live/                    # Live service tests (requires running services)
-│   ├── test_llm_service.py  # LLM/LiteLLM service tests
-│   ├── test_web_server.py   # Web server tests
-│   └── test_data_service.py # Data service tests (requires data files)
+│   └── ...                  # Probes web/LLM/embedding availability and skips when absent
 │
 └── e2e/                     # End-to-end tests (requires running server)
     └── test_api_e2e.py      # Complete API test suite
@@ -68,9 +48,15 @@ ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/ tests/integration/ -v
 ### Run All Unit and Integration Tests
 
 ```bash
-cd /path/to/arxiv-sanity
+cd /path/to/arxiv-sanity-x
 conda activate sanity
 pytest tests/unit/ tests/integration/ -v
+```
+
+Recommended (fast + avoids daemon side effects):
+
+```bash
+pytest tests/unit tests/integration -q -k "not daemon"
 ```
 
 ### Run Only Unit Tests
@@ -98,7 +84,10 @@ End-to-end tests require a running server:
 
 ```bash
 # Start the server first
-./up.sh
+bash bin/up.sh
+
+# Also start Huey consumer if your flow triggers async tasks
+python bin/huey_consumer.py
 
 # In another terminal, run the tests
 python tests/e2e/test_api_e2e.py --host localhost --port 55555

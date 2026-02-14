@@ -1,3 +1,0 @@
-[submodule "data-repo"]
-	path = data-repo
-	url = https://github.com/arxiv-sanity/arxiv-sanity-data-dummy.git

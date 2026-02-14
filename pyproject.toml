@@ -16,6 +16,7 @@ dependencies = [
   "Flask",
   "Werkzeug",
   "gunicorn",
+  "gevent",
 
   # ML / AI
   "numpy",
@@ -39,11 +40,13 @@ dependencies = [
 
   # Config / utils
   "loguru",
+  "sentry-sdk",
   "tqdm",
   "backoff",
   "pydantic>=2.6,<3",
   "pydantic-settings>=2.0,<3",
   "flasgger",
+  "prometheus-client",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +55,7 @@ dependencies = [
 
 dev = [
   "pytest",
+  "pytest-cov",
   "pre-commit",
 ]
 

@@ -12,7 +12,7 @@ def test_fetch_compute_skips_on_fetch_failure(monkeypatch):
 
     calls: list[tuple[str, list[str]]] = []
 
-    def fake_run_cmd(cmd, name: str) -> bool:
+    def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
         calls.append((name, list(cmd)))
         return False if name == "fetch" else True
 
@@ -29,7 +29,7 @@ def test_fetch_compute_runs_compute_and_optional_embeddings(monkeypatch):
 
     calls: list[tuple[str, list[str]]] = []
 
-    def fake_run_cmd(cmd, name: str) -> bool:
+    def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
         calls.append((name, list(map(str, cmd))))
         return True
 
@@ -58,7 +58,7 @@ def test_gen_summary_respects_enable_summary(monkeypatch):
 
     calls: list[str] = []
 
-    def fake_run_cmd(_cmd, name: str) -> bool:
+    def fake_run_cmd(_cmd, name: str, **kwargs) -> bool:
         calls.append(name)
         return True
 

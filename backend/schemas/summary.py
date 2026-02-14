@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict
 
 
@@ -29,6 +31,10 @@ class SummaryTriggerRequest(SummaryPidRequest):
     # Backward compatibility: some legacy clients use `force` instead of `force_regenerate`.
     force: bool = False
     force_regenerate: bool = False
+
+
+class SummaryTriggerBulkRequest(SummaryBaseModel):
+    items: list[dict[str, Any]]
 
 
 class SummaryStatusRequest(SummaryBaseModel):

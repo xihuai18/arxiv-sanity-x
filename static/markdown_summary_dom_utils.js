@@ -409,7 +409,10 @@
             if (th.dataset.sortable === 'false') return;
             th.classList.add('sortable-header');
             th.dataset.sortDir = '';
+            th.setAttribute('aria-sort', 'none');
+            th.setAttribute('tabindex', '0');
             th.addEventListener('click', handleHeaderClick);
+            th.addEventListener('keydown', handleHeaderKeyDown);
         });
     }
 
@@ -421,7 +424,10 @@
         headers.forEach(th => {
             th.classList.remove('sortable-header', 'sort-asc', 'sort-desc');
             th.removeEventListener('click', handleHeaderClick);
+            th.removeEventListener('keydown', handleHeaderKeyDown);
             delete th.dataset.sortDir;
+            th.removeAttribute('tabindex');
+            th.removeAttribute('aria-sort');
         });
     }
 
@@ -443,10 +449,12 @@
         headerRow.querySelectorAll('.sortable-header').forEach(h => {
             h.classList.remove('sort-asc', 'sort-desc');
             h.dataset.sortDir = '';
+            h.setAttribute('aria-sort', 'none');
         });
 
         th.dataset.sortDir = newDir;
         th.classList.add('sort-' + newDir);
+        th.setAttribute('aria-sort', newDir === 'asc' ? 'ascending' : 'descending');
 
         // Get rows to sort (skip header row)
         const rows = Array.from(tbody.querySelectorAll('tr')).filter(
@@ -476,6 +484,15 @@
 
         // Reorder rows
         rows.forEach(row => tbody.appendChild(row));
+    }
+
+    function handleHeaderKeyDown(event) {
+        if (!event) return;
+        const key = event.key;
+        if (key === 'Enter' || key === ' ') {
+            event.preventDefault();
+            handleHeaderClick(event);
+        }
     }
 
     function setupImageZoom(container) {

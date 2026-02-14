@@ -288,20 +288,21 @@ def add_to_readinglist(
     # Check if already in reading list
     existing = ReadingListRepository.get_reading_list_item(user, pid)
     if existing is not None:
-        # Update existing item
-        ReadingListRepository.update_reading_list_item(
-            user,
-            pid,
-            {
-                "summary_status": "queued",
-                "summary_last_error": None,
-                "summary_updated_time": time.time(),
-            },
-        )
-
+        # If summary is already ready, do not re-trigger it.
+        current_status = (existing.get("summary_status") or "").strip()
         task_id = None
-        if trigger_summary_fn:
-            task_id = trigger_summary_fn(user, pid)
+        if current_status != "ok":
+            ReadingListRepository.update_reading_list_item(
+                user,
+                pid,
+                {
+                    "summary_status": "queued",
+                    "summary_last_error": None,
+                    "summary_updated_time": time.time(),
+                },
+            )
+            if trigger_summary_fn:
+                task_id = trigger_summary_fn(user, pid)
 
         return {
             "message": "Already in reading list",

@@ -155,8 +155,7 @@ def api_upload_pdf():
                                     parse_status = current
                 except Exception as e:
                     logger.warning(f"Failed to update parse_status for re-upload {pid}: {e}")
-                    should_enqueue = True
-                    parse_status = "queued"
+                    return _api_error("Failed to update upload status. Please retry.", 500)
 
         if should_enqueue:
             try:
@@ -236,9 +235,12 @@ def api_uploaded_papers_update_meta():
         return _api_error("Invalid paper ID", 400)
 
     try:
-        from backend.services.upload_service import update_uploaded_paper_meta
+        from backend.services.upload_service import (
+            UploadServiceError,
+            update_uploaded_paper_meta,
+        )
 
-        success = update_uploaded_paper_meta(
+        update_uploaded_paper_meta(
             pid=pid,
             user=g.user,
             title=data.get("title"),
@@ -247,14 +249,14 @@ def api_uploaded_papers_update_meta():
             abstract=data.get("abstract"),
         )
 
-        if not success:
-            return _api_error("Paper not found or access denied", 404)
-
         return _api_success(pid=pid)
 
-    except ValueError as e:
-        # Validation errors from upload_service.
-        return _api_error(str(e), 400)
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
+            return _api_error("Paper not found", 404)
+        if e.code == "invalid_meta":
+            return _api_error(e.detail, 400)
+        return _api_error("Failed to update metadata. Please try again.", 500)
 
     except Exception as e:
         logger.error(f"Failed to update metadata: {e}")
@@ -282,25 +284,24 @@ def api_uploaded_papers_delete():
         return _api_error("Invalid paper ID", 400)
 
     try:
-        from backend.services.upload_service import delete_uploaded_paper
+        from backend.services.upload_service import (
+            UploadServiceError,
+            delete_uploaded_paper,
+        )
 
-        success, message = delete_uploaded_paper(pid, g.user)
+        delete_uploaded_paper(pid, g.user)
+        return _api_success(pid=pid)
 
-        if success:
-            return _api_success(pid=pid)
-
-        if message == "not_found":
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
-        elif message == "not_owner":
-            return _api_error("Paper not found", 404)
-        elif message == "invalid_pid":
+        if e.code == "invalid_pid":
             return _api_error("Invalid paper ID", 400)
-        elif message.startswith("file_delete_failed"):
+        if e.code == "file_delete_failed":
             return _api_error("Failed to delete files. Please try again.", 500)
-        elif message.startswith("db_delete_failed"):
+        if e.code == "db_delete_failed":
             return _api_error("Partial deletion occurred. Please contact support.", 500)
-        else:
-            return _api_error(f"Delete failed: {message}", 500)
+        return _api_error("Failed to delete paper. Please try again.", 500)
 
     except Exception as e:
         logger.error(f"Failed to delete uploaded paper: {e}")
@@ -331,27 +332,28 @@ def api_uploaded_papers_retry_parse():
         return _api_error("Invalid paper ID", 400)
 
     try:
-        from backend.services.upload_service import retry_parse_uploaded_paper
+        from backend.services.upload_service import (
+            UploadServiceError,
+            retry_parse_uploaded_paper,
+        )
 
-        success, message, task_id = retry_parse_uploaded_paper(pid, g.user)
+        result = retry_parse_uploaded_paper(pid, g.user)
+        return _api_success(pid=pid, parse_status=result.status, task_id=result.task_id)
 
-        if success:
-            return _api_success(pid=pid, parse_status=message, task_id=task_id)
-
-        if message == "not_found":
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
-        elif message == "not_owner":
-            return _api_error("Paper not found", 404)
-        elif message == "not_failed":
+        if e.code == "not_failed":
             return _api_error("Paper is not in failed state, cannot retry", 400)
-        elif message == "invalid_pid":
+        if e.code == "invalid_pid":
             return _api_error("Invalid paper ID", 400)
-        elif message == "db_error":
+        if e.code == "db_error":
             return _api_error("Database error, please retry", 500)
-        elif message == "enqueue_failed":
+        if e.code == "enqueue_failed":
             return _api_error("Failed to enqueue task, please retry", 500)
-        else:
-            return _api_error(f"Retry failed: {message}", 400)
+        if e.code == "already_parsed":
+            return _api_error("Paper already parsed successfully", 409)
+        return _api_error("Failed to retry parsing. Please try again.", 500)
 
     except Exception as e:
         logger.error(f"Failed to retry parse: {e}")
@@ -383,33 +385,81 @@ def api_uploaded_papers_parse():
         return _api_error("Invalid paper ID", 400)
 
     try:
-        from backend.services.upload_service import trigger_parse_only
+        from backend.services.upload_service import (
+            UploadServiceError,
+            trigger_parse_only,
+        )
 
-        success, message, task_id = trigger_parse_only(pid, g.user)
+        result = trigger_parse_only(pid, g.user)
+        return _api_success(pid=pid, parse_status=result.status, task_id=result.task_id)
 
-        if success:
-            # Both "queued" and "already_in_progress" are success cases
-            return _api_success(pid=pid, parse_status=message, task_id=task_id)
-
-        # Handle specific error cases with appropriate HTTP status codes
-        if message == "not_found":
-            return _api_error("Paper not found", 404)
-        elif message == "not_owner":
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)  # Don't leak existence
-        elif message == "already_parsed":
+        if e.code == "already_parsed":
             return _api_error("Paper already parsed successfully", 409)
-        elif message == "invalid_pid":
+        if e.code == "invalid_pid":
             return _api_error("Invalid paper ID", 400)
-        elif message == "db_error":
+        if e.code == "db_error":
             return _api_error("Database error, please retry", 500)
-        elif message == "enqueue_failed":
+        if e.code == "enqueue_failed":
             return _api_error("Failed to enqueue task, please retry", 500)
-        else:
-            return _api_error(f"Parse failed: {message}", 400)
+        return _api_error("Failed to trigger parsing. Please try again.", 500)
 
     except Exception as e:
         logger.error(f"Failed to trigger parse: {e}")
         return _api_error("Failed to trigger parsing. Please try again.", 500)
+
+
+@bp.route("/uploaded_papers/process", methods=["POST"])
+def api_uploaded_papers_process():
+    """Trigger the full upload processing pipeline (parse + extract + summary) for an uploaded paper.
+
+    Returns:
+        - 200 with parse_status="queued" if newly enqueued
+        - 200 with parse_status="already_in_progress" if already queued/running (idempotent)
+        - 400 if invalid input / already parsed
+        - 404 if not found or not owner
+        - 500 on DB/enqueue errors
+    """
+    if g.user is None:
+        return _api_error("Not logged in", 401)
+
+    csrf_protect()
+
+    data = request.get_json(silent=True)
+    if not data:
+        return _api_error("No JSON data provided", 400)
+
+    pid = data.get("pid", "").strip()
+    if not pid or not validate_upload_pid(pid):
+        return _api_error("Invalid paper ID", 400)
+
+    try:
+        from backend.services.upload_service import (
+            UploadServiceError,
+            trigger_process_uploaded_paper,
+        )
+
+        result = trigger_process_uploaded_paper(pid, g.user)
+        return _api_success(pid=pid, parse_status=result.status, task_id=result.task_id)
+
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
+            return _api_error("Paper not found", 404)
+        if e.code == "already_parsed":
+            return _api_error("Paper already parsed successfully", 409)
+        if e.code == "invalid_pid":
+            return _api_error("Invalid paper ID", 400)
+        if e.code == "db_error":
+            return _api_error("Database error, please retry", 500)
+        if e.code == "enqueue_failed":
+            return _api_error("Failed to enqueue task, please retry", 500)
+        return _api_error("Failed to start processing. Please try again.", 500)
+
+    except Exception as e:
+        logger.error(f"Failed to trigger process: {e}")
+        return _api_error("Failed to start processing. Please try again.", 500)
 
 
 @bp.route("/uploaded_papers/extract_info", methods=["POST"])
@@ -429,33 +479,26 @@ def api_uploaded_papers_extract_info():
         return _api_error("Invalid paper ID", 400)
 
     try:
-        from aslite.repositories import UploadedPaperRepository
-        from backend.services.upload_service import trigger_extract_info
+        from backend.services.upload_service import (
+            UploadServiceError,
+            trigger_extract_info,
+        )
 
-        # Get record to provide better error message
-        record = UploadedPaperRepository.get(pid)
-        if not record:
-            return _api_error("Paper not found", 404)
-
-        if record.get("owner") != g.user:
-            # Do not leak existence of private upload PIDs to other authenticated users.
-            return _api_error("Paper not found", 404)
-
-        from backend.services.upload_service import _normalize_upload_parse_status
-
-        parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
-        if parse_status != "ok":
-            return _api_error(f"Paper not parsed yet (status: {parse_status})", 400)
-
-        if record.get("meta_extracted_ok") is True:
-            return _api_error("Metadata already extracted", 400)
-
-        success, task_id = trigger_extract_info(pid, g.user)
-
-        if not success:
-            return _api_error("Failed to enqueue extraction task", 500)
-
+        task_id = trigger_extract_info(pid, g.user)
         return _api_success(pid=pid, task_id=task_id)
+
+    except UploadServiceError as e:
+        if e.code in {"not_found", "not_owner"}:
+            return _api_error("Paper not found", 404)
+        if e.code == "not_parsed":
+            return _api_error("Paper not parsed yet", 400)
+        if e.code == "already_extracted":
+            return _api_error("Metadata already extracted", 400)
+        if e.code == "invalid_pid":
+            return _api_error("Invalid paper ID", 400)
+        if e.code == "enqueue_failed":
+            return _api_error("Failed to enqueue extraction task", 500)
+        return _api_error("Failed to trigger extraction. Please try again.", 500)
 
     except Exception as e:
         logger.error(f"Failed to trigger extract info: {e}")

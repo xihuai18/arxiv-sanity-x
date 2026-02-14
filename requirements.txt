@@ -29,13 +29,16 @@ huey[sqlite]
 tqdm
 backoff
 loguru
+sentry-sdk
 requests
 beautifulsoup4
 markdownify
 pydantic>=2.6,<3
 pydantic-settings>=2.0,<3
 flasgger
+prometheus-client
 
 # Development tools
 pytest
+pytest-cov
 pre-commit

@@ -21,23 +21,12 @@
     padding: 6px 12px;
     border-radius: 20px;
     font-size: 13px;
-    transition: all var(--transition-fast);
-}
-
-.rel_word:hover {
-    background-color: var(--tag-hover-bg-light);
-    border-color: var(--tag-hover-border-light);
-    transform: translateY(-1px);
+    cursor: default;
 }
 
 [data-theme='dark'] .rel_word {
     background-color: var(--tag-bg-dark);
     border-color: var(--tag-border-dark);
-}
-
-[data-theme='dark'] .rel_word:hover {
-    background-color: var(--tag-hover-bg-dark);
-    border-color: var(--tag-hover-border-dark);
 }
 
 .rel_word_weight {

@@ -8,15 +8,19 @@ This module provides business logic for:
 - Managing uploaded paper lifecycle
 """
 
+import importlib
 import json
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
+import openai
 from loguru import logger
 
+import tools.paper_summarizer as paper_summarizer
 from aslite.repositories import (
     NegativeTagRepository,
     SummaryStatusRepository,
@@ -38,6 +42,11 @@ SUMMARY_DIR = str(settings.summary_dir)
 
 # SSE enabled flag - check if we're in a web context
 _SSE_ENABLED = True
+
+
+def _get_tasks_module():
+    """Lazy import tasks module to avoid circular imports."""
+    return importlib.import_module("tasks")
 
 
 def _emit_upload_event(user: str, payload: dict) -> None:
@@ -141,6 +150,13 @@ def _infer_meta_extracted_ok(record: Dict[str, Any], title: str, abstract: str, 
 
     # Infer from available metadata
     inferred_title = str(title or "").strip()
+    # Do not treat original filename as a "real" extracted title.
+    try:
+        orig = str(record.get("original_filename") or "").strip()
+        if orig and inferred_title == orig:
+            inferred_title = ""
+    except Exception:
+        pass
     inferred_abs = str(abstract or "").strip()
     inferred_authors = authors if isinstance(authors, list) else []
     inferred_authors = [str(a).strip() for a in inferred_authors if str(a).strip()]
@@ -198,10 +214,6 @@ def _normalize_upload_parse_status(pid: str, record: Dict[str, Any]) -> tuple[st
         return parse_status, parse_error
 
     if _infer_upload_mineru_parsed_ok(pid):
-        try:
-            UploadedPaperRepository.update(pid, {"parse_status": "ok", "parse_error": None})
-        except Exception:
-            pass
         return "ok", ""
 
     # Keep UI consistent: treat unknown as pending (not ready).
@@ -286,8 +298,6 @@ def _get_extract_info_client():
     Uses settings.extract_info configuration, falling back to main LLM settings.
     This is lazy-loaded to avoid import issues at module load time.
     """
-    import openai
-
     base_url = settings.extract_info.base_url or LLM_BASE_URL
     api_key = settings.extract_info.api_key or LLM_API_KEY
 
@@ -424,8 +434,6 @@ def extract_metadata_with_llm(front_matter: str) -> Dict[str, Any]:
     ]
     # Add main LLM as fallback if different from extract_info model
     if settings.extract_info.model_name != LLM_NAME:
-        import openai
-
         main_client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
         models_to_try.append((LLM_NAME, main_client))
 
@@ -527,18 +535,58 @@ def create_uploaded_paper(
     now = time.time()
     safe_name = sanitize_filename(original_filename)
 
+    def _build_record(upload_pid: str) -> dict[str, Any]:
+        return {
+            "pid": upload_pid,
+            "owner": user,
+            "created_time": now,
+            "updated_time": now,
+            "original_filename": safe_name,
+            "size_bytes": len(file_content),
+            "sha256": sha256,
+            "parse_status": "queued",
+            "parse_error": None,
+            "meta_extracted": {
+                "title": "",
+                "authors": [],
+                "year": None,
+                "abstract": None,
+            },
+            "meta_extracted_ok": False,
+            "meta_override": {},
+            "parse_task_id": None,
+            "extract_task_id": None,
+            "summary_task_id": None,
+        }
+
+    def _prepare_pdf_paths(upload_pid: str):
+        upload_dir = get_upload_dir(upload_pid, DATA_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        out_path = get_upload_pdf_path(upload_pid, DATA_DIR)
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        return out_path, tmp_path
+
     # Create record + sha mapping atomically to avoid duplicate PIDs under concurrent uploads.
     # Quota check is also done inside the transaction to prevent race conditions.
-    # File write happens after commit; on failure we best-effort clean up DB entries.
-    from aslite.db import get_uploaded_papers_db, get_uploaded_papers_index_db
+    # PDF is written before DB commit; on failure we best-effort clean up both.
+    from aslite.db import get_uploaded_papers_db
 
     sha_key = UploadedPaperRepository.sha256_mapping_key(user, sha256)
     pid: str | None = None
     paper_data: dict[str, Any] | None = None
+    pdf_path = None
+    tmp_pdf_path = None
 
     try:
         with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
             with updb.transaction(mode="IMMEDIATE"):
+                from aslite import repositories as _repos
+
+                conn = updb.conn
+                decode = updb._decode
+                encode = updb._encode
+                _repos._ensure_kv_table(conn, "uploaded_papers_index")
+
                 mapped_pid = updb.get(sha_key)
                 if isinstance(mapped_pid, str) and mapped_pid:
                     record = UploadedPaperRepository.get(mapped_pid)
@@ -548,17 +596,16 @@ def create_uploaded_paper(
 
                 # Atomic quota check inside transaction
                 # Count user's existing uploads by scanning the index
-                with get_uploaded_papers_index_db(flag="c", autocommit=False) as idx_db:
-                    indexed_pids = idx_db.get(user, [])
-                    # Verify each indexed PID actually exists and belongs to user
-                    valid_count = 0
-                    for indexed_pid in indexed_pids:
-                        rec = updb.get(indexed_pid)
-                        if isinstance(rec, dict) and rec.get("owner") == user:
-                            valid_count += 1
+                indexed_pids = _repos._kv_get(conn, "uploaded_papers_index", user, decode) or []
+                # Verify each indexed PID actually exists and belongs to user
+                valid_count = 0
+                for indexed_pid in indexed_pids:
+                    rec = updb.get(indexed_pid)
+                    if isinstance(rec, dict) and rec.get("owner") == user:
+                        valid_count += 1
 
-                    if valid_count >= max_uploads_per_user:
-                        raise QuotaExceededError(f"Upload limit reached (max {max_uploads_per_user} papers)")
+                if valid_count >= max_uploads_per_user:
+                    raise QuotaExceededError(f"Upload limit reached (max {max_uploads_per_user} papers)")
 
                 # Generate a PID that doesn't collide with an existing record.
                 for _ in range(5):
@@ -569,40 +616,20 @@ def create_uploaded_paper(
                 if not pid:
                     raise RuntimeError("Failed to generate unique upload pid")
 
-                paper_data = {
-                    "pid": pid,
-                    "owner": user,
-                    "created_time": now,
-                    "updated_time": now,
-                    "original_filename": safe_name,
-                    "size_bytes": len(file_content),
-                    "sha256": sha256,
-                    "parse_status": "queued",
-                    "parse_error": None,
-                    "meta_extracted": {
-                        "title": "",
-                        "authors": [],
-                        "year": None,
-                        "abstract": None,
-                    },
-                    "meta_extracted_ok": False,
-                    "meta_override": {},
-                    "parse_task_id": None,
-                    "extract_task_id": None,
-                    "summary_task_id": None,
-                }
+                # Write PDF to disk before committing DB records so we don't leave orphan DB rows on IO failure.
+                pdf_path, tmp_pdf_path = _prepare_pdf_paths(pid)
+                with open(tmp_pdf_path, "wb") as f:
+                    f.write(file_content)
+                tmp_pdf_path.replace(pdf_path)
+                tmp_pdf_path = None
+                paper_data = _build_record(pid)
 
                 updb[pid] = paper_data
                 updb[sha_key] = pid
+                if pid not in indexed_pids:
+                    indexed_pids.append(pid)
+                _repos._kv_set(conn, "uploaded_papers_index", user, indexed_pids, encode)
 
-        # Write PDF to disk (best effort).
-        upload_dir = get_upload_dir(pid, DATA_DIR)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = get_upload_pdf_path(pid, DATA_DIR)
-        with open(pdf_path, "wb") as f:
-            f.write(file_content)
-
-        UploadedPaperRepository.add_to_index(user, pid)
         logger.info(f"Created uploaded paper {pid} for user {user}")
         return pid, paper_data or {}, True
 
@@ -616,12 +643,46 @@ def create_uploaded_paper(
                 UploadedPaperRepository.remove_from_index(user, pid)
             UploadedPaperRepository.remove_sha256_mapping(user, sha256, pid=pid)
         except Exception:
-            pass
+            logger.opt(exception=True).warning(
+                f"Best-effort cleanup failed (db rows/index/sha mapping): pid={pid}, user={user}"
+            )
+        try:
+            if tmp_pdf_path and tmp_pdf_path.exists():
+                tmp_pdf_path.unlink()
+        except Exception:
+            logger.opt(exception=True).warning(f"Best-effort cleanup failed (tmp pdf): pid={pid}, path={tmp_pdf_path}")
+        try:
+            if pdf_path and pdf_path.exists():
+                pdf_path.unlink()
+        except Exception:
+            logger.opt(exception=True).warning(f"Best-effort cleanup failed (pdf): pid={pid}, path={pdf_path}")
         raise
 
 
-class QuotaExceededError(Exception):
+class UploadServiceError(Exception):
+    """Raised for expected upload service errors.
+
+    `code` is a stable machine-readable identifier for API mapping.
+    `detail` is a short user-safe message.
+    """
+
+    def __init__(self, code: str, detail: str = ""):
+        self.code = str(code or "").strip() or "upload_error"
+        self.detail = str(detail or "").strip() or self.code
+        super().__init__(self.detail)
+
+
+class QuotaExceededError(UploadServiceError):
     """Raised when user has exceeded their upload quota."""
+
+    def __init__(self, detail: str = ""):
+        super().__init__("quota_exceeded", detail or "Upload limit reached")
+
+
+@dataclass(frozen=True)
+class UploadEnqueueResult:
+    status: Literal["queued", "already_in_progress"]
+    task_id: str
 
 
 def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
@@ -640,8 +701,6 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
         return
-
-    from tools.paper_summarizer import PaperSummarizer
 
     record = UploadedPaperRepository.get(pid)
     if not record:
@@ -663,7 +722,7 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
         # Parse with MinerU (use pid as cache_pid, keep_pdf=True to preserve uploaded file)
-        summarizer = PaperSummarizer()
+        summarizer = paper_summarizer.PaperSummarizer()
         t_parse = time.time()
         logger.trace(f"[BLOCKING] process_uploaded_pdf: starting MinerU parse pid={pid}, pdf={pdf_path}")
         md_path = summarizer.parse_pdf_with_mineru(pdf_path, cache_pid=pid, keep_pdf=True)
@@ -737,10 +796,10 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
 
         # Trigger summary generation
         try:
-            from tasks import enqueue_summary_task
+            tasks = _get_tasks_module()
 
             t_enqueue = time.time()
-            task_id = enqueue_summary_task(pid, model=model, user=user)
+            task_id = tasks.enqueue_summary_task(pid, model=model, user=user)
             logger.trace(
                 f"[BLOCKING] process_uploaded_pdf: enqueue_summary_task completed in {time.time() - t_enqueue:.2f}s pid={pid}"
             )
@@ -870,7 +929,7 @@ def update_uploaded_paper_meta(
     authors: Optional[List[str]] = None,
     year: Optional[int] = None,
     abstract: Optional[str] = None,
-) -> bool:
+) -> None:
     """Update metadata override for an uploaded paper.
 
     Args:
@@ -881,23 +940,26 @@ def update_uploaded_paper_meta(
         year: New year (optional)
         abstract: New abstract (optional)
 
-    Returns:
-        True if updated successfully
+    Raises:
+        UploadServiceError: if not found / not owner / invalid inputs.
     """
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return False
+        raise UploadServiceError("not_found", "Paper not found")
 
     if record.get("owner") != user:
-        return False
+        raise UploadServiceError("not_owner", "Paper not found")
 
     # Validate inputs early.
-    title, authors, year, abstract = _validate_meta_override_inputs(
-        title=title,
-        authors=authors,
-        year=year,
-        abstract=abstract,
-    )
+    try:
+        title, authors, year, abstract = _validate_meta_override_inputs(
+            title=title,
+            authors=authors,
+            year=year,
+            abstract=abstract,
+        )
+    except ValueError as e:
+        raise UploadServiceError("invalid_meta", str(e)) from e
 
     override = record.get("meta_override", {})
 
@@ -912,10 +974,10 @@ def update_uploaded_paper_meta(
 
     UploadedPaperRepository.update(pid, {"meta_override": override})
     _invalidate_upload_features(pid)
-    return True
+    return None
 
 
-def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
+def delete_uploaded_paper(pid: str, user: str) -> None:
     """Delete an uploaded paper and all associated data.
 
     Uses two-phase delete: first delete files, then delete DB records.
@@ -926,22 +988,20 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         pid: Upload PID
         user: Username (must be owner)
 
-    Returns:
-        Tuple of (success, message).
-        - success=True, message="deleted": successfully deleted
-        - success=False, message="...": error reason
+    Raises:
+        UploadServiceError: for expected failures (not found, not owner, delete failed).
     """
     # Validate PID format for security
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False, "invalid_pid"
+        raise UploadServiceError("invalid_pid", "Invalid paper ID")
 
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return False, "not_found"
+        raise UploadServiceError("not_found", "Paper not found")
 
     if record.get("owner") != user:
-        return False, "not_owner"
+        raise UploadServiceError("not_owner", "Paper not found")
 
     sha256 = record.get("sha256")
 
@@ -953,9 +1013,8 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
 
     # Best-effort: cancel any in-flight summary tasks before deleting files.
     try:
-        from tasks import cancel_paper_summary_tasks
-
-        cancel_paper_summary_tasks(pid, user=user, reason="Paper deleted")
+        tasks = _get_tasks_module()
+        tasks.cancel_paper_summary_tasks(pid, user=user, reason="Paper deleted")
     except Exception as e:
         logger.warning(f"Failed to cancel summary tasks for {pid}: {e}")
 
@@ -984,7 +1043,7 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
             UploadedPaperRepository.update(pid, {"deleting": False})
         except Exception:
             pass
-        return False, f"file_delete_failed: {'; '.join(critical_errors)}"
+        raise UploadServiceError("file_delete_failed", "; ".join(critical_errors))
 
     # Phase 2: Delete DB records (now safe since files are gone)
     try:
@@ -1001,7 +1060,7 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         logger.error(f"Failed to delete DB records for {pid}: {e}")
         # Files are already deleted, so we should still try to clean up
         # but report partial failure
-        return False, f"db_delete_failed: {e}"
+        raise UploadServiceError("db_delete_failed", str(e))
 
     # Phase 3: Clean up non-critical caches (best effort, don't fail on errors)
     # Delete MinerU cache
@@ -1110,10 +1169,10 @@ def delete_uploaded_paper(pid: str, user: str) -> tuple[bool, str]:
         _emit_upload_event(user, {"type": "upload_deleted", "pid": pid})
     except Exception:
         pass
-    return True, "deleted"
+    return None
 
 
-def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str, str]:
+def retry_parse_uploaded_paper(pid: str, user: str) -> UploadEnqueueResult:
     """Retry parsing for a failed uploaded paper.
 
     Args:
@@ -1121,35 +1180,78 @@ def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str, str]:
         user: Username (must be owner)
 
     Returns:
-        Tuple of (success, message, task_id).
-        - success=True, message="queued": newly enqueued
-        - success=True, message="already_in_progress": idempotent, already queued/running
-        - success=False, message="...": error reason
+        UploadEnqueueResult with status/task_id.
+
+    Raises:
+        UploadServiceError: for expected failures.
     """
-    # Validate PID format for security
+    status, existing_task_id = _prepare_upload_parse_enqueue(
+        pid=pid,
+        user=user,
+        require_failed=True,
+        reject_if_ok=False,
+        set_updated_time=False,
+    )
+    if status == "already_in_progress":
+        return UploadEnqueueResult(status="already_in_progress", task_id=existing_task_id)
+
+    tasks = _get_tasks_module()
+
+    try:
+        task_id = _enqueue_upload_task(
+            task_type="process",
+            pid=pid,
+            user=user,
+            task_builder=lambda: tasks.process_uploaded_pdf_task.s(pid, user),
+        )
+    except UploadServiceError:
+        try:
+            UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
+        except Exception:
+            pass
+        raise
+
+    return UploadEnqueueResult(status="queued", task_id=task_id)
+
+
+def _prepare_upload_parse_enqueue(
+    *,
+    pid: str,
+    user: str,
+    require_failed: bool,
+    reject_if_ok: bool,
+    set_updated_time: bool = False,
+) -> tuple[Literal["ready", "already_in_progress"], str]:
+    """Validate ownership and atomically transition parse_status to queued.
+
+    Returns (status, existing_task_id).
+    - status="already_in_progress": idempotent, already queued/running
+    - status="ready": transitioned to queued, caller should enqueue a task
+
+    Raises:
+        UploadServiceError: for expected failures (not found, not owner, etc.)
+    """
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False, "invalid_pid", ""
+        raise UploadServiceError("invalid_pid", "Invalid paper ID")
 
     record = UploadedPaperRepository.get(pid)
     if not record:
-        return False, "not_found", ""
+        raise UploadServiceError("not_found", "Paper not found")
 
     if record.get("owner") != user:
-        return False, "not_owner", ""
+        raise UploadServiceError("not_owner", "Paper not found")
 
-    current_status = record.get("parse_status", "")
-
-    # Idempotent: if already queued or running, return success
+    current_status = (record.get("parse_status") or "").strip()
     if current_status in ("queued", "running"):
-        logger.info(f"Parse already in progress for {pid} (status={current_status})")
-        return True, "already_in_progress", str(record.get("parse_task_id") or "")
+        return "already_in_progress", str(record.get("parse_task_id") or "")
 
-    # Only allow retry for failed status
-    if current_status != "failed":
-        return False, "not_failed", ""
+    if require_failed and current_status != "failed":
+        raise UploadServiceError("not_failed", "Paper is not in failed state")
 
-    # Atomically check-and-set status
+    if reject_if_ok and current_status == "ok":
+        raise UploadServiceError("already_parsed", "Paper already parsed")
+
     from aslite.db import get_uploaded_papers_db
 
     try:
@@ -1157,46 +1259,68 @@ def retry_parse_uploaded_paper(pid: str, user: str) -> tuple[bool, str, str]:
             with updb.transaction(mode="IMMEDIATE"):
                 current_record = updb.get(pid)
                 if not isinstance(current_record, dict):
-                    return False, "not_found", ""
+                    raise UploadServiceError("not_found", "Paper not found")
+                if current_record.get("owner") != user:
+                    raise UploadServiceError("not_owner", "Paper not found")
 
-                actual_status = current_record.get("parse_status", "")
+                actual_status = (current_record.get("parse_status") or "").strip()
                 if actual_status in ("queued", "running"):
-                    return True, "already_in_progress", str(current_record.get("parse_task_id") or "")
-                if actual_status != "failed":
-                    return False, "not_failed", ""
+                    return "already_in_progress", str(current_record.get("parse_task_id") or "")
+
+                if require_failed and actual_status != "failed":
+                    raise UploadServiceError("not_failed", "Paper is not in failed state")
+
+                if reject_if_ok and actual_status == "ok":
+                    raise UploadServiceError("already_parsed", "Paper already parsed")
 
                 current_record["parse_status"] = "queued"
                 current_record["parse_error"] = None
+                if set_updated_time:
+                    current_record["updated_time"] = time.time()
                 updb[pid] = current_record
+    except UploadServiceError:
+        raise
     except Exception as e:
         logger.error(f"Failed to update parse status for {pid}: {e}")
-        return False, "db_error", ""
+        raise UploadServiceError("db_error", "Failed to update parse status") from e
 
+    return "ready", ""
+
+
+def _enqueue_upload_task(
+    *,
+    task_type: str,
+    pid: str,
+    user: str,
+    task_builder,
+) -> str:
+    """Enqueue a Huey task and register task status.
+
+    Returns:
+        task_id (may be empty string if task id not available).
+
+    Raises:
+        UploadServiceError: when enqueue fails.
+    """
     try:
-        from tasks import huey, process_uploaded_pdf_task
+        tasks = _get_tasks_module()
 
-        # Use huey.enqueue() to run task asynchronously
-        task = process_uploaded_pdf_task.s(pid, user)
-        enqueue_result = huey.enqueue(task)
+        task = task_builder()
+        enqueue_result = tasks.huey.enqueue(task)
         task_id = register_upload_task_enqueue(
-            task_type="process",
+            task_type=task_type,
             pid=pid,
             user=user,
             task=task,
             enqueue_result=enqueue_result,
         )
+        return task_id
     except Exception as e:
-        logger.error(f"Failed to enqueue retry for {pid}: {e}")
-        try:
-            UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
-        except Exception:
-            pass
-        return False, "enqueue_failed", ""
-
-    return True, "queued", task_id
+        logger.error(f"Failed to enqueue upload task (type={task_type}) for {pid}: {e}")
+        raise UploadServiceError("enqueue_failed", "Failed to enqueue task") from e
 
 
-def trigger_parse_only(pid: str, user: str) -> tuple[bool, str, str]:
+def trigger_parse_only(pid: str, user: str) -> UploadEnqueueResult:
     """Trigger MinerU parsing only (without metadata extraction).
 
     Args:
@@ -1204,84 +1328,83 @@ def trigger_parse_only(pid: str, user: str) -> tuple[bool, str, str]:
         user: Username (must be owner)
 
     Returns:
-        Tuple of (success, message, task_id). Message explains why if not successful.
-        - success=True, message="queued": newly enqueued
-        - success=True, message="already_in_progress": idempotent, already queued/running
-        - success=False, message="...": error reason
+        UploadEnqueueResult with status/task_id.
+
+    Raises:
+        UploadServiceError: for expected failures.
     """
-    if not validate_upload_pid(pid):
-        logger.error(f"Invalid upload PID format: {pid}")
-        return False, "invalid_pid", ""
+    status, existing_task_id = _prepare_upload_parse_enqueue(
+        pid=pid,
+        user=user,
+        require_failed=False,
+        reject_if_ok=True,
+        set_updated_time=False,
+    )
+    if status == "already_in_progress":
+        return UploadEnqueueResult(status="already_in_progress", task_id=existing_task_id)
 
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        return False, "not_found", ""
-
-    if record.get("owner") != user:
-        return False, "not_owner", ""
-
-    current_status = record.get("parse_status", "")
-
-    # Idempotent: if already queued or running, return success without re-enqueue
-    if current_status in ("queued", "running"):
-        logger.info(f"Parse already in progress for {pid} (status={current_status})")
-        return True, "already_in_progress", str(record.get("parse_task_id") or "")
-
-    # Already parsed successfully - no need to re-parse
-    if current_status == "ok":
-        return False, "already_parsed", ""
-
-    # Atomically check-and-set status to avoid race conditions
-    # Use compare-and-swap pattern: only update if status hasn't changed
-    from aslite.db import get_uploaded_papers_db
+    tasks = _get_tasks_module()
 
     try:
-        with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
-            with updb.transaction(mode="IMMEDIATE"):
-                current_record = updb.get(pid)
-                if not isinstance(current_record, dict):
-                    return False, "not_found", ""
-
-                # Re-check status inside transaction
-                actual_status = current_record.get("parse_status", "")
-                if actual_status in ("queued", "running"):
-                    return True, "already_in_progress", str(current_record.get("parse_task_id") or "")
-                if actual_status == "ok":
-                    return False, "already_parsed", ""
-
-                # Update status atomically
-                current_record["parse_status"] = "queued"
-                current_record["parse_error"] = None
-                updb[pid] = current_record
-    except Exception as e:
-        logger.error(f"Failed to update parse status for {pid}: {e}")
-        return False, "db_error", ""
-
-    try:
-        from tasks import huey, parse_uploaded_pdf_task
-
-        task = parse_uploaded_pdf_task.s(pid, user)
-        enqueue_result = huey.enqueue(task)
-        task_id = register_upload_task_enqueue(
+        task_id = _enqueue_upload_task(
             task_type="parse",
             pid=pid,
             user=user,
-            task=task,
-            enqueue_result=enqueue_result,
+            task_builder=lambda: tasks.parse_uploaded_pdf_task.s(pid, user),
         )
-    except Exception as e:
-        logger.error(f"Failed to enqueue parse for {pid}: {e}")
+    except UploadServiceError:
         # Rollback status on enqueue failure
         try:
             UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
         except Exception:
             pass
-        return False, "enqueue_failed", ""
+        raise
 
-    return True, "queued", task_id
+    return UploadEnqueueResult(status="queued", task_id=task_id)
 
 
-def trigger_extract_info(pid: str, user: str) -> tuple[bool, str]:
+def trigger_process_uploaded_paper(pid: str, user: str) -> UploadEnqueueResult:
+    """Trigger the full upload processing pipeline: parse + extract + summary.
+
+    This is intended for the UI "one-click" flow. Individual steps are still
+    available via separate endpoints (parse-only / extract-only / trigger summary).
+
+    Returns:
+        UploadEnqueueResult with status/task_id.
+
+    Raises:
+        UploadServiceError: for expected failures.
+    """
+    status, existing_task_id = _prepare_upload_parse_enqueue(
+        pid=pid,
+        user=user,
+        require_failed=False,
+        reject_if_ok=True,
+        set_updated_time=True,
+    )
+    if status == "already_in_progress":
+        return UploadEnqueueResult(status="already_in_progress", task_id=existing_task_id)
+
+    tasks = _get_tasks_module()
+
+    try:
+        task_id = _enqueue_upload_task(
+            task_type="process",
+            pid=pid,
+            user=user,
+            task_builder=lambda: tasks.process_uploaded_pdf_task.s(pid, user),
+        )
+    except UploadServiceError:
+        try:
+            UploadedPaperRepository.update(pid, {"parse_status": "failed", "parse_error": "enqueue_failed"})
+        except Exception:
+            pass
+        raise
+
+    return UploadEnqueueResult(status="queued", task_id=task_id)
+
+
+def trigger_extract_info(pid: str, user: str) -> str:
     """Trigger metadata extraction only (requires parsing to be done).
 
     Args:
@@ -1289,37 +1412,41 @@ def trigger_extract_info(pid: str, user: str) -> tuple[bool, str]:
         user: Username (must be owner)
 
     Returns:
-        Tuple of (success, task_id)
+        task_id (may be empty string if task id not available).
+
+    Raises:
+        UploadServiceError: for expected failures.
     """
     if not validate_upload_pid(pid):
         logger.error(f"Invalid upload PID format: {pid}")
-        return False, ""
+        raise UploadServiceError("invalid_pid", "Invalid paper ID")
 
     record = UploadedPaperRepository.get(pid)
     if not record:
         logger.warning(f"Record not found for {pid}")
-        return False, ""
+        raise UploadServiceError("not_found", "Paper not found")
 
     if record.get("owner") != user:
         logger.warning(f"User {user} does not own {pid}")
-        return False, ""
+        raise UploadServiceError("not_owner", "Paper not found")
 
     # Only allow if already parsed successfully
-    if record.get("parse_status") != "ok":
-        logger.warning(f"Paper {pid} not parsed yet (status: {record.get('parse_status')})")
-        return False, ""
+    parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+    if parse_status != "ok":
+        logger.warning(f"Paper {pid} not parsed yet (status: {parse_status})")
+        raise UploadServiceError("not_parsed", "Paper not parsed yet")
 
     # Only allow if not already extracted successfully
     # Use explicit True check to allow re-extraction for old records without this field
     if record.get("meta_extracted_ok") is True:
         logger.warning(f"Paper {pid} already has extracted metadata")
-        return False, ""
+        raise UploadServiceError("already_extracted", "Metadata already extracted")
 
     try:
-        from tasks import extract_info_task, huey
+        tasks = _get_tasks_module()
 
-        task = extract_info_task.s(pid, user)
-        enqueue_result = huey.enqueue(task)
+        task = tasks.extract_info_task.s(pid, user)
+        enqueue_result = tasks.huey.enqueue(task)
         task_id = register_upload_task_enqueue(
             task_type="extract",
             pid=pid,
@@ -1329,9 +1456,9 @@ def trigger_extract_info(pid: str, user: str) -> tuple[bool, str]:
         )
     except Exception as e:
         logger.error(f"Failed to enqueue extract info for {pid}: {e}")
-        return False, ""
+        raise UploadServiceError("enqueue_failed", "Failed to enqueue task") from e
 
-    return True, task_id
+    return task_id
 
 
 def do_extract_metadata(pid: str, user: str) -> bool:
@@ -1361,9 +1488,7 @@ def do_extract_metadata(pid: str, user: str) -> bool:
     _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "running"})
 
     try:
-        from tools.paper_summarizer import PaperSummarizer
-
-        summarizer = PaperSummarizer()
+        summarizer = paper_summarizer.PaperSummarizer()
         backend = summarizer._normalize_mineru_backend()
         md_path = summarizer._find_mineru_markdown(pid, backend=backend)
 
@@ -1436,13 +1561,11 @@ def do_parse_only(pid: str, user: str) -> bool:
     _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""})
 
     try:
-        from tools.paper_summarizer import PaperSummarizer
-
         pdf_path = get_upload_pdf_path(pid, DATA_DIR)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
-        summarizer = PaperSummarizer()
+        summarizer = paper_summarizer.PaperSummarizer()
         md_path = summarizer.parse_pdf_with_mineru(pdf_path, cache_pid=pid, keep_pdf=True)
 
         if not md_path or not md_path.exists():

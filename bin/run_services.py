@@ -771,6 +771,14 @@ def main() -> int:
 
     _print_startup_context(repo_root=repo_root, args=args, verbose=verbose)
 
+    # Helpful warning: git backup is configured in settings.daemon but the daemon
+    # process is not started unless --with-daemon is passed.
+    try:
+        if settings is not None and getattr(settings.daemon, "enable_git_backup", False) and not args.with_daemon:
+            print("[launcher] Warning: git backup is enabled but daemon is not started; pass --with-daemon", flush=True)
+    except Exception:
+        pass
+
     print("[launcher] Starting services:", flush=True)
     if verbose:
         for spec in services:

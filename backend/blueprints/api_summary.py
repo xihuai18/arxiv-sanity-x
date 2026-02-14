@@ -137,6 +137,44 @@ def api_trigger_paper_summary():
     return legacy.api_trigger_paper_summary()
 
 
+@bp.route("/api/trigger_paper_summary_bulk", methods=["POST"])
+def api_trigger_paper_summary_bulk():
+    """Trigger summary generation in batch
+    ---
+    tags:
+      - Summary
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                required: [pid]
+                properties:
+                  pid:
+                    type: string
+                  model:
+                    type: string
+                  priority:
+                    type: integer
+                  force:
+                    type: boolean
+                  force_regenerate:
+                    type: boolean
+    responses:
+      200:
+        description: Tasks queued
+    """
+    return legacy.api_trigger_paper_summary_bulk()
+
+
 @bp.route("/api/task_status/<task_id>", methods=["GET"])
 def api_task_status(task_id):
     """Get task status

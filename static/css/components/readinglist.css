@@ -47,6 +47,12 @@
     transform: none;
 }
 
+@media (max-width: 640px) {
+    .rel_title {
+        padding-right: 56px;
+    }
+}
+
 /* Summary page: Reading List toggle button in header nav
  * Reuses the same circular icon style as the main page (.readinglist-btn)
  * but without absolute positioning so it flows inline with nav buttons. */

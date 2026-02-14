@@ -55,6 +55,10 @@ _FEATURES_REFRESH_IN_PROGRESS: bool = False
 _FEATURES_REFRESH_LAST_START: float = 0.0
 _FEATURES_REFRESH_LAST_ERROR: str | None = None
 
+# Cooperative polling interval while waiting for cold-start cache load.
+# Keep this small enough to remain responsive under gevent, but not too small to busy-spin.
+_COLD_START_POLL_INTERVAL_S: float = 0.05
+
 
 def _get_native_thread_class():
     """Return a real OS Thread class even under gevent monkey-patching."""
@@ -484,7 +488,7 @@ def get_data_cached(*, wait: bool = True, max_wait_s: float | None = None) -> di
                         f"[BLOCKING] get_data_cached: cold start still loading after {now - started_at:.0f}s"
                     )
                 # Yield to other greenlets/threads.
-                time.sleep(0.05)
+                time.sleep(_COLD_START_POLL_INTERVAL_S)
         else:
             # Non-blocking peek: still surface a previous cold-start error if one already happened.
             with _DATA_LOCK:

@@ -25,14 +25,20 @@ jobs:
       - name: Build static files
         run: npm run build:static
 
-      - name: Check for uncommitted changes
+      - name: Verify manifest is generated
         run: |
-          if [ -n "$(git status --porcelain static/dist/)" ]; then
-            echo "::error::static/dist/ is out of sync with source files"
-            echo "The following files have changed after rebuild:"
-            git diff --name-only static/dist/
-            echo ""
-            echo "Please run 'npm run build:static' and commit the dist files."
+          if [ ! -f "static/dist/manifest.json" ]; then
+            echo "::error::static/dist/manifest.json not found after build"
             exit 1
           fi
-          echo "dist files are in sync"
+          node - <<'NODE'
+          const fs = require('fs');
+          const p = 'static/dist/manifest.json';
+          const raw = fs.readFileSync(p, 'utf8');
+          const obj = JSON.parse(raw);
+          if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) {
+            console.error('manifest.json is empty');
+            process.exit(1);
+          }
+          console.log('manifest.json looks OK');
+          NODE

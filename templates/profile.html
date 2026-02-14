@@ -91,7 +91,7 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="form-group">
                     <label for="username-input">Username</label>
-                    <input id="username-input" class="form-control" type="text" name="username" placeholder="Enter a username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64" autofocus>
+                    <input id="username-input" class="form-control" type="text" name="username" placeholder="Enter a username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64">
                     <span class="form-hint">Letters, numbers, and underscores allowed</span>
                 </div>
                 <button type="submit" class="btn btn-primary btn-full">Continue</button>
@@ -109,6 +109,12 @@ document.addEventListener('DOMContentLoaded', function() {
     // Username input validation
     var usernameInput = document.getElementById('username-input');
     if (usernameInput) {
+        // Avoid auto-focusing on small screens (virtual keyboard popping).
+        try {
+            if (window.innerWidth > 800) {
+                usernameInput.focus();
+            }
+        } catch (e) {}
         usernameInput.addEventListener('input', function() {
             var value = this.value.trim();
             var hint = this.parentElement.querySelector('.form-hint');

@@ -46,7 +46,7 @@ repos:
   - repo: local
     hooks:
       - id: check-dist-sync
-        name: Check static/dist sync
+        name: Check frontend build (static/dist manifest)
         entry: bash scripts/check-dist-sync.sh
         language: system
         files: ^static/.*\.js$
