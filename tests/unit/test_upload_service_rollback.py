@@ -57,15 +57,17 @@ class TestCreateUploadedPaperRollback:
                         raise OSError("No space left on device")
                     return original_open(path, *args, **kwargs)
 
-                with patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo, \
-                     patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash"), \
-                     patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTROLLBACK"), \
-                     patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"), \
-                     patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir), \
-                     patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path), \
-                     patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb), \
-                     patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx), \
-                     patch("builtins.open", side_effect=failing_open):
+                with (
+                    patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo,
+                    patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash"),
+                    patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTROLLBACK"),
+                    patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"),
+                    patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir),
+                    patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path),
+                    patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb),
+                    patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx),
+                    patch("builtins.open", side_effect=failing_open),
+                ):
 
                     mock_repo.get_by_sha256.return_value = None
                     mock_repo.sha256_mapping_key.return_value = "sha256::rollback_test_user::fakehash"
@@ -92,15 +94,17 @@ class TestCreateUploadedPaperRollback:
                 mock_updb = _make_mock_updb()
                 mock_idx = _make_mock_idx_db()
 
-                with patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo, \
-                     patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash2"), \
-                     patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTCLEAN"), \
-                     patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"), \
-                     patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir), \
-                     patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path), \
-                     patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb), \
-                     patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx), \
-                     patch.object(Path, "replace", side_effect=OSError("Permission denied")):
+                with (
+                    patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo,
+                    patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash2"),
+                    patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTCLEAN"),
+                    patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"),
+                    patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir),
+                    patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path),
+                    patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb),
+                    patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx),
+                    patch.object(Path, "replace", side_effect=OSError("Permission denied")),
+                ):
 
                     mock_repo.get_by_sha256.return_value = None
                     mock_repo.sha256_mapping_key.return_value = "sha256::cleanup_test_user::fakehash2"

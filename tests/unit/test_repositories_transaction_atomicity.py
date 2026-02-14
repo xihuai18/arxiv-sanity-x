@@ -7,9 +7,9 @@ import pytest
 
 class TestTagRepositoryTransactions:
     def test_delete_tag_full_is_atomic_across_tables(self, monkeypatch):
+        import aslite.repositories as repos
         from aslite.db import get_combined_tags_db, get_neg_tags_db, get_tags_db
         from aslite.repositories import TagRepository
-        import aslite.repositories as repos
 
         user = "u"
 
@@ -46,9 +46,9 @@ class TestTagRepositoryTransactions:
         assert "t1,t2" in combined
 
     def test_rename_tag_full_is_atomic_across_tables(self, monkeypatch):
+        import aslite.repositories as repos
         from aslite.db import get_combined_tags_db, get_neg_tags_db, get_tags_db
         from aslite.repositories import TagRepository
-        import aslite.repositories as repos
 
         user = "u2"
 
@@ -82,4 +82,3 @@ class TestTagRepositoryTransactions:
         assert "new" not in tags
         assert neg_tags.get("old") == {"p2"}
         assert "old,x" in combined
-

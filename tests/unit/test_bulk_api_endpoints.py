@@ -38,4 +38,3 @@ def test_trigger_paper_summary_bulk_returns_results(client, auth_headers, monkey
     assert data["results"][0]["success"] is True
     assert data["results"][0]["status"] == "queued"
     assert data["results"][0]["task_id"] == "task123"
-

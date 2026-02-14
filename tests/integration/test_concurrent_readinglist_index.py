@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 
 import aslite.repositories as repos
-from aslite.repositories import ReadingListRepository, readinglist_key
+from aslite.repositories import ReadingListRepository
 
 
 def test_add_to_readinglist_holds_write_lock_until_index_updated(monkeypatch):
@@ -72,4 +72,3 @@ def test_add_to_readinglist_holds_write_lock_until_index_updated(monkeypatch):
     items = ReadingListRepository.get_user_reading_list(user)
     assert pid_a in items
     assert pid_b in items
-

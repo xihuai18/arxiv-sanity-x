@@ -83,4 +83,3 @@ def test_concurrent_readinglist_updates_no_lost_update(monkeypatch):
 
     tags = TagRepository.get_user_tags(user)
     assert pid in (tags.get("alpha") or set())
-

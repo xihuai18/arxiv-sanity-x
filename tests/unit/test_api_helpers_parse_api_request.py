@@ -5,8 +5,9 @@ from __future__ import annotations
 
 class TestParseApiRequest:
     def test_require_login_blocks_anonymous(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         with app.test_request_context("/api/test", method="POST", json={"x": 1}):
             g.user = None
@@ -19,8 +20,9 @@ class TestParseApiRequest:
         assert resp.get_json()["error"] == "Not logged in"
 
     def test_missing_json_returns_400(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         with app.test_request_context("/api/test", method="POST"):
             g.user = "u"
@@ -33,8 +35,9 @@ class TestParseApiRequest:
         assert resp.get_json()["error"] == "No JSON data provided"
 
     def test_require_csrf_calls_hook(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         called = {"n": 0}
 
@@ -50,8 +53,9 @@ class TestParseApiRequest:
         assert called["n"] == 1
 
     def test_require_pid_adds_raw_pid_and_checks_exists(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         def exists(pid: str) -> bool:
             return pid == "2301.00001"
@@ -71,8 +75,9 @@ class TestParseApiRequest:
         assert data["_raw_pid"] == "2301.00001"
 
     def test_require_pid_missing_returns_400(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         with app.test_request_context("/api/test", method="POST", json={"pid": ""}):
             g.user = "u"
@@ -85,8 +90,9 @@ class TestParseApiRequest:
         assert resp.get_json()["error"] == "Paper ID is required"
 
     def test_require_pid_not_found_returns_404(self, app):
-        from backend.services.api_helpers import parse_api_request
         from flask import g
+
+        from backend.services.api_helpers import parse_api_request
 
         with app.test_request_context("/api/test", method="POST", json={"pid": "2301.00001"}):
             g.user = "u"
@@ -102,4 +108,3 @@ class TestParseApiRequest:
         resp, status = err
         assert status == 404
         assert resp.get_json()["error"] == "Paper not found"
-

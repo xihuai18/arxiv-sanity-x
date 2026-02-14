@@ -78,4 +78,3 @@ def initialize_sentry(*, settings_obj: Any | None = None) -> bool:
     except Exception:
         logger.opt(exception=True).warning("Failed to initialize Sentry (ignored)")
         return False
-

@@ -100,4 +100,3 @@ def after_request_hook(response):
         pass
 
     return response
-

@@ -66,4 +66,3 @@ def test_sqlitekv_retries_when_db_locked(tmp_path):
         db.DB_TIMEOUT = old_timeout
         db.DB_MAX_RETRIES = old_max_retries
         db.DB_RETRY_BASE_SLEEP = old_sleep
-
