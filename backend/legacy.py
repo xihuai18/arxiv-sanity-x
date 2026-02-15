@@ -28,7 +28,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Any, Optional, Type
+from typing import Any
 
 import numpy as np
 import requests
@@ -57,6 +57,7 @@ from aslite.repositories import (
     MetaRepository,
     PaperRepository,
     SummaryStatusRepository,
+    safe_closing,
     summary_status_key,
 )
 from config import settings
@@ -261,7 +262,7 @@ def _csrf_protect() -> None:
 # Input normalization helpers
 
 
-def _normalize_name(value: Optional[str]) -> str:
+def _normalize_name(value: str | None) -> str:
     from backend.services.api_helpers import normalize_name
 
     return normalize_name(value)
@@ -310,7 +311,7 @@ def _parse_api_request(
     require_csrf: bool = True,
     require_csrf_for_session: bool = False,
     require_pid: bool = False,
-    schema: Optional[Type[BaseModel]] = None,
+    schema: type[BaseModel] | None = None,
 ) -> tuple[dict | None, ResponseReturnValue | None]:
     """
     Common API request parsing and validation.
@@ -402,13 +403,13 @@ _QUERY_SEP_RE = re.compile(r"[,;\uFF0C\u3001\uFF1B\uFF1A:/\\|\(\)\[\]{}]+")
 _BOOLEAN_TOKENS = {"and", "or", "not"}
 
 
-def _validate_tag_name(tag: str) -> Optional[str]:
+def _validate_tag_name(tag: str) -> str | None:
     from backend.utils.validation import validate_tag_name
 
     return validate_tag_name(tag)
 
 
-def _validate_keyword_name(keyword: str) -> Optional[str]:
+def _validate_keyword_name(keyword: str) -> str | None:
     from backend.utils.validation import validate_keyword_name
 
     return validate_keyword_name(keyword)
@@ -419,7 +420,13 @@ def _validate_keyword_name(keyword: str) -> Optional[str]:
 # Note: Some caches are now in backend.services modules
 
 # Cache for queue_stats/task_status expensive scans (per-process TTL).
-_QUEUE_STATS_CACHE = _LRUCacheTTL(maxsize=16, ttl_s=2.0)
+# Keep this aligned with frontend throttling to avoid repeated full scans under load.
+_QUEUE_STATS_CACHE = _LRUCacheTTL(maxsize=16, ttl_s=5.0)
+_QUEUE_SNAPSHOT_LOCK = threading.Lock()
+
+# Hard cap: /api/summary_status may be called by clients with large pid sets.
+# Keep this reasonably small to avoid expensive filesystem/db scans blocking workers.
+MAX_SUMMARY_STATUS_PIDS = 200
 
 PAPER_CACHE = _LRUCacheTTL(maxsize=2048, ttl_s=300.0)
 
@@ -431,65 +438,74 @@ def _get_queue_snapshot_cached() -> dict:
     if cached is not None:
         return cached
 
-    queued_count = 0
-    running_count = 0
-    high_priority_queued: list[tuple[float, str]] = []
-    has_task_entries = False
+    # Avoid thundering-herd full scans under concurrency: only one thread per process computes
+    # the snapshot on a cache miss; other threads will block briefly and then hit the cache.
+    with _QUEUE_SNAPSHOT_LOCK:
+        cached = _QUEUE_STATS_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
-    try:
-        for tkey, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            has_task_entries = True
-            status = info.get("status")
-            if status == "queued":
-                queued_count += 1
-                try:
-                    if SUMMARY_PRIORITY_HIGH is not None:
-                        prio = info.get("priority")
-                        if prio is not None and int(prio) >= int(SUMMARY_PRIORITY_HIGH):
-                            ts = info.get("updated_time") or 0
-                            high_priority_queued.append((float(ts), str(tkey)))
-                except Exception:
-                    pass
-            elif status == "running":
-                running_count += 1
-    except Exception:
-        # If the task-status store is unavailable, fall back to the summary-status scan.
+        queued_count = 0
+        running_count = 0
+        high_priority_queued: list[tuple[float, str]] = []
         has_task_entries = False
 
-    # Fallback: if task:: entries are missing (older versions), count summary statuses.
-    #
-    # Important: do NOT fall back when task:: entries exist but the active queue is empty.
-    # That path used to trigger a full scan of the entire summary-status DB on every poll,
-    # which is extremely expensive in large deployments and breaks the purpose of caching.
-    if not has_task_entries:
-        summary_queued = 0
-        summary_running = 0
-        for key, info in SummaryStatusRepository.get_all_items():
-            if not isinstance(info, dict):
-                continue
-            if str(key).startswith("task::"):
-                continue
-            status = info.get("status")
-            if status == "queued":
-                summary_queued += 1
-            elif status == "running":
-                summary_running += 1
-        if (queued_count + running_count) == 0:
-            queued_count = summary_queued
-            running_count = summary_running
+        try:
+            with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+                for tkey, info in items:
+                    if not isinstance(info, dict):
+                        continue
+                    has_task_entries = True
+                    status = info.get("status")
+                    if status == "queued":
+                        queued_count += 1
+                        try:
+                            if SUMMARY_PRIORITY_HIGH is not None:
+                                prio = info.get("priority")
+                                if prio is not None and int(prio) >= int(SUMMARY_PRIORITY_HIGH):
+                                    ts = info.get("updated_time") or 0
+                                    high_priority_queued.append((float(ts), str(tkey)))
+                        except Exception:
+                            pass
+                    elif status == "running":
+                        running_count += 1
+        except Exception:
+            # If the task-status store is unavailable, fall back to the summary-status scan.
+            has_task_entries = False
 
-    if high_priority_queued:
-        high_priority_queued.sort(key=lambda item: (item[0], item[1]))
+        # Fallback: if task:: entries are missing (older versions), count summary statuses.
+        #
+        # Important: do NOT fall back when task:: entries exist but the active queue is empty.
+        # That path used to trigger a full scan of the entire summary-status DB on every poll,
+        # which is extremely expensive in large deployments and breaks the purpose of caching.
+        if not has_task_entries:
+            summary_queued = 0
+            summary_running = 0
+            with safe_closing(SummaryStatusRepository.get_all_items()) as items:
+                for key, info in items:
+                    if not isinstance(info, dict):
+                        continue
+                    if str(key).startswith("task::"):
+                        continue
+                    status = info.get("status")
+                    if status == "queued":
+                        summary_queued += 1
+                    elif status == "running":
+                        summary_running += 1
+            if (queued_count + running_count) == 0:
+                queued_count = summary_queued
+                running_count = summary_running
 
-    snapshot = {
-        "queued": queued_count,
-        "running": running_count,
-        "high_priority_queued": high_priority_queued,
-    }
-    _QUEUE_STATS_CACHE.set(cache_key, snapshot)
-    return snapshot
+        if high_priority_queued:
+            high_priority_queued.sort(key=lambda item: (item[0], item[1]))
+
+        snapshot = {
+            "queued": queued_count,
+            "running": running_count,
+            "high_priority_queued": high_priority_queued,
+        }
+        _QUEUE_STATS_CACHE.set(cache_key, snapshot)
+        return snapshot
 
 
 # globals that manage the (lazy) loading of various state for a request
@@ -856,7 +872,7 @@ def _compute_paper_score_parsed(parsed: dict, p: dict, pid: str) -> float:
     )
 
 
-def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = None) -> Any:
+def _lexical_rank_over_pids(pids: list, parsed: dict, limit: int | None = None) -> Any:
     from backend.services.search_service import lexical_rank_over_pids
 
     return lexical_rank_over_pids(
@@ -870,7 +886,7 @@ def _lexical_rank_over_pids(pids: list, parsed: dict, limit: Optional[int] = Non
     )
 
 
-def _lexical_rank_fullscan(parsed: dict, limit: Optional[int] = None) -> Any:
+def _lexical_rank_fullscan(parsed: dict, limit: int | None = None) -> Any:
     from backend.services.search_service import lexical_rank_fullscan
 
     return lexical_rank_fullscan(
@@ -2219,6 +2235,8 @@ def api_summary_status() -> ResponseReturnValue:
             pids = [pids]
         if not isinstance(pids, list) or not pids:
             return _api_error("Paper IDs are required", 400)
+        if len(pids) > MAX_SUMMARY_STATUS_PIDS:
+            return _api_error(f"Too many paper IDs (max {MAX_SUMMARY_STATUS_PIDS})", 400)
 
         model = (data.get("model") or LLM_NAME or "").strip()
         if not model:
@@ -2654,7 +2672,7 @@ def _sanitize_summary_meta(meta: dict) -> dict:
 
 def generate_paper_summary(
     pid: str,
-    model: Optional[str] = None,
+    model: str | None = None,
     force_refresh: bool = False,
     cache_only: bool = False,
 ) -> Any:
@@ -2746,7 +2764,7 @@ def stats() -> ResponseReturnValue:
     queue_active_total = 0
     queue_history_total = 0
 
-    def _format_age(ts: Optional[float]) -> str:
+    def _format_age(ts: float | None) -> str:
         if not ts:
             return "n/a"
         delta = max(0.0, time.time() - float(ts))
@@ -2763,22 +2781,23 @@ def stats() -> ResponseReturnValue:
         model_counts = defaultdict(int)
         paper_ids = set()
 
-        for key, info in SummaryStatusRepository.get_all_items():
-            if not isinstance(info, dict):
-                continue
-            if key.startswith("task::"):
-                continue
-            if "::" not in key:
-                continue
-            pid, model = key.split("::", 1)
-            status = info.get("status") or "unknown"
-            summary_status_counts[str(status)] += 1
-            if status == "ok":
-                summary_total_ok += 1
-                if pid:
-                    paper_ids.add(pid)
-                if model:
-                    model_counts[model] += 1
+        with safe_closing(SummaryStatusRepository.get_all_items()) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                if key.startswith("task::"):
+                    continue
+                if "::" not in key:
+                    continue
+                pid, model = key.split("::", 1)
+                status = info.get("status") or "unknown"
+                summary_status_counts[str(status)] += 1
+                if status == "ok":
+                    summary_total_ok += 1
+                    if pid:
+                        paper_ids.add(pid)
+                    if model:
+                        model_counts[model] += 1
 
         summary_paper_count = len(paper_ids)
         summary_status_map = dict(summary_status_counts)
@@ -2790,39 +2809,40 @@ def stats() -> ResponseReturnValue:
         task_counts = defaultdict(int)
         priority_counts = defaultdict(lambda: defaultdict(int))
         task_rows = []
-        for key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            task_id = key.split("task::", 1)[-1]
-            status = info.get("status") or "unknown"
-            task_counts[str(status)] += 1
-            raw_priority = info.get("priority")
-            bucket = "unknown"
-            if raw_priority is not None:
-                try:
-                    prio_val = int(raw_priority)
-                    if SUMMARY_PRIORITY_HIGH is not None and prio_val >= int(SUMMARY_PRIORITY_HIGH):
-                        bucket = "high"
-                    elif SUMMARY_PRIORITY_LOW is not None and prio_val <= int(SUMMARY_PRIORITY_LOW):
-                        bucket = "low"
-                    else:
-                        bucket = "normal"
-                except Exception:
-                    bucket = "unknown"
-            priority_counts[bucket][str(status)] += 1
-            updated_time = info.get("updated_time")
-            task_rows.append(
-                {
-                    "task_id": task_id,
-                    "pid": info.get("pid") or "",
-                    "model": info.get("model") or "",
-                    "status": status,
-                    "priority": info.get("priority"),
-                    "updated_time": updated_time,
-                    "updated_ago": _format_age(updated_time),
-                    "error": info.get("error") or "",
-                }
-            )
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                task_id = key.split("task::", 1)[-1]
+                status = info.get("status") or "unknown"
+                task_counts[str(status)] += 1
+                raw_priority = info.get("priority")
+                bucket = "unknown"
+                if raw_priority is not None:
+                    try:
+                        prio_val = int(raw_priority)
+                        if SUMMARY_PRIORITY_HIGH is not None and prio_val >= int(SUMMARY_PRIORITY_HIGH):
+                            bucket = "high"
+                        elif SUMMARY_PRIORITY_LOW is not None and prio_val <= int(SUMMARY_PRIORITY_LOW):
+                            bucket = "low"
+                        else:
+                            bucket = "normal"
+                    except Exception:
+                        bucket = "unknown"
+                priority_counts[bucket][str(status)] += 1
+                updated_time = info.get("updated_time")
+                task_rows.append(
+                    {
+                        "task_id": task_id,
+                        "pid": info.get("pid") or "",
+                        "model": info.get("model") or "",
+                        "status": status,
+                        "priority": info.get("priority"),
+                        "updated_time": updated_time,
+                        "updated_ago": _format_age(updated_time),
+                        "error": info.get("error") or "",
+                    }
+                )
 
         task_rows.sort(key=lambda row: row.get("updated_time") or 0, reverse=True)
         queue_tasks = task_rows[:50]
@@ -3770,8 +3790,8 @@ def _update_readinglist_summary_status(
     user: str,
     pid: str,
     status: str,
-    error: Optional[str] = None,
-    task_id: Optional[str] = None,
+    error: str | None = None,
+    task_id: str | None = None,
 ) -> None:
     """Update summary status in reading list - delegates to readinglist_service."""
     from backend.services.readinglist_service import update_summary_status
@@ -3781,11 +3801,11 @@ def _update_readinglist_summary_status(
 
 def _update_summary_status_db(
     pid: str,
-    model: Optional[str],
+    model: str | None,
     status: str,
-    error: Optional[str] = None,
-    task_id: Optional[str] = None,
-    task_user: Optional[str] = None,
+    error: str | None = None,
+    task_id: str | None = None,
+    task_user: str | None = None,
 ) -> None:
     """Persist summary status - delegates to readinglist_service."""
     from backend.services.readinglist_service import update_summary_status_db
@@ -3794,12 +3814,12 @@ def _update_summary_status_db(
 
 
 def _trigger_summary_async(
-    user: Optional[str],
+    user: str | None,
     pid: str,
-    model: Optional[str] = None,
-    priority: Optional[int] = None,
+    model: str | None = None,
+    priority: int | None = None,
     force_refresh: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Trigger summary generation - delegates to readinglist_service."""
     from backend.services.readinglist_service import trigger_summary_async
 

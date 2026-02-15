@@ -2439,6 +2439,8 @@ function debugLog(category, message, data) {
     let summaryStatusPoller = null;
     let summaryStatusCallback = null;
     let summaryStatusPollInFlight = false;
+    let summaryStatusPollOffset = 0;
+    const SUMMARY_STATUS_POLL_BATCH = 50;
 
     /**
      * Normalize a paper ID to a consistent string format.
@@ -2523,7 +2525,20 @@ function debugLog(category, message, data) {
             stopSummaryStatusPolling();
             return;
         }
-        const pids = Array.from(SUMMARY_PENDING);
+        // Avoid sending huge batches that can block the server and cause timeouts.
+        // Round-robin through pending pids so large sets eventually get polled.
+        const allPids = Array.from(SUMMARY_PENDING);
+        let pids = allPids;
+        if (allPids.length > SUMMARY_STATUS_POLL_BATCH) {
+            const start = summaryStatusPollOffset % allPids.length;
+            const end = start + SUMMARY_STATUS_POLL_BATCH;
+            if (end <= allPids.length) {
+                pids = allPids.slice(start, end);
+            } else {
+                pids = allPids.slice(start).concat(allPids.slice(0, end - allPids.length));
+            }
+            summaryStatusPollOffset = (start + SUMMARY_STATUS_POLL_BATCH) % allPids.length;
+        }
         csrfFetch('/api/summary_status', {
             method: 'POST',
             headers: {

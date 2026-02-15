@@ -38,7 +38,9 @@ Migration strategy:
 
 import re
 import time
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
+from contextlib import contextmanager
+from typing import Any
 
 from loguru import logger
 
@@ -57,6 +59,26 @@ from aslite.db import (
     get_uploaded_papers_index_db,
     update_metas_time_index,
 )
+
+
+@contextmanager
+def safe_closing(obj):
+    """Best-effort closing() that tolerates non-closable iterables.
+
+    Notes:
+    - SummaryStatusRepository.get_* methods may return generators (which have `.close()`).
+    - Some unit tests monkeypatch these methods to return plain lists (no `.close()`).
+    """
+    try:
+        yield obj
+    finally:
+        close = getattr(obj, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
 
 # -----------------------------------------------------------------------------
 # Helper functions
@@ -90,7 +112,7 @@ def summary_generation_epoch_key(pid: str, model: str) -> str:
     return f"epoch::{pid}::{model}"
 
 
-def parse_readinglist_key(key: str) -> Tuple[str, str]:
+def parse_readinglist_key(key: str) -> tuple[str, str]:
     """Parse reading list key into (user, pid)."""
     parts = key.split("::", 1)
     if len(parts) == 2:
@@ -129,7 +151,7 @@ class PaperRepository:
     """Repository for paper-related operations."""
 
     @staticmethod
-    def get_by_ids(pids: List[str]) -> Dict[str, dict]:
+    def get_by_ids(pids: list[str]) -> dict[str, dict]:
         """
         Batch fetch papers by IDs.
 
@@ -145,7 +167,7 @@ class PaperRepository:
             return pdb.get_many(pids)
 
     @staticmethod
-    def get_by_ids_with_cache(pids: List[str], cache=None) -> Dict[str, dict]:
+    def get_by_ids_with_cache(pids: list[str], cache=None) -> dict[str, dict]:
         """
         Batch fetch papers by IDs with optional cache update.
 
@@ -166,7 +188,7 @@ class PaperRepository:
         return papers
 
     @staticmethod
-    def get_by_id(pid: str) -> Optional[dict]:
+    def get_by_id(pid: str) -> dict | None:
         """
         Get a single paper by ID.
 
@@ -205,7 +227,7 @@ class PaperRepository:
         )
 
     @staticmethod
-    def get_recent_papers(days: int = 7, limit: Optional[int] = None) -> List[Tuple[str, dict]]:
+    def get_recent_papers(days: int = 7, limit: int | None = None) -> list[tuple[str, dict]]:
         """
         Get papers from the last N days.
 
@@ -251,7 +273,7 @@ class PaperRepository:
             pdb[pid] = paper_data
 
     @staticmethod
-    def save_many(papers: Dict[str, dict]):
+    def save_many(papers: dict[str, dict]):
         """
         Batch save multiple papers.
 
@@ -264,7 +286,7 @@ class PaperRepository:
             pdb.set_many(papers)
 
     @staticmethod
-    def set_many(papers: Dict[str, dict]):
+    def set_many(papers: dict[str, dict]):
         """Alias for save_many to keep naming consistent with lower-level API."""
         PaperRepository.save_many(papers)
 
@@ -278,7 +300,7 @@ class MetaRepository:
     """Repository for paper metadata operations."""
 
     @staticmethod
-    def get_by_ids(pids: List[str]) -> Dict[str, dict]:
+    def get_by_ids(pids: list[str]) -> dict[str, dict]:
         """Batch fetch metadata by paper IDs."""
         if not pids:
             return {}
@@ -286,13 +308,13 @@ class MetaRepository:
             return mdb.get_many(pids)
 
     @staticmethod
-    def get_by_id(pid: str) -> Optional[dict]:
+    def get_by_id(pid: str) -> dict | None:
         """Get metadata for a single paper."""
         with get_metas_db() as mdb:
             return mdb.get(pid)
 
     @staticmethod
-    def save_many(metas: Dict[str, dict]):
+    def save_many(metas: dict[str, dict]):
         """Batch save metadata and update time index."""
         if not metas:
             return
@@ -302,7 +324,7 @@ class MetaRepository:
         MetaRepository._update_time_index(metas)
 
     @staticmethod
-    def save_many_no_commit(metas: Dict[str, dict]):
+    def save_many_no_commit(metas: dict[str, dict]):
         """Batch save metadata without autocommit (caller manages commit)."""
         if not metas:
             return
@@ -313,7 +335,7 @@ class MetaRepository:
         MetaRepository._update_time_index(metas)
 
     @staticmethod
-    def _update_time_index(metas: Dict[str, dict]):
+    def _update_time_index(metas: dict[str, dict]):
         """Update the metas_time_index table with _time values from metas."""
         if not metas:
             return
@@ -341,7 +363,7 @@ class MetaRepository:
         logger.trace(f"[BLOCKING] MetaRepository.iter_all_metas: yielded {count} metas in {time.time() - t_start:.2f}s")
 
     @staticmethod
-    def get_latest_n(n: int, use_index: bool = True) -> List[Tuple[str, dict]]:
+    def get_latest_n(n: int, use_index: bool = True) -> list[tuple[str, dict]]:
         """Get the latest n papers sorted by _time descending.
 
         This method uses the metas_time_index table for efficient queries,
@@ -379,7 +401,7 @@ class MetaRepository:
         # Fallback: full table scan with heapq (original behavior)
         import heapq
 
-        heap: List[Tuple[float, str, dict]] = []
+        heap: list[tuple[float, str, dict]] = []
         with get_metas_db() as mdb:
             for pid, meta in mdb.items():
                 t = meta.get("_time", 0) if isinstance(meta, dict) else 0
@@ -401,7 +423,7 @@ class TagRepository:
     """Repository for tag-related operations."""
 
     @staticmethod
-    def get_user_tags(user: str) -> Dict[str, Set[str]]:
+    def get_user_tags(user: str) -> dict[str, set[str]]:
         """
         Get all tags for a user.
 
@@ -415,23 +437,23 @@ class TagRepository:
             return tdb.get(user, {})
 
     @staticmethod
-    def get_all_tags() -> Dict[str, Dict[str, Set[str]]]:
+    def get_all_tags() -> dict[str, dict[str, set[str]]]:
         """Get all tags for all users."""
         with get_tags_db() as tdb:
             return {user: tags for user, tags in tdb.items()}
 
     @staticmethod
-    def get_user_neg_tags(user: str) -> Dict[str, Set[str]]:
+    def get_user_neg_tags(user: str) -> dict[str, set[str]]:
         """Get all negative tags for a user (convenience wrapper)."""
         return NegativeTagRepository.get_user_neg_tags(user)
 
     @staticmethod
-    def get_user_combined_tags(user: str) -> Set[str]:
+    def get_user_combined_tags(user: str) -> set[str]:
         """Get all combined tags for a user (convenience wrapper)."""
         return CombinedTagRepository.get_user_combined_tags(user)
 
     @staticmethod
-    def get_all_users_tags() -> Dict[str, Dict[str, Set[str]]]:
+    def get_all_users_tags() -> dict[str, dict[str, set[str]]]:
         """
         Get tags for all users.
 
@@ -714,7 +736,7 @@ class TagRepository:
         return "ok"
 
     @staticmethod
-    def get_papers_by_tag(user: str, tag: str) -> Set[str]:
+    def get_papers_by_tag(user: str, tag: str) -> set[str]:
         """
         Get all paper IDs for a specific tag.
 
@@ -789,7 +811,7 @@ class NegativeTagRepository:
     """Repository for negative tag operations."""
 
     @staticmethod
-    def get_user_neg_tags(user: str) -> Dict[str, Set[str]]:
+    def get_user_neg_tags(user: str) -> dict[str, set[str]]:
         """Get all negative tags for a user."""
         with get_neg_tags_db() as ntdb:
             return ntdb.get(user, {})
@@ -838,7 +860,7 @@ class CombinedTagRepository:
     """Repository for combined tag operations."""
 
     @staticmethod
-    def get_user_combined_tags(user: str) -> Set[str]:
+    def get_user_combined_tags(user: str) -> set[str]:
         """
         Get all combined tags for a user.
 
@@ -852,7 +874,7 @@ class CombinedTagRepository:
             return ctdb.get(user, set())
 
     @staticmethod
-    def get_all_combined_tags() -> Dict[str, Set[str]]:
+    def get_all_combined_tags() -> dict[str, set[str]]:
         """Get all combined tags for all users."""
         with get_combined_tags_db() as ctdb:
             return {user: ctags for user, ctags in ctdb.items()}
@@ -921,7 +943,7 @@ class KeywordRepository:
     """Repository for keyword tracking operations."""
 
     @staticmethod
-    def get_user_keywords(user: str) -> Dict[str, Set[str]]:
+    def get_user_keywords(user: str) -> dict[str, set[str]]:
         """
         Get all keywords for a user.
 
@@ -935,7 +957,7 @@ class KeywordRepository:
             return kdb.get(user, {})
 
     @staticmethod
-    def get_all_keywords() -> Dict[str, Dict[str, Set[str]]]:
+    def get_all_keywords() -> dict[str, dict[str, set[str]]]:
         """Get all keywords for all users."""
         with get_keywords_db() as kdb:
             return {user: keywords for user, keywords in kdb.items()}
@@ -1010,7 +1032,7 @@ class ReadingListRepository:
     """Repository for reading list operations."""
 
     @staticmethod
-    def get_user_reading_list(user: str) -> Dict[str, dict]:
+    def get_user_reading_list(user: str) -> dict[str, dict]:
         """
         Get all reading list items for a user.
 
@@ -1078,7 +1100,7 @@ class ReadingListRepository:
         return result
 
     @staticmethod
-    def get_reading_list_item(user: str, pid: str) -> Optional[dict]:
+    def get_reading_list_item(user: str, pid: str) -> dict | None:
         """
         Get a specific reading list item.
 
@@ -1192,7 +1214,7 @@ class SummaryStatusRepository:
             return True
 
     @staticmethod
-    def get_status(pid: str, model: str = None) -> Optional[dict]:
+    def get_status(pid: str, model: str = None) -> dict | None:
         """
         Get summary status for a paper.
 
@@ -1284,7 +1306,7 @@ class SummaryStatusRepository:
             return False
 
     @staticmethod
-    def get_all_items(limit: Optional[int] = None):
+    def get_all_items(limit: int | None = None):
         """
         Get all summary status items.
 
@@ -1292,20 +1314,20 @@ class SummaryStatusRepository:
             limit: Maximum number of items to return (None for all)
 
         Returns:
-            List of (key, value) tuples
+            Iterable of (key, value) tuples
         """
         with get_summary_status_db() as sdb:
             if limit is None or limit <= 0:
-                return list(sdb.items())
-            out = []
+                for item in sdb.items():
+                    yield item
+                return
             for i, item in enumerate(sdb.items()):
                 if i >= limit:
                     break
-                out.append(item)
-            return out
+                yield item
 
     @staticmethod
-    def get_items_with_prefix(prefix: str, limit: Optional[int] = None):
+    def get_items_with_prefix(prefix: str, limit: int | None = None):
         """
         Get all items with a specific key prefix.
 
@@ -1314,20 +1336,20 @@ class SummaryStatusRepository:
             limit: Maximum number of items to return (None for all)
 
         Returns:
-            List of (key, value) tuples
+            Iterable of (key, value) tuples
         """
         with get_summary_status_db() as sdb:
             if limit is None or limit <= 0:
-                return list(sdb.items_with_prefix(prefix))
-            out = []
+                for item in sdb.items_with_prefix(prefix):
+                    yield item
+                return
             for i, item in enumerate(sdb.items_with_prefix(prefix)):
                 if i >= limit:
                     break
-                out.append(item)
-            return out
+                yield item
 
     @staticmethod
-    def get_task_status(task_id: str) -> Optional[dict]:
+    def get_task_status(task_id: str) -> dict | None:
         """
         Get status for a specific task.
 
@@ -1342,7 +1364,7 @@ class SummaryStatusRepository:
             return sdb.get(key)
 
     @staticmethod
-    def set_task_status(task_id: str, status: str, error: Optional[str] = None, **extra):
+    def set_task_status(task_id: str, status: str, error: str | None = None, **extra):
         """
         Set status for a specific task.
 
@@ -1434,7 +1456,7 @@ class UserRepository:
     """Repository for user-related operations."""
 
     @staticmethod
-    def _coerce_email_list(value) -> List[str]:
+    def _coerce_email_list(value) -> list[str]:
         """Coerce legacy/new email value into a normalized list[str]."""
         if value is None:
             return []
@@ -1442,7 +1464,7 @@ class UserRepository:
             v = value.strip()
             return [v] if v else []
         if isinstance(value, (list, tuple, set)):
-            out: List[str] = []
+            out: list[str] = []
             for item in value:
                 if not isinstance(item, str):
                     continue
@@ -1453,7 +1475,7 @@ class UserRepository:
         return []
 
     @staticmethod
-    def get_email(user: str) -> Optional[str]:
+    def get_email(user: str) -> str | None:
         """Get primary email address for a user (legacy API)."""
         with get_email_db() as edb:
             value = edb.get(user)
@@ -1461,25 +1483,25 @@ class UserRepository:
         return emails[0] if emails else ""
 
     @staticmethod
-    def get_emails(user: str) -> List[str]:
+    def get_emails(user: str) -> list[str]:
         """Get all email addresses for a user."""
         with get_email_db() as edb:
             value = edb.get(user)
         return UserRepository._coerce_email_list(value)
 
     @staticmethod
-    def get_all_emails() -> Dict[str, str]:
+    def get_all_emails() -> dict[str, str]:
         """Get primary email addresses for all users (legacy API)."""
         with get_email_db() as edb:
             items = list(edb.items())
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for user, value in items:
             emails = UserRepository._coerce_email_list(value)
             out[user] = emails[0] if emails else ""
         return out
 
     @staticmethod
-    def get_all_email_lists() -> Dict[str, List[str]]:
+    def get_all_email_lists() -> dict[str, list[str]]:
         """Get email address lists for all users."""
         with get_email_db() as edb:
             items = list(edb.items())
@@ -1495,9 +1517,9 @@ class UserRepository:
             UserRepository.set_emails(user, [])
 
     @staticmethod
-    def set_emails(user: str, emails: List[str]):
+    def set_emails(user: str, emails: list[str]):
         """Set email addresses for a user."""
-        normalized: List[str] = []
+        normalized: list[str] = []
         seen = set()
         for email in emails or []:
             if not isinstance(email, str):
@@ -1514,7 +1536,7 @@ class UserRepository:
             edb[user] = normalized
 
     @staticmethod
-    def get_all_users() -> List[str]:
+    def get_all_users() -> list[str]:
         """Get list of all users (from tags database)."""
         with get_tags_db() as tdb:
             return list(tdb.keys())
@@ -1538,7 +1560,7 @@ class UploadedPaperRepository:
         return f"{UploadedPaperRepository._SHA256_KEY_PREFIX}{owner}::{sha256}"
 
     @staticmethod
-    def get(pid: str) -> Optional[dict]:
+    def get(pid: str) -> dict | None:
         """Get an uploaded paper by PID.
 
         Args:
@@ -1579,7 +1601,7 @@ class UploadedPaperRepository:
                 return False
 
     @staticmethod
-    def get_by_owner(owner: str) -> Dict[str, dict]:
+    def get_by_owner(owner: str) -> dict[str, dict]:
         """Get all uploaded papers for a user.
 
         Args:
@@ -1631,7 +1653,7 @@ class UploadedPaperRepository:
         return result
 
     @staticmethod
-    def get_by_sha256(owner: str, sha256: str) -> Optional[Tuple[str, dict]]:
+    def get_by_sha256(owner: str, sha256: str) -> tuple[str, dict] | None:
         """Find an uploaded paper by SHA256 hash for a specific owner.
 
         Args:

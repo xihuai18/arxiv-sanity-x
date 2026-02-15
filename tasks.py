@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from huey import SqliteHuey
 from loguru import logger
@@ -13,6 +13,7 @@ from aslite.repositories import (
     MetaRepository,
     ReadingListRepository,
     SummaryStatusRepository,
+    safe_closing,
 )
 from config import settings
 from config.sentry import initialize_sentry
@@ -104,15 +105,16 @@ def _allow_task_id(task_user: str | None, request_user: str | None) -> bool:
 def _find_active_task(pid: str, model: str) -> tuple[str | None, str | None]:
     """Return (task_id, task_user) for an active queued/running task, if any."""
     try:
-        for key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            task_status = info.get("status")
-            if task_status not in ("queued", "running"):
-                continue
-            if info.get("pid") != pid or info.get("model") != model:
-                continue
-            return key.replace("task::", ""), info.get("user")
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                task_status = info.get("status")
+                if task_status not in ("queued", "running"):
+                    continue
+                if info.get("pid") != pid or info.get("model") != model:
+                    continue
+                return key.replace("task::", ""), info.get("user")
     except Exception as e:
         logger.warning(f"Failed to scan active tasks for {pid}::{model}: {e}")
     return None, None
@@ -404,16 +406,17 @@ def cancel_summary_tasks(
 
     # 2) Best-effort scan for any duplicate queued/running tasks for this pid/model.
     try:
-        for key, tinfo in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(tinfo, dict):
-                continue
-            if tinfo.get("status") not in ("queued", "running"):
-                continue
-            if tinfo.get("pid") != pid or tinfo.get("model") != model:
-                continue
-            task_id = str(key).replace("task::", "")
-            if _should_cancel_task(task_id, tinfo):
-                canceled_task_ids.append(task_id)
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, tinfo in items:
+                if not isinstance(tinfo, dict):
+                    continue
+                if tinfo.get("status") not in ("queued", "running"):
+                    continue
+                if tinfo.get("pid") != pid or tinfo.get("model") != model:
+                    continue
+                task_id = str(key).replace("task::", "")
+                if _should_cancel_task(task_id, tinfo):
+                    canceled_task_ids.append(task_id)
     except Exception:
         pass
 
@@ -476,32 +479,34 @@ def cancel_paper_summary_tasks(
     # Collect active tasks grouped by model.
     model_to_task_ids: dict[str, list[str]] = {}
     try:
-        for key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            if info.get("status") not in ("queued", "running"):
-                continue
-            if info.get("pid") != pid:
-                continue
-            m = (info.get("model") or "").strip()
-            if not m:
-                continue
-            model_to_task_ids.setdefault(m, []).append(str(key).replace("task::", ""))
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                if info.get("status") not in ("queued", "running"):
+                    continue
+                if info.get("pid") != pid:
+                    continue
+                m = (info.get("model") or "").strip()
+                if not m:
+                    continue
+                model_to_task_ids.setdefault(m, []).append(str(key).replace("task::", ""))
     except Exception:
         model_to_task_ids = {}
     # Include models from status entries (even if no task:: record is present).
     try:
-        for key, info in SummaryStatusRepository.get_items_with_prefix(f"{pid}::"):
-            if not isinstance(info, dict):
-                continue
-            if info.get("status") not in ("queued", "running"):
-                continue
-            if "::" not in key:
-                continue
-            _pid, m = key.split("::", 1)
-            if not m:
-                continue
-            model_to_task_ids.setdefault(m, [])
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix(f"{pid}::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                if info.get("status") not in ("queued", "running"):
+                    continue
+                if "::" not in key:
+                    continue
+                _pid, m = key.split("::", 1)
+                if not m:
+                    continue
+                model_to_task_ids.setdefault(m, [])
     except Exception:
         pass
 
@@ -968,19 +973,20 @@ def _collect_task_priority_map() -> dict:
     """Return latest priority per (pid, model) from task status records."""
     priority_map = {}
     try:
-        for _key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            pid = info.get("pid")
-            model = info.get("model")
-            priority = info.get("priority")
-            updated_time = info.get("updated_time") or 0
-            if not pid or not model or priority is None:
-                continue
-            map_key = (pid, model)
-            prev = priority_map.get(map_key)
-            if not prev or updated_time >= prev.get("updated_time", 0):
-                priority_map[map_key] = {"priority": priority, "updated_time": updated_time}
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for _key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                pid = info.get("pid")
+                model = info.get("model")
+                priority = info.get("priority")
+                updated_time = info.get("updated_time") or 0
+                if not pid or not model or priority is None:
+                    continue
+                map_key = (pid, model)
+                prev = priority_map.get(map_key)
+                if not prev or updated_time >= prev.get("updated_time", 0):
+                    priority_map[map_key] = {"priority": priority, "updated_time": updated_time}
     except Exception as e:
         logger.warning(f"Failed to collect task priorities: {e}")
     return priority_map
@@ -990,19 +996,20 @@ def _collect_task_user_map() -> dict:
     """Return latest user per (pid, model) from task status records."""
     user_map = {}
     try:
-        for _key, info in SummaryStatusRepository.get_items_with_prefix("task::"):
-            if not isinstance(info, dict):
-                continue
-            pid = info.get("pid")
-            model = info.get("model")
-            user = info.get("user")
-            updated_time = info.get("updated_time") or 0
-            if not pid or not model or not user:
-                continue
-            map_key = (pid, model)
-            prev = user_map.get(map_key)
-            if not prev or updated_time >= prev.get("updated_time", 0):
-                user_map[map_key] = {"user": user, "updated_time": updated_time}
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for _key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                pid = info.get("pid")
+                model = info.get("model")
+                user = info.get("user")
+                updated_time = info.get("updated_time") or 0
+                if not pid or not model or not user:
+                    continue
+                map_key = (pid, model)
+                prev = user_map.get(map_key)
+                if not prev or updated_time >= prev.get("updated_time", 0):
+                    user_map[map_key] = {"user": user, "updated_time": updated_time}
     except Exception as e:
         logger.warning(f"Failed to collect task users: {e}")
     return user_map
@@ -1024,25 +1031,34 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
     priority_map = _collect_task_priority_map() if requeue else {}
     user_map = _collect_task_user_map()
 
+    stale_items: list[tuple[str, str, dict]] = []
     try:
-        for key, info in SummaryStatusRepository.get_all_items():
-            if key.startswith("task::"):
-                continue
-            if not isinstance(info, dict):
-                continue
-            status = info.get("status")
-            updated_time = info.get("updated_time") or 0
-            if status != "running":
-                continue
-            if now - float(updated_time) < max_age_s:
-                continue
+        with safe_closing(SummaryStatusRepository.get_all_items()) as items:
+            for key, info in items:
+                if key.startswith("task::"):
+                    continue
+                if not isinstance(info, dict):
+                    continue
+                status = info.get("status")
+                updated_time = info.get("updated_time") or 0
+                if status != "running":
+                    continue
+                if now - float(updated_time) < max_age_s:
+                    continue
 
-            if "::" not in key:
-                continue
-            pid, model = key.split("::", 1)
-            if not pid or not model:
-                continue
+                if "::" not in key:
+                    continue
+                pid, model = key.split("::", 1)
+                if not pid or not model:
+                    continue
+                # Do not mutate the summary-status DB while iterating its items: snapshot stale keys
+                # and repair them after closing the iterator to avoid SQLite cursor/locking issues.
+                stale_items.append((pid, model, dict(info)))
+    except Exception as e:
+        logger.warning(f"Failed to repair stale summary tasks: {e}")
 
+    for pid, model, info in stale_items:
+        try:
             _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
                 pid, model
             )
@@ -1054,28 +1070,31 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
                             lock_path.unlink(missing_ok=True)
                 except Exception as e:
                     logger.warning(f"Failed to remove stale lock {lock_path}: {e}")
+        except Exception:
+            pass
 
-            user_info = user_map.get((pid, model))
-            user = user_info.get("user") if user_info else None
-            task_id = info.get("task_id") if isinstance(info, dict) else None
+        user_info = user_map.get((pid, model))
+        user = user_info.get("user") if user_info else None
+        task_id = info.get("task_id") if isinstance(info, dict) else None
 
-            if requeue:
-                if task_id:
-                    try:
-                        SummaryStatusRepository.set_task_status(
-                            str(task_id),
-                            "failed",
-                            error="stale_running_repaired",
-                            pid=pid,
-                            model=model,
-                            user=user,
-                        )
-                    except Exception:
-                        pass
-                priority_info = priority_map.get((pid, model))
-                priority = priority_info.get("priority") if priority_info else None
-                enqueue_summary_task(pid, model=model, user=user, priority=priority)
-            else:
+        if requeue:
+            if task_id:
+                try:
+                    SummaryStatusRepository.set_task_status(
+                        str(task_id),
+                        "failed",
+                        error="stale_running_repaired",
+                        pid=pid,
+                        model=model,
+                        user=user,
+                    )
+                except Exception:
+                    pass
+            priority_info = priority_map.get((pid, model))
+            priority = priority_info.get("priority") if priority_info else None
+            enqueue_summary_task(pid, model=model, user=user, priority=priority)
+        else:
+            try:
                 SummaryStatusRepository.update_status(
                     pid,
                     model,
@@ -1085,23 +1104,26 @@ def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = Fal
                         "updated_time": now,
                     },
                 )
-                if task_id:
-                    try:
-                        SummaryStatusRepository.set_task_status(
-                            str(task_id),
-                            "failed",
-                            error="stale_running_repaired",
-                            pid=pid,
-                            model=model,
-                            user=user,
-                        )
-                    except Exception:
-                        pass
-                if user:
+            except Exception:
+                pass
+            if task_id:
+                try:
+                    SummaryStatusRepository.set_task_status(
+                        str(task_id),
+                        "failed",
+                        error="stale_running_repaired",
+                        pid=pid,
+                        model=model,
+                        user=user,
+                    )
+                except Exception:
+                    pass
+            if user:
+                try:
                     _update_readinglist_summary_status(user, pid, "failed", "stale_running_repaired")
-            repaired += 1
-    except Exception as e:
-        logger.warning(f"Failed to repair stale summary tasks: {e}")
+                except Exception:
+                    pass
+        repaired += 1
 
     return repaired
 
@@ -1146,64 +1168,65 @@ def cleanup_tasks(
     details = []
 
     try:
-        for key, info in list(SummaryStatusRepository.get_items_with_prefix("task::")):
-            if not isinstance(info, dict):
-                continue
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in list(items):
+                if not isinstance(info, dict):
+                    continue
 
-            task_id = key.replace("task::", "")
-            status = info.get("status")
-            pid = info.get("pid")
-            model = info.get("model")
-            updated_time = info.get("updated_time") or 0
+                task_id = key.replace("task::", "")
+                status = info.get("status")
+                pid = info.get("pid")
+                model = info.get("model")
+                updated_time = info.get("updated_time") or 0
 
-            # Apply filters
-            if status_filter and status not in status_filter:
-                continue
-            if pid_filter and pid != pid_filter:
-                continue
-            if model_filter and model != model_filter:
-                continue
-            if max_age_s is not None and (now - updated_time) < max_age_s:
-                continue
+                # Apply filters
+                if status_filter and status not in status_filter:
+                    continue
+                if pid_filter and pid != pid_filter:
+                    continue
+                if model_filter and model != model_filter:
+                    continue
+                if max_age_s is not None and (now - updated_time) < max_age_s:
+                    continue
 
-            details.append(
-                {
-                    "task_id": task_id,
-                    "pid": pid,
-                    "model": model,
-                    "status": status,
-                    "age_s": int(now - updated_time) if updated_time else None,
-                }
-            )
+                details.append(
+                    {
+                        "task_id": task_id,
+                        "pid": pid,
+                        "model": model,
+                        "status": status,
+                        "age_s": int(now - updated_time) if updated_time else None,
+                    }
+                )
 
-            if not dry_run:
-                # Delete task entry directly from db
-                task_key = f"task::{task_id}"
-                try:
-                    from aslite.db import get_summary_status_db
-
-                    with get_summary_status_db(flag="c") as sdb:
-                        if task_key in sdb:
-                            del sdb[task_key]
-                except Exception as del_err:
-                    logger.warning(f"Failed to delete task {task_id}: {del_err}")
-                # Also reset the summary status if it was queued/running
-                if pid and model and status in ("queued", "running"):
+                if not dry_run:
+                    # Delete task entry directly from db
+                    task_key = f"task::{task_id}"
                     try:
-                        current = SummaryStatusRepository.get_status(pid, model)
-                        if isinstance(current, dict) and current.get("status") in ("queued", "running"):
-                            SummaryStatusRepository.delete_status(pid, model)
-                    except Exception:
-                        pass
-                # Best-effort: clear readinglist task linkage to avoid UI stuck in queued/running.
-                task_user = info.get("user")
-                if pid and task_user and status in ("queued", "running"):
-                    try:
-                        _update_readinglist_summary_status(task_user, pid, "failed", "task_cleaned", task_id=None)
-                    except Exception:
-                        pass
+                        from aslite.db import get_summary_status_db
 
-            cleaned += 1
+                        with get_summary_status_db(flag="c") as sdb:
+                            if task_key in sdb:
+                                del sdb[task_key]
+                    except Exception as del_err:
+                        logger.warning(f"Failed to delete task {task_id}: {del_err}")
+                    # Also reset the summary status if it was queued/running
+                    if pid and model and status in ("queued", "running"):
+                        try:
+                            current = SummaryStatusRepository.get_status(pid, model)
+                            if isinstance(current, dict) and current.get("status") in ("queued", "running"):
+                                SummaryStatusRepository.delete_status(pid, model)
+                        except Exception:
+                            pass
+                    # Best-effort: clear readinglist task linkage to avoid UI stuck in queued/running.
+                    task_user = info.get("user")
+                    if pid and task_user and status in ("queued", "running"):
+                        try:
+                            _update_readinglist_summary_status(task_user, pid, "failed", "task_cleaned", task_id=None)
+                        except Exception:
+                            pass
+
+                cleaned += 1
 
     except Exception as e:
         logger.warning(f"Failed to cleanup tasks: {e}")

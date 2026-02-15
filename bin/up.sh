@@ -258,12 +258,13 @@ fi
 
 # Gunicorn timeouts:
 # - Default timeout (30s) is often too small for cold-start / preload / cache warmup on large corpora.
+# - gthread fallback (when gevent isn't available) is especially prone to worker timeouts under heavy DB scans.
 # - Only set defaults when the user did not specify them explicitly.
-if [ "${WORKER_CLASS}" = "gevent" ] && [ "${EXTRA_ARGS_HAS_TIMEOUT}" != "1" ]; then
+if [ "${EXTRA_ARGS_HAS_TIMEOUT}" != "1" ]; then
   # SSE connections and cold-start I/O can legitimately take >30s; keep this generous.
   set -- "$@" --timeout 600
 fi
-if [ "${WORKER_CLASS}" = "gevent" ] && [ "${EXTRA_ARGS_HAS_GRACEFUL_TIMEOUT}" != "1" ]; then
+if [ "${EXTRA_ARGS_HAS_GRACEFUL_TIMEOUT}" != "1" ]; then
   set -- "$@" --graceful-timeout 600
 fi
 

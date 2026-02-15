@@ -807,6 +807,7 @@ ${qed}</div>`;
                 return;
             }
 
+            let didConvert = false;
             for (const el of nodes) {
                 // Skip stale nodes when re-render happens mid-flight.
                 if (!el || !isNodeConnected(el)) continue;
@@ -823,6 +824,7 @@ ${qed}</div>`;
                     el.appendChild(out);
                     el.classList.add('mjx-typeset');
                     el.classList.remove('mjx-error');
+                    didConvert = true;
                 } catch (e) {
                     // Show user-friendly error message
                     el.classList.add('mjx-error');
@@ -866,6 +868,19 @@ ${qed}</div>`;
                     }
                 }
             }
+
+            // Ensure CHTML styles and layout are updated after tex2chtmlPromise insertions.
+            // MathJax's own docs recommend calling updateDocument() after programmatic conversions.
+            try {
+                if (
+                    didConvert &&
+                    MathJax.startup &&
+                    MathJax.startup.document &&
+                    typeof MathJax.startup.document.updateDocument === 'function'
+                ) {
+                    MathJax.startup.document.updateDocument();
+                }
+            } catch (e) {}
         };
 
         /**
