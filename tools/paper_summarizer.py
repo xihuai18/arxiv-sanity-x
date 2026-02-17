@@ -20,7 +20,6 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import openai
 import requests
@@ -44,7 +43,6 @@ LLM_BASE_URL = settings.llm.base_url
 LLM_API_KEY = settings.llm.api_key
 LLM_NAME = settings.llm.name
 LLM_SUMMARY_LANG = settings.llm.summary_lang
-SUMMARY_FALLBACK_MODELS = settings.llm.fallback_models
 LLM_TIMEOUT = int(getattr(settings.llm, "timeout", 180))
 SUMMARY_MIN_CHINESE_RATIO = settings.summary.min_chinese_ratio
 SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
@@ -140,19 +138,6 @@ class PaperSummarizer:
         # Initialize OpenAI client
         self.client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
 
-        # Fallback models from config (comma-separated)
-        self._fallback_models = self._parse_fallback_models(SUMMARY_FALLBACK_MODELS)
-
-    @staticmethod
-    def _parse_fallback_models(raw: str) -> List[str]:
-        """Parse comma-separated fallback model list."""
-        models: List[str] = []
-        for part in (raw or "").split(","):
-            m = (part or "").strip()
-            if m and m not in models:
-                models.append(m)
-        return models
-
     @staticmethod
     def _should_fallback_llm_error(exc: Exception) -> bool:
         """Decide whether to fallback to another model for this error.
@@ -238,12 +223,12 @@ class PaperSummarizer:
         return any(m in msg for m in markers)
 
     @staticmethod
-    def _build_summary_result(content: str, meta: Optional[dict] = None) -> dict:
+    def _build_summary_result(content: str, meta: dict | None = None) -> dict:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
 
     @staticmethod
-    def _extract_version_from_url(url: str, raw_pid: str) -> Optional[str]:
+    def _extract_version_from_url(url: str, raw_pid: str) -> str | None:
         """Extract version number from arXiv URL.
 
         Args:
@@ -263,7 +248,7 @@ class PaperSummarizer:
             return match.group(1)
         return None
 
-    def download_arxiv_paper(self, pid: str) -> Tuple[Optional[Path], Optional[str]]:
+    def download_arxiv_paper(self, pid: str) -> tuple[Path | None, str | None]:
         """
         Download arXiv paper PDF
 
@@ -402,7 +387,7 @@ class PaperSummarizer:
         return raw_pid
 
     @classmethod
-    def _split_pid_version(cls, pid: str) -> Tuple[str, Optional[int]]:
+    def _split_pid_version(cls, pid: str) -> tuple[str, int | None]:
         """Split paper ID into raw ID and version number.
 
         Args:
@@ -424,7 +409,7 @@ class PaperSummarizer:
             return pid, None
         return raw_pid, version
 
-    def _get_latest_version_from_meta(self, pid: str) -> Optional[int]:
+    def _get_latest_version_from_meta(self, pid: str) -> int | None:
         raw_pid, explicit_version = self._split_pid_version(pid)
         if explicit_version:
             return explicit_version
@@ -465,14 +450,14 @@ class PaperSummarizer:
         raw_pid, _ = self._split_pid_version(pid)
         return raw_pid
 
-    def _normalize_summary_source(self, source: Optional[str]) -> str:
+    def _normalize_summary_source(self, source: str | None) -> str:
         src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
         if src not in {"html", "mineru"}:
             logger.trace(f"Unknown summary source '{src}', fallback to html")
             return "html"
         return src
 
-    def _normalize_mineru_backend(self, backend: Optional[str] = None) -> str:
+    def _normalize_mineru_backend(self, backend: str | None = None) -> str:
         raw = (backend or MINERU_BACKEND or "pipeline").strip().lower()
         aliases = {
             "vlm": "vlm-http-client",
@@ -494,7 +479,7 @@ class PaperSummarizer:
             return "pipeline"
         return raw
 
-    def _mineru_md_candidates(self, paper_id: str, backend: Optional[str] = None) -> List[Path]:
+    def _mineru_md_candidates(self, paper_id: str, backend: str | None = None) -> list[Path]:
         base_dir = self.mineru_dir / paper_id
         auto_md = base_dir / "auto" / f"{paper_id}.md"
         vlm_md = base_dir / "vlm" / f"{paper_id}.md"
@@ -508,7 +493,7 @@ class PaperSummarizer:
     # Minimum size for a valid MinerU markdown (4KB) to detect truncated/corrupted files
     _MINERU_MD_MIN_SIZE = 4096
 
-    def _find_mineru_markdown(self, paper_id: str, backend: Optional[str] = None) -> Optional[Path]:
+    def _find_mineru_markdown(self, paper_id: str, backend: str | None = None) -> Path | None:
         def _is_valid_md(path: Path) -> bool:
             """Check if markdown file is valid (exists and has reasonable size)."""
             if not path.exists() or not path.is_file():
@@ -548,7 +533,7 @@ class PaperSummarizer:
         except Exception:
             return {}
 
-    def _write_mineru_meta(self, paper_id: str, backend: str, cached_version: Optional[str] = None) -> None:
+    def _write_mineru_meta(self, paper_id: str, backend: str, cached_version: str | None = None) -> None:
         """Write MinerU metadata to file.
 
         Args:
@@ -565,11 +550,11 @@ class PaperSummarizer:
             meta["cached_version"] = cached_version
         self._atomic_write_json(meta_path, meta)
 
-    def _parse_html_sources(self) -> List[str]:
+    def _parse_html_sources(self) -> list[str]:
         raw = (SUMMARY_HTML_SOURCES or "").strip()
         if not raw:
             raw = "ar5iv,arxiv"
-        sources: List[str] = []
+        sources: list[str] = []
         for item in raw.split(","):
             src = item.strip().lower()
             if not src:
@@ -583,7 +568,7 @@ class PaperSummarizer:
             sources = ["ar5iv", "arxiv"]
         return sources
 
-    def _html_cache_paths(self, cache_pid: str) -> Tuple[Path, Path, Path]:
+    def _html_cache_paths(self, cache_pid: str) -> tuple[Path, Path, Path]:
         """Get HTML cache paths in new folder structure.
 
         Returns:
@@ -606,7 +591,7 @@ class PaperSummarizer:
         except Exception:
             return {}
 
-    def _read_html_markdown_cache(self, cache_pid: str) -> Optional[str]:
+    def _read_html_markdown_cache(self, cache_pid: str) -> str | None:
         md_path, _, _ = self._html_cache_paths(cache_pid)
         if not md_path.exists():
             return None
@@ -747,7 +732,7 @@ class PaperSummarizer:
             else:
                 math.decompose()
 
-    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str) -> Optional[str]:
+    def _html_to_markdown(self, html: str, cache_pid: str, base_url: str) -> str | None:
         """Convert HTML to Markdown and download images.
 
         Args:
@@ -827,7 +812,7 @@ class PaperSummarizer:
         markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
         return markdown if markdown else None
 
-    def _fetch_html_from_source(self, pid: str, source: str) -> Tuple[Optional[str], str]:
+    def _fetch_html_from_source(self, pid: str, source: str) -> tuple[str | None, str]:
         if source == "ar5iv":
             url = f"https://ar5iv.labs.arxiv.org/html/{pid}"
         else:
@@ -857,7 +842,7 @@ class PaperSummarizer:
             logger.trace(f"HTML fetch error ({source}) {pid}: {e}")
             return None, url
 
-    def _get_markdown_from_html(self, pid: str) -> Tuple[Optional[str], Optional[str], str]:
+    def _get_markdown_from_html(self, pid: str) -> tuple[str | None, str | None, str]:
         """Get markdown from HTML source with versioned caching.
 
         Args:
@@ -891,7 +876,7 @@ class PaperSummarizer:
 
         return None, None, cache_pid
 
-    def _acquire_file_lock(self, lock_path: Path, timeout: int = 60) -> Optional[int]:
+    def _acquire_file_lock(self, lock_path: Path, timeout: int = 60) -> int | None:
         """
         Acquire a file-based lock for multi-process synchronization
 
@@ -974,7 +959,7 @@ class PaperSummarizer:
         except Exception as e:
             logger.trace(f"Error releasing lock: {e}")
 
-    def _acquire_gpu_slot(self, timeout: int = 600) -> Optional[int]:
+    def _acquire_gpu_slot(self, timeout: int = 600) -> int | None:
         """
         Acquire a GPU slot for MinerU process (implements semaphore with file-based locks)
 
@@ -1072,10 +1057,10 @@ class PaperSummarizer:
     def parse_pdf_with_mineru(
         self,
         pdf_path: Path,
-        cache_pid: Optional[str] = None,
-        cached_version: Optional[str] = None,
+        cache_pid: str | None = None,
+        cached_version: str | None = None,
         keep_pdf: bool = False,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Parse PDF to Markdown using minerU (with multi-process lock protection)
 
@@ -1258,8 +1243,8 @@ class PaperSummarizer:
             return None
 
     def _parse_pdf_with_mineru_api(
-        self, pdf_path: Path, pdf_name: str, cached_version: Optional[str] = None, keep_pdf: bool = False
-    ) -> Optional[Path]:
+        self, pdf_path: Path, pdf_name: str, cached_version: str | None = None, keep_pdf: bool = False
+    ) -> Path | None:
         """
         Parse PDF using MinerU API service with file upload mode.
 
@@ -1748,7 +1733,7 @@ class PaperSummarizer:
             logger.trace(f"Failed to extract main content: {e}")
             return markdown_content
 
-    def summarize_with_llm(self, markdown_content: str, model: Optional[str] = None, pid: Optional[str] = None) -> dict:
+    def summarize_with_llm(self, markdown_content: str, model: str | None = None, pid: str | None = None) -> dict:
         """
         Summarize paper content using LLM
 
@@ -1798,8 +1783,34 @@ class PaperSummarizer:
         # then optional fallbacks from config.
         requested = (model or "").strip()
         default_model = (LLM_NAME or "").strip()
-        model_candidates: List[str] = []
-        for m in [requested, default_model, *self._fallback_models]:
+        fallback_models: list[str] = []
+        try:
+            raw = str(getattr(settings.llm, "fallback_models", "") or "").strip()
+        except Exception:
+            raw = ""
+        mode = raw.lower()
+        if mode in ("", "auto", "yml"):
+            try:
+                from config.llm_model_order import (
+                    compute_auto_fallback_models,
+                    read_llm_yml_model_order,
+                )
+
+                yml_order = read_llm_yml_model_order()
+                anchor = requested or default_model
+                if yml_order:
+                    fallback_models = compute_auto_fallback_models(
+                        yml_order=yml_order,
+                        anchor=anchor,
+                        default_anchor=default_model,
+                    )
+            except Exception:
+                fallback_models = []
+        if not fallback_models:
+            # Non-auto mode (explicit allowlist) or a best-effort fallback when llm.yml is unavailable.
+            fallback_models = list(getattr(settings.llm, "fallback_model_list", []) or [])
+        model_candidates: list[str] = []
+        for m in [requested, default_model, *fallback_models]:
             m = (m or "").strip()
             if m and m not in model_candidates:
                 model_candidates.append(m)
@@ -1810,8 +1821,8 @@ class PaperSummarizer:
             return self._build_summary_result("# Error\n\nLLM model is not configured", summary_meta)
 
         prompt = None
-        last_exc: Optional[Exception] = None
-        attempts: List[dict] = []
+        last_exc: Exception | None = None
+        attempts: list[dict] = []
 
         for idx, modelid in enumerate(model_candidates):
             try:
@@ -1820,6 +1831,8 @@ class PaperSummarizer:
                     # English prompt - Academic technical blog style
                     prompt = rf"""
 You are an experienced academic technical blogger who excels at transforming research papers into rigorous yet accessible technical blog posts with proper academic conventions.
+
+IMPORTANT: This is a pure text-generation task. Do NOT call any tools/functions. Do NOT ask to use tools. Output the blog post content in Markdown.
 
 ## Task Objective
 Transform the paper below into an academic-style technical blog post that enables readers to understand the key techniques, core results, and important details without reading the original paper, while maintaining scholarly rigor.
@@ -1957,11 +1970,14 @@ Please output strictly according to the following structure:
 3. **Language**: Write entirely in **English** with formal academic style
 4. **Figure Integrity**: Only include figures that exist in the paper; always cross-reference them in text
 5. **Mathematical Precision**: Ensure all equations are syntactically correct and properly contextualized
+6. **No Tools / No Functions**: Do NOT call tools/functions and do NOT return tool calls. You may write a brief preface, but you must include a complete Markdown blog post with `## TL;DR`.
 """
                 else:
                     # Chinese prompt (default) - Academic technical blog style
                     prompt = rf"""
 你是一位经验丰富的学术技术博主，擅长将研究论文转化为既严谨又易懂的技术博客，同时恪守学术规范，保持专业但不晦涩。
+
+重要：这是纯文本生成任务。请不要调用任何工具/函数，也不要请求使用工具。请以 Markdown 输出博客内容。
 
 ## 任务目标
 将下方论文转化为一篇学术风格的技术博客，使读者无需阅读原文即可理解其关键技术、核心结果与重要细节，同时保持学术严谨性。
@@ -2099,6 +2115,7 @@ Please output strictly according to the following structure:
 3. **语言规范**：全文使用中文撰写，保持正式学术风格
 4. **图片引用规范**：仅引用论文中实际存在的图片，必须在正文中交叉引用
 5. **公式准确性**：确保所有公式语法正确，并有恰当的上下文说明
+6. **禁止工具/函数**：不要调用任何工具/函数，也不要返回 tool calls。允许简短前言，但必须输出完整的 Markdown 博客，并包含 `## TL;DR`。
 """
 
                 summary_meta = {
@@ -2112,98 +2129,188 @@ Please output strictly according to the following structure:
                     f"Calling {modelid} to generate paper summary... " f"(attempt {idx + 1}/{len(model_candidates)})"
                 )
 
+                # Some providers/proxies may (incorrectly) return tool calls for long prompts.
+                # We do a best-effort guard: forbid tool calls, and if the response still looks
+                # incomplete, retry once with a stronger "no tools, output final markdown" hint.
                 response = None
-                for llm_try in range(2):
-                    try:
-                        response = self.client.chat.completions.create(
-                            model=modelid,
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.3,
-                            top_p=0.95,
-                            timeout=LLM_TIMEOUT,
+                last_finish_reason = None
+                last_tool_call_count = 0
+                for content_try in range(2):
+                    is_claude = "claude" in str(modelid or "").lower()
+                    claude_notice = (
+                        "\n\nIMPORTANT (Claude): Do not use any built-in tools. "
+                        "Do not return tool calls. Output the final markdown directly."
+                        if is_claude
+                        else ""
+                    )
+                    prompt_for_call = prompt + claude_notice
+                    if content_try > 0:
+                        prompt_for_call = (
+                            prompt
+                            + "\n\nIMPORTANT: Do not call any tools/functions. "
+                            + "Output the complete markdown blog post content."
                         )
-                        break
-                    except Exception as e:
-                        if llm_try < 1 and self._is_transient_llm_error(e):
-                            logger.warning(f"LLM transient error for model={modelid}, retrying once: {e}")
-                            _sleep_backoff(llm_try, base_s=1.0, cap_s=4.0)
-                            continue
-                        raise
-                if response is None:
-                    raise RuntimeError("LLM call returned no response")
+                        if claude_notice:
+                            prompt_for_call += claude_notice
+                        summary_meta["prompt"] = prompt_for_call
 
-                # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
-                try:
-                    usage = getattr(response, "usage", None)
-                except Exception:
-                    usage = None
+                    response = None
+                    for llm_try in range(2):
+                        try:
+                            # Prefer disabling tools explicitly (OpenAI-compatible); fall back if proxy rejects params.
+                            messages = [
+                                {
+                                    "role": "system",
+                                    "content": "You must not call tools/functions. Produce the final answer directly as markdown.",
+                                },
+                                {"role": "user", "content": prompt_for_call},
+                            ]
+                            base_kwargs = {
+                                "model": modelid,
+                                "messages": messages,
+                                "temperature": 0.3,
+                                "top_p": 0.95,
+                                "timeout": LLM_TIMEOUT,
+                            }
 
-                finish_reason = None
-                try:
-                    if getattr(response, "choices", None):
-                        finish_reason = getattr(response.choices[0], "finish_reason", None)
-                except Exception:
+                            try:
+                                response = self.client.chat.completions.create(
+                                    **base_kwargs,
+                                    tool_choice="none",
+                                    tools=[],
+                                )
+                            except Exception as tool_exc:
+                                msg = str(tool_exc or "").lower()
+                                # Some proxies require object-style tool_choice.
+                                if "tool_choice" in msg and any(k in msg for k in ("object", "dict", "type")):
+                                    try:
+                                        response = self.client.chat.completions.create(
+                                            **base_kwargs,
+                                            tool_choice={"type": "none"},
+                                            tools=[],
+                                        )
+                                    except Exception:
+                                        response = None
+                                # Unknown/unsupported tool params: retry without them.
+                                if response is None and ("tool_choice" in msg or "tools" in msg):
+                                    response = self.client.chat.completions.create(**base_kwargs)
+                                elif response is None:
+                                    raise
+                            break
+                        except Exception as e:
+                            if llm_try < 1 and self._is_transient_llm_error(e):
+                                logger.warning(f"LLM transient error for model={modelid}, retrying once: {e}")
+                                _sleep_backoff(llm_try, base_s=1.0, cap_s=4.0)
+                                continue
+                            raise
+                    if response is None:
+                        raise RuntimeError("LLM call returned no response")
+
+                    # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
+                    try:
+                        usage = getattr(response, "usage", None)
+                    except Exception:
+                        usage = None
+
                     finish_reason = None
+                    try:
+                        if getattr(response, "choices", None):
+                            finish_reason = getattr(response.choices[0], "finish_reason", None)
+                    except Exception:
+                        finish_reason = None
+                    last_finish_reason = finish_reason
 
-                llm_info = {}
-                usage_dump = _safe_dump(usage)
-                if usage_dump is not None:
-                    llm_info["usage"] = usage_dump
-                if finish_reason is not None:
-                    llm_info["finish_reason"] = finish_reason
+                    llm_info = {}
+                    usage_dump = _safe_dump(usage)
+                    if usage_dump is not None:
+                        llm_info["usage"] = usage_dump
+                    if finish_reason is not None:
+                        llm_info["finish_reason"] = finish_reason
 
-                # Validate response structure
-                if not response.choices:
-                    logger.trace("LLM returned empty choices")
-                    return self._build_summary_result("# Error\n\nLLM returned no response", summary_meta)
+                    # Validate response structure
+                    if not response.choices:
+                        logger.trace("LLM returned empty choices")
+                        return self._build_summary_result("# Error\n\nLLM returned no response", summary_meta)
 
-                message = response.choices[0].message
-                summary = message.content if message else None
+                    message = response.choices[0].message
+                    summary = message.content if message else None
 
-                # Attach reasoning to meta if provider returns it (can be large)
-                reasoning = None
-                try:
-                    if hasattr(message, "reasoning") and message.reasoning:
-                        reasoning = message.reasoning
-                    elif hasattr(message, "reasoning_content") and message.reasoning_content:
-                        reasoning = message.reasoning_content
-                except Exception:
+                    # Detect tool calls (OpenAI schema); if present, treat as invalid for this app.
+                    tool_calls = None
+                    try:
+                        tool_calls = getattr(message, "tool_calls", None) if message else None
+                    except Exception:
+                        tool_calls = None
+                    try:
+                        last_tool_call_count = len(tool_calls) if tool_calls else 0
+                    except Exception:
+                        last_tool_call_count = 0
+                    if finish_reason == "tool_calls" or last_tool_call_count > 0:
+                        llm_info["tool_call_count"] = last_tool_call_count
+                        # Some proxies may pack the final markdown into tool call arguments.
+                        extracted = None
+                        try:
+                            extracted = self._extract_markdown_from_tool_calls(tool_calls)
+                        except Exception:
+                            extracted = None
+                        if extracted and isinstance(extracted, str) and extracted.strip():
+                            llm_info["tool_calls_salvaged"] = True
+                            summary = extracted
+                        else:
+                            summary_meta["llm"] = llm_info
+                            if content_try < 1:
+                                continue
+                            raise RuntimeError("LLM returned tool calls instead of content")
+
+                    # Attach reasoning to meta if provider returns it (can be large)
                     reasoning = None
+                    try:
+                        if hasattr(message, "reasoning") and message.reasoning:
+                            reasoning = message.reasoning
+                        elif hasattr(message, "reasoning_content") and message.reasoning_content:
+                            reasoning = message.reasoning_content
+                    except Exception:
+                        reasoning = None
 
-                if reasoning:
-                    llm_info["reasoning"] = str(reasoning)
+                    if reasoning:
+                        llm_info["reasoning"] = str(reasoning)
 
-                if llm_info:
-                    summary_meta["llm"] = llm_info
+                    if llm_info:
+                        summary_meta["llm"] = llm_info
 
-                # Record which model succeeded and any prior failed attempts.
-                summary_meta["llm_model"] = modelid
-                if attempts:
-                    summary_meta["llm_fallback_attempts"] = attempts
+                    # Record which model succeeded and any prior failed attempts.
+                    summary_meta["llm_model"] = modelid
+                    if attempts:
+                        summary_meta["llm_fallback_attempts"] = attempts
 
-                if not summary:
-                    logger.trace("LLM returned empty content")
-                    return self._build_summary_result("# Error\n\nLLM returned empty content", summary_meta)
+                    if not summary:
+                        logger.trace("LLM returned empty content")
+                        return self._build_summary_result("# Error\n\nLLM returned empty content", summary_meta)
 
-                # Log reasoning content if available
-                if hasattr(message, "reasoning") and message.reasoning:
-                    logger.trace(f"Original summary Thinking:\n{message.reasoning}")
-                elif hasattr(message, "reasoning_content") and message.reasoning_content:
-                    logger.trace(f"Original summary Thinking:\n{message.reasoning_content}")
-                else:
-                    logger.trace(f"Original summary content:\n{summary[:500]}...")
+                    # Log reasoning content if available
+                    if hasattr(message, "reasoning") and message.reasoning:
+                        logger.trace(f"Original summary Thinking:\n{message.reasoning}")
+                    elif hasattr(message, "reasoning_content") and message.reasoning_content:
+                        logger.trace(f"Original summary Thinking:\n{message.reasoning_content}")
+                    else:
+                        logger.trace(f"Original summary content:\n{summary[:500]}...")
 
-                # Extract content after </think> tag if present
-                if "</think>" in summary:
-                    summary = summary.split("</think>", 1)[1].strip()
-                else:
-                    summary = summary.strip()
+                    # Extract content after </think> tag if present
+                    if "</think>" in summary:
+                        summary = summary.split("</think>", 1)[1].strip()
+                    else:
+                        summary = summary.strip()
 
-                # Parse detailed summary and TL;DR sections
-                parsed_summary = self._parse_summary_sections(summary)
-                logger.trace("Paper summary generation complete")
-                logger.info(f"Summary succeeded: pid={pid} model={modelid}")
-                return self._build_summary_result(parsed_summary, summary_meta)
+                    # Parse detailed summary and TL;DR sections
+                    parsed_summary = self._parse_summary_sections(summary)
+                    if not self._looks_like_valid_blog_summary(parsed_summary):
+                        if content_try < 1:
+                            continue
+                        raise RuntimeError("LLM returned incomplete summary content")
+
+                    logger.trace("Paper summary generation complete")
+                    logger.info(f"Summary succeeded: pid={pid} model={modelid}")
+                    return self._build_summary_result(parsed_summary, summary_meta)
 
             except Exception as e:
                 last_exc = e
@@ -2213,6 +2320,8 @@ Please output strictly according to the following structure:
                         "model": modelid,
                         "error": str(e),
                         "fallback": should_fallback,
+                        "finish_reason": str(last_finish_reason) if last_finish_reason is not None else None,
+                        "tool_call_count": int(last_tool_call_count or 0),
                     }
                 )
 
@@ -2337,6 +2446,108 @@ Please output strictly according to the following structure:
         # Fallback: no TL;DR found, just clean up
         return re.sub(r"\n{3,}", "\n\n", summary).strip()
 
+    @staticmethod
+    def _looks_like_valid_blog_summary(text: str) -> bool:
+        if not isinstance(text, str):
+            return False
+        t = text.strip()
+        if len(t) < 800:
+            return False
+        if not t.startswith("#"):
+            return False
+        # Prompt requires a TL;DR section marker.
+        if not re.search(r"^\s*##\s*TL;DR\s*$", t, flags=re.IGNORECASE | re.MULTILINE):
+            return False
+        return True
+
+    @staticmethod
+    def _collect_string_values(obj, out: list[str], *, max_items: int = 2000) -> None:
+        """Collect string leaf values from nested JSON-like structures (iterative to avoid recursion limits)."""
+        if obj is None or len(out) >= max_items:
+            return
+        stack = [obj]
+        while stack and len(out) < max_items:
+            cur = stack.pop()
+            if cur is None:
+                continue
+            if isinstance(cur, str):
+                out.append(cur)
+                continue
+            if isinstance(cur, dict):
+                try:
+                    stack.extend(list(cur.values()))
+                except Exception:
+                    continue
+                continue
+            if isinstance(cur, (list, tuple)):
+                try:
+                    stack.extend(list(cur))
+                except Exception:
+                    continue
+                continue
+        return
+
+    @staticmethod
+    def _extract_markdown_from_tool_calls(tool_calls) -> str | None:
+        """Best-effort salvage: some proxies encode final markdown inside tool call arguments."""
+        if not tool_calls:
+            return None
+        candidates: list[str] = []
+        for call in tool_calls:
+            fn = None
+            try:
+                fn = getattr(call, "function", None)
+            except Exception:
+                fn = None
+            if fn is None and isinstance(call, dict):
+                fn = call.get("function")
+
+            args = None
+            try:
+                args = getattr(fn, "arguments", None) if fn is not None else None
+            except Exception:
+                args = None
+            if args is None and isinstance(fn, dict):
+                args = fn.get("arguments")
+
+            if not args:
+                continue
+
+            if isinstance(args, str):
+                s = args.strip()
+                if not s:
+                    continue
+                # Try JSON first; if it fails, keep raw string.
+                try:
+                    parsed = json.loads(s)
+                    PaperSummarizer._collect_string_values(parsed, candidates)
+                except Exception:
+                    candidates.append(s)
+                continue
+
+            # Non-string arguments: collect any strings inside.
+            try:
+                PaperSummarizer._collect_string_values(args, candidates)
+            except Exception:
+                continue
+
+        if not candidates:
+            return None
+        cleaned = []
+        for c in candidates:
+            s = (c or "").strip()
+            if not s:
+                continue
+            # Fast prefilter: likely markdown output should contain headings or TL;DR.
+            if "TL;DR" in s or s.startswith("#") or "\n#" in s:
+                cleaned.append(s)
+        pool = cleaned or [str(c or "").strip() for c in candidates if str(c or "").strip()]
+        if not pool:
+            return None
+        pool.sort(key=lambda x: len(x or ""), reverse=True)
+        best = (pool[0] or "").strip()
+        return best or None
+
     def _postprocess_image_paths(self, summary: str, pid: str, source: str = "html") -> str:
         """
         Post-process image paths in summary to use correct API URLs.
@@ -2367,7 +2578,7 @@ Please output strictly according to the following structure:
 
         return re.sub(pattern, replace_path, summary)
 
-    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
+    def generate_summary(self, pid: str, source: str | None = None, model: str | None = None) -> dict:
         """
         Main entry function for generating paper summary
 
@@ -2526,7 +2737,7 @@ def get_summarizer() -> PaperSummarizer:
     return _summarizer
 
 
-def generate_paper_summary(pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
+def generate_paper_summary(pid: str, source: str | None = None, model: str | None = None) -> dict:
     """
     External interface function for generating paper summary
 
@@ -2548,7 +2759,7 @@ def generate_paper_summary(pid: str, source: Optional[str] = None, model: Option
 _PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
 
 
-def split_pid_version(pid: str) -> Tuple[str, Optional[int]]:
+def split_pid_version(pid: str) -> tuple[str, int | None]:
     """
     Split paper ID into raw ID and version number.
 
@@ -2572,7 +2783,30 @@ def split_pid_version(pid: str) -> Tuple[str, Optional[int]]:
     return raw_pid, version
 
 
-def resolve_cache_pid(pid: str, meta: Optional[dict] = None) -> Tuple[str, str, bool]:
+def looks_like_valid_cached_summary_markdown(text: str) -> bool:
+    """Heuristic: decide whether cached markdown is a usable summary (not an error/partial preface)."""
+    if not isinstance(text, str):
+        return False
+    t = (text or "").strip()
+    if len(t) < 250:
+        return False
+    lines = t.splitlines()
+    first = (lines[0] if lines else "").strip()
+    if re.match(r"^#\s*Error\b", first, re.IGNORECASE):
+        return False
+    if re.match(r"^#\s*PDF Parsing Service Unavailable\b", first, re.IGNORECASE):
+        return False
+    # Prefer the standardized format marker.
+    if re.search(r"^\s*##\s*TL;DR\s*$", t, flags=re.IGNORECASE | re.MULTILINE):
+        return True
+    # Backward compatible: accept longer markdown with multiple headings.
+    if len(t) >= 800:
+        headings = re.findall(r"^\s*#{1,6}\s+\S", t, flags=re.MULTILINE)
+        return len(headings) >= 2
+    return False
+
+
+def resolve_cache_pid(pid: str, meta: dict | None = None) -> tuple[str, str, bool]:
     """
     Resolve cache PID from paper ID.
 
@@ -2595,7 +2829,7 @@ def resolve_cache_pid(pid: str, meta: Optional[dict] = None) -> Tuple[str, str, 
     return raw_pid, raw_pid, explicit_version is not None
 
 
-def normalize_to_versioned_pid(pid: str, meta: Optional[dict] = None, base_dir: Optional[Path] = None) -> str:
+def normalize_to_versioned_pid(pid: str, meta: dict | None = None, base_dir: Path | None = None) -> str:
     """
     Normalize PID to always include a version number.
 
@@ -2654,7 +2888,7 @@ def normalize_to_versioned_pid(pid: str, meta: Optional[dict] = None, base_dir: 
     return f"{raw_pid}v1"
 
 
-def find_cache_dir(base_dir: Path, pid: str, create: bool = False) -> Tuple[Optional[Path], str]:
+def find_cache_dir(base_dir: Path, pid: str, create: bool = False) -> tuple[Path | None, str]:
     """
     Find or create a cache directory using raw PID (no version suffix).
 
@@ -2684,8 +2918,8 @@ def find_cache_dir(base_dir: Path, pid: str, create: bool = False) -> Tuple[Opti
 
 # Keep for backward compatibility during migration
 def find_versioned_cache_dir(
-    base_dir: Path, pid: str, meta: Optional[dict] = None, create: bool = False
-) -> Tuple[Optional[Path], str]:
+    base_dir: Path, pid: str, meta: dict | None = None, create: bool = False
+) -> tuple[Path | None, str]:
     """
     DEPRECATED: Use find_cache_dir instead.
     This function now delegates to find_cache_dir (ignores meta parameter).
@@ -2693,7 +2927,7 @@ def find_versioned_cache_dir(
     return find_cache_dir(base_dir, pid, create)
 
 
-def model_cache_key(model: Optional[str]) -> str:
+def model_cache_key(model: str | None) -> str:
     """
     Generate cache key from model name.
 
@@ -2715,7 +2949,7 @@ def model_cache_key(model: Optional[str]) -> str:
     return cleaned
 
 
-def summary_cache_paths(cache_pid: str, model: Optional[str]) -> Tuple[Path, Path, Path, Path, Path, Path]:
+def summary_cache_paths(cache_pid: str, model: str | None) -> tuple[Path, Path, Path, Path, Path, Path]:
     """
     Get cache file paths for summary.
 
@@ -2738,7 +2972,7 @@ def summary_cache_paths(cache_pid: str, model: Optional[str]) -> Tuple[Path, Pat
     return cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock
 
 
-def normalize_summary_source(source: Optional[str]) -> str:
+def normalize_summary_source(source: str | None) -> str:
     """
     Normalize summary markdown source.
 
@@ -2807,7 +3041,7 @@ def read_summary_meta(meta_path: Path) -> dict:
         return {}
 
 
-def normalize_summary_result(result) -> Tuple[str, dict]:
+def normalize_summary_result(result) -> tuple[str, dict]:
     """
     Normalize summary result from various formats.
 
@@ -2855,7 +3089,7 @@ def calculate_chinese_ratio(text: str) -> float:
     return ratio
 
 
-def summary_quality(summary_content: str) -> Tuple[str, Optional[float]]:
+def summary_quality(summary_content: str) -> tuple[str, float | None]:
     """
     Evaluate summary quality based on language settings.
 
@@ -2896,7 +3130,7 @@ def _is_lock_stale(lock_path: Path, stale_s: float) -> bool:
     return age > stale_s
 
 
-def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> Optional[int]:
+def acquire_summary_lock(lock_path: Path, timeout_s: int = 300) -> int | None:
     """
     Acquire a file-based lock for summary caching.
 

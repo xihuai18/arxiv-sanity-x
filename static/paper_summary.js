@@ -928,7 +928,9 @@ class SummaryState {
 
     renderModelOptions() {
         const current = this.getCurrentModel();
-        const availableSummaries = this.availableSummaries || [];
+        const availableSummaries = Array.isArray(this.availableSummaries)
+            ? this.availableSummaries
+            : [];
 
         if (!Array.isArray(this.models) || this.models.length === 0) {
             const fallbackLabel = current
@@ -1496,6 +1498,31 @@ function modelCacheKey(modelId) {
     const raw = String(modelId || '').trim();
     if (!raw) return '';
     return raw.replace(/[^a-zA-Z0-9._-]+/g, '_');
+}
+
+function _isSummaryErrorMarkdown(content) {
+    if (typeof content !== 'string') return false;
+    const t = content.trim();
+    if (!t) return true;
+    const firstLine = (t.split(/\r?\n/, 1)[0] || '').trim();
+    if (/^#\s*Error\b/i.test(firstLine)) return true;
+    if (/^#\s*PDF Parsing Service Unavailable\b/i.test(firstLine)) return true;
+    // Guard against clearly broken caches (e.g., one-line preface).
+    if (t.length < 250 && !/##\s*TL;DR\b/i.test(t)) return true;
+    return false;
+}
+
+function _summaryErrorMarkdownToMessage(content) {
+    const t = typeof content === 'string' ? content.trim() : '';
+    if (!t) return '';
+    const lines = t.split(/\r?\n/);
+    if (lines.length && /^\s*#/.test(lines[0] || '')) {
+        lines.shift();
+    }
+    while (lines.length && !String(lines[0] || '').trim()) {
+        lines.shift();
+    }
+    return lines.join(' ').replace(/\s+/g, ' ').trim();
 }
 
 function hashString(input) {
@@ -2836,6 +2863,57 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                         meta: null,
                     });
                     this.scheduleAutoRetry(pid, { model: chosenModel, cache_only: true });
+                    return;
+                }
+
+                // IMPORTANT: the cache-only backend can return "# Error ..." markdown with 200 OK
+                // (e.g., canceled, unavailable services). Treat these as errors, not cached summaries,
+                // otherwise the UI will incorrectly mark the model as having a summary (✓).
+                if (_isSummaryErrorMarkdown(content)) {
+                    const reqKey = chosenModelStr ? modelCacheKey(chosenModelStr) : '';
+                    if (
+                        reqKey &&
+                        Array.isArray(this.availableSummaries) &&
+                        this.availableSummaries.includes(reqKey)
+                    ) {
+                        this.availableSummaries = this.availableSummaries.filter(k => k !== reqKey);
+                    }
+                    // Drop in-memory cache for this model to avoid switching back to the same error content.
+                    try {
+                        if (chosenModelStr && this.summaryCacheByModel) {
+                            delete this.summaryCacheByModel[chosenModelStr];
+                        }
+                    } catch (e) {}
+                    // Clear any stale in-flight flags for this model.
+                    if (chosenModelStr) {
+                        this.inflightModels[chosenModelStr] = false;
+                        this.taskIdsByModel[chosenModelStr] = '';
+                        this.queueRankByModel[chosenModelStr] = 0;
+                        this.queueTotalByModel[chosenModelStr] = 0;
+                    }
+                    if (
+                        this.pendingGenerationModel &&
+                        this.pendingGenerationModel === chosenModelStr
+                    ) {
+                        this.pendingGenerationModel = '';
+                    }
+
+                    const msg =
+                        _summaryErrorMarkdownToMessage(content) ||
+                        'Failed to load summary. Click Generate to try again.';
+                    this.setState({
+                        loading: false,
+                        regenerating: false,
+                        error: msg,
+                        notice: '',
+                        content: null,
+                        meta: null,
+                        contentModel: String(chosenModelStr || '').trim(),
+                        selectedModel: chosenModel || this.selectedModel || '',
+                        queueRank: 0,
+                        queueTotal: 0,
+                        lastTaskId: '',
+                    });
                     return;
                 }
 

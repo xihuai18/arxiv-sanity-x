@@ -58,11 +58,58 @@ def health():
         except Exception as e:
             deps["papers_db_file"] = {"error": str(e)}
 
-        # Optional dependency probes (best-effort, should not block readiness).
+        # Optional dependency probes. Note: when LLM base_url is configured, we enforce
+        # that default/fallback models exist in the /models list to avoid silent misconfig.
         try:
             llm_base = (settings.llm.base_url or "").rstrip("/")
             if llm_base:
-                deps["llm"] = _http_probe(f"{llm_base}/v1/models")
+                from backend.services.health_service import (
+                    fetch_llm_model_ids,
+                    validate_required_models,
+                )
+
+                result = fetch_llm_model_ids(llm_base, settings.llm.api_key, timeout_s=1.0)
+                deps["llm"] = {
+                    "reachable": bool(result.get("ok")),
+                    "url": result.get("url"),
+                    "error": result.get("error"),
+                }
+                deps["llm_models"] = result
+                if not result.get("ok"):
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "Failed to fetch LLM model list for fallback validation",
+                                "deps": deps,
+                            }
+                        ),
+                        503,
+                    )
+
+                model_ids = result.get("model_ids") or []
+                required = []
+                try:
+                    required.append(str(settings.llm.name or "").strip())
+                except Exception:
+                    pass
+                try:
+                    required.extend(list(settings.llm.fallback_model_list or []))
+                except Exception:
+                    pass
+                check = validate_required_models(required, list(model_ids))
+                deps["llm_fallback_check"] = check
+                if not check.get("ok"):
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "message": "Fallback model(s) missing from LLM model list",
+                                "deps": deps,
+                            }
+                        ),
+                        503,
+                    )
         except Exception as e:
             deps["llm"] = {"reachable": False, "error": str(e)}
 

@@ -6,9 +6,10 @@ import shutil
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any
 
 from loguru import logger
 
@@ -966,6 +967,15 @@ def generate_paper_summary(
                 with open(body_path, encoding="utf-8") as f:
                     cached = f.read()
                 cached = cached if cached.strip() else None
+                # Guard against obviously broken caches (e.g., a single-line preface).
+                # Keep this conservative to avoid invalidating older valid summaries.
+                if cached:
+                    try:
+                        t = cached.strip()
+                        if len(t) < 250 and t.count("\n") < 2 and "TL;DR" not in t:
+                            cached = None
+                    except Exception:
+                        pass
                 meta = read_summary_meta(meta_path)
                 # Backfill generated_at for old caches without mutating meaning.
                 if "generated_at" not in meta:

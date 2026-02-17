@@ -62,6 +62,7 @@ from aslite.repositories import (
 )
 from config import settings
 from tools.paper_summarizer import (
+    looks_like_valid_cached_summary_markdown,
     normalize_summary_source,
     read_summary_meta,
     split_pid_version,
@@ -2536,6 +2537,35 @@ def api_llm_models() -> ResponseReturnValue:
                     models.append(item)
             if not models and LLM_NAME:
                 models = [{"id": LLM_NAME}]
+            # Prefer config/llm.yml ordering for UI stability (LiteLLM may return arbitrary order).
+            try:
+                from config.llm_model_order import (
+                    read_llm_yml_model_order,
+                    sort_models_by_preferred_order,
+                )
+
+                preferred = read_llm_yml_model_order()
+                if preferred:
+                    before = [str((m or {}).get("id") or "") for m in models]
+                    preferred_set = set(preferred)
+                    matched = sum(1 for mid in before if mid in preferred_set)
+                    models = sort_models_by_preferred_order(models, preferred)
+                    after = [str((m or {}).get("id") or "") for m in models]
+                    if before != after:
+                        logger.debug(
+                            f"api_llm_models: reordered models to match config/llm.yml "
+                            f"(before={before}, after={after}, preferred={preferred})"
+                        )
+                    elif matched == 0:
+                        logger.debug(
+                            f"api_llm_models: no model ids matched config/llm.yml order "
+                            f"(ids={before}, preferred={preferred})"
+                        )
+            except Exception as e:
+                try:
+                    logger.debug(f"api_llm_models: failed to apply config/llm.yml ordering: {e}")
+                except Exception:
+                    pass
             return models, None
 
         def _refresh_cache_in_background():
@@ -2627,6 +2657,18 @@ def api_check_paper_summaries() -> ResponseReturnValue:
                 return _api_success(available_models=[])
             return _api_error("Paper not found", 404)
 
+        def _looks_valid_cached_summary(md_path: Path) -> bool:
+            try:
+                if md_path.stat().st_size < 250:
+                    return False
+            except Exception:
+                return False
+            try:
+                text = md_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return False
+            return bool(looks_like_valid_cached_summary_markdown(text))
+
         # Check summary directory for this paper
         summary_dir = Path(SUMMARY_DIR) / raw_pid
         available_models = []
@@ -2638,7 +2680,7 @@ def api_check_paper_summaries() -> ResponseReturnValue:
                 model_name = md_file.stem
                 # Check if corresponding meta file exists and is valid
                 meta_file = summary_dir / f"{model_name}.meta.json"
-                if meta_file.exists() and md_file.stat().st_size > 0:
+                if meta_file.exists() and _looks_valid_cached_summary(md_file):
                     available_models.append(model_name)
 
         logger.trace(

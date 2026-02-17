@@ -64,16 +64,51 @@ class LLMSettings(BaseSettings):
     api_key: str = Field(default="no-key", description="LLM API key")
     name: str = Field(default="deepseek-v3.2", description="Default LLM model name")
     summary_lang: str = Field(default="zh", description="Summary language (zh/en)")
-    fallback_models: str = Field(default="glm-4.7", description="Fallback models (comma-separated)")
+    fallback_models: str = Field(
+        default="auto",
+        description='Fallback models (comma-separated) or "auto" to fallback backwards from the current model based on config/llm.yml order',
+    )
     timeout: int = Field(default=600, description="LLM request timeout (seconds)")
     # LiteLLM verbose logging switch (for bin/litellm.sh)
     litellm_verbose: bool = Field(default=False, description="LiteLLM verbose logging mode")
 
     @property
     def fallback_model_list(self) -> list[str]:
-        """Get fallback model list"""
-        models: str = self.fallback_models  # type: ignore[assignment]
-        return [m.strip() for m in models.split(",") if m.strip()]
+        """Get fallback model list.
+
+        Behavior:
+        - When set to "auto" (default) or empty: follow `config/llm.yml` order but fallback
+          *backwards* from the current/default model (try earlier models first).
+        - When set to a comma-separated list: use it as an allowlist, but keep the order
+          aligned to `config/llm.yml` when possible (extras appended at the end).
+        """
+        raw = str(self.fallback_models or "").strip()
+        mode = raw.lower()
+
+        from .llm_model_order import read_llm_yml_model_order
+
+        yml_order = read_llm_yml_model_order()
+        default_fallback = ["glm-4.7"]
+
+        def _parse_list(value: str) -> list[str]:
+            return [m.strip() for m in str(value or "").split(",") if m.strip()]
+
+        if mode in ("", "auto", "yml"):
+            if not yml_order:
+                return default_fallback
+            # Prefer falling back to earlier models in llm.yml (weaker -> stronger ordering).
+            from .llm_model_order import compute_auto_fallback_models
+
+            return compute_auto_fallback_models(yml_order=yml_order, anchor=str(self.name or "").strip())
+
+        allowlist = _parse_list(raw)
+        if not yml_order:
+            return allowlist
+
+        allowed = set(allowlist)
+        in_order = [m for m in yml_order if m in allowed]
+        extras = [m for m in allowlist if m not in set(yml_order)]
+        return in_order + extras
 
 
 class ExtractInfoSettings(BaseSettings):
