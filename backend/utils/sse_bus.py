@@ -12,8 +12,8 @@ import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from loguru import logger
 
@@ -119,7 +119,11 @@ class SQLiteSSEBus:
         db_dir = os.path.dirname(self.db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        conn = sqlite3.connect(self.db_path, timeout=max(0.1, self.busy_timeout_ms / 1000), check_same_thread=False)
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=max(0.1, self.busy_timeout_ms / 1000),
+            check_same_thread=False,
+        )
         conn.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
         conn.execute("PRAGMA synchronous=NORMAL")
         # Important: avoid setting journal_mode on every connection creation.
@@ -163,7 +167,10 @@ class SQLiteSSEBus:
                 "INSERT INTO sse_events(user, payload, ts, origin_pid) VALUES (?, ?, ?, ?)",
                 (user, msg, ts, int(os.getpid())),
             )
-        return conn.execute("INSERT INTO sse_events(user, payload, ts) VALUES (?, ?, ?)", (user, msg, ts))
+        return conn.execute(
+            "INSERT INTO sse_events(user, payload, ts) VALUES (?, ?, ?)",
+            (user, msg, ts),
+        )
 
     def _ensure_writer_started(self) -> None:
         if self._writer_started:
@@ -408,7 +415,14 @@ class SQLiteSSEBus:
                 payload = json.loads(r["payload"])
                 if not isinstance(payload, dict):
                     continue
-                out.append(EventRow(id=int(r["id"]), user=r["user"], payload=payload, ts=float(r["ts"])))
+                out.append(
+                    EventRow(
+                        id=int(r["id"]),
+                        user=r["user"],
+                        payload=payload,
+                        ts=float(r["ts"]),
+                    )
+                )
             except Exception:
                 continue
         return out
@@ -624,7 +638,7 @@ def get_sse_bus() -> SQLiteSSEBus | None:
     db_path = (settings.sse.db_path or "").strip()
     if not db_path:
         return None
-    role = (os.environ.get("ARXIV_SANITY_PROCESS_ROLE") or "").strip().lower()
+    role = str(getattr(settings, "process_role", "") or "").strip().lower()
     timeout_s = 2.0
     try:
         if role == "worker" and hasattr(settings.db, "timeout_worker"):

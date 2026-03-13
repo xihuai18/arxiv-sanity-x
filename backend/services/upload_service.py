@@ -15,7 +15,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Literal
 
 import openai
 from loguru import logger
@@ -37,8 +37,14 @@ from backend.utils.upload_utils import (
 )
 from config import settings
 
-DATA_DIR = str(settings.data_dir)
-SUMMARY_DIR = str(settings.summary_dir)
+
+def _data_dir() -> str:
+    return str(settings.data_dir)
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
 
 # SSE enabled flag - check if we're in a web context
 _SSE_ENABLED = True
@@ -67,9 +73,37 @@ def _emit_upload_event(user: str, payload: dict) -> None:
 
 
 # Main LLM settings (for fallback)
-LLM_NAME = settings.llm.name
-LLM_BASE_URL = settings.llm.base_url
-LLM_API_KEY = settings.llm.api_key
+def _llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _llm_base_url() -> str:
+    return str(settings.llm.base_url or "")
+
+
+def _llm_api_key() -> str:
+    return str(settings.llm.api_key or "")
+
+
+def _extract_model_name() -> str:
+    return str(settings.extract_info.model_name or "")
+
+
+def _extract_base_url() -> str:
+    return str(settings.extract_info.base_url or _llm_base_url() or "")
+
+
+def _extract_api_key() -> str:
+    return str(settings.extract_info.api_key or _llm_api_key() or "")
+
+
+def _extract_uses_main_llm_route() -> bool:
+    return (
+        _extract_model_name() == _llm_name()
+        and _extract_base_url() == _llm_base_url()
+        and _extract_api_key() == _llm_api_key()
+    )
+
 
 # Reasonable limits to prevent abuse / DB bloat.
 # Keep them generous to avoid surprising users, but bounded.
@@ -130,7 +164,22 @@ def register_upload_task_enqueue(
     return task_id
 
 
-def _infer_meta_extracted_ok(record: Dict[str, Any], title: str, abstract: str, authors: List) -> bool:
+def _get_active_upload_task_id(record: dict[str, Any], record_field: str) -> str:
+    """Return active queued/running task id from upload record, if any."""
+    task_id = str(record.get(record_field) or "").strip()
+    if not task_id:
+        return ""
+    try:
+        info = SummaryStatusRepository.get_task_status(task_id) or {}
+    except Exception:
+        return ""
+    status = str(info.get("status") or "").strip().lower()
+    if status in {"queued", "running"}:
+        return task_id
+    return ""
+
+
+def _infer_meta_extracted_ok(record: dict[str, Any], title: str, abstract: str, authors: list) -> bool:
     """Infer meta_extracted_ok status from available metadata.
 
     For backward compatibility with older records that don't have the meta_extracted_ok field,
@@ -172,7 +221,7 @@ def _infer_upload_mineru_parsed_ok(pid: str) -> bool:
     """
     # Keep aligned with tools.paper_summarizer.PaperSummarizer._MINERU_MD_MIN_SIZE
     min_size = 4096
-    base_dir = Path(DATA_DIR) / "mineru" / pid
+    base_dir = Path(_data_dir()) / "mineru" / pid
     candidates = [
         base_dir / "auto" / f"{pid}.md",
         base_dir / "vlm" / f"{pid}.md",
@@ -199,7 +248,7 @@ def _infer_upload_mineru_parsed_ok(pid: str) -> bool:
     return False
 
 
-def _normalize_upload_parse_status(pid: str, record: Dict[str, Any]) -> tuple[str, str]:
+def _normalize_upload_parse_status(pid: str, record: dict[str, Any]) -> tuple[str, str]:
     """Return (parse_status, parse_error) with backward-compatible inference.
 
     Older upload records may miss `parse_status` even if MinerU cache exists on disk.
@@ -222,17 +271,17 @@ def _normalize_upload_parse_status(pid: str, record: Dict[str, Any]) -> tuple[st
 
 def _validate_meta_override_inputs(
     *,
-    title: Optional[str] = None,
-    authors: Optional[List[str]] = None,
-    year: Optional[int] = None,
-    abstract: Optional[str] = None,
-) -> tuple[Optional[str], Optional[list[str]], Optional[int], Optional[str]]:
+    title: str | None = None,
+    authors: list[str] | None = None,
+    year: int | None = None,
+    abstract: str | None = None,
+) -> tuple[str | None, list[str] | None, int | None, str | None]:
     """Validate and normalize user-supplied meta override inputs.
 
     Raises:
         ValueError: for invalid types/values.
     """
-    norm_title: Optional[str] = None
+    norm_title: str | None = None
     if title is not None:
         if not isinstance(title, str):
             raise ValueError("title must be a string")
@@ -240,7 +289,7 @@ def _validate_meta_override_inputs(
         if len(norm_title) > MAX_META_TITLE_CHARS:
             raise ValueError(f"title too long (max {MAX_META_TITLE_CHARS} chars)")
 
-    norm_authors: Optional[list[str]] = None
+    norm_authors: list[str] | None = None
     if authors is not None:
         if not isinstance(authors, list):
             raise ValueError("authors must be a list")
@@ -260,7 +309,7 @@ def _validate_meta_override_inputs(
             out.append(s)
         norm_authors = out
 
-    norm_year: Optional[int] = None
+    norm_year: int | None = None
     if year is not None:
         if not isinstance(year, int):
             raise ValueError("year must be an integer")
@@ -269,7 +318,7 @@ def _validate_meta_override_inputs(
             raise ValueError("year out of range")
         norm_year = int(year)
 
-    norm_abs: Optional[str] = None
+    norm_abs: str | None = None
     if abstract is not None:
         if not isinstance(abstract, str):
             raise ValueError("abstract must be a string")
@@ -298,13 +347,98 @@ def _get_extract_info_client():
     Uses settings.extract_info configuration, falling back to main LLM settings.
     This is lazy-loaded to avoid import issues at module load time.
     """
-    base_url = settings.extract_info.base_url or LLM_BASE_URL
-    api_key = settings.extract_info.api_key or LLM_API_KEY
-
-    return openai.OpenAI(api_key=api_key, base_url=base_url)
+    return openai.OpenAI(api_key=_extract_api_key(), base_url=_extract_base_url())
 
 
-def _normalize_extracted_metadata(meta: Dict[str, Any]) -> Dict[str, Any]:
+def _extract_shares_main_llm_endpoint() -> bool:
+    return _extract_base_url() == _llm_base_url() and _extract_api_key() == _llm_api_key()
+
+
+def _call_metadata_llm(
+    *,
+    client,
+    model_name: str,
+    prompt: str,
+    allow_direct_responses_route: bool,
+) -> tuple[str, str]:
+    temperature = settings.extract_info.temperature
+    max_tokens = settings.extract_info.max_tokens
+    timeout = settings.extract_info.timeout
+
+    response_api = "chat_completions"
+
+    if paper_summarizer.PaperSummarizer._should_use_responses_api(model_name):
+        response_api = "responses"
+        responses_client = client
+        responses_model = model_name
+        responses_kwargs = {
+            "temperature": temperature,
+            "timeout": timeout,
+            "max_output_tokens": max_tokens,
+        }
+
+        if allow_direct_responses_route:
+            direct_route = paper_summarizer.PaperSummarizer._resolve_direct_responses_route(model_name)
+            if direct_route:
+                responses_client = openai.OpenAI(
+                    api_key=direct_route["api_key"],
+                    base_url=direct_route["base_url"],
+                )
+                responses_model = direct_route["model"]
+                responses_kwargs.update(direct_route.get("extra_body") or {})
+                route_max_output_tokens = direct_route.get("max_output_tokens")
+                if route_max_output_tokens:
+                    responses_kwargs["max_output_tokens"] = min(
+                        int(route_max_output_tokens),
+                        int(responses_kwargs["max_output_tokens"]),
+                    )
+
+        try:
+            response = responses_client.responses.create(
+                model=responses_model,
+                instructions="Return JSON only. Do not call tools/functions.",
+                input=[{"role": "user", "content": prompt}],
+                **responses_kwargs,
+            )
+            content, _status, _usage = paper_summarizer.PaperSummarizer._extract_responses_text_fields(response)
+            if str(content or "").strip():
+                return response_api, str(content or "")
+            logger.warning(
+                f"Responses API returned empty content for metadata extraction model={model_name}, falling back to chat completions"
+            )
+            response_api = "chat_completions"
+        except Exception as exc:
+            if not paper_summarizer.PaperSummarizer._should_fallback_to_chat_completions_for_responses_error(exc):
+                raise
+            logger.warning(
+                f"Responses API unavailable for metadata extraction model={model_name}, falling back to chat completions: {exc}"
+            )
+            response_api = "chat_completions"
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+
+    if not response.choices:
+        logger.warning(f"LLM {model_name} returned empty choices for metadata extraction")
+        return response_api, ""
+
+    choice = response.choices[0]
+
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "length":
+        logger.warning(f"LLM {model_name} response truncated (finish_reason=length), may have incomplete JSON")
+
+    content = choice.message.content or ""
+    reasoning_content = getattr(choice.message, "reasoning_content", None) or ""
+    return response_api, f"{reasoning_content}\n{content}".strip()
+
+
+def _normalize_extracted_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     """Normalize LLM metadata output to expected types."""
     if not isinstance(meta, dict):
         return {"title": "", "authors": [], "year": None, "abstract": None}
@@ -379,7 +513,7 @@ def _redact_error_message(msg: str, max_len: int = 300) -> str:
     # Collapse whitespace/newlines to keep the UI compact.
     msg = " ".join(str(msg).split())
     try:
-        msg = msg.replace(DATA_DIR, "<DATA_DIR>")
+        msg = msg.replace(_data_dir(), "<DATA_DIR>")
     except Exception:
         pass
 
@@ -408,10 +542,10 @@ def extract_front_matter(md_content: str, max_chars: int = 12000) -> str:
     return md_content[:max_chars]
 
 
-def extract_metadata_with_llm(front_matter: str) -> Dict[str, Any]:
+def extract_metadata_with_llm(front_matter: str) -> dict[str, Any]:
     """Extract metadata from front matter using LLM.
 
-    Uses settings.extract_info configuration (default model: glm-4.7).
+    Uses settings.extract_info configuration (default model: qwen3.5-plus).
     Falls back to main LLM if extract_info model fails.
 
     Uses OpenAI client library for consistency with main LLM logic in paper_summarizer.
@@ -422,7 +556,7 @@ def extract_metadata_with_llm(front_matter: str) -> Dict[str, Any]:
     Returns:
         Dictionary with title, authors, year (always None), abstract
     """
-    extract_base_url = settings.extract_info.base_url or LLM_BASE_URL
+    extract_base_url = _extract_base_url()
     if not extract_base_url or not front_matter.strip():
         return {"title": "", "authors": [], "year": None, "abstract": None}
 
@@ -430,46 +564,28 @@ def extract_metadata_with_llm(front_matter: str) -> Dict[str, Any]:
 
     # Try extract_info model first, then fallback to main LLM
     models_to_try = [
-        (settings.extract_info.model_name, _get_extract_info_client()),
+        (
+            _extract_model_name(),
+            _get_extract_info_client(),
+            _extract_shares_main_llm_endpoint(),
+        ),
     ]
-    # Add main LLM as fallback if different from extract_info model
-    if settings.extract_info.model_name != LLM_NAME:
-        main_client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
-        models_to_try.append((LLM_NAME, main_client))
+    # Add main LLM fallback unless extract_info already uses the same effective route.
+    if not _extract_uses_main_llm_route():
+        main_client = openai.OpenAI(api_key=_llm_api_key(), base_url=_llm_base_url())
+        models_to_try.append((_llm_name(), main_client, True))
 
-    for model_name, client in models_to_try:
+    for model_name, client, allow_direct_responses_route in models_to_try:
         try:
-            temperature = settings.extract_info.temperature
-            max_tokens = settings.extract_info.max_tokens
-            timeout = settings.extract_info.timeout
-
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=timeout,
+            response_api, combined_content = _call_metadata_llm(
+                client=client,
+                model_name=model_name,
+                prompt=prompt,
+                allow_direct_responses_route=allow_direct_responses_route,
             )
 
-            if not response.choices:
-                logger.warning(f"LLM {model_name} returned empty choices for metadata extraction")
-                continue
-
-            choice = response.choices[0]
-
-            # Check for truncated response (token limit reached)
-            finish_reason = getattr(choice, "finish_reason", None)
-            if finish_reason == "length":
-                logger.warning(f"LLM {model_name} response truncated (finish_reason=length), may have incomplete JSON")
-
-            content = choice.message.content or ""
-            reasoning_content = getattr(choice.message, "reasoning_content", None) or ""
-
-            # Merge content and reasoning_content for reasoning models
-            combined_content = f"{reasoning_content}\n{content}".strip()
-
             if not combined_content:
-                logger.warning(f"LLM {model_name} returned empty content for metadata extraction")
+                logger.warning(f"LLM {model_name} returned empty content for metadata extraction via {response_api}")
                 continue
 
             # Find all JSON objects and use the last one (final output from reasoning)
@@ -488,7 +604,7 @@ def extract_metadata_with_llm(front_matter: str) -> Dict[str, Any]:
 
             # Fallback: try to parse the entire content as JSON
             try:
-                meta = json.loads(content.strip())
+                meta = json.loads(combined_content.strip())
                 if meta.get("title") or meta.get("authors"):
                     logger.info(f"Successfully extracted metadata using {model_name}")
                     return _normalize_extracted_metadata(meta)
@@ -508,7 +624,7 @@ def create_uploaded_paper(
     file_content: bytes,
     original_filename: str,
     max_uploads_per_user: int = 100,
-) -> Tuple[str, Dict[str, Any], bool]:
+) -> tuple[str, dict[str, Any], bool]:
     """Create a new uploaded paper record.
 
     Args:
@@ -560,9 +676,9 @@ def create_uploaded_paper(
         }
 
     def _prepare_pdf_paths(upload_pid: str):
-        upload_dir = get_upload_dir(upload_pid, DATA_DIR)
+        upload_dir = get_upload_dir(upload_pid, _data_dir())
         upload_dir.mkdir(parents=True, exist_ok=True)
-        out_path = get_upload_pdf_path(upload_pid, DATA_DIR)
+        out_path = get_upload_pdf_path(upload_pid, _data_dir())
         tmp_path = out_path.with_name(out_path.name + ".tmp")
         return out_path, tmp_path
 
@@ -713,11 +829,14 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
 
     # Update status to running
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
-    _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""})
+    _emit_upload_event(
+        user,
+        {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""},
+    )
 
     try:
         # Get PDF path
-        pdf_path = get_upload_pdf_path(pid, DATA_DIR)
+        pdf_path = get_upload_pdf_path(pid, _data_dir())
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
@@ -749,7 +868,10 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 "parse_error": None,
             },
         )
-        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""})
+        _emit_upload_event(
+            user,
+            {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""},
+        )
 
         # Extract metadata from front matter (separate step, can fail independently)
         meta_extracted_ok = False
@@ -787,7 +909,10 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 )
             else:
                 logger.warning(f"Metadata extraction returned empty for {pid}")
-                _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
+                _emit_upload_event(
+                    user,
+                    {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+                )
         except Exception as e:
             logger.warning(f"Failed to extract metadata for {pid}: {e}")
             _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
@@ -832,7 +957,7 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         raise
 
 
-def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
+def get_uploaded_papers_list(user: str) -> list[dict[str, Any]]:
     """Get list of uploaded papers for a user in display format.
 
     Args:
@@ -882,6 +1007,7 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
 
         # Get summary status and TL;DR
         summary_status, summary_last_error = get_summary_status(pid)
+        parse_status, parse_error = _normalize_upload_parse_status(pid, data)
 
         # Extract TL;DR from summary if available
         tldr = ""
@@ -901,8 +1027,8 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
                 "tldr": tldr,
                 "utags": utags,
                 "ntags": ntags,
-                "parse_status": data.get("parse_status", ""),
-                "parse_error": data.get("parse_error") or "",
+                "parse_status": parse_status,
+                "parse_error": parse_error,
                 "meta_extracted_ok": meta_extracted_ok,
                 "summary_status": summary_status or "",
                 "summary_last_error": summary_last_error or "",
@@ -925,10 +1051,10 @@ def get_uploaded_papers_list(user: str) -> List[Dict[str, Any]]:
 def update_uploaded_paper_meta(
     pid: str,
     user: str,
-    title: Optional[str] = None,
-    authors: Optional[List[str]] = None,
-    year: Optional[int] = None,
-    abstract: Optional[str] = None,
+    title: str | None = None,
+    authors: list[str] | None = None,
+    year: int | None = None,
+    abstract: str | None = None,
 ) -> None:
     """Update metadata override for an uploaded paper.
 
@@ -1028,7 +1154,7 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
     # If this fails, we abort and keep DB intact so user can retry
     critical_errors = []
 
-    upload_dir = get_upload_dir(pid, DATA_DIR)
+    upload_dir = get_upload_dir(pid, _data_dir())
     if upload_dir.exists():
         try:
             shutil.rmtree(upload_dir)
@@ -1064,7 +1190,7 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
 
     # Phase 3: Clean up non-critical caches (best effort, don't fail on errors)
     # Delete MinerU cache
-    mineru_dir = Path(DATA_DIR) / "mineru" / pid
+    mineru_dir = Path(_data_dir()) / "mineru" / pid
     if mineru_dir.exists():
         try:
             shutil.rmtree(mineru_dir)
@@ -1072,7 +1198,7 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
             logger.warning(f"Failed to delete MinerU cache for {pid}: {e}")
 
     # Delete HTML->Markdown cache
-    html_md_dir = Path(DATA_DIR) / "html_md" / pid
+    html_md_dir = Path(_data_dir()) / "html_md" / pid
     if html_md_dir.exists():
         try:
             shutil.rmtree(html_md_dir)
@@ -1080,7 +1206,7 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
             logger.warning(f"Failed to delete HTML cache for {pid}: {e}")
 
     # Delete summary cache
-    summary_root = Path(SUMMARY_DIR)
+    summary_root = Path(_summary_dir())
     summary_dir = summary_root / pid
     if summary_dir.exists():
         try:
@@ -1413,6 +1539,7 @@ def trigger_extract_info(pid: str, user: str) -> str:
 
     Returns:
         task_id (may be empty string if task id not available).
+        If an extract task is already queued/running, returns the existing task id.
 
     Raises:
         UploadServiceError: for expected failures.
@@ -1441,6 +1568,11 @@ def trigger_extract_info(pid: str, user: str) -> str:
     if record.get("meta_extracted_ok") is True:
         logger.warning(f"Paper {pid} already has extracted metadata")
         raise UploadServiceError("already_extracted", "Metadata already extracted")
+
+    existing_task_id = _get_active_upload_task_id(record, "extract_task_id")
+    if existing_task_id:
+        logger.info(f"Extract metadata task already active for {pid}: {existing_task_id}")
+        return existing_task_id
 
     try:
         tasks = _get_tasks_module()
@@ -1481,7 +1613,8 @@ def do_extract_metadata(pid: str, user: str) -> bool:
     if record.get("deleting") is True:
         return False
 
-    if record.get("parse_status") != "ok":
+    parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+    if parse_status != "ok":
         return False
 
     # Emit running status
@@ -1558,10 +1691,13 @@ def do_parse_only(pid: str, user: str) -> bool:
 
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
     # Emit running status
-    _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""})
+    _emit_upload_event(
+        user,
+        {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""},
+    )
 
     try:
-        pdf_path = get_upload_pdf_path(pid, DATA_DIR)
+        pdf_path = get_upload_pdf_path(pid, _data_dir())
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
 
@@ -1580,7 +1716,10 @@ def do_parse_only(pid: str, user: str) -> bool:
         )
         logger.info(f"Successfully parsed uploaded paper {pid}")
         # Emit success status
-        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""})
+        _emit_upload_event(
+            user,
+            {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""},
+        )
         return True
 
     except Exception as e:
@@ -1594,11 +1733,19 @@ def do_parse_only(pid: str, user: str) -> bool:
             },
         )
         # Emit failure status
-        _emit_upload_event(user, {"type": "upload_parse_status", "pid": pid, "status": "failed", "error": parse_error})
+        _emit_upload_event(
+            user,
+            {
+                "type": "upload_parse_status",
+                "pid": pid,
+                "status": "failed",
+                "error": parse_error,
+            },
+        )
         return False
 
 
-def get_upload_summary_context(pid: str, user: str) -> Optional[Dict[str, Any]]:
+def get_upload_summary_context(pid: str, user: str) -> dict[str, Any] | None:
     """Get context for rendering summary page for an uploaded paper.
 
     Args:

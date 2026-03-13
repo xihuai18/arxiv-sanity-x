@@ -15,7 +15,11 @@ from config import settings
 
 bp = Blueprint("api_uploads", __name__, url_prefix="/api")
 
-DATA_DIR = str(settings.data_dir)
+
+def _data_dir() -> str:
+    return str(settings.data_dir)
+
+
 MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_UPLOADS_PER_USER = 100  # Maximum uploads per user to prevent storage abuse
 
@@ -115,7 +119,7 @@ def api_upload_pdf():
 
         # Defensive: if the record already exists but the PDF was deleted, restore it from this upload.
         try:
-            pdf_path = get_upload_pdf_path(pid, DATA_DIR)
+            pdf_path = get_upload_pdf_path(pid, _data_dir())
             if not pdf_path.exists():
                 pdf_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(pdf_path, "wb") as f:
@@ -524,7 +528,7 @@ def api_uploaded_papers_pdf(pid: str):
         if record.get("owner") != g.user:
             abort(404)
 
-        pdf_path = get_upload_pdf_path(pid, DATA_DIR)
+        pdf_path = get_upload_pdf_path(pid, _data_dir())
         if not pdf_path.exists():
             abort(404)
 

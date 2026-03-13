@@ -3,8 +3,18 @@
 {% block head_extra %}
 <!-- Markdown + Math rendering for TL;DR in paper list -->
 {% if asset_cdn_enabled %}
-<script src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/markdown-it.min.js') }}';"></script>
+<script>
+document.addEventListener('error', function(event) {
+    var target = event.target;
+    if (!target || target.tagName !== 'SCRIPT') return;
+    var fallbackSrc = target.getAttribute('data-fallback-src');
+    if (!fallbackSrc || target.getAttribute('data-fallback-loaded') === '1') return;
+    target.setAttribute('data-fallback-loaded', '1');
+    target.src = fallbackSrc;
+}, true);
+</script>
+<script defer src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
+    data-fallback-src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
 {% endif %}
@@ -43,16 +53,177 @@ var move_page = function(int_offset) {
 
 // Search box optimization logic
 var SearchBoxController = {
+    rankTouched: false,
+    tagSuggestionIndex: -1,
+
+    getTagSuggestionItems: function() {
+        return Array.from(document.querySelectorAll('#tag-suggestions .tag-suggestion-item'));
+    },
+
+    setActiveTagSuggestion: function(index) {
+        var items = this.getTagSuggestionItems();
+        var field = document.getElementById('tags_field');
+        if (!items.length) {
+            this.tagSuggestionIndex = -1;
+            if (field) field.removeAttribute('aria-activedescendant');
+            return;
+        }
+        if (index < 0) {
+            index = items.length - 1;
+        } else if (index >= items.length) {
+            index = 0;
+        }
+        this.tagSuggestionIndex = index;
+        items.forEach(function(item, itemIndex) {
+            var isActive = itemIndex === index;
+            item.classList.toggle('is-active', isActive);
+            item.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        if (field && items[index]) {
+            field.setAttribute('aria-activedescendant', items[index].id);
+        }
+    },
+
+    applyTagSuggestion: function(input, tag, lastCommaIndex) {
+        var newValue = lastCommaIndex >= 0 ?
+            input.value.substring(0, lastCommaIndex + 1) + ' ' + tag :
+            tag;
+        input.value = newValue;
+        this.hideTagSuggestions(input);
+        input.focus();
+    },
+
     // Initialize search box features
     init: function() {
+        this.rankTouched = new URLSearchParams(window.location.search).has('rank');
         this.restorePreferences();
         this.setupSearchBox();
         this.setupFilters();
         this.setupAdvancedFilters();
+        this.setupInspectToggle();
+        this.setupPagination();
         this.updateEmptyState();
-        this.setupModalFocus();
         this.setupShortcuts();
         this.setupFormValidation();
+    },
+
+    getForm: function() {
+        return document.getElementById('search-form') || document.querySelector('#cbox form');
+    },
+
+    getCurrentRank: function() {
+        var rankSelect = document.getElementById('rank_select');
+        return rankSelect ? rankSelect.value : 'time';
+    },
+
+    hasQuery: function() {
+        var searchInput = document.getElementById('qfield');
+        return Boolean(searchInput && searchInput.value.trim());
+    },
+
+    isAdvancedRank: function(rank) {
+        return rank === 'tags' || rank === 'pid';
+    },
+
+    isQueryRank: function(rank) {
+        return rank === 'search' || rank === 'time';
+    },
+
+    showClientErrors: function(errors) {
+        var errorBox = document.getElementById('filter-client-errors');
+        if (!errorBox) return;
+        if (!errors || !errors.length) {
+            errorBox.hidden = true;
+            errorBox.innerHTML = '';
+            return;
+        }
+
+        var list = document.createElement('ul');
+        errors.forEach(function(msg) {
+            var item = document.createElement('li');
+            item.textContent = msg;
+            list.appendChild(item);
+        });
+        errorBox.innerHTML = '';
+        errorBox.appendChild(list);
+        errorBox.hidden = false;
+    },
+
+    setFieldError: function(field, message) {
+        if (!field) return;
+        if (message) {
+            field.classList.add('error');
+            field.setAttribute('aria-invalid', 'true');
+        } else {
+            field.classList.remove('error');
+            field.removeAttribute('aria-invalid');
+        }
+    },
+
+    syncDefaultRankWithQuery: function() {
+        if (this.rankTouched) return;
+        var rankSelect = document.getElementById('rank_select');
+        var searchInput = document.getElementById('qfield');
+        if (!rankSelect || !searchInput) return;
+
+        if (searchInput.value.trim()) {
+            if (!this.isQueryRank(rankSelect.value)) {
+                rankSelect.value = 'search';
+            } else if (rankSelect.value === 'time') {
+                rankSelect.value = 'search';
+            }
+        } else if (rankSelect.value === 'search') {
+            rankSelect.value = 'time';
+        }
+
+        this.updateAdvancedFilterAvailability();
+    },
+
+    updateSemanticWeightVisibility: function() {
+        var searchModeSelect = document.getElementById('search_mode_select');
+        var semanticWeightContainer = document.getElementById('semantic_weight_container');
+        if (!searchModeSelect || !semanticWeightContainer) return;
+        semanticWeightContainer.hidden = searchModeSelect.value !== 'hybrid';
+    },
+
+    updateSemanticWeightBadge: function() {
+        var semanticWeightValue = document.getElementById('semantic_weight_value');
+        var semanticWeightSlider = document.getElementById('semantic_weight_slider');
+        if (semanticWeightValue && semanticWeightSlider) {
+            semanticWeightValue.textContent = semanticWeightSlider.value;
+        }
+    },
+
+    updateAdvancedFilterAvailability: function() {
+        var rank = this.getCurrentRank();
+        var isAdvanced = this.isAdvancedRank(rank);
+        var fields = ['tags_field', 'pid_field', 'logic', 'svm_c_field'];
+        fields.forEach(function(id) {
+            var field = document.getElementById(id);
+            if (!field) return;
+            field.disabled = !isAdvanced;
+            field.setAttribute('aria-disabled', !isAdvanced ? 'true' : 'false');
+            var filterItem = field.closest('.filter-item');
+            if (filterItem) {
+                filterItem.classList.toggle('is-disabled', !isAdvanced);
+            }
+        });
+
+        var noteTitle = document.getElementById('adv-filter-note-title');
+        var noteBody = document.getElementById('adv-filter-note-body');
+        if (!noteTitle || !noteBody) return;
+        if (isAdvanced) {
+            noteTitle.textContent =
+                rank === 'tags'
+                    ? 'Advanced filters are active for tag-based recommendations.'
+                    : 'Advanced filters are active for PID-based ranking.';
+            noteBody.textContent =
+                'Tags, PIDs, logic, and SVM C are submitted in this mode. Time filter still applies everywhere.';
+        } else {
+            noteTitle.textContent = 'Tags, PIDs, logic, and SVM C only apply when Rank by is tags or pid.';
+            noteBody.textContent =
+                'You can keep filling them in, but they are not submitted until you switch back to tags or pid ranking.';
+        }
     },
 
     // Restore last used preferences (only when URL doesn't specify them)
@@ -103,17 +274,13 @@ var SearchBoxController = {
                 return isAllowed(v, ['yes', 'no']);
             });
 
-            var semanticWeightValue = document.getElementById('semantic_weight_value');
-            var semanticWeightSlider = document.getElementById('semantic_weight_slider');
-            if (semanticWeightValue && semanticWeightSlider) {
-                semanticWeightValue.textContent = semanticWeightSlider.value;
-            }
+            SearchBoxController.updateSemanticWeightBadge();
 
             // Reflect restored search mode in the UI (weight slider visibility)
             var searchModeSelect = document.getElementById('search_mode_select');
             var semanticWeightContainer = document.getElementById('semantic_weight_container');
             if (searchModeSelect && semanticWeightContainer) {
-                semanticWeightContainer.style.display = (searchModeSelect.value === 'hybrid') ? '' : 'none';
+                semanticWeightContainer.hidden = searchModeSelect.value !== 'hybrid';
 
                 // Persist search_mode to cookie so backend default can match UI.
                 if (!params.has('search_mode')) {
@@ -134,7 +301,11 @@ var SearchBoxController = {
                         if (shouldResubmit) {
                             try {
                                 sessionStorage.setItem(resubmitKey, '1');
-                            } catch (e) {}
+                            } catch (e) {
+                                shouldResubmit = false;
+                            }
+                        }
+                        if (shouldResubmit) {
                             document.body.classList.add('search-loading');
                             if (form.requestSubmit) form.requestSubmit();
                             else form.submit();
@@ -151,12 +322,6 @@ var SearchBoxController = {
     setupSearchBox: function() {
         var searchInput = document.getElementById('qfield');
         if (!searchInput) return;
-        var searchForm = searchInput.closest('form');
-        if (searchForm) {
-            searchForm.addEventListener('submit', function() {
-                document.body.classList.add('search-loading');
-            });
-        }
 
         // Auto focus search box (if no query)
         if (searchInput && !searchInput.value.trim()) {
@@ -171,6 +336,10 @@ var SearchBoxController = {
                 e.preventDefault();
                 SearchBoxController.performSearch();
             }
+        });
+
+        searchInput.addEventListener('input', function() {
+            SearchBoxController.syncDefaultRankWithQuery();
         });
 
         // Search suggestions and history functionality removed
@@ -191,27 +360,38 @@ var SearchBoxController = {
         var tagsField = document.getElementById('tags_field');
         var pidField = document.getElementById('pid_field');
         var searchModeSelect = document.getElementById('search_mode_select');
-        var semanticWeightContainer = document.getElementById('semantic_weight_container');
         var semanticWeightSlider = document.getElementById('semantic_weight_slider');
+        var form = this.getForm();
 
         // Auto open advanced filter panel when rank is tags/pid, and auto-submit on rank change
         if (rankSelect) {
             rankSelect.addEventListener('change', function() {
+                SearchBoxController.rankTouched = true;
                 if (this.value === 'tags' || this.value === 'pid') {
                     SearchBoxController.setAdvancedFiltersOpen(true, true);
                 }
+                SearchBoxController.updateAdvancedFilterAvailability();
+                SearchBoxController.showClientErrors([]);
                 try { localStorage.setItem('arxiv_sanity_pref.rank', this.value); } catch (e) {}
 
-                // Auto-submit form when rank changes to time or random (no query needed)
-                if (this.value === 'time' || this.value === 'random') {
-                    var form = document.querySelector('#cbox form');
-                    if (form) {
-                        document.body.classList.add('search-loading');
-                        if (form.requestSubmit) {
-                            form.requestSubmit();
-                        } else {
-                            form.submit();
-                        }
+                if (!form) return;
+                var hasQuery = SearchBoxController.hasQuery();
+                if (hasQuery && SearchBoxController.isQueryRank(this.value)) {
+                    document.body.classList.add('search-loading');
+                    if (form.requestSubmit) {
+                        form.requestSubmit();
+                    } else {
+                        form.submit();
+                    }
+                    return;
+                }
+
+                if (!hasQuery && (this.value === 'time' || this.value === 'random')) {
+                    document.body.classList.add('search-loading');
+                    if (form.requestSubmit) {
+                        form.requestSubmit();
+                    } else {
+                        form.submit();
                     }
                 }
             });
@@ -220,20 +400,14 @@ var SearchBoxController = {
         // Show/hide semantic weight slider based on search mode
         if (searchModeSelect) {
             searchModeSelect.addEventListener('change', function() {
-                if (this.value === 'hybrid') {
-                    semanticWeightContainer.style.display = '';
-                } else {
-                    semanticWeightContainer.style.display = 'none';
-                }
+                SearchBoxController.updateSemanticWeightVisibility();
                 try { localStorage.setItem('arxiv_sanity_pref.search_mode', this.value); } catch (e) {}
                 try {
                     document.cookie = 'arxiv_sanity_pref.search_mode=' + encodeURIComponent(this.value) + '; max-age=' + (365 * 24 * 60 * 60) + '; path=/; samesite=lax';
                 } catch (e) {}
 
-                // Auto-submit when switching search mode with a non-empty query.
-                var qfield = document.getElementById('qfield');
-                if (qfield && qfield.value && qfield.value.trim()) {
-                    var form = document.querySelector('#cbox form');
+                // Auto-submit when switching search mode with a non-empty query in a query-aware rank.
+                if (SearchBoxController.hasQuery() && SearchBoxController.isQueryRank(SearchBoxController.getCurrentRank())) {
                     if (form) {
                         document.body.classList.add('search-loading');
                         if (form.requestSubmit) {
@@ -249,6 +423,7 @@ var SearchBoxController = {
         // Persist semantic weight
         if (semanticWeightSlider) {
             semanticWeightSlider.addEventListener('input', function() {
+                SearchBoxController.updateSemanticWeightBadge();
                 try { localStorage.setItem('arxiv_sanity_pref.semantic_weight', this.value); } catch (e) {}
             });
         }
@@ -287,15 +462,15 @@ var SearchBoxController = {
         var emptyState = document.getElementById('empty-state');
         if (!emptyState) return;
         var isEmpty = Array.isArray(papers) && papers.length === 0;
-        emptyState.style.display = isEmpty ? 'block' : 'none';
+        emptyState.hidden = !isEmpty;
 
         var pagination = document.getElementById('pagination');
         if (pagination) {
-            pagination.style.display = isEmpty ? 'none' : '';
+            pagination.hidden = isEmpty;
         }
         var paginationNote = document.querySelector('.pagination-note');
         if (paginationNote) {
-            paginationNote.style.display = isEmpty ? 'none' : '';
+            paginationNote.hidden = isEmpty;
         }
     },
 
@@ -307,24 +482,36 @@ var SearchBoxController = {
             localStorage.removeItem('arxiv_sanity_pref.time_filter');
             localStorage.removeItem('arxiv_sanity_pref.skip_have');
             localStorage.removeItem('arxiv_sanity_pref.adv_open');
+            sessionStorage.removeItem('arxiv_sanity_pref.search_mode_resubmitted');
+        } catch (e) {}
+        try {
+            document.cookie =
+                'arxiv_sanity_pref.search_mode=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; samesite=lax';
         } catch (e) {}
     },
 
-    setupModalFocus: function() {
-        if (this._modalObserver) return;
-        var observer = new MutationObserver(function() {
-            var overlays = document.querySelectorAll('.modal-overlay');
-            overlays.forEach(function(overlay) {
-                if (overlay.dataset.focused) return;
-                var field = overlay.querySelector('input, select, textarea, button');
-                if (field) {
-                    field.focus();
-                }
-                overlay.dataset.focused = '1';
-            });
+    setupInspectToggle: function() {
+        var inspectBtn = document.getElementById('inspect_svm');
+        var wordwrap = document.getElementById('wordwrap');
+        if (!inspectBtn || !wordwrap) return;
+        inspectBtn.addEventListener('click', function() {
+            var isHidden = wordwrap.hidden;
+            wordwrap.hidden = !isHidden;
+            inspectBtn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
         });
-        observer.observe(document.body, { childList: true, subtree: true });
-        this._modalObserver = observer;
+    },
+
+    setupPagination: function() {
+        var pagination = document.getElementById('pagination');
+        if (!pagination) return;
+        pagination.addEventListener('click', function(event) {
+            var btn = event.target.closest('[data-page-offset]');
+            if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
+            var offset = parseInt(btn.getAttribute('data-page-offset'), 10);
+            if (Number.isFinite(offset)) {
+                move_page(offset);
+            }
+        });
     },
 
     // Advanced filter panel behavior
@@ -353,6 +540,7 @@ var SearchBoxController = {
         } catch (e) {}
 
         this.setAdvancedFiltersOpen(hasAdvancedValues || persistedOpen, false);
+        this.updateAdvancedFilterAvailability();
 
         var self = this;
         advBtn.addEventListener('click', function() {
@@ -366,7 +554,7 @@ var SearchBoxController = {
         var advPanel = document.getElementById('adv-filter-panel');
         if (!advBtn || !advPanel) return;
         advBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
-        advPanel.style.display = isOpen ? 'flex' : 'none';
+        advPanel.hidden = !isOpen;
         if (persist) {
             try {
                 localStorage.setItem('arxiv_sanity_pref.adv_open', isOpen ? '1' : '0');
@@ -377,6 +565,9 @@ var SearchBoxController = {
     // Setup tag suggestions
     setupTagSuggestions: function(tagsField) {
         var availableTags = tags.map(tag => tag.name).filter(name => name !== 'all');
+        tagsField.setAttribute('autocomplete', 'off');
+        tagsField.setAttribute('aria-autocomplete', 'list');
+        tagsField.setAttribute('aria-haspopup', 'listbox');
 
         tagsField.addEventListener('input', function() {
             var input = this.value;
@@ -394,10 +585,37 @@ var SearchBoxController = {
             }
         });
 
+        tagsField.addEventListener('keydown', function(e) {
+            var items = SearchBoxController.getTagSuggestionItems();
+            if (!items.length) return;
+
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                SearchBoxController.setActiveTagSuggestion(SearchBoxController.tagSuggestionIndex + 1);
+                return;
+            }
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                SearchBoxController.setActiveTagSuggestion(SearchBoxController.tagSuggestionIndex - 1);
+                return;
+            }
+            if (e.key === 'Enter' && SearchBoxController.tagSuggestionIndex >= 0) {
+                e.preventDefault();
+                var activeItem = items[SearchBoxController.tagSuggestionIndex];
+                if (activeItem) {
+                    SearchBoxController.applyTagSuggestion(
+                        tagsField,
+                        activeItem.getAttribute('data-tag') || activeItem.textContent || '',
+                        Number(activeItem.getAttribute('data-last-comma-index') || '-1')
+                    );
+                }
+            }
+        });
+
         if (!tagsField.dataset.suggestionBound) {
             document.addEventListener('click', function(e) {
                 if (!tagsField.parentNode || !tagsField.parentNode.contains(e.target)) {
-                    SearchBoxController.hideTagSuggestions();
+                    SearchBoxController.hideTagSuggestions(tagsField);
                 }
             });
             tagsField.dataset.suggestionBound = '1';
@@ -406,44 +624,67 @@ var SearchBoxController = {
 
     // Show tag suggestions
     showTagSuggestions: function(input, suggestions, lastCommaIndex, currentTag) {
-        this.hideTagSuggestions();
+        this.hideTagSuggestions(input);
 
         if (suggestions.length === 0) return;
 
         var dropdown = document.createElement('div');
         dropdown.className = 'tag-suggestions';
         dropdown.id = 'tag-suggestions';
+        dropdown.setAttribute('role', 'listbox');
+        dropdown.setAttribute('aria-label', 'Tag suggestions');
+        input.setAttribute('aria-controls', dropdown.id);
+        input.setAttribute('aria-expanded', 'true');
 
-        suggestions.forEach(function(tag) {
-            var item = document.createElement('div');
+        suggestions.forEach(function(tag, index) {
+            var item = document.createElement('button');
+            item.type = 'button';
             item.className = 'tag-suggestion-item';
+            item.id = 'tag-suggestion-option-' + index;
+            item.setAttribute('role', 'option');
+            item.setAttribute('aria-selected', 'false');
+            item.setAttribute('data-tag', tag);
+            item.setAttribute('data-last-comma-index', String(lastCommaIndex));
             item.textContent = tag;
 
             item.addEventListener('click', function() {
-                var newValue = lastCommaIndex >= 0 ?
-                    input.value.substring(0, lastCommaIndex + 1) + ' ' + tag :
-                    tag;
-                input.value = newValue;
-                SearchBoxController.hideTagSuggestions();
-                input.focus();
+                SearchBoxController.applyTagSuggestion(input, tag, lastCommaIndex);
+            });
+            item.addEventListener('mouseenter', function() {
+                SearchBoxController.setActiveTagSuggestion(index);
             });
             dropdown.appendChild(item);
         });
 
         input.parentNode.style.position = 'relative';
         input.parentNode.appendChild(dropdown);
+        this.setActiveTagSuggestion(0);
     },
 
     // Hide tag suggestions
-    hideTagSuggestions: function() {
+    hideTagSuggestions: function(input) {
         var existing = document.getElementById('tag-suggestions');
         if (existing) {
             existing.remove();
+        }
+        this.tagSuggestionIndex = -1;
+        var field = input || document.getElementById('tags_field');
+        if (field) {
+            field.setAttribute('aria-expanded', 'false');
+            field.removeAttribute('aria-controls');
+            field.removeAttribute('aria-activedescendant');
         }
     },
 
     // Setup shortcuts
     setupShortcuts: function() {
+        var clearFiltersLink = document.getElementById('clear-filters-link');
+        if (clearFiltersLink) {
+            clearFiltersLink.addEventListener('click', function() {
+                SearchBoxController.clearPreferences();
+            });
+        }
+
         // Keyboard shortcuts
         document.addEventListener('keydown', function(e) {
             // Ctrl/Cmd + K focus search box
@@ -457,13 +698,6 @@ var SearchBoxController = {
                 SearchBoxController.hideSuggestions();
                 SearchBoxController.hideTagSuggestions();
 
-                // Close all modals
-                var modals = document.querySelectorAll('.modal-overlay');
-                modals.forEach(function(modal) {
-                    if (modal.style.display !== 'none') {
-                        modal.click(); // Trigger mask layer click event
-                    }
-                });
             }
         });
     },
@@ -473,22 +707,10 @@ var SearchBoxController = {
         var form = document.querySelector('#cbox form');
         var timeFilterField = document.getElementById('time_filter_field');
         var svmCField = document.getElementById('svm_c_field');
-        var errorBox = document.getElementById('filter-client-errors');
+        var qField = document.getElementById('qfield');
+        var rankSelect = document.getElementById('rank_select');
 
-        if (!form || !timeFilterField || !svmCField) return;
-
-        var setFieldError = function(field, message) {
-            if (!field) return;
-            if (message) {
-                field.classList.add('error');
-                field.setAttribute('aria-invalid', 'true');
-                field.title = message;
-            } else {
-                field.classList.remove('error');
-                field.removeAttribute('aria-invalid');
-                field.title = '';
-            }
-        };
+        if (!form || !timeFilterField || !svmCField || !qField || !rankSelect) return;
 
         var validatePositiveNumber = function(field, label) {
             var value = field.value.trim();
@@ -502,15 +724,14 @@ var SearchBoxController = {
 
         var updateFieldState = function(field, label) {
             var error = validatePositiveNumber(field, label);
-            setFieldError(field, error);
+            SearchBoxController.setFieldError(field, error);
         };
 
         var maybeClearErrors = function() {
             var timeError = validatePositiveNumber(timeFilterField, 'Time filter');
             var svmError = validatePositiveNumber(svmCField, 'SVM C');
-            if (!timeError && !svmError && errorBox) {
-                errorBox.style.display = 'none';
-                errorBox.innerHTML = '';
+            if (!timeError && !svmError) {
+                SearchBoxController.showClientErrors([]);
             }
         };
 
@@ -524,43 +745,49 @@ var SearchBoxController = {
             maybeClearErrors();
         });
 
-        var showErrors = function(errors) {
-            if (!errorBox) return;
-            if (!errors.length) {
-                errorBox.style.display = 'none';
-                errorBox.innerHTML = '';
-                return;
-            }
-
-            var list = document.createElement('ul');
-            errors.forEach(function(msg) {
-                var item = document.createElement('li');
-                item.textContent = msg;
-                list.appendChild(item);
-            });
-            errorBox.innerHTML = '';
-            errorBox.appendChild(list);
-            errorBox.style.display = 'block';
-        };
-
         form.addEventListener('submit', function(e) {
             var errors = [];
             var timeError = validatePositiveNumber(timeFilterField, 'Time filter');
             var svmError = validatePositiveNumber(svmCField, 'SVM C');
+            var query = qField.value.trim();
+            var rank = rankSelect.value;
+            var queryRankError = null;
+            var emptySearchError = null;
 
-            setFieldError(timeFilterField, timeError);
-            setFieldError(svmCField, svmError);
+            if (query && !SearchBoxController.isQueryRank(rank)) {
+                queryRankError =
+                    rank === 'random'
+                        ? 'Random ranking does not use the search query. Clear the query or switch Rank by to Search or Time.'
+                        : 'Tags/PIDs ranking does not use the search query. Clear the query or switch Rank by to Search or Time.';
+            }
+
+            if (!query && rank === 'search') {
+                emptySearchError = 'Enter a query to use Search ranking, or switch Rank by to Time, Tags, PID, or Random.';
+            }
+
+            SearchBoxController.setFieldError(timeFilterField, timeError);
+            SearchBoxController.setFieldError(svmCField, svmError);
+            SearchBoxController.setFieldError(qField, emptySearchError || queryRankError);
+            SearchBoxController.setFieldError(rankSelect, queryRankError || emptySearchError);
 
             if (timeError) errors.push(timeError);
             if (svmError) errors.push(svmError);
+            if (queryRankError) errors.push(queryRankError);
+            if (emptySearchError) errors.push(emptySearchError);
 
             if (errors.length) {
                 e.preventDefault();
-                showErrors(errors);
-                if (svmError) {
+                SearchBoxController.showClientErrors(errors);
+                if (svmError || SearchBoxController.isAdvancedRank(rank)) {
                     SearchBoxController.setAdvancedFiltersOpen(true, true);
                 }
-                if (timeError) {
+                if (queryRankError || emptySearchError) {
+                    if (queryRankError) {
+                        rankSelect.focus();
+                    } else {
+                        qField.focus();
+                    }
+                } else if (timeError) {
                     timeFilterField.focus();
                 } else if (svmError) {
                     svmCField.focus();
@@ -568,22 +795,15 @@ var SearchBoxController = {
                 return;
             }
 
-            showErrors([]);
+            SearchBoxController.showClientErrors([]);
             document.body.classList.add('search-loading');
         });
     },
 
     // Perform search
     performSearch: function() {
-        var query = document.getElementById('qfield').value.trim();
-
-        // Auto set rank to search
-        if (query) {
-            document.getElementById('rank_select').value = 'search';
-        }
-
-        // Submit form
-        var form = document.querySelector('#cbox form');
+        this.syncDefaultRankWithQuery();
+        var form = this.getForm();
         if (!form) return;
         if (form.requestSubmit) {
             form.requestSubmit();
@@ -621,7 +841,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         <!-- the choice box, allowing us to sort, rank, slice and dice papers -->
         <div id="cbox">
-            <form action="/" method="get">
+            <form action="/" method="get" id="search-form">
                 <div class="search-row">
                     <div class="search-input-wrapper">
                         <input name="q" type="text" id="qfield" class="search-input" aria-label="Search arXiv papers" placeholder="Search arXiv papers…" value="{{ gvars.search_query }}" autocomplete="off" spellcheck="false" inputmode="search">
@@ -632,7 +852,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     </button>
                 </div>
                 {% if form_errors %}
-                <div id="filter-server-errors" class="form-errors" role="status" aria-live="polite">
+                <div id="filter-server-errors" class="form-errors" role="alert" aria-live="assertive">
                     <ul>
                     {% for msg in form_errors %}
                         <li>{{ msg }}</li>
@@ -640,7 +860,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     </ul>
                 </div>
                 {% endif %}
-                <div id="filter-client-errors" class="form-errors" role="status" aria-live="polite" style="display:none;"></div>
+                <div id="filter-client-errors" class="form-errors" role="alert" aria-live="assertive" hidden></div>
                 <div class="filter-row">
                     <div class="filter-group primary-filters">
                         <div class="filter-item">
@@ -651,14 +871,13 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <option value="hybrid" {{ gvars.search_mode == 'hybrid' and 'selected' }}>Hybrid</option>
                             </select>
                         </div>
-                        <div class="filter-item" id="semantic_weight_container" style="{{ gvars.search_mode != 'hybrid' and 'display:none;' or '' }}">
-                            <label for="semantic_weight_slider" title="0 = keyword-only, 1 = semantic-only">Semantic Weight:</label>
+                        <div class="filter-item" id="semantic_weight_container" {% if gvars.search_mode != 'hybrid' %}hidden{% endif %}>
+                            <label for="semantic_weight_slider">Semantic Weight:</label>
                             <input type="range" name="semantic_weight" id="semantic_weight_slider"
-                                   min="0" max="1" step="0.1" value="{{ gvars.semantic_weight }}"
-                                   style="width: 80px;"
-                                   oninput="document.getElementById('semantic_weight_value').textContent = this.value">
+                                   min="0" max="1" step="0.1" value="{{ gvars.semantic_weight }}" class="semantic-weight-slider"
+                                   aria-describedby="semantic_weight_hint">
                             <span id="semantic_weight_value" class="weight-value-badge">{{ gvars.semantic_weight }}</span>
-                            <small class="filter-hint">0=keyword, 1=semantic</small>
+                            <small id="semantic_weight_hint" class="filter-hint">0=keyword, 1=semantic</small>
                         </div>
                         <div class="filter-item">
                             <label for="rank_select">Rank by:</label>
@@ -690,7 +909,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     </div>
                 </div>
                 <div class="adv-filter-container">
-                    <div id="adv-filter-panel" class="adv-filter-panel" style="display:none;">
+                    <div id="adv-filter-panel" class="adv-filter-panel" hidden>
                         <div class="filter-item filter-item--tags">
                             <label for="tags_field">Tags:</label>
                             <input name="tags" type="text" id="tags_field" value="{{ gvars.tags }}" placeholder="Comma separated tags" autocomplete="off" spellcheck="false">
@@ -701,7 +920,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         </div>
                         <div class="filter-item filter-item--logic">
                             <label for="logic">Match logic within Tags/PIDs:</label>
-                            <select name="logic" id="logic" title="Logical relation inside Tags and PIDs; results are combined when both lists are filled">
+                            <select name="logic" id="logic">
                                 <option value="or" {{ gvars.logic == 'or' and 'selected' }}>or</option>
                                 <option value="and" {{ gvars.logic == 'and' and 'selected' }}>and</option>
                             </select>
@@ -711,7 +930,8 @@ document.addEventListener('DOMContentLoaded', function() {
                             <input name="svm_c" type="text" id="svm_c_field" value="{{ gvars.svm_c }}" placeholder="0.005" inputmode="decimal" autocomplete="off">
                         </div>
                         <div class="filter-note">
-                            <small>When both Tags and PIDs are filled, papers matching either list are included.</small>
+                            <strong id="adv-filter-note-title">Advanced filters are active for tag-based ranking.</strong>
+                            <small id="adv-filter-note-body">When both Tags and PIDs are filled, papers matching either list are included.</small>
                         </div>
                     </div>
                 </div>
@@ -719,11 +939,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 <div id="cbox_fast">
                     <span class="shortcut-label">Shortcuts:</span>
                     <div class="shortcut-buttons">
-                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=7&skip_have=yes'">Recommend last week</button>
-                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=tags&tags=all&time_filter=3&skip_have=yes'">Recommend last 3 days</button>
-                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=time'">Recent</button>
-                        <button type="button" class="shortcut-btn" onclick="window.location.href='/?rank=random&time_filter=7'">Random last week</button>
-                        <button type="button" class="shortcut-btn shortcut-btn-secondary" onclick="SearchBoxController.clearPreferences(); window.location.href='/'">Clear filters</button>
+                        <a href="/?rank=tags&tags=all&time_filter=7&skip_have=yes" class="shortcut-btn">Recommend last week</a>
+                        <a href="/?rank=tags&tags=all&time_filter=3&skip_have=yes" class="shortcut-btn">Recommend last 3 days</a>
+                        <a href="/?rank=time" class="shortcut-btn">Recent</a>
+                        <a href="/?rank=random&time_filter=7" class="shortcut-btn">Random last week</a>
+                        <a href="/" id="clear-filters-link" class="shortcut-btn shortcut-btn-secondary">Clear filters</a>
                     </div>
                 </div>
             </form>
@@ -741,16 +961,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 
-<div id="wordwrap" style="display:none;">
+<div id="wordwrap" hidden>
 </div>
 
 {% if not user and words %}
-<div
-    id="inspect_svm"
-    onclick="(function(){var w=document.getElementById('wordwrap'); if(!w) return; w.style.display=(w.style.display==='block'?'none':'block');})();"
->
+<button type="button" id="inspect_svm" aria-controls="wordwrap" aria-expanded="false">
     inspect
-</div>
+</button>
 {% endif %}
 
 
@@ -763,7 +980,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 {% endif %}
 
-<div id="empty-state" class="empty-state" style="display:none;">
+<div id="empty-state" class="empty-state" hidden>
     <h3>No results found</h3>
     <p>Try adjusting the query, time filter, or tag/pid filters.</p>
 </div>
@@ -778,9 +995,9 @@ document.addEventListener('DOMContentLoaded', function() {
 {% set is_first_page = gvars.page_number|int <= 1 %}
 {% set is_last_page = gvars.page_number|int >= max_pages %}
 <div id="pagination">
-    <button type="button" id="link-prev-page" class="{{ 'disabled' if is_first_page }}" {% if is_first_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} onclick="move_page(-1);">prev</button>
+    <button type="button" id="link-prev-page" class="{{ 'disabled' if is_first_page }}" {% if is_first_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} data-page-offset="-1">prev</button>
     <span class="pagination-status">Page {{ gvars.page_number }} of {{ max_pages }}</span>
-    <button type="button" id="link-next-page" class="{{ 'disabled' if is_last_page }}" {% if is_last_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} onclick="move_page(1);">next</button>
+    <button type="button" id="link-next-page" class="{{ 'disabled' if is_last_page }}" {% if is_last_page %}disabled aria-disabled="true"{% else %}aria-disabled="false"{% endif %} data-page-offset="1">next</button>
 </div>
 {% if page_adjusted %}
 <div class="pagination-note">Reached the last available page ({{ gvars.page_number }} of {{ max_pages }}).</div>
@@ -791,9 +1008,9 @@ document.addEventListener('DOMContentLoaded', function() {
 <!-- React (only needed on pages with JSX/React components) -->
 {% if asset_cdn_enabled %}
 <script src="{{ npm_cdn_url('react@16.14.0/umd/react.production.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react.production.min.js') }}';"></script>
+    data-fallback-src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script src="{{ npm_cdn_url('react-dom@16.14.0/umd/react-dom.production.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react-dom.production.min.js') }}';"></script>
+    data-fallback-src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>

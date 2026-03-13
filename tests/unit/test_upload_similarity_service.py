@@ -112,8 +112,8 @@ class TestSaveLoadUploadFeatures:
         """Test saving and loading features."""
         from backend.services import upload_similarity_service
 
-        # Monkeypatch DATA_DIR to use temp directory
-        monkeypatch.setattr(upload_similarity_service, "DATA_DIR", str(tmp_path))
+        # Monkeypatch data dir to use temp directory
+        monkeypatch.setattr(upload_similarity_service, "_data_dir", lambda: tmp_path)
 
         # Use valid PID format: up_ + 12 chars = 15 total
         pid = "up_saveload1234"
@@ -152,7 +152,7 @@ class TestSaveLoadUploadFeatures:
         """Test loading features that don't exist."""
         from backend.services import upload_similarity_service
 
-        monkeypatch.setattr(upload_similarity_service, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(upload_similarity_service, "_data_dir", lambda: tmp_path)
 
         # Use valid PID format: up_ + 12 chars = 15 total
         result = upload_similarity_service.load_upload_features("up_nonexistent1")
@@ -377,7 +377,7 @@ class TestComputeUploadFeatures:
         """Test that compute_upload_features loads cached features."""
         from backend.services import upload_similarity_service
 
-        monkeypatch.setattr(upload_similarity_service, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(upload_similarity_service, "_data_dir", lambda: tmp_path)
 
         # Use valid PID format: up_ + 12 chars = 15 total
         pid = "up_testcached12"

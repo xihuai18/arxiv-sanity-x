@@ -16,7 +16,6 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 from tqdm import tqdm
@@ -44,9 +43,17 @@ from tools.paper_summarizer import (
     summary_source_matches,
 )
 
-LLM_NAME = settings.llm.name
-SUMMARY_DIR = str(settings.summary_dir)
-SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
+
+def _default_llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
+
+def _summary_markdown_source() -> str:
+    return str(settings.summary.markdown_source or "")
 
 
 class BatchPaperSummarizer(PaperSummarizer):
@@ -63,7 +70,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             processor: BatchProcessor instance for recording error details
         """
         super().__init__()  # Call parent class initialization
-        self.cache_dir = Path(SUMMARY_DIR)
+        self.cache_dir = Path(_summary_dir())
         self.processor = processor  # For recording error details
 
         # Ensure cache directory exists
@@ -74,7 +81,7 @@ class BatchPaperSummarizer(PaperSummarizer):
         if self.processor:
             self.processor._record_failure_detail(pid, reason, message, exception)
 
-    def download_arxiv_paper(self, pid: str) -> Tuple[Optional[Path], Optional[str]]:
+    def download_arxiv_paper(self, pid: str) -> tuple[Path | None, str | None]:
         """
         Download arXiv paper PDF, reuse parent class method and add error recording
 
@@ -96,8 +103,11 @@ class BatchPaperSummarizer(PaperSummarizer):
             return None, None
 
     def parse_pdf_with_mineru(
-        self, pdf_path: Path, cache_pid: Optional[str] = None, cached_version: Optional[str] = None
-    ) -> Optional[Path]:
+        self,
+        pdf_path: Path,
+        cache_pid: str | None = None,
+        cached_version: str | None = None,
+    ) -> Path | None:
         """
         Parse PDF to Markdown using minerU
         Now completely relies on parent class implementation which already has proper file locking
@@ -132,7 +142,7 @@ class BatchPaperSummarizer(PaperSummarizer):
             self._record_failure_detail(pid_for_error, "parse_failed", error_msg, e)
             return None
 
-    def generate_summary(self, pid: str, source: Optional[str] = None, model: Optional[str] = None) -> dict:
+    def generate_summary(self, pid: str, source: str | None = None, model: str | None = None) -> dict:
         """
         Main entry function for generating paper summary, reuse parent class logic
 
@@ -152,7 +162,7 @@ class BatchPaperSummarizer(PaperSummarizer):
 class BatchProcessor:
     """Batch Processor Class"""
 
-    def __init__(self, max_workers: int = 2, model: Optional[str] = None):
+    def __init__(self, max_workers: int = 2, model: str | None = None):
         """
         Initialize batch processor
 
@@ -161,10 +171,10 @@ class BatchProcessor:
             model: LLM model name for summary generation
         """
         self.max_workers = max_workers
-        self.cache_dir = Path(SUMMARY_DIR)
+        self.cache_dir = Path(_summary_dir())
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Use provided model or default from config
-        self.model = (model or LLM_NAME or "").strip()
+        self.model = (model or _default_llm_name() or "").strip()
         if not self.model:
             raise ValueError("Model name is required for batch processing")
 
@@ -218,7 +228,7 @@ class BatchProcessor:
             else:
                 self.stats["failure_reasons"]["other_error"] += 1
 
-    def get_latest_papers(self, n: int) -> List[Tuple[str, Dict]]:
+    def get_latest_papers(self, n: int) -> list[tuple[str, dict]]:
         """
         Get the latest n papers from the database
 
@@ -241,7 +251,7 @@ class BatchProcessor:
 
         return latest_papers
 
-    def get_priority_papers(self, time_delta_days: float = 7.0, limit: int = 50) -> List[Tuple[str, Dict]]:
+    def get_priority_papers(self, time_delta_days: float = 7.0, limit: int = 50) -> list[tuple[str, dict]]:
         """
         Get high-priority papers that will be recommended in emails but don't have summaries yet.
 
@@ -345,7 +355,7 @@ class BatchProcessor:
         logger.debug(f"Found {len(recommendation_count)} unique recommended papers")
 
         # Filter: no summary yet
-        summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+        summary_source = normalize_summary_source(_summary_markdown_source())
         priority_papers = []
 
         for pid, count in recommendation_count.items():
@@ -369,8 +379,11 @@ class BatchProcessor:
         return priority_papers
 
     def get_papers_with_priority(
-        self, num_papers: int, priority_time_delta: float = 7.0, priority_limit: int = 50
-    ) -> List[Tuple[str, Dict]]:
+        self,
+        num_papers: int,
+        priority_time_delta: float = 7.0,
+        priority_limit: int = 50,
+    ) -> list[tuple[str, dict]]:
         """
         Get papers for processing with priority papers first.
 
@@ -448,9 +461,9 @@ class BatchProcessor:
         self,
         cache_pid: str,
         summary_content: str,
-        source: Optional[str] = None,
-        summary_meta: Optional[dict] = None,
-    ) -> Tuple[bool, Optional[str]]:
+        source: str | None = None,
+        summary_meta: dict | None = None,
+    ) -> tuple[bool, str | None]:
         """
         Cache summary to the directory used by serve.py (uses layered structure)
 
@@ -489,7 +502,7 @@ class BatchProcessor:
             logger.error(f"Failed to cache summary {cache_pid}: {e}")
             return False, None
 
-    def process_single_paper(self, pid: str, paper_info: Dict, skip_cached: bool = True) -> Tuple[str, bool, str]:
+    def process_single_paper(self, pid: str, paper_info: dict, skip_cached: bool = True) -> tuple[str, bool, str]:
         """
         Process single paper, each thread uses independent BatchPaperSummarizer instance
 
@@ -566,7 +579,10 @@ class BatchProcessor:
 
                 # Cache summary
                 cache_success, _ = self.cache_summary(
-                    cache_pid, summary_content, source=summary_source, summary_meta=summary_meta
+                    cache_pid,
+                    summary_content,
+                    source=summary_source,
+                    summary_meta=summary_meta,
                 )
 
                 if cache_success:
@@ -594,8 +610,12 @@ class BatchProcessor:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
     def batch_process(
-        self, papers: List[Tuple[str, Dict]], skip_cached: bool = True, dry_run: bool = False, max_retries: int = 3
-    ) -> Dict:
+        self,
+        papers: list[tuple[str, dict]],
+        skip_cached: bool = True,
+        dry_run: bool = False,
+        max_retries: int = 3,
+    ) -> dict:
         """
         Batch process papers with failure retry mechanism
 
@@ -621,7 +641,14 @@ class BatchProcessor:
             logger.debug("=== Dry run mode - only displaying paper info ===")
 
             # Use progress bar to display paper information
-            with tqdm(papers, desc="Checking papers", unit="paper", leave=True, ncols=100, file=sys.stderr) as pbar:
+            with tqdm(
+                papers,
+                desc="Checking papers",
+                unit="paper",
+                leave=True,
+                ncols=100,
+                file=sys.stderr,
+            ) as pbar:
                 for pid, meta in pbar:
                     paper_info = papers_data.get(pid, {})
                     title = paper_info.get("title", "Unknown Title")
@@ -666,7 +693,13 @@ class BatchProcessor:
 
             # Create progress bar
             desc = f"Round {round_num} processing" if round_num > 1 else "Processing papers"
-            pbar = tqdm(total=len(current_round_papers), desc=desc, unit="paper", leave=True, ncols=120)
+            pbar = tqdm(
+                total=len(current_round_papers),
+                desc=desc,
+                unit="paper",
+                leave=True,
+                ncols=120,
+            )
 
             # Initialize current round counters
             round_success = 0
@@ -676,7 +709,12 @@ class BatchProcessor:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 # Submit all tasks in batch for efficiency
                 future_to_paper = {
-                    executor.submit(self.process_single_paper, pid, papers_data.get(pid, {}), skip_cached): (
+                    executor.submit(
+                        self.process_single_paper,
+                        pid,
+                        papers_data.get(pid, {}),
+                        skip_cached,
+                    ): (
                         pid,
                         meta,
                         retry_count,
@@ -775,7 +813,11 @@ def main():
     """Main function"""
     parser = argparse.ArgumentParser(description="Batch process latest papers and generate summaries")
     parser.add_argument(
-        "-n", "--num-papers", type=int, default=10, help="Number of latest papers to process (default: 10)"
+        "-n",
+        "--num-papers",
+        type=int,
+        default=10,
+        help="Number of latest papers to process (default: 10)",
     )
     parser.add_argument(
         "-w",
@@ -785,14 +827,29 @@ def main():
         help="Maximum number of worker threads (default: 2, recommended not to exceed 4)",
     )
     parser.add_argument(
-        "-m", "--model", type=str, default=None, help=f"LLM model name for summary generation (default: {LLM_NAME})"
+        "-m",
+        "--model",
+        type=str,
+        default=None,
+        help=f"LLM model name for summary generation (default: {_default_llm_name()})",
     )
-    parser.add_argument("--no-skip-cached", action="store_true", help="Do not skip cached papers, reprocess all papers")
     parser.add_argument(
-        "--dry-run", action="store_true", help="Dry run mode, only display paper information without processing"
+        "--no-skip-cached",
+        action="store_true",
+        help="Do not skip cached papers, reprocess all papers",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Dry run mode, only display paper information without processing",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed logs")
-    parser.add_argument("--max-retries", type=int, default=3, help="Maximum retry count for failed papers (default: 3)")
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Maximum retry count for failed papers (default: 3)",
+    )
 
     # Priority queue arguments
     parser.add_argument(
@@ -824,7 +881,11 @@ def main():
     logger.remove()
     base_level = settings.log_level.upper()
     level = "DEBUG" if args.verbose else base_level
-    logger.add(sys.stdout, level=level, format="\n{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}")
+    logger.add(
+        sys.stdout,
+        level=level,
+        format="\n{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | {message}",
+    )
 
     # Parameter validation
     if args.workers > 8:
@@ -896,7 +957,10 @@ def main():
 
         # Batch processing (local)
         results = processor.batch_process(
-            papers_to_process, skip_cached=skip_cached, dry_run=args.dry_run, max_retries=args.max_retries
+            papers_to_process,
+            skip_cached=skip_cached,
+            dry_run=args.dry_run,
+            max_retries=args.max_retries,
         )
 
         if not args.dry_run and results["failed"] > 0:

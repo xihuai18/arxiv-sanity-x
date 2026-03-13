@@ -3,9 +3,9 @@
 {% block head_extra %}
 <!-- React + shared tag dropdown (for consistent 3-state tag UI across pages) -->
 {% if asset_cdn_enabled %}
-<script src="{{ npm_cdn_url('react@16.14.0/umd/react.production.min.js') }}"
+<script defer src="{{ npm_cdn_url('react@16.14.0/umd/react.production.min.js') }}"
     onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react.production.min.js') }}';"></script>
-<script src="{{ npm_cdn_url('react-dom@16.14.0/umd/react-dom.production.min.js') }}"
+<script defer src="{{ npm_cdn_url('react-dom@16.14.0/umd/react-dom.production.min.js') }}"
     onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react-dom.production.min.js') }}';"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
@@ -14,7 +14,7 @@
 <script defer src="{{ hashed_static('dist/tag_dropdown_shared.js') }}"></script>
 <script defer src="{{ hashed_static('dist/author_utils.js') }}"></script>
 {% if asset_cdn_enabled %}
-<script src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
+<script defer src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
     onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/markdown-it.min.js') }}';"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
@@ -46,14 +46,14 @@ var defaultSummaryModel = {{ default_summary_model | tojson }};
     </div>
 
     {% if message %}
-    <div class="rl-login-message">
+    <div class="rl-login-message" role="status" aria-live="polite">
         <p>{{ message }}</p>
         <p><a href="/profile">Log in</a> to start using reading list.</p>
     </div>
     {% else %}
     <div id="rl-papers"></div>
 
-    <div id="rl-empty-state">
+    <div id="rl-empty-state" role="status" aria-live="polite">
         <h3>No papers in reading list</h3>
         <p>Add papers from the main page by clicking the bookmark icon.</p>
     </div>
@@ -79,7 +79,7 @@ var defaultSummaryModel = {{ default_summary_model | tojson }};
 
     <div id="uploaded-papers"></div>
 
-    <div id="uploaded-empty-state">
+    <div id="uploaded-empty-state" role="status" aria-live="polite">
         <h3>No uploaded papers</h3>
         <p>Upload a PDF to get started. Your papers are private and only visible to you.</p>
     </div>

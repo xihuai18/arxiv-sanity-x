@@ -7,8 +7,14 @@ This document focuses on deployment, observability, and runtime operations.
 - Recommended: `conda activate sanity`
 - Configuration: `.env` in repo root (see `.env.example`)
 - Inspect/validate config:
-  - `python -m config.cli show`
-  - `python -m config.cli validate`
+    - `python -m config.cli show`
+    - `python -m config.cli validate`
+    - `python -m config.cli doctor`
+
+Notes:
+
+- Canonical environment variable names are the `ARXIV_SANITY_*` names in `.env.example`.
+- `python bin/run_services.py` does not start the daemon unless you add `--with-daemon`.
 
 ## Process Model
 
@@ -25,22 +31,23 @@ For local development, `bin/run_services.py` can start a full stack in one termi
 
 - Web (recommended): `./bin/up.sh`
 - One-click launcher (starts multiple services): `python bin/run_services.py`
-- Huey consumer (required for async jobs): `python bin/huey_consumer.py`
-- Scheduler (fetch/compute/summaries/emails): `python tools/daemon.py` (or `python -m tools daemon`)
+- One-click launcher with scheduled pipeline: `python bin/run_services.py --with-daemon`
+- Huey consumer (required for async jobs): `python bin/huey_consumer.py tasks.huey -w 4 -k thread`
+- Scheduler (fetch/compute/summaries/emails; not auto-started by web): `python -m tools daemon`
 
 ### Suggested Local Workflow
 
-1) Initialize data once:
+1. Initialize data once:
 
 - `python -m tools arxiv_daemon -n 10000 -m 500`
 - `python -m tools compute --num 20000`
 
-2) Run the service stack:
+2. Run the service stack:
 
 - `python bin/run_services.py` (recommended), or:
-  - Terminal A: `bash bin/up.sh`
-  - Terminal B: `python bin/huey_consumer.py`
-  - Terminal C (optional): `python tools/daemon.py`
+    - Terminal A: `bash bin/up.sh`
+    - Terminal B: `python bin/huey_consumer.py tasks.huey -w 4 -k thread`
+    - Terminal C (optional): `python -m tools daemon`
 
 ### Notes
 
@@ -53,27 +60,31 @@ For local development, `bin/run_services.py` can start a full stack in one termi
 ### Health Check
 
 - `GET /health`
-  - Returns `200` only when papers are loaded and service is ready
-  - Returns `503` while cold-start loading or on errors
-  - Ready response shape (example): `{"status":"ok","papers":1234,"deps":{...}}`
-  - Loading response shape (example): `{"status":"loading","message":"No papers loaded yet"}`
+    - Non-strict liveness/degraded endpoint
+    - Returns `200` for `ok`, `loading`, or `degraded` states
+    - Returns `503` only on hard errors
+- `GET /ready`
+    - Strict readiness endpoint for launchers and probes
+    - Returns `503` while papers are still loading or required dependencies are unavailable
+    - Ready response shape (example): `{"status":"ok","papers":1234,"deps":{...}}`
+    - Loading/error response shape (example): `{"status":"loading","message":"No papers loaded yet"}`
 
 ### Prometheus Metrics (Optional)
 
 - Enable: `ARXIV_SANITY_ENABLE_METRICS=true`
 - Optional protection key:
-  - Set `ARXIV_SANITY_METRICS_KEY=...`
-  - Send header `X-ARXIV-SANITY-METRICS-KEY: ...`
+    - Set `ARXIV_SANITY_METRICS_KEY=...`
+    - Send header `X-ARXIV-SANITY-METRICS-KEY: ...`
 - Endpoint: `GET /metrics`
-  - Returns `404` unless enabled
-  - Under Gunicorn, metrics are **per-worker** (no cross-worker aggregation)
+    - Returns `404` unless enabled
+    - Under Gunicorn, metrics are **per-worker** (no cross-worker aggregation)
 
 ### Task Status (Huey)
 
 - `GET /api/task_status/<task_id>`
-  - For task owner, response includes `pid`, `model`, `error`, `priority`, and `stage`
-  - `stage` is a coarse-grained progress marker (e.g. acquiring lock / LLM request / writing cache)
-  - Some queued tasks may also return `queue_rank` / `queue_total`
+    - For task owner, response includes `pid`, `model`, `error`, `priority`, and `stage`
+    - `stage` is a coarse-grained progress marker (e.g. acquiring lock / LLM request / writing cache)
+    - Some queued tasks may also return `queue_rank` / `queue_total`
 
 ### Server-Sent Events (SSE)
 
@@ -81,7 +92,7 @@ For local development, `bin/run_services.py` can start a full stack in one termi
 - Stats: `GET /api/sse_stats` (process-local)
 - SSE IPC is SQLite-backed and designed to work across multiple Gunicorn workers.
 - If SSE is enabled, prefer `gevent` worker class (recommended and auto-selected by `bin/up.sh` when available).
-  - Optional hard fail: `ARXIV_SANITY_SSE_STRICT_WORKER_CLASS=true`
+    - Optional hard fail: `ARXIV_SANITY_SSE_STRICT_WORKER_CLASS=true`
 
 ### Logs
 
@@ -126,12 +137,12 @@ If enabled, the daemon can snapshot `data/dict.db` and commit/push it to a git r
 - Enable: `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true`
 - Source DB: `<ARXIV_SANITY_DATA_DIR>/dict.db`
 - Backup repo directory (relative to project root): `ARXIV_SANITY_DAEMON_BACKUP_REPO_DIR=data-repo`
-  - This directory can be a submodule checkout or a standalone git clone.
+    - This directory can be a submodule checkout or a standalone git clone.
 - Push control:
-  - `ARXIV_SANITY_DAEMON_BACKUP_PUSH=true|false`
-  - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_REMOTE=` (optional)
-  - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_BRANCH=` (optional)
-  - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_RETRIES=3`
+    - `ARXIV_SANITY_DAEMON_BACKUP_PUSH=true|false`
+    - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_REMOTE=` (optional)
+    - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_BRANCH=` (optional)
+    - `ARXIV_SANITY_DAEMON_BACKUP_PUSH_RETRIES=3`
 
 Notes:
 

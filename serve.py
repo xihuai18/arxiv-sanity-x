@@ -20,7 +20,9 @@ def _maybe_gevent_monkey_patch():
     occasional runtime issues.
     """
 
-    cls = (os.environ.get("ARXIV_SANITY_GUNICORN_WORKER_CLASS") or "").strip()
+    from config import settings
+
+    cls = (getattr(settings.gunicorn, "worker_class", "") or "").strip()
     if cls != "gevent":
         return
     try:
@@ -43,7 +45,7 @@ def _apply_memory_limit():
     try:
         from config import settings
 
-        max_mb = settings.gunicorn.max_memory_mb
+        max_mb = getattr(settings.gunicorn, "max_memory_mb")
         if max_mb > 0:
             from backend.utils.memory_limit import set_memory_limit
 
@@ -86,7 +88,7 @@ def _preload_caches():
 
     from config import settings
 
-    if not settings.gunicorn.preload_caches:
+    if not getattr(settings.gunicorn, "preload_caches"):
         logger.info("[preload] Skipping cache preload (preload_caches=False)")
         return
 

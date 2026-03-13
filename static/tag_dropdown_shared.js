@@ -42,7 +42,7 @@
             dropdownId,
             searchValue,
             onSearchChange,
-            filteredTags = [],
+            filteredTags,
             focusedOptionIndex = -1,
             onTriggerKeyDown,
             onMenuKeyDown,
@@ -50,6 +50,15 @@
             pending = false,
             pendingTag = '',
         } = props;
+
+        const normalizedSearch = String(searchValue || '').toLowerCase();
+        const effectiveFilteredTags = Array.isArray(filteredTags)
+            ? filteredTags
+            : (availableTags || []).filter(tag =>
+                  String(tag || '')
+                      .toLowerCase()
+                      .includes(normalizedSearch)
+              );
 
         const getTagState = tag => {
             if ((selectedTags || []).includes(tag)) return 1;
@@ -81,9 +90,11 @@
                 ),
                 React.createElement('span', null, item.tag),
                 React.createElement(
-                    'span',
+                    'button',
                     {
+                        type: 'button',
                         class: 'remove-tag',
+                        'aria-label': `Remove tag ${item.tag}`,
                         onClick: e => {
                             e.stopPropagation();
                             if (pending) return;
@@ -105,9 +116,11 @@
             : React.createElement('div', { class: 'multi-select-placeholder' }, 'Select tags...');
 
         const focusedOptionId =
-            focusedOptionIndex >= 0 ? `${dropdownId}-option-${focusedOptionIndex}` : null;
+            focusedOptionIndex >= 0 && focusedOptionIndex < effectiveFilteredTags.length
+                ? `${dropdownId}-option-${focusedOptionIndex}`
+                : null;
 
-        const optionElements = filteredTags.map((tag, ix) => {
+        const optionElements = effectiveFilteredTags.map((tag, ix) => {
             const state = getTagState(tag);
             const isTagPending = Boolean(pending) && String(pendingTag || '') === String(tag || '');
             const stateClass =
@@ -140,6 +153,12 @@
                 React.createElement('span', { class: 'multi-select-option-text' }, tag)
             );
         });
+
+        const emptyState = React.createElement(
+            'div',
+            { class: 'multi-select-empty' },
+            normalizedSearch ? 'No matching tags.' : 'No tags available yet.'
+        );
 
         const arrowText = pending ? '⏳' : isOpen ? '▲' : '▼';
         const liveMessage =
@@ -261,7 +280,11 @@
                               },
                           })
                       ),
-                      React.createElement('div', { class: 'multi-select-options' }, optionElements),
+                      React.createElement(
+                          'div',
+                          { class: 'multi-select-options' },
+                          optionElements.length ? optionElements : emptyState
+                      ),
                       showNewTagInput
                           ? React.createElement(
                                 'div',

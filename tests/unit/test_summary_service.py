@@ -76,7 +76,11 @@ class TestSummaryCacheStats:
         from backend.services.summary_service import compute_summary_cache_stats
 
         stats = compute_summary_cache_stats()
-        expected_keys = ["summary_cache_total", "summary_cache_paper_count", "summary_cache_model_counts"]
+        expected_keys = [
+            "summary_cache_total",
+            "summary_cache_paper_count",
+            "summary_cache_model_counts",
+        ]
 
         for key in expected_keys:
             assert key in stats, f"Missing key: {key}"
@@ -106,7 +110,7 @@ class TestClearModelSummary:
         # Safety guard: never mutate the real repo data directory in unit tests.
         repo_root = Path(__file__).resolve().parents[2]
         real_data_dir = (repo_root / "data").resolve()
-        if Path(ss.DATA_DIR).resolve() == real_data_dir:
+        if Path(ss._data_dir()).resolve() == real_data_dir:
             pytest.skip("Refusing to modify real data/ directory; set ARXIV_SANITY_DATA_DIR to a temp dir for tests.")
 
         clear_model_summary = ss.clear_model_summary
@@ -114,7 +118,7 @@ class TestClearModelSummary:
 
         pid = "9999.99999"
         target_model = "mimo-v2-flash-test-legacy"
-        cache_dir = Path(ss.SUMMARY_DIR) / pid
+        cache_dir = Path(ss._summary_dir()) / pid
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a mismatch cache: filename looks like another model, but meta declares target_model.

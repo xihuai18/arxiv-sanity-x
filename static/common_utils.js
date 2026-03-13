@@ -31,6 +31,9 @@ function debugLog(category, message, data) {
             const c = document.createElement('div');
             c.id = TOAST_CONTAINER_ID;
             c.className = 'as-toast-container';
+            c.setAttribute('role', 'status');
+            c.setAttribute('aria-live', 'polite');
+            c.setAttribute('aria-atomic', 'true');
             document.body.appendChild(c);
             return c;
         };
@@ -84,6 +87,319 @@ function debugLog(category, message, data) {
             Math.max(250, durationMs)
         );
     }
+
+    /**
+     * Show a promise-based confirm dialog using the shared modal styles.
+     * @param {string|{title?: string, message?: string, detail?: string, detailTone?: 'muted'|'warning', confirmText?: string, cancelText?: string, danger?: boolean}} options
+     * @returns {Promise<boolean>}
+     */
+    function showConfirm(options) {
+        if (typeof document === 'undefined') return Promise.resolve(false);
+
+        const opts =
+            typeof options === 'string' ? { message: String(options || '') } : options || {};
+        const title = String(opts.title || 'Please confirm');
+        const message = String(opts.message || 'Are you sure?');
+        const detail = String(opts.detail || '');
+        const danger = opts.danger === true;
+        const detailTone = String(opts.detailTone || (danger ? 'warning' : 'muted'));
+        const confirmText = String(opts.confirmText || 'Confirm');
+        const cancelText = String(opts.cancelText || 'Cancel');
+
+        return new Promise(resolve => {
+            let settled = false;
+            const dialogId = 'as-confirm-title-' + Math.random().toString(36).slice(2, 10);
+            const descriptionId =
+                'as-confirm-description-' + Math.random().toString(36).slice(2, 10);
+            const detailId = detail
+                ? 'as-confirm-detail-' + Math.random().toString(36).slice(2, 10)
+                : '';
+            const previousActive = document.activeElement;
+            const previousOverflow = document.body ? document.body.style.overflow : '';
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay';
+            overlay.setAttribute('role', 'presentation');
+
+            const dialog = document.createElement('div');
+            dialog.className = 'modal-content';
+            dialog.setAttribute('role', 'dialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-labelledby', dialogId);
+            dialog.setAttribute(
+                'aria-describedby',
+                detailId ? `${descriptionId} ${detailId}` : descriptionId
+            );
+
+            const header = document.createElement('div');
+            header.className = 'modal-header';
+            const titleEl = document.createElement('h3');
+            titleEl.id = dialogId;
+            titleEl.textContent = title;
+            header.appendChild(titleEl);
+
+            const body = document.createElement('div');
+            body.className = 'modal-body';
+            const msgEl = document.createElement('p');
+            msgEl.id = descriptionId;
+            msgEl.textContent = message;
+            body.appendChild(msgEl);
+            if (detail) {
+                const detailEl = document.createElement('p');
+                detailEl.id = detailId;
+                detailEl.className = detailTone === 'warning' ? 'warning-text' : 'muted-text';
+                detailEl.textContent = detail;
+                body.appendChild(detailEl);
+            }
+
+            const footer = document.createElement('div');
+            footer.className = 'modal-footer';
+            const cancelBtn = document.createElement('button');
+            cancelBtn.type = 'button';
+            cancelBtn.className = 'btn btn-cancel';
+            cancelBtn.textContent = cancelText;
+            const confirmBtn = document.createElement('button');
+            confirmBtn.type = 'button';
+            confirmBtn.className = danger ? 'btn btn-danger' : 'btn btn-primary';
+            confirmBtn.textContent = confirmText;
+            footer.appendChild(cancelBtn);
+            footer.appendChild(confirmBtn);
+
+            dialog.appendChild(header);
+            dialog.appendChild(body);
+            dialog.appendChild(footer);
+            overlay.appendChild(dialog);
+
+            function cleanup(result) {
+                if (settled) return;
+                settled = true;
+                document.removeEventListener('keydown', onKeyDown);
+                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                if (document.body) {
+                    document.body.style.overflow = previousOverflow;
+                }
+                if (previousActive && typeof previousActive.focus === 'function') {
+                    previousActive.focus();
+                }
+                resolve(Boolean(result));
+            }
+
+            function onKeyDown(event) {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    cleanup(false);
+                    return;
+                }
+                if (event.key === 'Tab') {
+                    const focusables = [cancelBtn, confirmBtn];
+                    const currentIndex = focusables.indexOf(document.activeElement);
+                    let nextIndex = currentIndex;
+                    if (event.shiftKey) {
+                        nextIndex = currentIndex <= 0 ? focusables.length - 1 : currentIndex - 1;
+                    } else {
+                        nextIndex = currentIndex === focusables.length - 1 ? 0 : currentIndex + 1;
+                    }
+                    event.preventDefault();
+                    focusables[nextIndex].focus();
+                }
+            }
+
+            overlay.addEventListener('click', event => {
+                if (event.target === overlay) cleanup(false);
+            });
+            dialog.addEventListener('click', event => event.stopPropagation());
+            cancelBtn.addEventListener('click', () => cleanup(false));
+            confirmBtn.addEventListener('click', () => cleanup(true));
+            document.addEventListener('keydown', onKeyDown);
+
+            document.body.appendChild(overlay);
+            if (document.body) {
+                document.body.style.overflow = 'hidden';
+            }
+            if (danger) {
+                cancelBtn.focus();
+            } else {
+                confirmBtn.focus();
+            }
+        });
+    }
+
+    /**
+     * Show a shared similar-papers modal.
+     * @param {Array<Object>} papers
+     * @param {{title?: string, modalId?: string, buildHref?: function(Object): string, emptyMessage?: string}} [options]
+     */
+    function showSimilarPapersModal(papers, options) {
+        if (typeof document === 'undefined') return;
+
+        const items = Array.isArray(papers) ? papers.filter(Boolean) : [];
+        const opts = options || {};
+        const modalId = String(opts.modalId || 'similar-papers-modal');
+        const title = String(opts.title || `Similar Papers (${items.length})`);
+        const emptyMessage = String(opts.emptyMessage || 'No similar papers found.');
+        const buildHref =
+            typeof opts.buildHref === 'function'
+                ? opts.buildHref
+                : paper => `/summary?pid=${encodeURIComponent(String((paper && paper.id) || ''))}`;
+
+        const existingModal = document.getElementById(modalId);
+        if (existingModal) {
+            if (typeof existingModal._cleanupModal === 'function') {
+                existingModal._cleanupModal();
+            } else {
+                existingModal.remove();
+            }
+        }
+
+        const modal = document.createElement('div');
+        const titleId = 'as-similar-title-' + Math.random().toString(36).slice(2, 10);
+        const previousActive = document.activeElement;
+        const previousOverflow = document.body ? document.body.style.overflow : '';
+        let modalClosed = false;
+
+        modal.id = modalId;
+        modal.className = 'similar-modal-overlay';
+
+        function buildPaperItem(paper, index) {
+            const titleSafe = escapeHtml(
+                (paper && paper.title) || (paper && paper.id) || 'Untitled'
+            );
+            const authorsSafe = escapeHtml((paper && paper.authors) || '');
+            const timeSafe = escapeHtml((paper && paper.time) || '');
+            const scoreNum = Number(paper && paper.score);
+            const scoreSafe = Number.isFinite(scoreNum) ? scoreNum.toFixed(3) : '—';
+            const contentText = (paper && (paper.tldr || paper.abstract)) || '';
+            const contentSafe = escapeHtml(contentText);
+            const contentLabel =
+                paper && paper.tldr ? 'TL;DR' : paper && paper.abstract ? 'Abstract' : '';
+            const href = escapeHtml(String(buildHref(paper) || ''));
+
+            return `
+                <div class="similar-paper-item">
+                    <span class="similar-paper-rank">${index + 1}</span>
+                    <div class="similar-paper-info">
+                        <a href="${href}" target="_blank" rel="noopener noreferrer" class="similar-paper-title">${titleSafe}</a>
+                        ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
+                        <div class="similar-paper-meta-line">
+                            ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
+                            <span class="similar-paper-score">Score: ${scoreSafe}</span>
+                        </div>
+                        ${
+                            contentSafe
+                                ? `
+                            <div class="similar-paper-content">
+                                ${contentLabel ? `<span class="similar-paper-content-label">${escapeHtml(contentLabel)}</span>` : ''}
+                                <span class="similar-paper-content-text">${contentSafe}</span>
+                            </div>
+                        `
+                                : ''
+                        }
+                    </div>
+                </div>
+            `;
+        }
+
+        modal.innerHTML = `
+            <div class="similar-modal-content" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
+                <div class="similar-modal-header">
+                    <h3 id="${titleId}">${escapeHtml(title)}</h3>
+                    <button type="button" class="similar-modal-close" aria-label="Close similar papers dialog">&times;</button>
+                </div>
+                <div class="similar-modal-body">
+                    ${items.length ? items.map((paper, index) => buildPaperItem(paper, index)).join('') : `<p class="similar-paper-empty">${escapeHtml(emptyMessage)}</p>`}
+                </div>
+            </div>
+        `;
+
+        function getFocusableElements() {
+            return Array.from(
+                modal.querySelectorAll(
+                    'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                )
+            ).filter(el => !el.hasAttribute('hidden'));
+        }
+
+        function cleanupModal() {
+            if (modalClosed) return;
+            modalClosed = true;
+            document.removeEventListener('keydown', onKeyDown);
+            if (modal.parentNode) modal.parentNode.removeChild(modal);
+            if (document.body) {
+                document.body.style.overflow = previousOverflow;
+            }
+            if (previousActive && typeof previousActive.focus === 'function') {
+                previousActive.focus();
+            }
+        }
+
+        function onKeyDown(event) {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                cleanupModal();
+                return;
+            }
+            if (event.key === 'Tab') {
+                const focusables = getFocusableElements();
+                if (!focusables.length) return;
+                const first = focusables[0];
+                const last = focusables[focusables.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            }
+        }
+
+        modal._cleanupModal = cleanupModal;
+        modal.addEventListener('click', event => {
+            if (event.target === modal) cleanupModal();
+        });
+
+        document.body.appendChild(modal);
+        if (document.body) {
+            document.body.style.overflow = 'hidden';
+        }
+
+        const closeBtn = modal.querySelector('.similar-modal-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', cleanupModal);
+            closeBtn.focus();
+        }
+        document.addEventListener('keydown', onKeyDown);
+    }
+
+    function installAlertBridge() {
+        if (!global || global.__arxivSanityAlertPatched) return;
+        if (typeof global.alert !== 'function') return;
+        const nativeAlert = global.alert.bind(global);
+        global.__arxivSanityNativeAlert = nativeAlert;
+        global.alert = function (message) {
+            showToast(String(message || ''), { type: 'error', durationMs: 4000 });
+        };
+        global.__arxivSanityAlertPatched = true;
+    }
+
+    function hydrateFlashToasts() {
+        if (typeof document === 'undefined') return;
+        const container = document.querySelector('.flash-container');
+        if (!container || container.dataset.hydrated === '1') return;
+        const flashes = container.querySelectorAll('.flash[data-flash-kind]');
+        if (!flashes.length) return;
+        flashes.forEach(el => {
+            const kind = String(el.getAttribute('data-flash-kind') || 'info').toLowerCase();
+            const type = kind === 'message' ? 'info' : kind;
+            const text = (el.textContent || '').trim();
+            if (text) {
+                showToast(text, { type: type, durationMs: 3200 });
+            }
+        });
+        container.dataset.hydrated = '1';
+        container.hidden = true;
+    }
+
+    installAlertBridge();
 
     // =========================================================================
     // CSRF Token Management
@@ -1288,7 +1604,6 @@ function debugLog(category, message, data) {
 
         // If MathJax is fully loaded (has typeset methods), typeset immediately.
         if (typeof MathJax !== 'undefined' && (MathJax.typesetPromise || MathJax.typeset)) {
-            _preloadMjxFonts(); // ensure font preload even if MathJax loaded externally
             _typesetNow();
             // Queue element for re-typeset if MJXTEX fonts aren't ready yet
             _queueMjxRetypeset(element);
@@ -1393,17 +1708,6 @@ function debugLog(category, message, data) {
      * - Keep this config as the single source of truth; templates should not duplicate MathJax config blocks.
      */
     const defaultMathJaxConfig = {
-        loader: {
-            // Extensions are included in tex-chtml-full.js, but explicitly listing them makes config
-            // consistent across pages and future-proof if the bundle changes.
-            load: [
-                '[tex]/boldsymbol',
-                '[tex]/mathtools',
-                '[tex]/physics',
-                '[tex]/tagformat',
-                '[tex]/textmacros',
-            ],
-        },
         options: {
             enableMenu: false,
             enableAssistiveMml: false,
@@ -1540,11 +1844,9 @@ function debugLog(category, message, data) {
         chtml: {
             scale: 1.0,
             displayAlign: 'center',
-            // Ensure MathJax web fonts resolve correctly in self-hosted deployments.
-            // Without an explicit fontURL, some setups may request fonts from a wrong relative path,
-            // causing missing glyphs in rendered formulas.
-            // Prefer CDN fonts; can be overridden to local when CDN is unavailable.
-            fontURL: 'https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/output/chtml/fonts/woff-v2',
+            // Always use self-hosted MathJax fonts. This avoids noisy failed font
+            // requests on networks that block public CDNs while keeping math layout stable.
+            fontURL: '/static/lib/es5/output/chtml/fonts/woff-v2',
         },
     };
 
@@ -1562,15 +1864,14 @@ function debugLog(category, message, data) {
         if (existing) _mergeDeep(base, existing);
         if (_isPlainObject(overrides)) _mergeDeep(base, overrides);
 
-        // Ensure MathJax fontURL respects runtime CDN settings.
-        // Rationale: the CDN base / fallback flags may change at runtime
-        // (custom `asset_npm_cdn_base`, probe-triggered local fallback), so we
-        // choose the preferred font URL at call-time to stay consistent.
+        // Always normalize to self-hosted fonts unless a page explicitly sets a
+        // different non-default font URL.
         try {
             if (!base.chtml) base.chtml = {};
             const curFontUrl = String((base.chtml && base.chtml.fontURL) || '');
             const defaultJsdelivrRe =
                 /https?:\/\/cdn\.jsdelivr\.net\/npm\/mathjax@[^/]+\/es5\/output\/chtml\/fonts\/woff-v2/;
+            const defaultLocal = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
 
             // If we already know fonts must be local (e.g. CDN blocked), keep it local.
             // Use the global flag only to avoid temporal-dead-zone hazards with internal `let` vars.
@@ -1580,12 +1881,9 @@ function debugLog(category, message, data) {
                     global.__arxivSanityMathJaxForceLocal === true);
 
             if (forceLocal) {
-                base.chtml.fontURL = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+                base.chtml.fontURL = defaultLocal;
             } else if (!curFontUrl || defaultJsdelivrRe.test(curFontUrl)) {
-                // Prefer the configured npm CDN base when enabled; otherwise local.
-                base.chtml.fontURL = isAssetCdnEnabled()
-                    ? npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2')
-                    : staticUrl('lib/es5/output/chtml/fonts/woff-v2');
+                base.chtml.fontURL = defaultLocal;
             }
         } catch (e) {}
 
@@ -1612,8 +1910,7 @@ function debugLog(category, message, data) {
 
     function getMathJaxFontCandidates() {
         const local = staticUrl('lib/es5/output/chtml/fonts/woff-v2');
-        const cdn = npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2');
-        return isAssetCdnEnabled() ? [cdn, local] : [local];
+        return [local];
     }
 
     function ensureMathJaxFontUrlPreferred(sourceUrl) {
@@ -1703,43 +2000,8 @@ function debugLog(category, message, data) {
 
     function _startCdnFontProbe() {
         if (_cdnFontProbePromise) return _cdnFontProbePromise;
-        if (!isAssetCdnEnabled() || typeof fetch === 'undefined') {
-            _cdnFontProbeResult = true;
-            _cdnFontProbePromise = Promise.resolve(true);
-            return _cdnFontProbePromise;
-        }
-        const testUrl =
-            npmCdnUrl('mathjax@3.2.2/es5/output/chtml/fonts/woff-v2').replace(/\/+$/, '') +
-            '/MathJax_Main-Regular.woff';
-
-        _cdnFontProbePromise = new Promise(function (resolve) {
-            const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-            const tid = setTimeout(function () {
-                try {
-                    if (ctrl) ctrl.abort();
-                } catch (_) {}
-                resolve(false);
-            }, 5000);
-            const opts = { mode: 'cors' };
-            if (ctrl) opts.signal = ctrl.signal;
-            fetch(testUrl, opts)
-                .then(function (r) {
-                    if (!r.ok) throw new Error(r.status);
-                    return r.arrayBuffer();
-                })
-                .then(function (buf) {
-                    clearTimeout(tid);
-                    resolve(!!(buf && buf.byteLength > 1000));
-                })
-                .catch(function () {
-                    clearTimeout(tid);
-                    resolve(false);
-                });
-        });
-        _cdnFontProbePromise.then(function (ok) {
-            _cdnFontProbeResult = ok;
-            if (!ok) _applyLocalMathJaxFonts();
-        });
+        _cdnFontProbeResult = true;
+        _cdnFontProbePromise = Promise.resolve(true);
         return _cdnFontProbePromise;
     }
 
@@ -1793,7 +2055,6 @@ function debugLog(category, message, data) {
         { family: 'MJXTEX-A', file: 'MathJax_AMS-Regular.woff' },
     ];
 
-    let _mjxFontPreloaded = false;
     let _mjxRetypesetQueue = []; // elements to re-typeset when fonts ready
     let _mjxRetypesetCount = 0;
     const _MJX_MAX_RETYPESETS = 3;
@@ -1802,29 +2063,6 @@ function debugLog(category, message, data) {
     let _mjxDebounceTimer = null;
     let _mjxTypesetting = 0; // reference count for concurrent typeset operations
     let _mjxDeferredFlushTimer = null; // single deferred flush to avoid timer storm
-
-    /** Inject <link rel="preload"> hints for critical MathJax fonts. */
-    function _preloadMjxFonts() {
-        if (_mjxFontPreloaded) return;
-        _mjxFontPreloaded = true;
-        try {
-            const baseUrl = (getMathJaxFontUrl() || '').replace(/\/+$/, '');
-            if (!baseUrl) return;
-            _CRITICAL_MJX_FONTS.forEach(function (entry) {
-                try {
-                    const url = baseUrl + '/' + entry.file;
-                    if (document.querySelector('link[rel="preload"][href="' + url + '"]')) return;
-                    const link = document.createElement('link');
-                    link.rel = 'preload';
-                    link.as = 'font';
-                    link.type = 'font/woff';
-                    link.href = url;
-                    link.crossOrigin = 'anonymous';
-                    document.head.appendChild(link);
-                } catch (e) {}
-            });
-        } catch (e) {}
-    }
 
     function getMathJaxFontUrl() {
         if (
@@ -2058,9 +2296,6 @@ function debugLog(category, message, data) {
     function loadMathJaxOnDemand(callback, scriptUrl) {
         // Queue callback first so we can consistently drain the queue when MathJax becomes ready.
         if (callback) mathJaxCallbacks.push(callback);
-
-        // Preload MathJax fonts in parallel with script loading
-        _preloadMjxFonts();
 
         // Already loaded / ready (covers cases where a script tag was loaded outside this helper)
         if (mathJaxLoaded || isMathJaxAvailable()) {
@@ -2462,6 +2697,13 @@ function debugLog(category, message, data) {
         return '';
     }
 
+    function isSummaryModelMatch(model) {
+        const eventModel = String(model || '').trim();
+        const activeModel = getSummaryModel();
+        if (!eventModel || !activeModel) return true;
+        return eventModel === activeModel;
+    }
+
     /**
      * Mark a paper as pending summary generation.
      * @param {string} pid - Paper ID
@@ -2570,7 +2812,7 @@ function debugLog(category, message, data) {
                     const taskId = info.task_id ? String(info.task_id) : '';
                     // Call the registered callback if available
                     if (summaryStatusCallback) {
-                        summaryStatusCallback(pid, status, lastError, taskId);
+                        summaryStatusCallback(pid, status, lastError, taskId, model);
                     }
                     if (status && status !== 'queued' && status !== 'running') {
                         unmarkSummaryPending(pid);
@@ -2587,7 +2829,7 @@ function debugLog(category, message, data) {
 
     /**
      * Register a callback to be called when summary status updates are received.
-     * @param {Function} callback - Function(pid, status, lastError, taskId)
+     * @param {Function} callback - Function(pid, status, lastError, taskId, model)
      */
     function setSummaryStatusCallback(callback) {
         summaryStatusCallback = callback;
@@ -2753,6 +2995,7 @@ function debugLog(category, message, data) {
         // Summary status polling (shared)
         normalizePid,
         getSummaryModel,
+        isSummaryModelMatch,
         markSummaryPending,
         unmarkSummaryPending,
         startSummaryStatusPolling,
@@ -2766,6 +3009,9 @@ function debugLog(category, message, data) {
         copyTextToClipboard,
         // Toast
         showToast,
+        showConfirm,
+        showSimilarPapersModal,
+        hydrateFlashToasts,
         // CDN font probe (for summary page resource gate)
         waitForCdnFontProbe: _startCdnFontProbe,
         getMathJaxFontUrl: getMathJaxFontUrl,

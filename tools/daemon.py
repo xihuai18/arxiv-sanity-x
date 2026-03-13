@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import os
 import re
@@ -32,23 +33,22 @@ logger.add(sys.stdout, level=settings.log_level.upper())
 # Optional Sentry error reporting (no-op unless configured).
 initialize_sentry()
 
-# Guardrail: avoid daemon getting stuck forever on a hung child process.
-SUBPROCESS_TIMEOUT_S = int(getattr(settings.daemon, "subprocess_timeout_s", 7200) or 7200)
 
-# Read daemon settings from configuration
-FETCH_NUM = settings.daemon.fetch_num
-FETCH_MAX = settings.daemon.fetch_max
-SUMMARY_NUM = settings.daemon.summary_num
-SUMMARY_WORKERS = settings.daemon.summary_workers
-ENABLE_SUMMARY = settings.daemon.enable_summary
-ENABLE_EMBEDDINGS = settings.daemon.enable_embeddings
-ENABLE_PRIORITY_QUEUE = settings.daemon.enable_priority_queue
-ENABLE_SUMMARY_QUEUE = settings.daemon.enable_summary_queue
-PRIORITY_DAYS = settings.daemon.priority_days
-PRIORITY_LIMIT = settings.daemon.priority_limit
+def _daemon_cfg():
+    return settings.daemon
+
+
+def _subprocess_timeout_s() -> int:
+    return int(getattr(_daemon_cfg(), "subprocess_timeout_s", 7200) or 7200)
+
 
 _LAST_RUN_REASON: dict[str, str] = {}
 _LAST_RUN_OUTPUT: dict[str, str] = {}
+
+
+def _pipeline_notice(message: str) -> None:
+    """Print key pipeline milestones even when log level filters INFO."""
+    print(message, flush=True)
 
 
 def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -151,7 +151,7 @@ def _is_git_repo(repo_dir: Path) -> bool:
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
         return r.returncode == 0 and (r.stdout or "").strip() == "true"
     except Exception:
@@ -174,7 +174,7 @@ def _ensure_git_identity(repo_dir: Path) -> None:
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT_S,
+                timeout=_subprocess_timeout_s(),
             )
             if r.returncode != 0:
                 return ""
@@ -188,7 +188,7 @@ def _ensure_git_identity(repo_dir: Path) -> None:
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
     if not _get("user.email"):
         subprocess.run(
@@ -196,7 +196,7 @@ def _ensure_git_identity(repo_dir: Path) -> None:
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
 
 
@@ -208,7 +208,7 @@ def _git_current_branch(repo_dir: Path) -> str:
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
         if r.returncode != 0:
             return ""
@@ -228,14 +228,14 @@ def _ensure_on_branch(repo_dir: Path, branch: str) -> bool:
             cwd=repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
         if r.returncode != 0:
             logger.warning(f"git checkout -B {b} failed in backup repo: {(r.stderr or '').strip()}")
             return False
         return True
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[pipeline] backup: git checkout timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git checkout timed out after {_subprocess_timeout_s()}s")
         return False
     except Exception as e:
         logger.warning(f"git checkout failed in backup repo: {e}")
@@ -249,7 +249,7 @@ def _run_cmd(cmd: list[str], name: str, fail_level: str = "error", capture: bool
     _LAST_RUN_OUTPUT.pop(name, None)
     try:
         t0 = time.time()
-        kw: dict = dict(check=True, timeout=SUBPROCESS_TIMEOUT_S)
+        kw: dict = dict(check=True, timeout=_subprocess_timeout_s())
         if capture:
             kw.update(capture_output=True, text=True)
         result = subprocess.run(cmd, **kw)
@@ -273,7 +273,7 @@ def _run_cmd(cmd: list[str], name: str, fail_level: str = "error", capture: bool
     except _real_subprocess.TimeoutExpired as e:
         if capture and getattr(e, "stdout", None):
             _LAST_RUN_OUTPUT[name] = e.stdout if isinstance(e.stdout, str) else e.stdout.decode()
-        log_fn(f"[pipeline] {name}: timed out after {SUBPROCESS_TIMEOUT_S}s")
+        log_fn(f"[pipeline] {name}: timed out after {_subprocess_timeout_s()}s")
         _LAST_RUN_REASON[name] = "timeout"
         return False
     except Exception as e:
@@ -313,28 +313,67 @@ def _get_email_time_delta() -> float:
 
 
 def gen_summary():
-    if not ENABLE_SUMMARY:
+    daemon = _daemon_cfg()
+    if not daemon.enable_summary:
+        _pipeline_notice("[pipeline] generate_summary: disabled")
         logger.debug("Summary generation disabled (set ARXIV_SANITY_DAEMON_ENABLE_SUMMARY=false)")
         return True
 
-    cmd = [PYTHON, str(TOOLS_DIR / "batch_paper_summarizer.py"), "-n", str(SUMMARY_NUM), "-w", str(SUMMARY_WORKERS)]
+    cmd = [
+        PYTHON,
+        str(TOOLS_DIR / "batch_paper_summarizer.py"),
+        "-n",
+        str(daemon.summary_num),
+        "-w",
+        str(daemon.summary_workers),
+    ]
 
-    if ENABLE_SUMMARY_QUEUE:
+    if daemon.enable_summary_queue:
         cmd.append("--queue")
 
     # Add priority queue arguments if enabled
-    if ENABLE_PRIORITY_QUEUE:
+    if daemon.enable_priority_queue:
         # Use dynamic time_delta matching email recommendations
-        priority_days = _get_email_time_delta() if PRIORITY_DAYS == 2.0 else PRIORITY_DAYS
-        cmd.extend(["--priority", "--priority-days", str(priority_days), "--priority-limit", str(PRIORITY_LIMIT)])
+        priority_days = _get_email_time_delta() if daemon.priority_days == 2.0 else daemon.priority_days
+        cmd.extend(
+            [
+                "--priority",
+                "--priority-days",
+                str(priority_days),
+                "--priority-limit",
+                str(daemon.priority_limit),
+            ]
+        )
 
-    return _run_cmd(cmd, "generate_summary")
+    mode = "queue" if daemon.enable_summary_queue else "local"
+    details = [
+        f"mode={mode}",
+        f"n={daemon.summary_num}",
+        f"workers={daemon.summary_workers}",
+    ]
+    if daemon.enable_priority_queue:
+        details.append(f"priority_days={priority_days}")
+        details.append(f"priority_limit={daemon.priority_limit}")
+    _pipeline_notice(f"[pipeline] generate_summary: starting ({', '.join(details)})")
+    logger.warning(f"[pipeline] generate_summary: command={' '.join(cmd)}")
+
+    ok = _run_cmd(cmd, "generate_summary")
+    reason = _LAST_RUN_REASON.get("generate_summary") or ("ok" if ok else "unknown")
+    _pipeline_notice(f"[pipeline] generate_summary: finished ({reason})")
+    return ok
 
 
 def fetch_compute():
     logger.info("[pipeline] === fetch_compute started ===")
     fetch_ok = _run_cmd(
-        [PYTHON, str(TOOLS_DIR / "arxiv_daemon.py"), "-n", str(FETCH_NUM), "-m", str(FETCH_MAX)],
+        [
+            PYTHON,
+            str(TOOLS_DIR / "arxiv_daemon.py"),
+            "-n",
+            str(_daemon_cfg().fetch_num),
+            "-m",
+            str(_daemon_cfg().fetch_max),
+        ],
         "fetch",
         capture=True,
     )
@@ -358,7 +397,7 @@ def fetch_compute():
         return
 
     compute_cmd = [PYTHON, str(TOOLS_DIR / "compute.py")]
-    if ENABLE_EMBEDDINGS:
+    if _daemon_cfg().enable_embeddings:
         compute_cmd.append("--use_embeddings")
     else:
         compute_cmd.append("--no-embeddings")
@@ -405,12 +444,12 @@ def send_email():
                 time_param,
                 *(["--dry-run"] if settings.daemon.email_dry_run else []),
             ],
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
         if rc not in (0, 1):
             logger.warning(f"[pipeline] send_email: returned code {rc}")
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[pipeline] send_email: timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] send_email: timed out after {_subprocess_timeout_s()}s")
     logger.info(f"[pipeline] send_email: done ({time.time() - t0:.1f}s)")
 
 
@@ -466,10 +505,10 @@ def backup_user_data():
             cwd=data_repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[pipeline] backup: git add timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git add timed out after {_subprocess_timeout_s()}s")
         return
     logger.debug(f"[pipeline] backup: git add ({time.time() - t0:.1f}s)")
     if add_result.returncode != 0:
@@ -482,10 +521,10 @@ def backup_user_data():
         diff_result = subprocess.run(
             ["git", "diff", "--cached", "--quiet", "--", "dict.db"],
             cwd=data_repo_dir,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[pipeline] backup: git diff timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git diff timed out after {_subprocess_timeout_s()}s")
         return
     logger.debug(f"[pipeline] backup: git diff ({time.time() - t0:.1f}s)")
     if diff_result.returncode == 0:
@@ -504,10 +543,10 @@ def backup_user_data():
             cwd=data_repo_dir,
             capture_output=True,
             text=True,
-            timeout=SUBPROCESS_TIMEOUT_S,
+            timeout=_subprocess_timeout_s(),
         )
     except _real_subprocess.TimeoutExpired:
-        logger.warning(f"[pipeline] backup: git commit timed out after {SUBPROCESS_TIMEOUT_S}s")
+        logger.warning(f"[pipeline] backup: git commit timed out after {_subprocess_timeout_s()}s")
         return
     logger.debug(f"[pipeline] backup: git commit ({time.time() - t0:.1f}s)")
     if commit_result.returncode != 0:
@@ -542,12 +581,12 @@ def backup_user_data():
                 cwd=data_repo_dir,
                 capture_output=True,
                 text=True,
-                timeout=SUBPROCESS_TIMEOUT_S,
+                timeout=_subprocess_timeout_s(),
             )
         except _real_subprocess.TimeoutExpired:
-            logger.warning(f"[pipeline] backup: git push timed out after {SUBPROCESS_TIMEOUT_S}s")
+            logger.warning(f"[pipeline] backup: git push timed out after {_subprocess_timeout_s()}s")
             return
-        logger.debug(f"[pipeline] backup: git push ({time.time() - t0:.1f}s) attempt={attempt+1}")
+        logger.debug(f"[pipeline] backup: git push ({time.time() - t0:.1f}s) attempt={attempt + 1}")
         if push_result.returncode == 0:
             return
         err = (push_result.stderr or push_result.stdout or "").strip()
@@ -594,16 +633,17 @@ def create_scheduler() -> BlockingScheduler:
 def _log_startup_info():
     """Print daemon configuration summary on startup (always visible)."""
     summary = "off"
-    if ENABLE_SUMMARY:
-        parts = [f"{SUMMARY_NUM}/batch", f"{SUMMARY_WORKERS}w"]
-        if ENABLE_SUMMARY_QUEUE:
+    daemon = _daemon_cfg()
+    if daemon.enable_summary:
+        parts = [f"{daemon.summary_num}/batch", f"{daemon.summary_workers}w"]
+        if daemon.enable_summary_queue:
             parts.append("queue")
-        if ENABLE_PRIORITY_QUEUE:
-            parts.append(f"priority(limit={PRIORITY_LIMIT})")
+        if daemon.enable_priority_queue:
+            parts.append(f"priority(limit={daemon.priority_limit})")
         summary = ", ".join(parts)
 
     flags = []
-    if ENABLE_EMBEDDINGS:
+    if daemon.enable_embeddings:
         flags.append("embeddings")
     if settings.daemon.email_dry_run:
         flags.append("email-dry-run")
@@ -614,7 +654,7 @@ def _log_startup_info():
         "=" * 50,
         "Arxiv-Sanity Daemon",
         f"  TZ={settings.daemon.timezone}  Log={settings.log_level.upper()}",
-        f"  Fetch: {FETCH_NUM} papers (max {FETCH_MAX}/query)",
+        f"  Fetch: {daemon.fetch_num} papers (max {daemon.fetch_max}/query)",
         f"  Summary: {summary}",
         f"  Flags: {', '.join(flags) or 'none'}",
         "Schedule:",
@@ -630,9 +670,22 @@ def _log_startup_info():
 
 
 def main(argv: list[str] | None = None) -> int:
-    # argv is reserved for future flags; keep signature stable for reuse.
-    _ = argv
+    parser = argparse.ArgumentParser(description="Run scheduled daemon jobs")
+    parser.add_argument(
+        "--run-once",
+        action="store_true",
+        help="Run fetch/compute/summary immediately once and exit",
+    )
+    args = parser.parse_args(argv)
+
     _log_startup_info()
+
+    if args.run_once:
+        _pipeline_notice("[pipeline] run_once: starting immediate fetch_compute")
+        fetch_compute()
+        _pipeline_notice("[pipeline] run_once: completed")
+        return 0
+
     scheduler = create_scheduler()
     scheduler.start()
     return 0

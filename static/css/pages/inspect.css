@@ -94,3 +94,31 @@
     gap: 12px;
     margin-top: 20px;
 }
+
+@media (max-width: 768px) {
+    .inspect-page {
+        padding: 16px 0;
+    }
+
+    .inspect-header {
+        margin-bottom: 16px;
+    }
+
+    .inspect-title {
+        font-size: 18px;
+    }
+
+    .inspect-subtitle {
+        font-size: 14px;
+        line-height: 1.6;
+    }
+
+    .inspect-content {
+        padding: 16px;
+    }
+
+    .inspect-data {
+        padding: 12px;
+        font-size: 12px;
+    }
+}

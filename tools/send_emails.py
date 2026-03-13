@@ -17,7 +17,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from multiprocessing import cpu_count
-from typing import Dict, List, Set
 
 import requests
 from loguru import logger
@@ -38,11 +37,17 @@ from aslite.repositories import (
 )
 from config import settings
 
-HOST = settings.host
-SERVE_PORT = settings.serve_port
 
-# Thread configuration from centralized settings
-MAX_NUM_THREADS = settings.reco.max_threads
+def _host() -> str:
+    return str(settings.host or "")
+
+
+def _serve_port() -> int:
+    return int(settings.serve_port)
+
+
+def _max_num_threads() -> int:
+    return int(settings.reco.max_threads)
 
 
 def _resolve_num_threads(requested: int) -> int:
@@ -52,8 +57,8 @@ def _resolve_num_threads(requested: int) -> int:
     """
 
     if requested <= 0:
-        return min(cpu_count(), MAX_NUM_THREADS)
-    return min(requested, MAX_NUM_THREADS)
+        return min(cpu_count(), _max_num_threads())
+    return min(requested, _max_num_threads())
 
 
 def _configure_thread_env_vars(n: int) -> None:
@@ -72,10 +77,28 @@ class RecoHyperparams:
 
 USE_INTEL_EXT = False
 
+
 # API call configuration from centralized settings
-API_BASE_URL = settings.reco.api_base_url
-API_TIMEOUT = settings.reco.api_timeout
-API_KEY = getattr(settings.reco, "api_key", "")
+def _api_base_url() -> str:
+    return str(settings.reco.api_base_url or "")
+
+
+def _api_timeout() -> float:
+    return float(settings.reco.api_timeout)
+
+
+def _api_key() -> str:
+    return str(getattr(settings.reco, "api_key", "") or "")
+
+
+HOST = _host()
+SERVE_PORT = _serve_port()
+MAX_NUM_THREADS = _max_num_threads()
+API_BASE_URL = _api_base_url()
+API_TIMEOUT = _api_timeout()
+API_KEY = _api_key()
+
+
 API_HEADERS: dict = {}
 
 
@@ -90,13 +113,16 @@ def _build_api_headers(api_key: str) -> dict:
 num_threads = _resolve_num_threads(settings.reco.num_threads)
 
 # Recommendation hyperparams from centralized settings
-RECO_HPARAMS = RecoHyperparams(
-    api_limit=settings.reco.api_limit,
-    model_C=settings.reco.model_c,
-)
+RECO_HPARAMS = RecoHyperparams(api_limit=settings.reco.api_limit, model_C=settings.reco.model_c)
+
 
 # Web name for email template
-WEB = settings.reco.web_name
+def _web_name() -> str:
+    return str(settings.reco.web_name or "")
+
+
+WEB = _web_name()
+
 
 # -----------------------------------------------------------------------------
 # the html template for the email
@@ -466,7 +492,13 @@ from backend.utils.summary_utils import (
 )
 
 
-def _render_paper_html(paper: dict, pid: str, score: float, source_label: str, source_class: str = "badge-source"):
+def _render_paper_html(
+    paper: dict,
+    pid: str,
+    score: float,
+    source_label: str,
+    source_class: str = "badge-source",
+):
     title = _h(paper.get("title", ""))
 
     # Truncate authors - keep first 15 and last 5, omit middle ones if > 20
@@ -562,7 +594,7 @@ def _post_recommendation(url: str, payload: dict, label: str, key: str):
             if attempt >= 2:
                 logger.error(f"API request exception for {label} {key}: {e}")
                 return None
-            logger.warning(f"API request exception for {label} {key} (retry {attempt+1}/2): {e}")
+            logger.warning(f"API request exception for {label} {key} (retry {attempt + 1}/2): {e}")
             _sleep_backoff(attempt)
             continue
 
@@ -571,7 +603,7 @@ def _post_recommendation(url: str, payload: dict, label: str, key: str):
                 # Retry for transient overloads.
                 if _is_retryable_status(int(response.status_code)) and attempt < 2:
                     logger.warning(
-                        f"API request failed for {label} {key}: {response.status_code} (retry {attempt+1}/2)"
+                        f"API request failed for {label} {key}: {response.status_code} (retry {attempt + 1}/2)"
                     )
                     _sleep_backoff(attempt)
                     continue
@@ -606,7 +638,7 @@ def _post_recommendation(url: str, payload: dict, label: str, key: str):
 
 
 def calculate_ctag_recommendation(
-    ctags: List[str],
+    ctags: list[str],
     tags: dict,
     user: str,  # Add user parameter
     time_delta: int = 3,
@@ -645,7 +677,13 @@ def calculate_ctag_recommendation(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_post_recommendation, f"{API_BASE_URL}/api/tags_search", payload, "ctag", ctag): ctag
+            executor.submit(
+                _post_recommendation,
+                f"{API_BASE_URL}/api/tags_search",
+                payload,
+                "ctag",
+                ctag,
+            ): ctag
             for ctag, payload in tasks
         }
         for future in as_completed(futures):
@@ -698,7 +736,13 @@ def calculate_recommendation(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_post_recommendation, f"{API_BASE_URL}/api/tag_search", payload, "tag", tag): tag
+            executor.submit(
+                _post_recommendation,
+                f"{API_BASE_URL}/api/tag_search",
+                payload,
+                "tag",
+                tag,
+            ): tag
             for tag, payload in tasks
         }
         for future in as_completed(futures):
@@ -718,13 +762,17 @@ def calculate_recommendation(
 # -----------------------------------------------------------------------------
 # Keywords recommendation
 # -----------------------------------------------------------------------------
-def search_keywords_recommendations(user: str, keywords: Dict[str, Set[str]], time_delta: int = 3):
+def search_keywords_recommendations(user: str, keywords: dict[str, set[str]], time_delta: int = 3):
     """Use API to call keyword search"""
     all_pids, all_scores = {}, {}
 
     tasks = []
     for keyword, pids in keywords.items():
-        payload = {"keyword": keyword, "time_delta": time_delta, "limit": RECO_HPARAMS.api_limit}
+        payload = {
+            "keyword": keyword,
+            "time_delta": time_delta,
+            "limit": RECO_HPARAMS.api_limit,
+        }
         tasks.append((keyword, payload, pids))
 
     if not tasks:
@@ -946,7 +994,15 @@ def render_recommendations(
             if p is None:
                 logger.warning(f"Missing paper in db for ctag recommendation: {pid}")
                 continue
-            parts.append(_render_paper_html(p, pid, score, max_source_ctag.get(pid, ""), source_class="badge-ctag"))
+            parts.append(
+                _render_paper_html(
+                    p,
+                    pid,
+                    score,
+                    max_source_ctag.get(pid, ""),
+                    source_class="badge-ctag",
+                )
+            )
 
         # render the recommendations
         final = "".join(parts)
@@ -1009,7 +1065,13 @@ def render_recommendations(
                 logger.warning(f"Missing paper in db for keyword recommendation: {pid}")
                 continue
             parts.append(
-                _render_paper_html(p, pid, score, max_source_keyword.get(pid, ""), source_class="badge-keyword")
+                _render_paper_html(
+                    p,
+                    pid,
+                    score,
+                    max_source_keyword.get(pid, ""),
+                    source_class="badge-keyword",
+                )
             )
 
         # render the recommendations
@@ -1270,7 +1332,16 @@ def main(argv: list[str] | None = None) -> int:
                 "rendering top max %d recommendations into a report for %s..." % (args.num_recommendations, user)
             )
             email_html = render_recommendations(
-                user, utags, pids, scores, u_ctag, cpids, cscores, ukeywords, kpids, kscores
+                user,
+                utags,
+                pids,
+                scores,
+                u_ctag,
+                cpids,
+                cscores,
+                ukeywords,
+                kpids,
+                kscores,
             )
 
             # temporarily for debugging write recommendations to disk for manual inspection

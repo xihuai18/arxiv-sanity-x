@@ -18,8 +18,14 @@ if (!CommonUtils) {
                 '<h2>Page failed to load</h2>' +
                 '<p>A required script (<code>common_utils.js</code>) could not be loaded. ' +
                 'This is usually caused by a network issue or browser cache mismatch.</p>' +
-                '<p>Please <a href="javascript:location.reload(true)">hard-refresh</a> the page ' +
+                '<p>Please <button type="button" class="summary-reload-btn">reload the page</button> ' +
                 '(Ctrl+Shift+R / Cmd+Shift+R) or try again later.</p></div>';
+            var reloadBtn = wrap.querySelector('.summary-reload-btn');
+            if (reloadBtn) {
+                reloadBtn.addEventListener('click', function () {
+                    window.location.reload();
+                });
+            }
         }
     });
 }
@@ -71,6 +77,25 @@ var fetchTaskStatus =
                   .then(data => (data && data.success ? data : null))
                   .catch(() => null);
           };
+var showToast =
+    typeof CommonUtils.showToast === 'function' ? CommonUtils.showToast : function () {};
+var showConfirm =
+    typeof CommonUtils.showConfirm === 'function'
+        ? CommonUtils.showConfirm
+        : function () {
+              return Promise.resolve(false);
+          };
+var sharedShowSimilarPapersModal =
+    typeof CommonUtils.showSimilarPapersModal === 'function'
+        ? CommonUtils.showSimilarPapersModal
+        : function () {};
+
+function notify(message, type, durationMs) {
+    showToast(String(message || ''), {
+        type: type || 'error',
+        durationMs: Number.isFinite(durationMs) ? durationMs : undefined,
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Resource readiness gate – delay content rendering until critical libraries
@@ -119,41 +144,92 @@ function _checkRenderResourcesLoaded() {
     return true;
 }
 
-/**
- * Hint the browser to preload critical MathJax font files using
- * <link rel="preload">.  This puts the font files into the HTTP cache so
- * that when MathJax later injects its own @font-face CSS rules, the browser
- * can satisfy them from cache instead of making new network requests.
- *
- * IMPORTANT: We intentionally do NOT use the FontFace API here because
- * MathJax dynamically injects its own @font-face rules for the same family
- * names (MJXTEX, MJXTEX-I, etc.).  Creating duplicate FontFace objects via
- * the API causes the browser to have two competing registrations for the
- * same family, which can result in the browser picking MathJax's (not-yet-
- * loaded) entry over our preloaded one, making formulas invisible.
- *
- * @param {string} fontBaseUrl - Base URL for MathJax fonts (CDN or local)
- * @returns {Promise<void>}  Resolves immediately (preload is fire-and-forget).
- */
-function _preloadMathJaxFonts(fontBaseUrl) {
-    if (!fontBaseUrl) return Promise.resolve();
-    var baseUrl = fontBaseUrl.replace(/\/+$/, '');
-    _CRITICAL_MATHJAX_FONTS.forEach(function (entry) {
+function _areCriticalMathJaxFontsReady() {
+    if (
+        typeof document === 'undefined' ||
+        !document.fonts ||
+        typeof document.fonts.check !== 'function'
+    ) {
+        return true;
+    }
+    return _CRITICAL_MATHJAX_FONTS.every(function (entry) {
+        var family = String((entry && entry.family) || '').trim();
+        if (!family) return true;
         try {
-            var url = baseUrl + '/' + entry.file;
-            // Avoid duplicate preload links
-            if (document.querySelector('link[rel="preload"][href="' + url + '"]')) return;
-            var link = document.createElement('link');
-            link.rel = 'preload';
-            link.as = 'font';
-            link.type = 'font/woff';
-            link.href = url;
-            // crossorigin is required for font preloads (even same-origin)
-            link.crossOrigin = 'anonymous';
-            document.head.appendChild(link);
-        } catch (e) {}
+            return document.fonts.check('1em ' + family);
+        } catch (e) {
+            return false;
+        }
     });
-    return Promise.resolve();
+}
+
+function _waitForCriticalMathJaxFonts(timeoutMs) {
+    if (_areCriticalMathJaxFontsReady()) return Promise.resolve(true);
+    if (
+        typeof document === 'undefined' ||
+        !document.fonts ||
+        typeof document.fonts.load !== 'function'
+    ) {
+        return Promise.resolve(false);
+    }
+
+    timeoutMs = Number(timeoutMs);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        timeoutMs = 4000;
+    }
+
+    var families = [];
+    _CRITICAL_MATHJAX_FONTS.forEach(function (entry) {
+        var family = String((entry && entry.family) || '').trim();
+        if (!family || families.indexOf(family) >= 0) return;
+        families.push(family);
+    });
+    if (!families.length) return Promise.resolve(true);
+
+    return new Promise(function (resolve) {
+        var settled = false;
+        var deadline = Date.now() + timeoutMs;
+
+        function finish(ok) {
+            if (settled) return;
+            settled = true;
+            resolve(Boolean(ok));
+        }
+
+        function pollUntilReady() {
+            if (_areCriticalMathJaxFontsReady()) {
+                finish(true);
+                return;
+            }
+            if (Date.now() >= deadline) {
+                finish(false);
+                return;
+            }
+            setTimeout(pollUntilReady, 80);
+        }
+
+        Promise.all(
+            families.map(function (family) {
+                try {
+                    return document.fonts.load('1em ' + family).catch(function () {
+                        return null;
+                    });
+                } catch (e) {
+                    return Promise.resolve(null);
+                }
+            })
+        )
+            .then(function () {
+                pollUntilReady();
+            })
+            .catch(function () {
+                pollUntilReady();
+            });
+
+        setTimeout(function () {
+            finish(_areCriticalMathJaxFontsReady());
+        }, timeoutMs);
+    });
 }
 
 /**
@@ -191,14 +267,17 @@ function waitForRenderResources(timeout) {
                         return fontProbe;
                     })
                     .then(function () {
-                        // Phase 3: Preload critical MathJax fonts
-                        var fontUrl =
-                            CommonUtils && typeof CommonUtils.getMathJaxFontUrl === 'function'
-                                ? CommonUtils.getMathJaxFontUrl()
-                                : '';
-                        return _preloadMathJaxFonts(fontUrl);
+                        // Phase 3: Wait briefly for critical fonts to become usable.
+                        // This avoids the first render happening with MJXZERO fallbacks,
+                        // which can make formulas appear incomplete until a second re-typeset.
+                        return _waitForCriticalMathJaxFonts(4000);
                     })
-                    .then(function () {
+                    .then(function (fontsReady) {
+                        if (!fontsReady) {
+                            console.warn(
+                                '[summary] Critical MathJax fonts not fully ready before first render'
+                            );
+                        }
                         _renderResourcesReady = true;
                         resolve(true);
                     })
@@ -392,6 +471,92 @@ function handleUserEvent(event, options = {}) {
                 summaryApp.setState({ inReadingList: false });
             }
         }
+    } else if (event.type === 'summary_status') {
+        if (!event.pid || !summaryApp.pid || String(event.pid) !== String(summaryApp.pid)) {
+            return;
+        }
+
+        const currentModel = String(summaryApp.getCurrentModel() || '').trim();
+        const eventModel = String(event.model || '').trim();
+        if (!currentModel || !eventModel || eventModel !== currentModel) {
+            return;
+        }
+
+        const status = String(event.status || '').trim();
+        const taskId = event.task_id ? String(event.task_id) : '';
+        const hasCurrentContent =
+            Boolean(summaryApp.content) &&
+            String(summaryApp.contentModel || '').trim() === currentModel;
+
+        if (status === 'queued' || status === 'running') {
+            summaryApp.inflightModels[currentModel] = true;
+            summaryApp.pendingGenerationModel = currentModel;
+            if (taskId) {
+                summaryApp.taskIdsByModel[currentModel] = taskId;
+                summaryApp.lastTaskId = taskId;
+                summaryApp.refreshQueueRank();
+            }
+
+            summaryApp.setState({
+                loading: !hasCurrentContent,
+                regenerating: hasCurrentContent,
+                notice: 'Summary is being generated for this model. You can switch models; this view will auto-refresh when ready.',
+                error: null,
+                content: hasCurrentContent ? summaryApp.content : null,
+                meta: hasCurrentContent ? summaryApp.meta : null,
+            });
+            summaryApp.scheduleAutoRetry(summaryApp.pid, { model: currentModel, cache_only: true });
+            return;
+        }
+
+        summaryApp.inflightModels[currentModel] = false;
+        if (summaryApp.pendingGenerationModel === currentModel) {
+            summaryApp.pendingGenerationModel = '';
+        }
+        summaryApp.taskIdsByModel[currentModel] = '';
+        summaryApp.queueRankByModel[currentModel] = 0;
+        summaryApp.queueTotalByModel[currentModel] = 0;
+
+        try {
+            delete summaryApp.summaryStatusCacheByModel[currentModel];
+        } catch (e) {}
+        try {
+            if (summaryApp._summaryStatusPromisesByModel) {
+                delete summaryApp._summaryStatusPromisesByModel[currentModel];
+            }
+        } catch (e) {}
+
+        if (status === 'ok') {
+            const key = modelCacheKey(currentModel);
+            if (
+                key &&
+                Array.isArray(summaryApp.availableSummaries) &&
+                !summaryApp.availableSummaries.includes(key)
+            ) {
+                summaryApp.availableSummaries = [...summaryApp.availableSummaries, key];
+            }
+            summaryApp.loadSummary(summaryApp.pid, { model: currentModel, cache_only: true });
+            return;
+        }
+
+        if (status === 'failed' || status === 'canceled') {
+            const eventError = event.error ? String(event.error).trim() : '';
+            const notice =
+                status === 'failed'
+                    ? eventError
+                        ? `Summary generation failed: ${eventError}`
+                        : 'Summary generation failed. Click Generate to retry.'
+                    : 'Summary generation was canceled. Click Generate to retry.';
+            summaryApp.setState({
+                loading: false,
+                regenerating: false,
+                queueRank: 0,
+                queueTotal: 0,
+                lastTaskId: '',
+                notice,
+                error: null,
+            });
+        }
     } else if (event.type === 'upload_parse_status') {
         // Keep uploaded paper parse status in sync on the summary page.
         if (
@@ -486,7 +651,6 @@ class SummaryState {
         this.notice = '';
         this.clearing = null;
         this.defaultModel = '';
-        this.pendingConfirm = null; // 'clearModel' or 'clearAll'
 
         // Available summaries for this paper (model cache keys that have summaries)
         this.availableSummaries = [];
@@ -672,6 +836,7 @@ class SummaryState {
             this._fontRetypesetCleanup = null;
         }
         if (!markdownContainer || typeof document === 'undefined' || !document.fonts) return;
+        if (_areCriticalMathJaxFontsReady()) return;
 
         var self = this;
         var debounceTimer = null;
@@ -691,18 +856,7 @@ class SummaryState {
 
         // Check whether any critical MJXTEX font is available for rendering.
         function isMjxFontReady() {
-            try {
-                // Test multiple critical families – any one being ready means
-                // MathJax CHTML can render at least some formulas correctly.
-                for (var i = 0; i < _CRITICAL_MATHJAX_FONTS.length; i++) {
-                    var fam = String((_CRITICAL_MATHJAX_FONTS[i] || {}).family || '');
-                    if (!fam) continue;
-                    if (document.fonts.check('1em ' + fam)) return true;
-                }
-                return false;
-            } catch (e) {
-                return false;
-            }
+            return _areCriticalMathJaxFontsReady();
         }
 
         // Debounced: fonts often load in batches and multiple triggers (event + fonts.load)
@@ -1016,86 +1170,44 @@ class SummaryState {
         if (showQueueStatus) {
             // Prefer per-task queue rank when available; fall back to global stats.
             if (this.queueRank > 0 && this.queueTotal > 0) {
-                queueStatusNote = `<div class="summary-note summary-queue-note" style="color: var(--text-muted); font-size: 12px;" role="status" aria-live="polite">${this.queueRank}/${this.queueTotal} in queue</div>`;
+                queueStatusNote = `<div class="summary-note summary-queue-note" role="status" aria-live="polite">${this.queueRank}/${this.queueTotal} in queue</div>`;
             } else {
                 const total = this.globalQueued + this.globalRunning;
                 if (total > 0) {
-                    queueStatusNote = `<div class="summary-note summary-queue-note" style="color: var(--text-muted); font-size: 12px;" role="status" aria-live="polite">${total} task${total > 1 ? 's' : ''} in queue</div>`;
+                    queueStatusNote = `<div class="summary-note summary-queue-note" role="status" aria-live="polite">${total} task${total > 1 ? 's' : ''} in queue</div>`;
                 }
             }
         }
 
-        const modelLabel = currentModel ? escapeHtml(currentModel) : 'current model';
-        const inflightNote = this.isCurrentModelGenerating()
-            ? `<p class="confirm-warning">Note: generation for this model is currently running. Clearing will cancel the in-flight job, but it may take a moment to stop.</p>`
-            : '';
-
         return `
             <div class="summary-actions">
-                <label class="summary-action-label" for="model-select">Model</label>
-                <select id="model-select" class="summary-model-select" onchange="summaryApp.handleModelChange(event)" ${disableSelect}>
-                    ${modelOptions}
-                </select>
-                <button onclick="summaryApp.regenerate()" class="summary-action-btn" ${disableGenerate} title="${generateTitle}">
-                    ${regenLabel}
-                </button>
-                <div class="summary-btn-group">
-                    <button onclick="summaryApp.requestClearModel()" class="summary-action-btn summary-btn-warning" ${disableClear} title="Clear summary for current model only">
-                        ${this.clearing === 'model' ? 'Clearing...' : 'Clear Current Summary'}
+                <div class="summary-actions-controls">
+                    <label class="summary-action-label" for="model-select">Model</label>
+                    <select id="model-select" class="summary-model-select" data-summary-change="model-select" ${disableSelect}>
+                        ${modelOptions}
+                    </select>
+                    <button type="button" data-summary-action="regenerate" class="summary-action-btn" ${disableGenerate} title="${generateTitle}" aria-label="${regenLabel}">
+                        ${regenLabel}
                     </button>
-                    ${
-                        this.pendingConfirm === 'clearModel'
-                            ? `
-                        <div class="confirm-popup" role="dialog" aria-labelledby="confirm-title">
-                            <div class="confirm-content">
-                                <strong id="confirm-title">Clear summary for ${modelLabel}?</strong>
-                                <p>This will only remove the summary generated by this model.</p>
-                                ${inflightNote}
-                                <div class="confirm-actions">
-                                    <button onclick="summaryApp.confirmClearModel()" class="confirm-btn confirm-yes">Confirm</button>
-                                    <button onclick="summaryApp.cancelConfirm()" class="confirm-btn confirm-no">Cancel</button>
-                                </div>
-                            </div>
-                        </div>
-                    `
-                            : ''
-                    }
-                </div>
-                <div class="summary-btn-group">
-                    <button onclick="summaryApp.requestClearAll()" class="summary-action-btn summary-btn-danger" ${disableClear} title="Clear all caches (all models, HTML, MinerU, etc.)">
-                        ${this.clearing === 'all' ? 'Clearing...' : 'Clear All'}
+                    <div class="summary-btn-group">
+                        <button type="button" data-summary-action="clear-model" class="summary-action-btn summary-btn-warning" ${disableClear} title="Clear summary for current model only" aria-label="Clear current summary">
+                            ${this.clearing === 'model' ? 'Clearing...' : 'Clear Current Summary'}
+                        </button>
+                    </div>
+                    <div class="summary-btn-group">
+                        <button type="button" data-summary-action="clear-all" class="summary-action-btn summary-btn-danger" ${disableClear} title="Clear all caches (all models, HTML, MinerU, etc.)" aria-label="Clear all summaries and caches">
+                            ${this.clearing === 'all' ? 'Clearing...' : 'Clear All'}
+                        </button>
+                    </div>
+                    <button type="button" data-summary-action="export" class="summary-action-btn summary-btn-export" ${this.content ? '' : 'disabled'} title="Export summary as Markdown ZIP" aria-label="Export summary">
+                    Export
                     </button>
-                    ${
-                        this.pendingConfirm === 'clearAll'
-                            ? `
-                        <div class="confirm-popup" role="dialog" aria-labelledby="confirm-all-title">
-                            <div class="confirm-content">
-                                <strong id="confirm-all-title">Clear ALL caches for this paper?</strong>
-                                <p>This will remove:</p>
-                                <ul>
-                                    <li>All model summaries</li>
-                                    <li>HTML/Markdown cache</li>
-                                    <li>MinerU cache</li>
-                                    <li>All related files</li>
-                                </ul>
-                                <p class="confirm-warning">This action cannot be undone!</p>
-                                ${inflightNote}
-                                <div class="confirm-actions">
-                                    <button onclick="summaryApp.confirmClearAll()" class="confirm-btn confirm-yes">Confirm</button>
-                                    <button onclick="summaryApp.cancelConfirm()" class="confirm-btn confirm-no">Cancel</button>
-                                </div>
-                            </div>
-                        </div>
-                    `
-                            : ''
-                    }
                 </div>
-                <button onclick="summaryApp.exportMarkdownZip()" class="summary-action-btn summary-btn-export" ${this.content ? '' : 'disabled'} title="Export summary as Markdown ZIP">
-                Export
-                </button>
-                ${errorNote}
-                ${notice}
-                ${queueStatusNote}
+                <div class="summary-actions-notices">
+                    ${errorNote}
+                    ${notice}
+                    ${queueStatusNote}
+                </div>
             </div>
         `;
     }
@@ -1151,7 +1263,7 @@ class SummaryState {
               : 'Add to reading list';
         const rlBtnDisabledAttr = rlPending ? 'disabled' : '';
         const readingListHTML = showReadingList
-            ? `<div class="rel_readinglist"><button type="button" class="${rlBtnClass}" ${rlBtnDisabledAttr} onclick="summaryApp.toggleReadingList()" title="${rlBtnTitle}">${rlBtnIcon}</button></div>`
+            ? `<div class="rel_readinglist"><button type="button" data-summary-action="toggle-reading-list" class="${rlBtnClass}" ${rlBtnDisabledAttr} title="${rlBtnTitle}" aria-label="${rlBtnTitle}" aria-pressed="${rlActive ? 'true' : 'false'}">${rlBtnIcon}</button></div>`
             : '';
 
         // Build navigation links - for uploaded papers, show Similar button; for arXiv, show all links
@@ -1189,18 +1301,24 @@ class SummaryState {
                   const extractDisabledClass = extractDisabled ? 'disabled' : '';
                   return `
                 <div class="paper-nav paper-actions-footer">
-                    <div class="rel_more"><button class="upload-similar-btn ${featureDisabledClass}" ${featureDisabledAttr} onclick="summaryApp.findSimilarPapers()" title="${title}">Similar</button></div>
-                    <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer" class="${featureDisabled ? 'disabled-link' : ''}" ${featureDisabled ? 'onclick="return false;"' : ''} title="${inspectTitle}">Inspect</a></div>
-                    <div class="rel_extract"><button class="action-btn extract-btn ${extractDisabledClass}" ${extractDisabledAttr} onclick="summaryApp.extractInfo()" title="${extractTitle}">🔍 Extract Info</button></div>
+                    <div class="paper-actions-group paper-actions-group-primary">
+                        <div class="rel_more"><button type="button" data-summary-action="find-similar" class="upload-similar-btn ${featureDisabledClass}" ${featureDisabledAttr} title="${title}">Similar</button></div>
+                        <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer" class="${featureDisabled ? 'disabled-link' : ''}" ${featureDisabled ? 'aria-disabled="true" tabindex="-1"' : ''} title="${inspectTitle}">Inspect</a></div>
+                        <div class="rel_extract"><button type="button" data-summary-action="extract-info" class="action-btn extract-btn ${extractDisabledClass}" ${extractDisabledAttr} title="${extractTitle}">🔍 Extract Info</button></div>
+                    </div>
                 </div>`;
               })()
             : `
                 <div class="paper-nav paper-actions-footer">
-                    <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
-                    <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
-                    ${readingListHTML}
-                    <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
-                    <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
+                    <div class="paper-actions-group paper-actions-group-primary">
+                        <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
+                        <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
+                        ${readingListHTML}
+                    </div>
+                    <div class="paper-actions-group paper-actions-group-secondary">
+                        <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
+                        <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
+                    </div>
                 </div>`;
 
         // Title link - for uploaded papers, link to PDF download; for arXiv papers, link to arXiv
@@ -1716,7 +1834,7 @@ summaryApp.refreshReadingListState = async function (pidValue) {
 summaryApp.toggleReadingList = function () {
     const isLoggedIn = typeof user !== 'undefined' && user;
     if (!isLoggedIn) {
-        alert('Please log in to use reading list.');
+        notify('Please log in to use reading list.');
         return;
     }
     if (!this.paper || this.paper.kind === 'upload') return;
@@ -1914,7 +2032,7 @@ summaryApp.regenerate = function () {
                 ? String(this.paper.parse_status)
                 : '';
         if (ps !== 'ok') {
-            alert('Parse PDF first before generating summary.');
+            notify('Parse PDF first before generating summary.');
             return;
         }
     }
@@ -1927,7 +2045,7 @@ summaryApp.regenerate = function () {
     this.queueSummary(this.pid, { model: currentModel, force_regenerate: hasCachedSummary });
 };
 
-summaryApp.requestClearModel = function () {
+summaryApp.requestClearModel = async function () {
     if (!this.pid || this.clearing) return;
 
     const currentModel = this.getCurrentModel();
@@ -1936,13 +2054,25 @@ summaryApp.requestClearModel = function () {
         return;
     }
 
-    this.setState({ pendingConfirm: 'clearModel' });
+    const confirmed = await showConfirm({
+        title: `Clear summary for ${currentModel}?`,
+        message: 'This only removes the cached summary for the selected model.',
+        detail: this.isCurrentModelGenerating()
+            ? 'Generation is currently running for this model. Clearing cancels the in-flight job, but it may take a moment to stop.'
+            : '',
+        confirmText: 'Clear Summary',
+        cancelText: 'Keep Summary',
+        danger: true,
+    });
+    if (!confirmed) return;
+
+    return this.confirmClearModel();
 };
 
 summaryApp.confirmClearModel = async function () {
     const currentModel = this.getCurrentModel();
     this.clearAutoRetry();
-    this.setState({ clearing: 'model', notice: '', error: null, pendingConfirm: null });
+    this.setState({ clearing: 'model', notice: '', error: null });
 
     try {
         await clearModelSummary(this.pid, currentModel);
@@ -1984,9 +2114,10 @@ summaryApp.confirmClearModel = async function () {
             lastTaskId: '',
             notice: `Summary for model "${currentModel}" cleared. Click Generate to create a new one.`,
         });
+        notify(`Cleared summary for ${currentModel}.`, 'success');
     } catch (error) {
         const friendlyMsg = handleApiError(error, 'Clear Model Summary');
-        this.setState({ clearing: null, error: friendlyMsg, pendingConfirm: null });
+        this.setState({ clearing: null, error: friendlyMsg });
     }
 };
 
@@ -2200,14 +2331,27 @@ summaryApp.queueSummary = async function (pid, options = {}) {
     }
 };
 
-summaryApp.requestClearAll = function () {
+summaryApp.requestClearAll = async function () {
     if (!this.pid || this.clearing) return;
-    this.setState({ pendingConfirm: 'clearAll' });
+
+    const confirmed = await showConfirm({
+        title: 'Clear all caches for this paper?',
+        message: 'This removes all model summaries and related cached files for this paper.',
+        detail: this.isCurrentModelGenerating()
+            ? 'Generation is currently running. Clearing cancels in-flight jobs and may take a moment to finish.'
+            : 'This action cannot be undone.',
+        confirmText: 'Clear All',
+        cancelText: 'Cancel',
+        danger: true,
+    });
+    if (!confirmed) return;
+
+    return this.confirmClearAll();
 };
 
 summaryApp.confirmClearAll = async function () {
     this.clearAutoRetry();
-    this.setState({ clearing: 'all', notice: '', error: null, pendingConfirm: null });
+    this.setState({ clearing: 'all', notice: '', error: null });
 
     try {
         await clearPaperCache(this.pid);
@@ -2242,14 +2386,11 @@ summaryApp.confirmClearAll = async function () {
             lastTaskId: '',
             notice: 'All caches cleared. Click Generate to fetch a fresh summary.',
         });
+        notify('Cleared all cached summary data for this paper.', 'success');
     } catch (error) {
         const friendlyMsg = handleApiError(error, 'Clear All Caches');
-        this.setState({ clearing: null, error: friendlyMsg, pendingConfirm: null });
+        this.setState({ clearing: null, error: friendlyMsg });
     }
-};
-
-summaryApp.cancelConfirm = function () {
-    this.setState({ pendingConfirm: null });
 };
 
 // Find similar papers for uploaded papers
@@ -2265,7 +2406,7 @@ summaryApp.findSimilarPapers = async function () {
             ? String(this.paper.parse_status)
             : '';
     if (ps !== 'ok') {
-        alert('Parse PDF first to find similar papers.');
+        notify('Parse PDF first to find similar papers.');
         return;
     }
 
@@ -2289,15 +2430,17 @@ summaryApp.findSimilarPapers = async function () {
         if (data.success && data.papers && data.papers.length > 0) {
             this.showSimilarPapersModal(data.papers);
         } else if (data.success && (!data.papers || data.papers.length === 0)) {
-            alert(
-                'No similar papers found. This may happen if the paper content is too short or unique.'
+            notify(
+                'No similar papers found. This may happen if the paper content is too short or unique.',
+                'info',
+                4200
             );
         } else {
-            alert('Failed to find similar papers: ' + (data.error || 'Unknown error'));
+            notify('Failed to find similar papers: ' + (data.error || 'Unknown error'));
         }
     } catch (err) {
         console.error('Error finding similar papers:', err);
-        alert('Failed to find similar papers');
+        notify('Failed to find similar papers');
         if (btn) {
             btn.disabled = false;
             btn.textContent = 'Similar';
@@ -2306,86 +2449,7 @@ summaryApp.findSimilarPapers = async function () {
 };
 
 summaryApp.showSimilarPapersModal = function (papers) {
-    // Remove existing modal if any
-    const existingModal = document.getElementById('similar-papers-modal');
-    if (existingModal) {
-        if (typeof existingModal._cleanupModal === 'function') {
-            existingModal._cleanupModal();
-        } else {
-            existingModal.remove();
-        }
-    }
-
-    const buildPaperItem = (p, i) => {
-        const titleSafe = escapeHtml(p.title || p.id);
-        const authorsSafe = escapeHtml(p.authors || '');
-        const timeSafe = escapeHtml(p.time || '');
-        const scoreNum = Number(p && p.score);
-        const scoreSafe = Number.isFinite(scoreNum) ? scoreNum.toFixed(3) : '—';
-        // Prefer TL;DR over abstract
-        const contentText = p.tldr || p.abstract || '';
-        const contentSafe = escapeHtml(contentText);
-        const contentLabel = p.tldr ? '💡 TL;DR' : p.abstract ? 'Abstract' : '';
-
-        return `
-            <div class="similar-paper-item">
-                <span class="similar-paper-rank">${i + 1}</span>
-                <div class="similar-paper-info">
-                    <a href="/summary?pid=${encodeURIComponent(p.id)}" target="_blank" rel="noopener noreferrer" class="similar-paper-title">${titleSafe}</a>
-                    ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
-                    <div class="similar-paper-meta-line">
-                        ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
-                        <span class="similar-paper-score">Score: ${scoreSafe}</span>
-                    </div>
-                    ${
-                        contentSafe
-                            ? `
-                        <div class="similar-paper-content">
-                            ${contentLabel ? `<span class="similar-paper-content-label">${contentLabel}</span>` : ''}
-                            <span class="similar-paper-content-text">${contentSafe}</span>
-                        </div>
-                    `
-                            : ''
-                    }
-                </div>
-            </div>
-        `;
-    };
-
-    const modal = document.createElement('div');
-    modal.id = 'similar-papers-modal';
-    modal.className = 'similar-modal-overlay';
-    modal.innerHTML = `
-        <div class="similar-modal-content">
-            <div class="similar-modal-header">
-                <h3>Similar Papers (${papers.length})</h3>
-                <button class="similar-modal-close">&times;</button>
-            </div>
-            <div class="similar-modal-body">
-                ${papers.map((p, i) => buildPaperItem(p, i)).join('')}
-            </div>
-        </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    // Close handlers
-    let modalClosed = false;
-    function cleanupModal() {
-        if (modalClosed) return;
-        modalClosed = true;
-        if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
-        document.removeEventListener('keydown', escHandler);
-    }
-    function escHandler(e) {
-        if (e.key === 'Escape') cleanupModal();
-    }
-    modal._cleanupModal = cleanupModal;
-    modal.querySelector('.similar-modal-close').addEventListener('click', cleanupModal);
-    modal.addEventListener('click', e => {
-        if (e.target === modal) cleanupModal();
-    });
-    document.addEventListener('keydown', escHandler);
+    sharedShowSimilarPapersModal(papers);
 };
 
 // Extract metadata for uploaded papers
@@ -2396,7 +2460,7 @@ summaryApp.extractInfo = async function () {
 
     // Check if already extracted
     if (this.paper.meta_extracted_ok === true) {
-        alert('Metadata already extracted.');
+        notify('Metadata already extracted.', 'info');
         return;
     }
 
@@ -2406,7 +2470,7 @@ summaryApp.extractInfo = async function () {
             ? String(this.paper.parse_status)
             : '';
     if (ps !== 'ok') {
-        alert('Parse PDF first before extracting info.');
+        notify('Parse PDF first before extracting info.');
         return;
     }
 
@@ -2430,8 +2494,9 @@ summaryApp.extractInfo = async function () {
                 notice: 'Metadata extraction started. Waiting for updates...',
                 error: null,
             });
+            notify('Metadata extraction started.', 'success');
         } else {
-            alert('Failed to extract: ' + (data.error || 'Unknown error'));
+            notify('Failed to extract: ' + (data.error || 'Unknown error'));
             if (btn) {
                 btn.disabled = false;
                 btn.textContent = '🔍 Extract Info';
@@ -2439,7 +2504,7 @@ summaryApp.extractInfo = async function () {
         }
     } catch (err) {
         console.error('Error triggering extract:', err);
-        alert('Failed to trigger extraction');
+        notify('Failed to trigger extraction');
         if (btn) {
             btn.disabled = false;
             btn.textContent = '🔍 Extract Info';
@@ -2450,7 +2515,7 @@ summaryApp.extractInfo = async function () {
 // Export summary as Markdown ZIP
 summaryApp.exportMarkdownZip = async function () {
     if (!this.content || !this.paper) {
-        alert('No summary content to export');
+        notify('No summary content to export', 'info');
         return;
     }
 
@@ -2608,9 +2673,10 @@ summaryApp.exportMarkdownZip = async function () {
                 exportBtn.disabled = false;
             }, 2000);
         }
+        notify('Exported summary ZIP.', 'success');
     } catch (error) {
         console.error('Export failed:', error);
-        alert('Export failed: ' + (error.message || 'Unknown error'));
+        notify('Export failed: ' + (error.message || 'Unknown error'));
         if (exportBtn) {
             exportBtn.innerHTML = originalText;
             exportBtn.disabled = false;
@@ -3199,7 +3265,7 @@ summaryApp.loadModels = async function () {
     });
 };
 
-summaryApp.selectInitialModel = async function (pid) {
+summaryApp.selectInitialModel = async function (pid, prefetchedAvailableSummaries) {
     try {
         // Uploaded papers: if not parsed yet, skip checking available summaries (API may 404).
         // Use default model selection without logging noisy errors.
@@ -3225,8 +3291,11 @@ summaryApp.selectInitialModel = async function (pid) {
             }
         }
 
-        // Get available summaries for this paper
-        const availableSummaries = await fetchAvailableSummaries(pid);
+        // Get available summaries for this paper. When init already started this request,
+        // reuse the prefetched result so model loading and cache discovery overlap.
+        const availableSummaries = Array.isArray(prefetchedAvailableSummaries)
+            ? prefetchedAvailableSummaries
+            : await fetchAvailableSummaries(pid);
 
         // Store available summaries in state for UI rendering
         this.availableSummaries = availableSummaries;
@@ -3291,6 +3360,8 @@ async function initSummaryApp() {
         return;
     }
 
+    bindSummaryDomEvents();
+
     // Check required variables
     if (typeof paper === 'undefined') {
         console.error('Paper data is missing!');
@@ -3336,15 +3407,30 @@ async function initSummaryApp() {
     });
 
     // Start resource readiness check early (runs in parallel with model loading)
-    var resourcesPromise = waitForRenderResources();
+    waitForRenderResources();
+    const initialAvailableSummariesPromise = (() => {
+        const isUploaded = paper && paper.kind === 'upload';
+        if (isUploaded) {
+            const ps =
+                paper.parse_status !== undefined && paper.parse_status !== null
+                    ? String(paper.parse_status)
+                    : '';
+            if (ps !== 'ok') {
+                return Promise.resolve([]);
+            }
+        }
+        return fetchAvailableSummaries(pid).catch(error => {
+            console.error('Failed to prefetch available summaries:', error);
+            return [];
+        });
+    })();
 
-    await summaryApp.loadModels();
+    const [, initialAvailableSummaries] = await Promise.all([
+        summaryApp.loadModels(),
+        initialAvailableSummariesPromise,
+    ]);
     // Select initial model based on available summaries
-    const initialModel = await summaryApp.selectInitialModel(pid);
-
-    // Ensure rendering resources are ready before triggering summary load,
-    // which will call render() when the API response arrives.
-    await resourcesPromise;
+    const initialModel = await summaryApp.selectInitialModel(pid, initialAvailableSummaries);
 
     // Start loading summary after model selection
     summaryApp.loadSummary(pid, {
@@ -3418,6 +3504,74 @@ function renderTagDropdown() {
 
 // Tag management functions
 let tagDropdownListenersBound = false;
+let summaryDomEventsBound = false;
+
+function bindSummaryDomEvents() {
+    if (summaryDomEventsBound) return;
+    const wrap = document.getElementById('wrap');
+    if (!wrap) return;
+
+    wrap.addEventListener('change', event => {
+        const target = event.target;
+        if (!target || !(target instanceof Element)) return;
+        const changeTarget = target.closest('[data-summary-change]');
+        if (!changeTarget) return;
+
+        if (changeTarget.getAttribute('data-summary-change') === 'model-select') {
+            summaryApp.handleModelChange(event);
+        }
+    });
+
+    wrap.addEventListener('click', event => {
+        const target = event.target;
+        if (!target || !(target instanceof Element)) return;
+        const actionTarget = target.closest('[data-summary-action]');
+        if (!actionTarget) return;
+
+        const disabled =
+            actionTarget.hasAttribute('disabled') ||
+            actionTarget.getAttribute('aria-disabled') === 'true' ||
+            actionTarget.classList.contains('disabled');
+        if (disabled) {
+            event.preventDefault();
+            return;
+        }
+
+        const action = String(actionTarget.getAttribute('data-summary-action') || '');
+        if (!action) return;
+
+        event.preventDefault();
+        if (action === 'regenerate') {
+            summaryApp.regenerate();
+            return;
+        }
+        if (action === 'clear-model') {
+            summaryApp.requestClearModel();
+            return;
+        }
+        if (action === 'clear-all') {
+            summaryApp.requestClearAll();
+            return;
+        }
+        if (action === 'export') {
+            summaryApp.exportMarkdownZip();
+            return;
+        }
+        if (action === 'toggle-reading-list') {
+            summaryApp.toggleReadingList();
+            return;
+        }
+        if (action === 'find-similar') {
+            summaryApp.findSimilarPapers();
+            return;
+        }
+        if (action === 'extract-info') {
+            summaryApp.extractInfo();
+        }
+    });
+
+    summaryDomEventsBound = true;
+}
 
 async function initTagManagement() {
     // Load available tags from global tags variable if available
@@ -3430,28 +3584,6 @@ async function initTagManagement() {
 
     if (tagDropdownListenersBound) return;
     tagDropdownListenersBound = true;
-
-    // Close confirm popup on Escape
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && summaryApp.pendingConfirm) {
-            summaryApp.cancelConfirm();
-        }
-    });
-
-    // Close confirm popup when clicking outside
-    document.addEventListener('mousedown', e => {
-        if (summaryApp.pendingConfirm) {
-            const confirmPopup = document.querySelector('.confirm-popup');
-            if (confirmPopup && !confirmPopup.contains(e.target)) {
-                // Check if click is not on the button that triggered it
-                const btnGroup = confirmPopup.closest('.summary-btn-group');
-                const triggerBtn = btnGroup ? btnGroup.querySelector('.summary-action-btn') : null;
-                if (!triggerBtn || !triggerBtn.contains(e.target)) {
-                    summaryApp.cancelConfirm();
-                }
-            }
-        }
-    });
 }
 
 // Initialize when DOM is loaded

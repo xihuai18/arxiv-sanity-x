@@ -24,6 +24,7 @@ from tools.paper_summarizer import (
     generate_paper_summary as generate_paper_summary_from_module,
 )
 from tools.paper_summarizer import (
+    looks_like_valid_cached_summary_markdown,
     model_cache_key,
     normalize_summary_result,
     normalize_summary_source,
@@ -35,10 +36,21 @@ from tools.paper_summarizer import (
     summary_source_matches,
 )
 
-DATA_DIR = str(settings.data_dir)
-SUMMARY_DIR = str(settings.summary_dir)
-LLM_NAME = settings.llm.name
-SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
+
+def _data_dir() -> str:
+    return str(settings.data_dir)
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
+
+def _default_llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _summary_markdown_source() -> str:
+    return str(settings.summary.markdown_source or "")
 
 
 def _get_native_thread_class():
@@ -85,7 +97,7 @@ def _get_stats_db(flag: str = "r"):
 
 
 def _stats_lock_path() -> Path:
-    return Path(SUMMARY_DIR) / ".summary_cache_stats.lock"
+    return Path(_summary_dir()) / ".summary_cache_stats.lock"
 
 
 def _with_stats_lock(timeout_s: int = 10):
@@ -446,26 +458,65 @@ _SUMMARY_CACHE_STATS = {
 
 def get_summary_status(pid: str, model: str | None = None) -> tuple[str, str | None]:
     """Return (status, last_error) for summary generation."""
-    model = (model or LLM_NAME or "").strip()
+    model = (model or _default_llm_name() or "").strip()
     if not model:
         return "", None
 
-    summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
-    cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(pid, model)
+    summary_source = normalize_summary_source(_summary_markdown_source())
 
-    if cache_file.exists() or legacy_cache.exists():
-        meta = read_summary_meta(meta_file) if meta_file.exists() else read_summary_meta(legacy_meta)
-        if summary_source_matches(meta, summary_source):
-            return "ok", None
+    def _is_valid_cache(body_path: Path, meta_path: Path, *, expected_legacy_model: str | None) -> bool:
+        if not body_path.exists():
+            return False
+        meta = read_summary_meta(meta_path)
+        if not summary_source_matches(meta, summary_source):
+            return False
+        if expected_legacy_model is not None:
+            legacy_model = (meta.get("model") or meta.get("llm_model") or "").strip()
+            if expected_legacy_model and (not legacy_model or legacy_model != expected_legacy_model):
+                return False
+        try:
+            content = body_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return False
+        return bool(looks_like_valid_cached_summary_markdown(content))
 
-    if lock_file.exists() or legacy_lock.exists():
+    def _has_valid_cache_for_model(target_model: str) -> bool:
+        cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(
+            pid, target_model
+        )
+        return _is_valid_cache(cache_file, meta_file, expected_legacy_model=None) or _is_valid_cache(
+            legacy_cache, legacy_meta, expected_legacy_model=target_model
+        )
+
+    def _has_any_lock(target_model: str) -> bool:
+        _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
+            pid, target_model
+        )
+        return lock_file.exists() or legacy_lock.exists()
+
+    if _has_valid_cache_for_model(model):
+        return "ok", None
+
+    if _has_any_lock(model):
         return "running", None
 
     try:
-        info = SummaryStatusRepository.get_status(pid, model)
+        info = SummaryStatusRepository.get_status(pid, model or "")
         if isinstance(info, dict):
             status = info.get("status") or ""
             last_error = info.get("last_error")
+            if status == "ok":
+                resolved_model = (info.get("resolved_model") or info.get("llm_model") or "").strip()
+                if resolved_model and resolved_model != model:
+                    if _has_valid_cache_for_model(resolved_model):
+                        return "ok", None
+                    if _has_any_lock(resolved_model):
+                        return "running", None
+                # Defensive: avoid stale DB "ok" when current cache is absent/invalid.
+                # Re-check lock to avoid returning empty state while generation just started.
+                if _has_any_lock(model):
+                    return "running", None
+                return "", None
             return status, last_error
     except Exception as e:
         logger.warning(f"Failed to read summary status for {pid}: {e}")
@@ -498,7 +549,7 @@ def compute_summary_cache_stats() -> dict:
     cache_models = defaultdict(int)
     pid_counts = defaultdict(int)
     cache_total = 0
-    summary_dir = Path(SUMMARY_DIR)
+    summary_dir = Path(_summary_dir())
 
     if summary_dir.exists():
         for entry in summary_dir.iterdir():
@@ -567,7 +618,13 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
         pduration = float(snap.get("duration") or 0.0)
         now = time.time()
         if pdata and (now - pupdated) < ttl:
-            return {"data": pdata, "updated_time": pupdated, "in_progress": False, "duration": pduration, "ttl": ttl}
+            return {
+                "data": pdata,
+                "updated_time": pupdated,
+                "in_progress": False,
+                "duration": pduration,
+                "ttl": ttl,
+            }
 
     now = time.time()
     with _SUMMARY_CACHE_STATS_LOCK:
@@ -576,7 +633,13 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
         duration = _SUMMARY_CACHE_STATS.get("duration", 0.0)
 
     if data and (now - updated_time) < ttl:
-        return {"data": data, "updated_time": updated_time, "in_progress": False, "duration": duration, "ttl": ttl}
+        return {
+            "data": data,
+            "updated_time": updated_time,
+            "in_progress": False,
+            "duration": duration,
+            "ttl": ttl,
+        }
 
     if data:
         # Refresh async
@@ -601,7 +664,13 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
                 _SUMMARY_CACHE_STATS["in_progress"] = True
                 _start_daemon_thread(target=_run, name="summary-cache-stats-refresh")
 
-        return {"data": data, "updated_time": updated_time, "in_progress": True, "duration": duration, "ttl": ttl}
+        return {
+            "data": data,
+            "updated_time": updated_time,
+            "in_progress": True,
+            "duration": duration,
+            "ttl": ttl,
+        }
 
     # Try quick assemble from totals+model counts without disk scan.
     try:
@@ -615,7 +684,13 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
                 _SUMMARY_CACHE_STATS["updated_time"] = time.time()
                 _SUMMARY_CACHE_STATS["duration"] = 0.0
                 updated_time = _SUMMARY_CACHE_STATS["updated_time"]
-            return {"data": assembled, "updated_time": updated_time, "in_progress": False, "duration": 0.0, "ttl": ttl}
+            return {
+                "data": assembled,
+                "updated_time": updated_time,
+                "in_progress": False,
+                "duration": 0.0,
+                "ttl": ttl,
+            }
     except Exception:
         pass
 
@@ -632,7 +707,13 @@ def get_summary_cache_stats(ttl: int = 300) -> dict:
         _SUMMARY_CACHE_STATS["in_progress"] = False
         updated_time = _SUMMARY_CACHE_STATS["updated_time"]
 
-    return {"data": new_data, "updated_time": updated_time, "in_progress": False, "duration": dur, "ttl": ttl}
+    return {
+        "data": new_data,
+        "updated_time": updated_time,
+        "in_progress": False,
+        "duration": dur,
+        "ttl": ttl,
+    }
 
 
 def safe_unlink(path: Path) -> bool:
@@ -722,7 +803,7 @@ def clear_model_summary(pid: str, model: str, metas_getter=None, user: str | Non
                 if legacy_model and legacy_model == model:
                     count += 1
             # Legacy mismatch: meta declares target model but filename differs.
-            cache_dir = Path(SUMMARY_DIR) / paper_id
+            cache_dir = Path(_summary_dir()) / paper_id
             matches = _scan_dir_meta_matches(cache_dir, model)
             if matches:
                 legacy_meta_matches_by_pid[paper_id] = matches
@@ -822,7 +903,7 @@ def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
     per_pid_models: dict[str, set[str]] = {}
     try:
         for paper_id in ids_to_clear:
-            cache_dir = Path(SUMMARY_DIR) / paper_id
+            cache_dir = Path(_summary_dir()) / paper_id
             if cache_dir.exists() and cache_dir.is_dir():
                 models = set()
                 for meta_path in cache_dir.glob("*.meta.json"):
@@ -836,7 +917,7 @@ def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
                 if models:
                     per_pid_models[paper_id] = models
             # Legacy root meta.json
-            legacy_meta = Path(SUMMARY_DIR) / f"{paper_id}.meta.json"
+            legacy_meta = Path(_summary_dir()) / f"{paper_id}.meta.json"
             if legacy_meta.exists():
                 meta_d = read_summary_meta(legacy_meta)
                 m = _normalize_model_for_stats(None, meta_d) or "legacy"
@@ -846,11 +927,11 @@ def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
         per_pid_models = {}
 
     for paper_id in ids_to_clear:
-        safe_rmtree(Path(SUMMARY_DIR) / paper_id)
+        safe_rmtree(Path(_summary_dir()) / paper_id)
         for path in (
-            Path(SUMMARY_DIR) / f"{paper_id}.md",
-            Path(SUMMARY_DIR) / f"{paper_id}.meta.json",
-            Path(SUMMARY_DIR) / f".{paper_id}.lock",
+            Path(_summary_dir()) / f"{paper_id}.md",
+            Path(_summary_dir()) / f"{paper_id}.meta.json",
+            Path(_summary_dir()) / f".{paper_id}.lock",
         ):
             safe_unlink(path)
 
@@ -867,9 +948,9 @@ def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
                         pass
         except Exception:
             pass
-        if safe_rmtree(Path(DATA_DIR) / "html_md" / paper_id):
+        if safe_rmtree(Path(_data_dir()) / "html_md" / paper_id):
             logger.debug(f"Cleared HTML cache for {paper_id}")
-        if safe_rmtree(Path(DATA_DIR) / "mineru" / paper_id):
+        if safe_rmtree(Path(_data_dir()) / "mineru" / paper_id):
             logger.debug(f"Cleared MinerU cache for {paper_id}")
             # For uploaded papers, reset parse_status since MinerU cache is required
             if paper_id.startswith("up_"):
@@ -878,7 +959,10 @@ def clear_paper_cache(pid: str, metas_getter=None, user: str | None = None):
 
                     UploadedPaperRepository.update(
                         paper_id,
-                        {"parse_status": "pending", "parse_error": "Cache cleared, re-parsing required"},
+                        {
+                            "parse_status": "pending",
+                            "parse_error": "Cache cleared, re-parsing required",
+                        },
                     )
                     logger.debug(f"Reset parse_status for uploaded paper {paper_id}")
                 except Exception as e:
@@ -935,14 +1019,12 @@ def generate_paper_summary(
     try:
         # Use shared resolve_cache_pid with local meta lookup
         raw_pid, _ = split_pid_version(pid)
-        meta_lookup_pid = raw_pid or pid
-        meta = metas_getter().get(meta_lookup_pid) if metas_getter and meta_lookup_pid else None
-        cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, meta)
+        cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, None)
 
         if paper_exists_fn and not paper_exists_fn(raw_pid):
             return "# Error\n\nPaper not found.", {}
 
-        summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+        summary_source = normalize_summary_source(_summary_markdown_source())
 
         # Cooperative cancellation epoch snapshot (bumped by clear actions).
         start_epoch = 0
@@ -967,15 +1049,8 @@ def generate_paper_summary(
                 with open(body_path, encoding="utf-8") as f:
                     cached = f.read()
                 cached = cached if cached.strip() else None
-                # Guard against obviously broken caches (e.g., a single-line preface).
-                # Keep this conservative to avoid invalidating older valid summaries.
-                if cached:
-                    try:
-                        t = cached.strip()
-                        if len(t) < 250 and t.count("\n") < 2 and "TL;DR" not in t:
-                            cached = None
-                    except Exception:
-                        pass
+                if cached and not looks_like_valid_cached_summary_markdown(cached):
+                    cached = None
                 meta = read_summary_meta(meta_path)
                 # Backfill generated_at for old caches without mutating meaning.
                 if "generated_at" not in meta:
@@ -1005,13 +1080,47 @@ def generate_paper_summary(
                 return cached, meta
 
             legacy_cached, legacy_meta_data = _read_from_paths(legacy_cache, legacy_meta)
-            if not legacy_cached:
+            if legacy_cached:
+                legacy_model = (legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or "").strip()
+                if not model or (legacy_model and legacy_model == model):
+                    return legacy_cached, legacy_meta_data
+
+            # If status DB records a resolved_model (fallback), try that cache path too.
+            try:
+                info = SummaryStatusRepository.get_status(cache_pid, model or "")
+            except Exception:
+                info = None
+            if not isinstance(info, dict):
                 return None, {}
 
-            legacy_model = (legacy_meta_data.get("model") or "").strip()
-            if model and (not legacy_model or legacy_model != model):
+            resolved_model = (info.get("resolved_model") or info.get("llm_model") or "").strip()
+            if not resolved_model or resolved_model == model:
                 return None, {}
-            return legacy_cached, legacy_meta_data
+
+            (
+                resolved_cache_file,
+                resolved_meta_file,
+                _resolved_lock_file,
+                resolved_legacy_cache,
+                resolved_legacy_meta,
+                _resolved_legacy_lock,
+            ) = summary_cache_paths(cache_pid, resolved_model)
+
+            resolved_cached, resolved_meta_data = _read_from_paths(resolved_cache_file, resolved_meta_file)
+            if resolved_cached:
+                return resolved_cached, resolved_meta_data
+
+            resolved_legacy_cached, resolved_legacy_meta_data = _read_from_paths(
+                resolved_legacy_cache, resolved_legacy_meta
+            )
+            if not resolved_legacy_cached:
+                return None, {}
+            resolved_legacy_model = (
+                resolved_legacy_meta_data.get("model") or resolved_legacy_meta_data.get("llm_model") or ""
+            ).strip()
+            if resolved_legacy_model and resolved_legacy_model == resolved_model:
+                return resolved_legacy_cached, resolved_legacy_meta_data
+            return None, {}
 
         # Check if cached summary exists (must match current markdown source)
         cached_summary, cached_meta = _read_cached_summary()
@@ -1063,7 +1172,10 @@ def generate_paper_summary(
                         except Exception:
                             pass
                     else:
-                        return "# Error\n\nSummary is being generated, please retry shortly.", {}
+                        return (
+                            "# Error\n\nSummary is being generated, please retry shortly.",
+                            {},
+                        )
             except Exception:
                 # Never block cache-only path; on any unexpected error, continue with cache-miss.
                 pass
@@ -1121,9 +1233,14 @@ def generate_paper_summary(
             # actual model id so future requests hit the right file.
             actual_model = (summary_meta.get("llm_model") or "").strip()
             if actual_model and model and actual_model != model:
-                cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(
-                    cache_pid, actual_model
-                )
+                (
+                    cache_file,
+                    meta_file,
+                    _lock_file,
+                    legacy_cache,
+                    legacy_meta,
+                    _legacy_lock,
+                ) = summary_cache_paths(cache_pid, actual_model)
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
 
             # Decide the stats model id and whether this pid+model already existed.
@@ -1138,10 +1255,9 @@ def generate_paper_summary(
             else:
                 existed_before = cache_file.exists() or legacy_cache.exists()
 
-            # Only cache successful summaries (not error messages)
-            is_error = summary_content.startswith("# Error") or summary_content.startswith(
-                "# PDF Parsing Service Unavailable"
-            )
+            # Only cache successful summaries (not empty/error messages).
+            normalized = str(summary_content or "")
+            is_error = not looks_like_valid_cached_summary_markdown(normalized)
 
             # If canceled after generation, do not write cache and do not return a "ready" signal.
             # Note: cancellation is keyed by the requested model epoch snapshot.

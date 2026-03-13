@@ -6,7 +6,7 @@ from __future__ import annotations
 def test_get_summary_file_does_not_split_on_non_version_v(tmp_path, monkeypatch):
     import backend.utils.summary_utils as su
 
-    monkeypatch.setattr(su, "SUMMARY_DIR", str(tmp_path))
+    monkeypatch.setattr(su, "_summary_dir", lambda: str(tmp_path))
 
     pid = "up_vpaper"
     d = tmp_path / pid

@@ -5,15 +5,20 @@ Summary utilities for extracting TL;DR and other structured content from summary
 import re
 import time
 from pathlib import Path
-from typing import Optional
 
 from loguru import logger
 
 from config import settings
 from tools.paper_summarizer import split_pid_version
 
-LLM_NAME = settings.llm.name
-SUMMARY_DIR = str(settings.summary_dir)
+
+def _default_llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
 
 # LaTeX to Unicode mapping for email display
 LATEX_TO_UNICODE = {
@@ -541,7 +546,7 @@ _TLDR_INLINE_PATTERN = re.compile(
 )
 
 
-def get_summary_file(pid: str, preferred_model: Optional[str] = None) -> Optional[Path]:
+def get_summary_file(pid: str, preferred_model: str | None = None) -> Path | None:
     """
     Find the summary file for a given paper ID.
 
@@ -554,12 +559,12 @@ def get_summary_file(pid: str, preferred_model: Optional[str] = None) -> Optiona
     raw_pid, _ = split_pid_version(pid)
     raw_pid = raw_pid or pid
 
-    # Try new layered structure first: SUMMARY_DIR/{pid}/{model}.md
-    summary_dir = Path(SUMMARY_DIR) / raw_pid
+    # Try new layered structure first: summary_dir/{pid}/{model}.md
+    summary_dir = Path(_summary_dir()) / raw_pid
 
     if summary_dir.exists() and summary_dir.is_dir():
-        # Prefer the configured default model (vars.LLM_NAME) unless overridden.
-        preferred = (preferred_model or LLM_NAME or "").strip()
+        # Prefer the configured default model unless overridden.
+        preferred = (preferred_model or _default_llm_name() or "").strip()
         if preferred:
             preferred_path = summary_dir / f"{preferred}.md"
             if preferred_path.is_file():
@@ -570,8 +575,8 @@ def get_summary_file(pid: str, preferred_model: Optional[str] = None) -> Optiona
         if md_files:
             return md_files[0]
 
-    # Try legacy flat structure: SUMMARY_DIR/{pid}.md
-    legacy_file = Path(SUMMARY_DIR) / f"{raw_pid}.md"
+    # Try legacy flat structure: summary_dir/{pid}.md
+    legacy_file = Path(_summary_dir()) / f"{raw_pid}.md"
     if legacy_file.exists():
         return legacy_file
 

@@ -36,19 +36,9 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
 </script>
 <!-- Common utilities (CSRF, events, dropdown registry) - Must load synchronously as other scripts depend on it -->
 <script src="{{ hashed_static('dist/common_utils.js') }}"></script>
-<!-- Google Fonts - Inter -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<!-- Load Google Fonts in a non-render-blocking way (important in networks where Google domains are slow/blocked). -->
-<link
-    rel="preload"
-    as="style"
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-    onload="this.onload=null;this.rel='stylesheet'"
-/>
-<noscript>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-</noscript>
+<!-- Font loading: rely on the local Inter install when available, then system fallbacks.
+     Avoid remote Google Fonts requests because blocked networks create console noise and
+     can delay page rendering without improving functionality. -->
 <!-- Favicon -->
 <link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon-x.png') }}" />
 {% block variables %}
@@ -65,18 +55,18 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
 
     <!-- Right navigation area -->
     <div class="nav-right">
-        <a href="/profile" id="login-link">
+        <a href="/profile" id="login-link" aria-label="{{ 'Profile' if user else 'Login' }}" title="{{ 'Profile' if user else 'Login' }}">
             {% if user %}
-                <span class="nav-icon">👤</span><span class="nav-text">profile</span>
+                <span class="nav-icon" aria-hidden="true">👤</span><span class="nav-text">profile</span>
             {% else %}
-                <span class="nav-icon">🔑</span><span class="nav-text">login</span>
+                <span class="nav-icon" aria-hidden="true">🔑</span><span class="nav-text">login</span>
             {% endif %}
         </a>
         {% if user %}
-        <a href="/readinglist" class="nav-link"><span class="nav-icon">📖</span><span class="nav-text">reading list</span></a>
+        <a href="/readinglist" class="nav-link" aria-label="Reading list" title="Reading list"><span class="nav-icon" aria-hidden="true">📖</span><span class="nav-text">reading list</span></a>
         {% endif %}
-        <a href="/stats" class="nav-link"><span class="nav-icon">📊</span><span class="nav-text">stats</span></a>
-        <a href="/about" class="nav-link"><span class="nav-icon">ℹ️</span><span class="nav-text">about</span></a>
+        <a href="/stats" class="nav-link" aria-label="Stats" title="Stats"><span class="nav-icon" aria-hidden="true">📊</span><span class="nav-text">stats</span></a>
+        <a href="/about" class="nav-link" aria-label="About" title="About"><span class="nav-icon" aria-hidden="true">ℹ️</span><span class="nav-text">about</span></a>
         <button id="theme-toggle" aria-label="Toggle theme" aria-pressed="false">
             <svg class="sun-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="5"></circle>
@@ -98,17 +88,10 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
 
 {% set _flashes = get_flashed_messages(with_categories=true) %}
 {% if _flashes %}
-<div class="flash-container" role="status" aria-live="polite" style="max-width: 1100px; margin: 12px auto 0; padding: 0 16px;">
+<div class="flash-container" role="status" aria-live="polite">
     {% for category, message in _flashes %}
     {% set kind = category or 'info' %}
-    <div class="flash flash-{{ kind }}" style="
-        margin: 8px 0;
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid rgba(127,127,127,0.2);
-        background: rgba(127,127,127,0.08);
-        color: var(--text-color);
-        ">
+    <div class="flash flash-{{ kind }}" data-flash-kind="{{ kind }}">
         {{ message }}
     </div>
     {% endfor %}
@@ -161,6 +144,10 @@ var __arxivSanityAssetNpmCdnBase = {{ asset_npm_cdn_base | default('https://cdn.
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+    if (window.ArxivSanityCommon && typeof window.ArxivSanityCommon.hydrateFlashToasts === 'function') {
+        window.ArxivSanityCommon.hydrateFlashToasts();
+    }
+
     // Highlight active nav link
     var path = window.location.pathname || '/';
     var links = document.querySelectorAll('#header a');

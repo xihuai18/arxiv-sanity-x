@@ -32,3 +32,31 @@ def test_summary_page_does_not_auto_trigger_generation_on_cache_miss():
     assert end != -1
     load_summary_block = text[start:end]
     assert "queueSummary" not in load_summary_block
+
+
+def test_summary_page_handles_model_scoped_summary_status_events():
+    repo_root = Path(__file__).resolve().parents[2]
+    js_text = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")
+    tasks_text = (repo_root / "tasks.py").read_text(encoding="utf-8", errors="ignore")
+
+    assert "event.type === 'summary_status'" in js_text
+    assert "event.model" in js_text
+    assert '"model": model' in tasks_text
+
+
+def test_non_summary_surfaces_ignore_other_models_summary_status_events():
+    repo_root = Path(__file__).resolve().parents[2]
+    paper_list_text = (repo_root / "static" / "paper_list.js").read_text(encoding="utf-8", errors="ignore")
+    readinglist_text = (repo_root / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    common_utils_text = (repo_root / "static" / "common_utils.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "isSummaryModelMatch" in common_utils_text
+    assert "if (!isSummaryModelMatch(event.model)) return;" in paper_list_text
+    assert "if (!isSummaryModelMatch(event.model)) return;" in readinglist_text
+
+
+def test_shared_summary_status_callback_exposes_model_argument():
+    repo_root = Path(__file__).resolve().parents[2]
+    common_utils_text = (repo_root / "static" / "common_utils.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "summaryStatusCallback(pid, status, lastError, taskId, model)" in common_utils_text

@@ -19,7 +19,219 @@ var markSummaryPending = CommonUtils.markSummaryPending;
 var unmarkSummaryPending = CommonUtils.unmarkSummaryPending;
 var canTriggerSummary = CommonUtils.canTriggerSummary;
 var formatSummaryStatus = CommonUtils.formatSummaryStatus;
+var isSummaryModelMatch =
+    CommonUtils.isSummaryModelMatch ||
+    function () {
+        return true;
+    };
 var fetchTaskStatus = CommonUtils.fetchTaskStatus;
+var showToast = CommonUtils.showToast;
+var showConfirm = CommonUtils.showConfirm;
+
+function notifyUser(message, type) {
+    if (typeof showToast === 'function') {
+        showToast(String(message || ''), { type: type || 'error' });
+        return;
+    }
+    console.warn(String(message || ''));
+}
+
+let pageIsUnloading = false;
+let pendingReadingListMutation = null;
+let pendingReadingListNavigation = false;
+if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', function () {
+        pageIsUnloading = true;
+    });
+}
+
+function shouldSuppressMutationError(error) {
+    const message = String((error && error.message) || error || '');
+    return pageIsUnloading && /failed to fetch|networkerror|load failed/i.test(message);
+}
+
+function trackReadingListMutation(promise) {
+    if (!promise || typeof promise.finally !== 'function') {
+        return promise;
+    }
+    pendingReadingListMutation = promise;
+    promise.finally(function () {
+        if (pendingReadingListMutation === promise) {
+            pendingReadingListMutation = null;
+        }
+    });
+    return promise;
+}
+
+function setupReadingListNavigationGuard() {
+    var links = document.querySelectorAll('a[href="/readinglist"], a[href^="/readinglist?"]');
+    links.forEach(function (link) {
+        if (!link || link.dataset.rlNavGuardBound === '1') return;
+        link.dataset.rlNavGuardBound = '1';
+        link.addEventListener('click', function (event) {
+            var pending = pendingReadingListMutation;
+            if (!pending || pendingReadingListNavigation) return;
+            event.preventDefault();
+            pendingReadingListNavigation = true;
+            var targetHref = link.href;
+            Promise.resolve(pending)
+                .catch(function () {})
+                .finally(function () {
+                    window.location.href = targetHref;
+                });
+        });
+    });
+}
+
+if (typeof document !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', setupReadingListNavigationGuard);
+    } else {
+        setupReadingListNavigationGuard();
+    }
+}
+
+var modalSequence = 0;
+
+function nextModalId(prefix) {
+    modalSequence += 1;
+    return `${prefix}-${modalSequence}`;
+}
+
+function getFocusableElements(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return [];
+    return Array.from(
+        root.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+    ).filter(el => !el.hasAttribute('hidden') && el.getAttribute('aria-hidden') !== 'true');
+}
+
+const AccessibleModal = props => {
+    const dialogRef = React.useRef(null);
+    const titleIdRef = React.useRef(props.titleId || nextModalId('paper-list-modal-title'));
+    const requestCloseRef = React.useRef(props.onRequestClose);
+    const escapeKeyRef = React.useRef(props.onEscapeKey);
+    const closeDisabledRef = React.useRef(props.closeDisabled);
+
+    React.useEffect(() => {
+        requestCloseRef.current = props.onRequestClose;
+        escapeKeyRef.current = props.onEscapeKey;
+        closeDisabledRef.current = props.closeDisabled;
+    }, [props.onRequestClose, props.onEscapeKey, props.closeDisabled]);
+
+    React.useEffect(() => {
+        if (!props.open) return undefined;
+
+        const dialog = dialogRef.current;
+        if (!dialog) return undefined;
+
+        const previousActive = document.activeElement;
+        const previousOverflow = document.body ? document.body.style.overflow : '';
+
+        if (document.body) {
+            document.body.style.overflow = 'hidden';
+        }
+
+        const autofocusTarget = dialog.querySelector('[data-modal-autofocus="true"]');
+        const focusTarget = autofocusTarget || getFocusableElements(dialog)[0] || dialog;
+        if (focusTarget && typeof focusTarget.focus === 'function') {
+            focusTarget.focus();
+        }
+
+        function handleKeyDown(event) {
+            if (event.key === 'Escape') {
+                if (closeDisabledRef.current) return;
+                if (typeof escapeKeyRef.current === 'function' && escapeKeyRef.current(event)) {
+                    event.preventDefault();
+                    return;
+                }
+                event.preventDefault();
+                if (typeof requestCloseRef.current === 'function') {
+                    requestCloseRef.current();
+                }
+                return;
+            }
+
+            if (event.key === 'Tab') {
+                const focusables = getFocusableElements(dialog);
+                if (!focusables.length) return;
+                const first = focusables[0];
+                const last = focusables[focusables.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            }
+        }
+
+        document.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+            if (document.body) {
+                document.body.style.overflow = previousOverflow;
+            }
+            if (previousActive && typeof previousActive.focus === 'function') {
+                previousActive.focus();
+            }
+        };
+    }, [props.open, props.closeDisabled]);
+
+    if (!props.open) return null;
+
+    const dialogClassName = ['modal-content'];
+    if (props.wide) dialogClassName.push('wide');
+    if (props.className) dialogClassName.push(props.className);
+
+    return (
+        <div
+            class="modal-overlay"
+            onClick={event => {
+                if (closeDisabledRef.current) return;
+                if (
+                    event.target === event.currentTarget &&
+                    typeof requestCloseRef.current === 'function'
+                ) {
+                    requestCloseRef.current();
+                }
+            }}
+        >
+            <div
+                ref={dialogRef}
+                class={dialogClassName.join(' ')}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={titleIdRef.current}
+                onClick={e => e.stopPropagation()}
+                tabIndex="-1"
+            >
+                <div class="modal-header">
+                    <h3 id={titleIdRef.current}>{props.title}</h3>
+                    <button
+                        type="button"
+                        class="modal-close"
+                        onClick={() => {
+                            if (closeDisabledRef.current) return;
+                            if (typeof requestCloseRef.current === 'function') {
+                                requestCloseRef.current();
+                            }
+                        }}
+                        aria-label="Close dialog"
+                        disabled={props.closeDisabled}
+                    >
+                        ×
+                    </button>
+                </div>
+                <div class="modal-body">{props.children}</div>
+                {props.footer ? <div class="modal-footer">{props.footer}</div> : null}
+            </div>
+        </div>
+    );
+};
 
 function applyUserState(state) {
     if (!state || !state.success) return;
@@ -221,7 +433,8 @@ function maybeRefreshPaperTldr(pid) {
 }
 
 // Register callback for summary status updates from shared polling
-CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId) {
+CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId, model) {
+    if (!isSummaryModelMatch(model)) return;
     updatePaperSummaryStatus(pid, status, lastError, undefined, undefined, taskId);
 });
 
@@ -320,6 +533,7 @@ function handleUserEvent(event, options = {}) {
         }
         fetchUserStateAndApply();
     } else if (event.type === 'summary_status') {
+        if (!isSummaryModelMatch(event.model)) return;
         updatePaperSummaryStatus(
             event.pid,
             event.status,
@@ -355,6 +569,13 @@ const MultiSelectDropdown =
               // Fallback: should not happen when tag_dropdown_shared.js is loaded.
               return React.createElement('div', null, 'Tag dropdown unavailable');
           };
+
+function clonePaperProp(paper) {
+    const nextPaper = Object.assign({}, paper || {});
+    nextPaper.utags = Array.isArray(nextPaper.utags) ? nextPaper.utags.slice() : [];
+    nextPaper.ntags = Array.isArray(nextPaper.ntags) ? nextPaper.ntags.slice() : [];
+    return nextPaper;
+}
 
 const Paper = props => {
     const p = props.paper;
@@ -479,14 +700,17 @@ const Paper = props => {
               : 'Add to reading list';
         const btnIcon = isPending ? '⏳' : isInReadingList ? '📖' : '🔖';
         readinglist_btn = (
-            <div
+            <button
+                type="button"
                 class={btnClass}
                 onClick={isPending ? null : props.onToggleReadingList}
                 title={btnTitle}
-                aria-disabled={isPending ? 'true' : 'false'}
+                aria-label={btnTitle}
+                aria-pressed={isInReadingList ? 'true' : 'false'}
+                disabled={isPending}
             >
                 {btnIcon}
-            </div>
+            </button>
         );
     }
 
@@ -533,39 +757,43 @@ const Paper = props => {
             {abstract_section}
             {utag_controls}
             <div class="paper-actions-footer">
-                <div class="rel_summary">{triggerBtn}</div>
-                <div class="rel_more">
-                    <a href={similar_url} target="_blank" rel="noopener noreferrer">
-                        Similar
-                    </a>
+                <div class="paper-actions-group paper-actions-group-primary">
+                    <div class="rel_summary_trigger">{triggerBtn}</div>
+                    <div class="rel_more">
+                        <a href={similar_url} target="_blank" rel="noopener noreferrer">
+                            Similar
+                        </a>
+                    </div>
+                    <div class="rel_inspect">
+                        <a href={inspect_url} target="_blank" rel="noopener noreferrer">
+                            Inspect
+                        </a>
+                    </div>
+                    <div class="rel_summary">
+                        <a href={summary_url} target="_blank" rel="noopener noreferrer">
+                            Summary
+                        </a>
+                    </div>
                 </div>
-                <div class="rel_inspect">
-                    <a href={inspect_url} target="_blank" rel="noopener noreferrer">
-                        Inspect
-                    </a>
-                </div>
-                <div class="rel_summary">
-                    <a href={summary_url} target="_blank" rel="noopener noreferrer">
-                        Summary
-                    </a>
-                </div>
-                <div class="rel_alphaxiv">
-                    <a
-                        href={'https://www.alphaxiv.org/overview/' + p.id}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        alphaXiv
-                    </a>
-                </div>
-                <div class="rel_cool">
-                    <a
-                        href={'https://papers.cool/arxiv/' + p.id}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                    >
-                        Cool
-                    </a>
+                <div class="paper-actions-group paper-actions-group-secondary">
+                    <div class="rel_alphaxiv">
+                        <a
+                            href={'https://www.alphaxiv.org/overview/' + p.id}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            alphaXiv
+                        </a>
+                    </div>
+                    <div class="rel_cool">
+                        <a
+                            href={'https://papers.cool/arxiv/' + p.id}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                        >
+                            Cool
+                        </a>
+                    </div>
                 </div>
             </div>
         </div>
@@ -578,7 +806,7 @@ const PaperList = props => {
     const plst = lst.map((jpaper, ix) => (
         <PaperComponent
             key={jpaper && jpaper.id ? jpaper.id : ix}
-            paper={jpaper}
+            paper={clonePaperProp(jpaper)}
             tags={filtered_tags}
             inReadingList={isInReadingList(jpaper && jpaper.id)}
         />
@@ -592,11 +820,201 @@ const PaperList = props => {
     );
 };
 
+const ChipActionMenu = props => {
+    const actions = Array.isArray(props.actions) ? props.actions.filter(Boolean) : [];
+    const [open, setOpen] = React.useState(false);
+    const menuIdRef = React.useRef(props.menuId || nextModalId('paper-list-chip-actions'));
+    const popoverIdRef = React.useRef(nextModalId('paper-list-chip-popover'));
+    const openRef = React.useRef(open);
+    const triggerRef = React.useRef(null);
+    const popoverRef = React.useRef(null);
+
+    function focusMenuItem(targetIndex) {
+        const popover = popoverRef.current;
+        if (!popover) return;
+        const items = Array.from(popover.querySelectorAll('[role="menuitem"]'));
+        if (!items.length) return;
+        const normalizedIndex = ((targetIndex % items.length) + items.length) % items.length;
+        items[normalizedIndex].focus();
+    }
+
+    React.useEffect(() => {
+        openRef.current = open;
+    }, [open]);
+
+    React.useEffect(() => {
+        if (!open) return undefined;
+        const timer = window.setTimeout(() => focusMenuItem(0), 0);
+        return () => window.clearTimeout(timer);
+    }, [open]);
+
+    React.useEffect(() => {
+        if (!open || !popoverRef.current) return undefined;
+        const adjustPosition = () => {
+            const popover = popoverRef.current;
+            if (!popover) return;
+            popover.style.right = '';
+            popover.style.left = '';
+            popover.style.top = '';
+            popover.style.bottom = '';
+            const rect = popover.getBoundingClientRect();
+            const triggerRect = triggerRef.current
+                ? triggerRef.current.getBoundingClientRect()
+                : { top: 0, bottom: 0 };
+            if (rect.right > window.innerWidth - 8) {
+                popover.style.right = '0';
+                popover.style.left = 'auto';
+            } else if (rect.left < 8) {
+                popover.style.left = '0';
+                popover.style.right = 'auto';
+            }
+            if (rect.bottom > window.innerHeight - 8 && triggerRect.top > rect.height + 8) {
+                popover.style.top = 'auto';
+                popover.style.bottom = 'calc(100% + 6px)';
+            }
+        };
+        const raf = window.requestAnimationFrame(adjustPosition);
+        return () => window.cancelAnimationFrame(raf);
+    }, [open]);
+
+    React.useEffect(() => {
+        const menuId = menuIdRef.current;
+        registerDropdown(menuId, {
+            isOpen: () => openRef.current,
+            close: () => {
+                openRef.current = false;
+                setOpen(false);
+            },
+        });
+        return () => {
+            unregisterDropdown(menuId);
+        };
+    }, []);
+
+    if (!actions.length) return null;
+
+    const rootClassName = [props.className || '', 'chip-actions', open ? 'is-open' : '']
+        .filter(Boolean)
+        .join(' ');
+    const triggerClassName = [
+        props.triggerClassName || '',
+        'chip-actions-trigger',
+        'chip-menu-surface',
+        open ? 'is-open' : '',
+    ]
+        .filter(Boolean)
+        .join(' ');
+
+    return (
+        <div id={menuIdRef.current} class={rootClassName}>
+            <button
+                ref={triggerRef}
+                type="button"
+                class={triggerClassName}
+                aria-haspopup="menu"
+                aria-expanded={open ? 'true' : 'false'}
+                aria-controls={popoverIdRef.current}
+                aria-label={props.triggerLabel || props.label || 'Open actions menu'}
+                onClick={event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setOpen(prevOpen => !prevOpen);
+                }}
+                onKeyDown={event => {
+                    if (event.key === 'ArrowDown') {
+                        event.preventDefault();
+                        setOpen(true);
+                    } else if (event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        setOpen(true);
+                        window.setTimeout(() => focusMenuItem(actions.length - 1), 0);
+                    }
+                }}
+            >
+                <span class="chip-actions-trigger-label">{props.triggerContent}</span>
+            </button>
+            {open ? (
+                <div
+                    id={popoverIdRef.current}
+                    ref={popoverRef}
+                    class="chip-actions-popover"
+                    role="menu"
+                    aria-label={props.label || 'Actions'}
+                    onKeyDown={event => {
+                        const items = popoverRef.current
+                            ? Array.from(popoverRef.current.querySelectorAll('[role="menuitem"]'))
+                            : [];
+                        const currentIndex = items.indexOf(document.activeElement);
+                        if (event.key === 'Escape') {
+                            event.preventDefault();
+                            setOpen(false);
+                            if (
+                                triggerRef.current &&
+                                typeof triggerRef.current.focus === 'function'
+                            ) {
+                                triggerRef.current.focus();
+                            }
+                            return;
+                        }
+                        if (event.key === 'Tab') {
+                            setOpen(false);
+                            return;
+                        }
+                        if (!items.length) return;
+                        if (event.key === 'ArrowDown') {
+                            event.preventDefault();
+                            focusMenuItem(currentIndex + 1);
+                        } else if (event.key === 'ArrowUp') {
+                            event.preventDefault();
+                            focusMenuItem(currentIndex - 1);
+                        } else if (event.key === 'Home') {
+                            event.preventDefault();
+                            focusMenuItem(0);
+                        } else if (event.key === 'End') {
+                            event.preventDefault();
+                            focusMenuItem(items.length - 1);
+                        }
+                    }}
+                >
+                    {actions.map((action, index) => {
+                        const actionClassName = [
+                            'chip-actions-item',
+                            action.tone === 'primary' ? 'chip-actions-item-primary' : '',
+                            action.tone === 'danger' ? 'chip-actions-item-danger' : '',
+                        ]
+                            .filter(Boolean)
+                            .join(' ');
+                        return (
+                            <button
+                                key={action.key || `${menuIdRef.current}-${index}`}
+                                type="button"
+                                role="menuitem"
+                                class={actionClassName}
+                                onClick={event => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setOpen(false);
+                                    if (typeof action.onClick === 'function') {
+                                        action.onClick(event);
+                                    }
+                                }}
+                            >
+                                {action.label}
+                            </button>
+                        );
+                    })}
+                </div>
+            ) : null}
+        </div>
+    );
+};
+
 class PaperComponent extends React.Component {
     constructor(props) {
         super(props);
         this._isMounted = false;
         this._readingListRequestInFlight = false;
+        this._tagFeedbackSeq = new Map();
         const paper = Object.assign({}, props.paper || {});
         paper.utags = Array.isArray(paper.utags) ? paper.utags.slice() : [];
         paper.ntags = Array.isArray(paper.ntags) ? paper.ntags.slice() : [];
@@ -663,6 +1081,43 @@ class PaperComponent extends React.Component {
         if (prevProps.tags !== this.props.tags) {
             this.setState({ tags: this.props.tags });
         }
+        const prevPaper = prevProps.paper || {};
+        const nextPaperProp = this.props.paper || {};
+        const prevUtags = Array.isArray(prevPaper.utags) ? prevPaper.utags.join('|') : '';
+        const nextUtags = Array.isArray(nextPaperProp.utags) ? nextPaperProp.utags.join('|') : '';
+        const prevNtags = Array.isArray(prevPaper.ntags) ? prevPaper.ntags.join('|') : '';
+        const nextNtags = Array.isArray(nextPaperProp.ntags) ? nextPaperProp.ntags.join('|') : '';
+        const tagListsChanged =
+            prevPaper.id !== nextPaperProp.id || prevUtags !== nextUtags || prevNtags !== nextNtags;
+        const contentFieldsChanged =
+            prevPaper.id !== nextPaperProp.id ||
+            prevPaper.tldr !== nextPaperProp.tldr ||
+            prevPaper.summary !== nextPaperProp.summary ||
+            prevPaper.thumb_url !== nextPaperProp.thumb_url;
+        if (tagListsChanged || contentFieldsChanged) {
+            this.setState(prevState => {
+                const currentPaper = prevState.paper || {};
+                const nextPaper = {
+                    ...currentPaper,
+                    ...nextPaperProp,
+                    utags: tagListsChanged
+                        ? Array.isArray(nextPaperProp.utags)
+                            ? nextPaperProp.utags.slice()
+                            : []
+                        : Array.isArray(currentPaper.utags)
+                          ? currentPaper.utags.slice()
+                          : [],
+                    ntags: tagListsChanged
+                        ? Array.isArray(nextPaperProp.ntags)
+                            ? nextPaperProp.ntags.slice()
+                            : []
+                        : Array.isArray(currentPaper.ntags)
+                          ? currentPaper.ntags.slice()
+                          : [],
+                };
+                return { paper: nextPaper };
+            });
+        }
         // Sync reading list state from props (handles cache updates + re-renders)
         if (
             prevProps.inReadingList !== this.props.inReadingList &&
@@ -726,13 +1181,17 @@ class PaperComponent extends React.Component {
         fetchTaskStatus(taskId).then(data => {
             if (!data) return;
             if (data.status && data.status !== 'queued') {
-                this.setState({ summaryQueueRank: 0, summaryQueueTotal: 0, summaryTaskId: '' });
+                this.setStateIfMounted({
+                    summaryQueueRank: 0,
+                    summaryQueueTotal: 0,
+                    summaryTaskId: '',
+                });
                 this.stopQueueRankPolling();
                 return;
             }
             const queueRank = Number(data.queue_rank || 0);
             const queueTotal = Number(data.queue_total || 0);
-            this.setState({ summaryQueueRank: queueRank, summaryQueueTotal: queueTotal });
+            this.setStateIfMounted({ summaryQueueRank: queueRank, summaryQueueTotal: queueTotal });
             updatePaperSummaryStatus(
                 this.state.paper.id,
                 this.state.summaryStatus,
@@ -772,11 +1231,13 @@ class PaperComponent extends React.Component {
     }
 
     applyTagFeedback(tagName, label) {
-        const { paper } = this.state;
+        const paperId = this.state.paper && this.state.paper.id ? this.state.paper.id : '';
+        const requestSeq = Number(this._tagFeedbackSeq.get(tagName) || 0) + 1;
+        this._tagFeedbackSeq.set(tagName, requestSeq);
         return csrfFetch('/api/tag_feedback', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pid: paper.id, tag: tagName, label: label }),
+            body: JSON.stringify({ pid: paperId, tag: tagName, label: label }),
         })
             .then(response => response.json())
             .then(data => {
@@ -784,8 +1245,15 @@ class PaperComponent extends React.Component {
                     const err = data && data.error ? data.error : 'Unknown error';
                     throw new Error(err);
                 }
-                const nextPos = new Set(paper.utags || []);
-                const nextNeg = new Set(paper.ntags || []);
+                if (this._tagFeedbackSeq.get(tagName) !== requestSeq || !this._isMounted) {
+                    return false;
+                }
+                const currentPaper = this.state.paper;
+                if (!currentPaper || currentPaper.id !== paperId) {
+                    return false;
+                }
+                const nextPos = new Set(currentPaper.utags || []);
+                const nextNeg = new Set(currentPaper.ntags || []);
                 const wasPos = nextPos.has(tagName);
                 const wasNeg = nextNeg.has(tagName);
                 let posDelta = 0;
@@ -824,11 +1292,11 @@ class PaperComponent extends React.Component {
                     adjustTagStats(tagName, posDelta, negDelta);
                 }
 
-                const nextPaper = Object.assign({}, paper, {
+                const nextPaper = Object.assign({}, currentPaper, {
                     utags: Array.from(nextPos),
                     ntags: Array.from(nextNeg),
                 });
-                this.setState({ paper: nextPaper });
+                this.setStateIfMounted({ paper: nextPaper });
                 return true;
             });
     }
@@ -872,12 +1340,15 @@ class PaperComponent extends React.Component {
 
         // Check if tag already exists
         if (paper.utags.includes(trimmedTag)) {
-            alert('Tag already exists');
+            notifyUser('Tag already exists', 'warning');
             return;
         }
 
         this.applyTagFeedback(trimmedTag, 1)
-            .then(() => this.setState({ newTagValue: '' }))
+            .then(() => {
+                this.setStateIfMounted({ newTagValue: '' });
+                notifyUser(`Added tag "${trimmedTag}"`, 'success');
+            })
             .catch(error => {
                 console.error('Error adding new tag:', error);
                 const c = (window && window.ArxivSanityCommon) || {};
@@ -896,11 +1367,14 @@ class PaperComponent extends React.Component {
         if (inReadingList) {
             // Remove from reading list
             this.setState({ readingListPending: true });
-            csrfFetch('/api/readinglist/remove', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: paper.id }),
-            })
+            trackReadingListMutation(
+                csrfFetch('/api/readinglist/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    keepalive: true,
+                    body: JSON.stringify({ pid: paper.id }),
+                })
+            )
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -910,6 +1384,7 @@ class PaperComponent extends React.Component {
                         } catch (e) {
                             console.warn('Failed to update readinglist cache (remove):', e);
                         }
+                        notifyUser('Removed from reading list', 'success');
                     } else {
                         console.error('Failed to remove from reading list:', data.error);
                         const c = (window && window.ArxivSanityCommon) || {};
@@ -924,6 +1399,9 @@ class PaperComponent extends React.Component {
                     }
                 })
                 .catch(error => {
+                    if (shouldSuppressMutationError(error)) {
+                        return;
+                    }
                     console.error('Error removing from reading list:', error);
                     const c = (window && window.ArxivSanityCommon) || {};
                     if (typeof c.showToast === 'function') {
@@ -939,11 +1417,14 @@ class PaperComponent extends React.Component {
         } else {
             // Add to reading list
             this.setState({ readingListPending: true });
-            csrfFetch('/api/readinglist/add', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pid: paper.id }),
-            })
+            trackReadingListMutation(
+                csrfFetch('/api/readinglist/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    keepalive: true,
+                    body: JSON.stringify({ pid: paper.id }),
+                })
+            )
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
@@ -971,6 +1452,7 @@ class PaperComponent extends React.Component {
                             undefined,
                             taskId
                         );
+                        notifyUser('Added to reading list', 'success');
                     } else {
                         console.error('Failed to add to reading list:', data.error);
                         const msg =
@@ -979,11 +1461,14 @@ class PaperComponent extends React.Component {
                         if (typeof c.showToast === 'function') {
                             c.showToast(msg, { type: 'error' });
                         } else {
-                            alert(msg);
+                            notifyUser(msg);
                         }
                     }
                 })
                 .catch(error => {
+                    if (shouldSuppressMutationError(error)) {
+                        return;
+                    }
                     console.error('Error adding to reading list:', error);
                     const c = (window && window.ArxivSanityCommon) || {};
                     if (typeof c.showToast === 'function') {
@@ -991,7 +1476,7 @@ class PaperComponent extends React.Component {
                             type: 'error',
                         });
                     } else {
-                        alert('Network error, failed to add to reading list');
+                        notifyUser('Network error, failed to add to reading list');
                     }
                 })
                 .finally(() => {
@@ -1017,7 +1502,7 @@ class PaperComponent extends React.Component {
                 if (data.success) {
                     const taskId = data.task_id ? String(data.task_id) : '';
                     const nextStatus = data.status || 'queued';
-                    this.setState({
+                    this.setStateIfMounted({
                         summaryStatus: nextStatus,
                         summaryLastError: data.last_error || '',
                         summaryTaskId: taskId,
@@ -1038,8 +1523,11 @@ class PaperComponent extends React.Component {
                         undefined,
                         taskId
                     );
+                    if (nextStatus === 'queued' || nextStatus === 'running') {
+                        notifyUser('Summary generation started', 'success');
+                    }
                 } else {
-                    this.setState({
+                    this.setStateIfMounted({
                         summaryStatus: 'failed',
                         summaryLastError: data.error || '',
                         summaryTaskId: '',
@@ -1047,12 +1535,12 @@ class PaperComponent extends React.Component {
                         summaryQueueTotal: 0,
                     });
                     unmarkSummaryPending(paper.id);
-                    alert('Failed to trigger summary: ' + (data.error || 'Unknown error'));
+                    notifyUser('Failed to trigger summary: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error triggering summary:', error);
-                this.setState({
+                this.setStateIfMounted({
                     summaryStatus: 'failed',
                     summaryLastError: String(error),
                     summaryTaskId: '',
@@ -1060,7 +1548,7 @@ class PaperComponent extends React.Component {
                     summaryQueueTotal: 0,
                 });
                 unmarkSummaryPending(paper.id);
-                alert('Network error, failed to trigger summary');
+                notifyUser('Network error, failed to trigger summary');
             })
             .finally(() => {
                 this.setStateIfMounted({ summaryTriggerPending: false });
@@ -1104,13 +1592,9 @@ const Tag = props => {
     const tag_class =
         'rel_utag' + (t.name === 'all' ? ' rel_utag_all' : '') + (isNegOnly ? ' tag-negative' : '');
     const isEditable = t.name !== 'all';
-    const tooltip =
-        t.name === 'all'
-            ? 'Contains all tags'
-            : `Positive: ${t.pos_n || 0} · Negative: ${t.neg_n || 0}`;
-
     const posCount = Number(t.pos_n || 0);
     const negCount = Number(t.neg_n || 0);
+    const hasAnyCount = posCount > 0 || negCount > 0;
 
     const handleOpenManage = e => {
         e.preventDefault();
@@ -1118,54 +1602,85 @@ const Tag = props => {
         if (props.onManage) props.onManage(t);
     };
 
-    const handleOpenReco = e => {
+    const handleEdit = e => {
         e.preventDefault();
         e.stopPropagation();
-        if (isNegOnly) {
-            alert('This tag only has negative examples and cannot be used for recommendations.');
-            return;
-        }
-        window.location.href = turl;
+        if (props.onEdit) props.onEdit(t);
     };
 
+    const handleDelete = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (props.onDelete) props.onDelete(t);
+    };
+
+    const chipContent = (
+        <span class="tag-label-content">
+            {hasAnyCount ? (
+                <span class="tag-counts" aria-hidden="true">
+                    {posCount > 0 ? <span class="tag-count tag-count-pos">+{posCount}</span> : null}
+                    {negCount > 0 ? <span class="tag-count tag-count-neg">-{negCount}</span> : null}
+                </span>
+            ) : null}
+            <span class="tag-name">{t.name}</span>
+        </span>
+    );
+
+    const tagActions = isEditable
+        ? [
+              !isNegOnly
+                  ? {
+                        key: 'view-results',
+                        label: 'View results',
+                        onClick: event => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            window.location.assign(turl);
+                        },
+                        tone: 'primary',
+                    }
+                  : null,
+              {
+                  key: 'manage',
+                  label: 'Manage',
+                  onClick: handleOpenManage,
+                  tone: 'neutral',
+              },
+              {
+                  key: 'rename',
+                  label: 'Rename',
+                  onClick: handleEdit,
+                  tone: 'neutral',
+              },
+              {
+                  key: 'delete',
+                  label: 'Delete',
+                  onClick: handleDelete,
+                  tone: 'danger',
+              },
+          ]
+        : [];
+
     return (
-        <div class={tag_class + ' enhanced-tag'} title={tooltip}>
-            <span
-                class={
-                    isEditable
-                        ? isNegOnly
-                            ? 'tag-link tag-link-disabled'
-                            : 'tag-link'
-                        : 'tag-link tag-link-static'
-                }
-                title={tooltip}
-                onClick={isEditable ? handleOpenManage : undefined}
-            >
-                <span class="tag-counts">
-                    <span class="tag-count tag-count-pos" title="Positive count">
-                        +{posCount}
-                    </span>
-                    <span class="tag-count tag-count-neg" title="Negative count">
-                        −{negCount}
-                    </span>
-                </span>
-                <span class="tag-name">{t.name}</span>
-            </span>
-            <div class="tag-actions">
-                <span class="tag-reco" onClick={handleOpenReco} title="Open recommendations">
-                    ↗
-                </span>
-                {isEditable && (
-                    <span class="tag-edit" onClick={() => props.onEdit(t)} title="Edit tag">
-                        ✎
-                    </span>
-                )}
-                {isEditable && (
-                    <span class="tag-delete" onClick={() => props.onDelete(t)} title="Delete tag">
-                        ×
-                    </span>
-                )}
-            </div>
+        <div class="enhanced-tag">
+            {isEditable ? (
+                <ChipActionMenu
+                    className="tag-actions"
+                    label={`Actions for tag ${t.name}`}
+                    triggerLabel={`Open actions for tag ${t.name}`}
+                    triggerClassName={tag_class + ' tag-link'}
+                    triggerContent={chipContent}
+                    actions={tagActions}
+                />
+            ) : (
+                <a
+                    class={tag_class + ' tag-link tag-link-static'}
+                    href={turl}
+                    aria-label={`Open results for tag ${t.name}`}
+                >
+                    {chipContent}
+                </a>
+            )}
         </div>
     );
 };
@@ -1176,7 +1691,7 @@ const TagList = props => {
     const mutationAction = String(props.mutationAction || '');
     const tlst = lst.map((jtag, ix) => (
         <Tag
-            key={ix}
+            key={jtag && jtag.name ? jtag.name : ix}
             tag={jtag}
             onEdit={props.onEditTag}
             onDelete={props.onDeleteTag}
@@ -1185,414 +1700,350 @@ const TagList = props => {
     ));
 
     // show the #wordwrap element if the user clicks inspect
-    const show_inspect = () => {
+    const show_inspect = event => {
         const wordwrap = document.getElementById('wordwrap');
-        if (wordwrap.style.display === 'block') {
-            wordwrap.style.display = 'none';
-        } else {
-            wordwrap.style.display = 'block';
+        if (!wordwrap) return;
+        const nextExpanded = wordwrap.hidden;
+        wordwrap.hidden = !nextExpanded;
+        if (event && event.currentTarget) {
+            event.currentTarget.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
         }
     };
     const inspect_elt =
         words.length > 0 ? (
-            <div id="inspect_svm" onClick={show_inspect}>
-                inspect
-            </div>
+            <button
+                type="button"
+                id="inspect_svm"
+                aria-controls="wordwrap"
+                aria-expanded="false"
+                onClick={show_inspect}
+            >
+                Inspect terms
+            </button>
         ) : null;
 
     return (
         <div class="enhanced-tag-list">
-            <div class="tag-list-actions">
-                <span class="tag-stats-inline">({lst.length} tags)</span>
-                <button
-                    class="tag-action-btn add-btn"
-                    onClick={props.onAddTag}
-                    title="Add new tag"
-                    disabled={mutationPending}
-                >
-                    + Add
-                </button>
+            <div class="collection-header">
+                <div class="collection-copy">
+                    <h2 class="collection-title">Tags</h2>
+                    <p class="collection-description">
+                        Train recommendations with positive and negative examples.
+                    </p>
+                </div>
+                <div class="tag-list-actions">
+                    <span class="tag-stats-inline">{lst.length} tags</span>
+                    <button
+                        class="tag-action-btn add-btn"
+                        onClick={props.onAddTag}
+                        disabled={mutationPending}
+                    >
+                        + Add
+                    </button>
+                </div>
             </div>
             <div id="tagList" class="rel_utags enhanced-tags">
-                {tlst}
+                {tlst.length ? (
+                    tlst
+                ) : (
+                    <div class="collection-empty">
+                        No tags yet. Add one from a paper card or start with the Add button.
+                    </div>
+                )}
             </div>
             {inspect_elt}
 
             {/* Edit Modal */}
-            {props.showEditModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseEditModal}
-                >
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Edit Tag</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseEditModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="form-group">
-                                <label>Tag Name:</label>
-                                <input
-                                    type="text"
-                                    value={props.editingTagName}
-                                    onChange={props.onEditingTagNameChange}
-                                    class="form-input"
-                                    placeholder="Enter new tag name"
-                                    disabled={mutationPending}
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseEditModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-primary"
-                                onClick={props.onSaveTagEdit}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'edit'
-                                    ? '⏳ Saving...'
-                                    : 'Save'}
-                            </button>
-                        </div>
-                    </div>
+            <AccessibleModal
+                open={props.showEditModal}
+                title="Edit Tag"
+                onRequestClose={props.onCloseEditModal}
+                closeDisabled={mutationPending}
+                footer={
+                    <>
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onCloseEditModal}
+                            disabled={mutationPending}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onSaveTagEdit}
+                            disabled={mutationPending}
+                        >
+                            {mutationPending && mutationAction === 'edit' ? '⏳ Saving...' : 'Save'}
+                        </button>
+                    </>
+                }
+            >
+                <div class="form-group">
+                    <label>Tag Name:</label>
+                    <input
+                        type="text"
+                        value={props.editingTagName}
+                        onChange={props.onEditingTagNameChange}
+                        class="form-input"
+                        placeholder="Enter new tag name"
+                        disabled={mutationPending}
+                        data-modal-autofocus="true"
+                    />
                 </div>
-            )}
+            </AccessibleModal>
 
             {/* Add Tag Modal */}
-            {props.showAddModal && (
-                <div class="modal-overlay" onClick={mutationPending ? null : props.onCloseAddModal}>
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Add Tag</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseAddModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="form-group">
-                                <label>Tag Name:</label>
-                                <input
-                                    type="text"
-                                    value={props.newTagName}
-                                    onChange={props.onNewTagNameChange}
-                                    class="form-input"
-                                    placeholder="Enter tag name"
-                                    disabled={mutationPending}
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseAddModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-primary"
-                                onClick={props.onSaveNewTag}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'add'
-                                    ? '⏳ Saving...'
-                                    : 'Save'}
-                            </button>
-                        </div>
-                    </div>
+            <AccessibleModal
+                open={props.showAddModal}
+                title="Add Tag"
+                onRequestClose={props.onCloseAddModal}
+                closeDisabled={mutationPending}
+                footer={
+                    <>
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onCloseAddModal}
+                            disabled={mutationPending}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onSaveNewTag}
+                            disabled={mutationPending}
+                        >
+                            {mutationPending && mutationAction === 'add' ? '⏳ Saving...' : 'Save'}
+                        </button>
+                    </>
+                }
+            >
+                <div class="form-group">
+                    <label>Tag Name:</label>
+                    <input
+                        type="text"
+                        value={props.newTagName}
+                        onChange={props.onNewTagNameChange}
+                        class="form-input"
+                        placeholder="Enter tag name"
+                        disabled={mutationPending}
+                        data-modal-autofocus="true"
+                    />
                 </div>
-            )}
-
-            {/* Delete Confirmation Modal */}
-            {props.showDeleteModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseDeleteModal}
-                >
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Confirm Delete</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseDeleteModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <p>
-                                Are you sure you want to delete tag "
-                                <strong>{props.deletingTag && props.deletingTag.name}</strong>"?
-                            </p>
-                            <p class="warning-text">
-                                This action is irreversible. All papers under this tag will lose the
-                                tag.
-                            </p>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseDeleteModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-danger"
-                                onClick={props.onConfirmDelete}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'delete'
-                                    ? '⏳ Deleting...'
-                                    : 'Delete'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            </AccessibleModal>
 
             {/* Tag Manage Modal */}
-            {props.showManageModal && (
-                <div class="modal-overlay" onClick={props.onCloseManageModal}>
-                    <div
-                        class="modal-content wide tag-manage-modal"
-                        onClick={e => e.stopPropagation()}
-                    >
-                        <div class="modal-header">
-                            <h3>Manage Tag: {props.managingTagName}</h3>
-                            <span class="modal-close" onClick={props.onCloseManageModal}>
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="tag-manage-toolbar">
-                                <div class="tag-manage-filters">
-                                    <label>View:</label>
-                                    <select
-                                        value={props.manageLabelFilter}
-                                        onChange={props.onManageLabelFilterChange}
-                                    >
-                                        <option value="all">All</option>
-                                        <option value="pos">Positive</option>
-                                        <option value="neg">Negative</option>
-                                    </select>
-                                    <input
-                                        type="text"
-                                        class="form-input"
-                                        placeholder="Search title / author..."
-                                        value={props.manageSearchValue}
-                                        onChange={props.onManageSearchChange}
-                                    />
-                                </div>
-                                <div class="tag-manage-stats">
-                                    <span class="tag-manage-stat">pos: {props.managePosTotal}</span>
-                                    <span class="tag-manage-stat">neg: {props.manageNegTotal}</span>
-                                    <span class="tag-manage-stat">
-                                        total: {props.manageTotalCount}
-                                    </span>
-                                </div>
-                            </div>
-
-                            <div class="tag-manage-add">
-                                <div class="tag-manage-add-row">
-                                    <input
-                                        type="text"
-                                        class="form-input tag-manage-add-input"
-                                        placeholder="Enter PID(s), e.g. 2501.01234"
-                                        value={props.manageAddPidsValue}
-                                        onChange={props.onManageAddPidsChange}
-                                        disabled={props.manageLoading}
-                                        onKeyDown={e => {
-                                            if (
-                                                e.key === 'Enter' &&
-                                                props.manageAddPidsValue.trim() &&
-                                                !props.manageLoading
-                                            ) {
-                                                e.preventDefault();
-                                                props.onManageAddPids(1);
-                                            }
-                                        }}
-                                    />
-                                    <button
-                                        class="btn btn-primary tag-manage-add-btn"
-                                        onClick={() => props.onManageAddPids(1)}
-                                        disabled={
-                                            props.manageLoading || !props.manageAddPidsValue.trim()
-                                        }
-                                        title="Add as positive (Enter)"
-                                    >
-                                        +
-                                    </button>
-                                    <button
-                                        class="btn btn-danger tag-manage-add-btn"
-                                        onClick={() => props.onManageAddPids(-1)}
-                                        disabled={
-                                            props.manageLoading || !props.manageAddPidsValue.trim()
-                                        }
-                                        title="Add as negative"
-                                    >
-                                        −
-                                    </button>
-                                </div>
-                                <div class="tag-manage-help">
-                                    <small>
-                                        Multiple PIDs: separate by comma / space / newline. Enter to
-                                        add as +. Use buttons for + / −.
-                                    </small>
-                                </div>
-
-                                {props.managePidPreviewLoading ||
-                                (props.managePidPreviewItems &&
-                                    props.managePidPreviewItems.length) ||
-                                props.managePidPreviewError ? (
-                                    <div class="tag-manage-pid-preview">
-                                        {props.managePidPreviewLoading ? (
-                                            <div class="tag-manage-pid-preview-loading">
-                                                Previewing…
-                                            </div>
-                                        ) : null}
-                                        {props.managePidPreviewError ? (
-                                            <div class="tag-manage-pid-preview-error">
-                                                {props.managePidPreviewError}
-                                            </div>
-                                        ) : null}
-                                        {(props.managePidPreviewItems || [])
-                                            .slice(0, 8)
-                                            .map((it, ix) => (
-                                                <div
-                                                    key={it.pid + '-' + ix}
-                                                    class={
-                                                        'tag-manage-pid-preview-item' +
-                                                        (it.title ? '' : ' not-found')
-                                                    }
-                                                >
-                                                    <span class="tag-manage-pid-preview-pid">
-                                                        {it.pid}
-                                                    </span>
-                                                    <span
-                                                        class={
-                                                            'tag-manage-pid-preview-title' +
-                                                            (it.title ? '' : ' not-found')
-                                                        }
-                                                    >
-                                                        {it.title || 'Not found in database'}
-                                                    </span>
-                                                </div>
-                                            ))}
-                                        {(props.managePidPreviewItems || []).length > 8 ? (
-                                            <div class="tag-manage-pid-preview-more">
-                                                …and{' '}
-                                                {(props.managePidPreviewItems || []).length - 8}{' '}
-                                                more
-                                            </div>
-                                        ) : null}
-                                    </div>
-                                ) : null}
-                            </div>
-
-                            <div class="tag-manage-list">
-                                {props.manageLoading ? (
-                                    <div class="tag-manage-loading">Loading…</div>
-                                ) : (props.manageItems || []).length === 0 ? (
-                                    <div class="tag-manage-empty">No papers in this tag.</div>
-                                ) : (
-                                    <div class="tag-manage-rows">
-                                        {(props.manageItems || []).map((it, ix) => (
-                                            <div key={it.pid + '-' + ix} class="tag-manage-row">
-                                                <button
-                                                    class={
-                                                        'tag-manage-label ' +
-                                                        (it.label === 0
-                                                            ? 'removed'
-                                                            : it.label === 1
-                                                              ? 'pos'
-                                                              : 'neg')
-                                                    }
-                                                    onClick={() =>
-                                                        props.onManageTogglePid(it.pid, it.label)
-                                                    }
-                                                    title="Toggle positive/negative"
-                                                >
-                                                    {it.label === -1 ? '−' : '+'}
-                                                </button>
-                                                <div class="tag-manage-main">
-                                                    <div class="tag-manage-title">
-                                                        <a
-                                                            href={
-                                                                '/summary?pid=' +
-                                                                encodeURIComponent(it.pid)
-                                                            }
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                        >
-                                                            {it.title || it.pid}
-                                                        </a>
-                                                    </div>
-                                                    <div class="tag-manage-meta">
-                                                        <span class="tag-manage-time">
-                                                            {it.time || ''}
-                                                        </span>
-                                                        <span
-                                                            class="tag-manage-authors"
-                                                            title={it.authors || ''}
-                                                        >
-                                                            {formatAuthorsText(it.authors, {
-                                                                maxAuthors: 10,
-                                                                head: 5,
-                                                                tail: 3,
-                                                            })}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <button
-                                                    class="btn btn-cancel tag-manage-remove"
-                                                    onClick={() => props.onManageSetPid(it.pid, 0)}
-                                                    disabled={it.label === 0}
-                                                >
-                                                    Remove
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <div class="tag-manage-pagination">
-                                <button
-                                    class="btn btn-cancel"
-                                    onClick={props.onManagePrevPage}
-                                    disabled={props.managePageNumber <= 1 || props.manageLoading}
-                                >
-                                    Prev
-                                </button>
-                                <span class="tag-manage-page">Page {props.managePageNumber}</span>
-                                <button
-                                    class="btn btn-primary"
-                                    onClick={props.onManageNextPage}
-                                    disabled={props.manageLoading || !props.manageHasMore}
-                                >
-                                    Next
-                                </button>
-                            </div>
-                        </div>
+            <AccessibleModal
+                open={props.showManageModal}
+                title={`Manage Tag: ${props.managingTagName}`}
+                onRequestClose={props.onCloseManageModal}
+                wide={true}
+                className="tag-manage-modal"
+                footer={
+                    <div class="tag-manage-pagination">
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onManagePrevPage}
+                            disabled={props.managePageNumber <= 1 || props.manageLoading}
+                        >
+                            Prev
+                        </button>
+                        <span class="tag-manage-page">Page {props.managePageNumber}</span>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onManageNextPage}
+                            disabled={props.manageLoading || !props.manageHasMore}
+                        >
+                            Next
+                        </button>
+                    </div>
+                }
+            >
+                <div class="tag-manage-toolbar">
+                    <div class="tag-manage-filters">
+                        <label>View:</label>
+                        <select
+                            value={props.manageLabelFilter}
+                            onChange={props.onManageLabelFilterChange}
+                            data-modal-autofocus="true"
+                        >
+                            <option value="all">All</option>
+                            <option value="pos">Positive</option>
+                            <option value="neg">Negative</option>
+                        </select>
+                        <input
+                            type="text"
+                            class="form-input"
+                            placeholder="Search title / author..."
+                            value={props.manageSearchValue}
+                            onChange={props.onManageSearchChange}
+                        />
+                    </div>
+                    <div class="tag-manage-stats">
+                        <span class="tag-manage-stat">pos: {props.managePosTotal}</span>
+                        <span class="tag-manage-stat">neg: {props.manageNegTotal}</span>
+                        <span class="tag-manage-stat">total: {props.manageTotalCount}</span>
                     </div>
                 </div>
-            )}
+
+                <div class="tag-manage-add">
+                    <div class="tag-manage-add-row">
+                        <input
+                            type="text"
+                            class="form-input tag-manage-add-input"
+                            placeholder="Enter PID(s), e.g. 2501.01234"
+                            value={props.manageAddPidsValue}
+                            onChange={props.onManageAddPidsChange}
+                            disabled={props.manageLoading || Boolean(props.manageMutationPid)}
+                            onKeyDown={e => {
+                                if (
+                                    e.key === 'Enter' &&
+                                    props.manageAddPidsValue.trim() &&
+                                    !props.manageLoading
+                                ) {
+                                    e.preventDefault();
+                                    props.onManageAddPids(1);
+                                }
+                            }}
+                        />
+                        <button
+                            class="btn btn-primary tag-manage-add-btn"
+                            onClick={() => props.onManageAddPids(1)}
+                            disabled={
+                                props.manageLoading ||
+                                Boolean(props.manageMutationPid) ||
+                                !props.manageAddPidsValue.trim()
+                            }
+                            title="Add as positive (Enter)"
+                        >
+                            +
+                        </button>
+                        <button
+                            class="btn btn-danger tag-manage-add-btn"
+                            onClick={() => props.onManageAddPids(-1)}
+                            disabled={
+                                props.manageLoading ||
+                                Boolean(props.manageMutationPid) ||
+                                !props.manageAddPidsValue.trim()
+                            }
+                            title="Add as negative"
+                        >
+                            −
+                        </button>
+                    </div>
+                    <div class="tag-manage-help">
+                        <small>
+                            Multiple PIDs: separate by comma / space / newline. Enter to add as +.
+                            Use buttons for + / −.
+                        </small>
+                    </div>
+
+                    {props.managePidPreviewLoading ||
+                    (props.managePidPreviewItems && props.managePidPreviewItems.length) ||
+                    props.managePidPreviewError ? (
+                        <div class="tag-manage-pid-preview">
+                            {props.managePidPreviewLoading ? (
+                                <div class="tag-manage-pid-preview-loading">Previewing…</div>
+                            ) : null}
+                            {props.managePidPreviewError ? (
+                                <div class="tag-manage-pid-preview-error">
+                                    {props.managePidPreviewError}
+                                </div>
+                            ) : null}
+                            {(props.managePidPreviewItems || []).slice(0, 8).map((it, ix) => (
+                                <div
+                                    key={it.pid + '-' + ix}
+                                    class={
+                                        'tag-manage-pid-preview-item' +
+                                        (it.title ? '' : ' not-found')
+                                    }
+                                >
+                                    <span class="tag-manage-pid-preview-pid">{it.pid}</span>
+                                    <span
+                                        class={
+                                            'tag-manage-pid-preview-title' +
+                                            (it.title ? '' : ' not-found')
+                                        }
+                                    >
+                                        {it.title || 'Not found in database'}
+                                    </span>
+                                </div>
+                            ))}
+                            {(props.managePidPreviewItems || []).length > 8 ? (
+                                <div class="tag-manage-pid-preview-more">
+                                    …and {(props.managePidPreviewItems || []).length - 8} more
+                                </div>
+                            ) : null}
+                        </div>
+                    ) : null}
+                </div>
+
+                <div class="tag-manage-list">
+                    {props.manageLoading ? (
+                        <div class="tag-manage-loading">Loading…</div>
+                    ) : (props.manageItems || []).length === 0 ? (
+                        <div class="tag-manage-empty">No papers in this tag.</div>
+                    ) : (
+                        <div class="tag-manage-rows">
+                            {(props.manageItems || []).map((it, ix) => (
+                                <div key={it.pid + '-' + ix} class="tag-manage-row">
+                                    <button
+                                        class={
+                                            'tag-manage-label ' +
+                                            (it.label === 0
+                                                ? 'removed'
+                                                : it.label === 1
+                                                  ? 'pos'
+                                                  : 'neg')
+                                        }
+                                        onClick={() => props.onManageTogglePid(it.pid, it.label)}
+                                        title="Toggle positive/negative"
+                                        disabled={
+                                            props.manageLoading || Boolean(props.manageMutationPid)
+                                        }
+                                    >
+                                        {it.label === -1 ? '−' : '+'}
+                                    </button>
+                                    <div class="tag-manage-main">
+                                        <div class="tag-manage-title">
+                                            <a
+                                                href={'/summary?pid=' + encodeURIComponent(it.pid)}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                            >
+                                                {it.title || it.pid}
+                                            </a>
+                                        </div>
+                                        <div class="tag-manage-meta">
+                                            <span class="tag-manage-time">{it.time || ''}</span>
+                                            <span
+                                                class="tag-manage-authors"
+                                                title={it.authors || ''}
+                                            >
+                                                {formatAuthorsText(it.authors, {
+                                                    maxAuthors: 10,
+                                                    head: 5,
+                                                    tail: 3,
+                                                })}
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <button
+                                        class="btn btn-cancel tag-manage-remove"
+                                        onClick={() => props.onManageSetPid(it.pid, 0)}
+                                        disabled={
+                                            it.label === 0 ||
+                                            props.manageLoading ||
+                                            Boolean(props.manageMutationPid)
+                                        }
+                                    >
+                                        Remove
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            </AccessibleModal>
         </div>
     );
 };
@@ -1600,6 +2051,7 @@ const TagList = props => {
 class TagListComponent extends React.Component {
     constructor(props) {
         super(props);
+        this._isMounted = false;
         this.state = {
             tags: props.tags,
             showEditModal: false,
@@ -1628,6 +2080,7 @@ class TagListComponent extends React.Component {
             managePidPreviewLoading: false,
             managePidPreviewItems: [],
             managePidPreviewError: '',
+            manageMutationPid: '',
         };
         this.handleEditTag = this.handleEditTag.bind(this);
         this.handleDeleteTag = this.handleDeleteTag.bind(this);
@@ -1640,7 +2093,6 @@ class TagListComponent extends React.Component {
         this.handleSaveTagEdit = this.handleSaveTagEdit.bind(this);
         this.handleSaveNewTag = this.handleSaveNewTag.bind(this);
         this.handleConfirmDelete = this.handleConfirmDelete.bind(this);
-        this.handleKeyDown = this.handleKeyDown.bind(this);
 
         this.handleManageTag = this.handleManageTag.bind(this);
         this.handleCloseManageModal = this.handleCloseManageModal.bind(this);
@@ -1654,10 +2106,18 @@ class TagListComponent extends React.Component {
         this.handleManageAddPids = this.handleManageAddPids.bind(this);
 
         this._pidPreviewTimeout = null;
+        this._searchTimeout = null;
+        this._manageFetchSeq = 0;
+        this._pidPreviewSeq = 0;
+    }
+
+    setStateIfMounted(nextState) {
+        if (!this._isMounted) return;
+        this.setState(nextState);
     }
 
     componentDidMount() {
-        document.addEventListener('keydown', this.handleKeyDown);
+        this._isMounted = true;
     }
 
     componentDidUpdate(prevProps) {
@@ -1667,22 +2127,11 @@ class TagListComponent extends React.Component {
     }
 
     componentWillUnmount() {
-        document.removeEventListener('keydown', this.handleKeyDown);
-    }
-
-    handleKeyDown(event) {
-        if (event.key === 'Escape') {
-            if (this.state.mutationPending) return;
-            if (this.state.showEditModal) {
-                this.handleCloseEditModal();
-            }
-            if (this.state.showDeleteModal) {
-                this.handleCloseDeleteModal();
-            }
-            if (this.state.showAddModal) {
-                this.handleCloseAddModal();
-            }
-        }
+        this._isMounted = false;
+        if (this._searchTimeout) clearTimeout(this._searchTimeout);
+        if (this._pidPreviewTimeout) clearTimeout(this._pidPreviewTimeout);
+        this._manageFetchSeq += 1;
+        this._pidPreviewSeq += 1;
     }
 
     handleEditTag(tag) {
@@ -1694,12 +2143,24 @@ class TagListComponent extends React.Component {
         });
     }
 
-    handleDeleteTag(tag) {
+    async handleDeleteTag(tag) {
         if (this.state.mutationPending) return;
-        this.setState({
-            showDeleteModal: true,
-            deletingTag: tag,
+        if (typeof showConfirm !== 'function') {
+            notifyUser('Confirmation dialog is unavailable. Please refresh and try again.');
+            return;
+        }
+
+        const confirmed = await showConfirm({
+            title: `Delete tag "${tag.name}"?`,
+            message: 'All papers under this tag will lose the tag.',
+            detail: 'This action is irreversible.',
+            confirmText: 'Delete',
+            cancelText: 'Cancel',
+            danger: true,
         });
+        if (!confirmed || !this._isMounted) return;
+
+        this.handleConfirmDelete(tag);
     }
 
     handleAddTag() {
@@ -1727,21 +2188,21 @@ class TagListComponent extends React.Component {
         const { newTagName } = this.state;
         const trimmedTag = newTagName.trim();
         if (!trimmedTag) {
-            alert('Tag name cannot be empty');
+            notifyUser('Tag name cannot be empty', 'warning');
             return;
         }
 
         if (trimmedTag === 'all' || trimmedTag === 'null') {
-            alert('Tag name is reserved');
+            notifyUser('Tag name is reserved', 'warning');
             return;
         }
         if (trimmedTag.includes('/') || trimmedTag.includes('\\')) {
-            alert('Tag name cannot contain slashes');
+            notifyUser('Tag name cannot contain slashes', 'warning');
             return;
         }
 
         if (this.state.tags.some(tag => tag.name === trimmedTag)) {
-            alert('Tag already exists');
+            notifyUser('Tag already exists', 'warning');
             return;
         }
 
@@ -1750,7 +2211,7 @@ class TagListComponent extends React.Component {
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags
                                 .filter(tag => tag.name !== 'all')
@@ -1763,16 +2224,17 @@ class TagListComponent extends React.Component {
                             newTagName: '',
                         };
                     });
+                    notifyUser(`Created tag "${trimmedTag}"`, 'success');
                 } else {
-                    alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error adding tag:', error);
-                alert('Network error, add failed');
+                notifyUser('Network error, add failed');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -1794,6 +2256,16 @@ class TagListComponent extends React.Component {
     }
 
     handleCloseManageModal() {
+        if (this._searchTimeout) {
+            clearTimeout(this._searchTimeout);
+            this._searchTimeout = null;
+        }
+        if (this._pidPreviewTimeout) {
+            clearTimeout(this._pidPreviewTimeout);
+            this._pidPreviewTimeout = null;
+        }
+        this._manageFetchSeq += 1;
+        this._pidPreviewSeq += 1;
         this.setState({
             showManageModal: false,
             managingTag: null,
@@ -1809,6 +2281,7 @@ class TagListComponent extends React.Component {
             managePidPreviewLoading: false,
             managePidPreviewItems: [],
             managePidPreviewError: '',
+            manageMutationPid: '',
         });
     }
 
@@ -1829,17 +2302,24 @@ class TagListComponent extends React.Component {
         return out;
     }
 
-    async fetchPidPreview(pids) {
+    async fetchPidPreview(rawValue, pids) {
+        const requestSeq = ++this._pidPreviewSeq;
+        const tagName =
+            this.state.managingTag && this.state.managingTag.name
+                ? String(this.state.managingTag.name)
+                : '';
+        const inputValue = String(rawValue || '');
         const list = Array.isArray(pids) ? pids : [];
         if (list.length === 0) {
-            this.setState({
+            if (requestSeq !== this._pidPreviewSeq) return;
+            this.setStateIfMounted({
                 managePidPreviewLoading: false,
                 managePidPreviewItems: [],
                 managePidPreviewError: '',
             });
             return;
         }
-        this.setState({ managePidPreviewLoading: true, managePidPreviewError: '' });
+        this.setStateIfMounted({ managePidPreviewLoading: true, managePidPreviewError: '' });
         try {
             const resp = await csrfFetch('/api/paper_titles', {
                 method: 'POST',
@@ -1851,10 +2331,31 @@ class TagListComponent extends React.Component {
                 throw new Error(data && data.error ? data.error : 'Failed to preview PIDs');
             }
             const items = Array.isArray(data.items) ? data.items : [];
-            this.setState({ managePidPreviewItems: items, managePidPreviewLoading: false });
+            if (
+                requestSeq !== this._pidPreviewSeq ||
+                !this.state.showManageModal ||
+                !this.state.managingTag ||
+                this.state.managingTag.name !== tagName ||
+                String(this.state.manageAddPidsValue || '') !== inputValue
+            ) {
+                return;
+            }
+            this.setStateIfMounted({
+                managePidPreviewItems: items,
+                managePidPreviewLoading: false,
+            });
         } catch (e) {
+            if (
+                requestSeq !== this._pidPreviewSeq ||
+                !this.state.showManageModal ||
+                !this.state.managingTag ||
+                this.state.managingTag.name !== tagName ||
+                String(this.state.manageAddPidsValue || '') !== inputValue
+            ) {
+                return;
+            }
             const friendlyMsg = CommonUtils.handleApiError(e, 'Preview PIDs');
-            this.setState({
+            this.setStateIfMounted({
                 managePidPreviewLoading: false,
                 managePidPreviewItems: [],
                 managePidPreviewError: friendlyMsg,
@@ -1863,6 +2364,7 @@ class TagListComponent extends React.Component {
     }
 
     async fetchManageMembers(overrides = {}) {
+        const requestSeq = ++this._manageFetchSeq;
         const managingTag =
             overrides.managingTag !== undefined ? overrides.managingTag : this.state.managingTag;
         if (!managingTag || !managingTag.name) return;
@@ -1882,16 +2384,18 @@ class TagListComponent extends React.Component {
             overrides.manageSearchValue !== undefined
                 ? overrides.manageSearchValue
                 : this.state.manageSearchValue;
+        const expectedTagName = String(managingTag.name);
+        const expectedSearch = String(search || '').trim();
 
-        this.setState({ manageLoading: true });
+        this.setStateIfMounted({ manageLoading: true });
         try {
             const params = new URLSearchParams();
-            params.set('tag', managingTag.name);
+            params.set('tag', expectedTagName);
             params.set('label', label);
             params.set('page_number', String(page_number));
             params.set('page_size', String(page_size));
-            if (search && search.trim()) {
-                params.set('search', search.trim());
+            if (expectedSearch) {
+                params.set('search', expectedSearch);
             }
             const resp = await fetch('/api/tag_members?' + params.toString(), {
                 credentials: 'same-origin',
@@ -1901,7 +2405,19 @@ class TagListComponent extends React.Component {
                 throw new Error(data && data.error ? data.error : 'Failed to load tag members');
             }
             const items = Array.isArray(data.items) ? data.items : [];
-            this.setState({
+            if (
+                requestSeq !== this._manageFetchSeq ||
+                !this.state.showManageModal ||
+                !this.state.managingTag ||
+                this.state.managingTag.name !== expectedTagName ||
+                this.state.manageLabelFilter !== label ||
+                this.state.managePageNumber !== page_number ||
+                this.state.managePageSize !== page_size ||
+                String(this.state.manageSearchValue || '').trim() !== expectedSearch
+            ) {
+                return;
+            }
+            this.setStateIfMounted({
                 manageItems: items,
                 manageTotalCount: data.total_count || 0,
                 managePosTotal: data.pos_total || 0,
@@ -1909,16 +2425,31 @@ class TagListComponent extends React.Component {
                 manageHasMore: page_number * page_size < (data.total_count || 0),
             });
         } catch (e) {
+            if (requestSeq !== this._manageFetchSeq) {
+                return;
+            }
             const friendlyMsg = CommonUtils.handleApiError(e, 'Fetch Tag Members');
             console.error('Failed to fetch tag members:', e);
-            alert('Failed to load tag members: ' + friendlyMsg);
+            notifyUser('Failed to load tag members: ' + friendlyMsg);
         } finally {
-            this.setState({ manageLoading: false });
+            if (requestSeq === this._manageFetchSeq) {
+                this.setStateIfMounted({ manageLoading: false });
+            }
         }
     }
 
     handleManageTag(tag) {
         if (!tag || !tag.name || tag.name === 'all') return;
+        if (this._searchTimeout) {
+            clearTimeout(this._searchTimeout);
+            this._searchTimeout = null;
+        }
+        if (this._pidPreviewTimeout) {
+            clearTimeout(this._pidPreviewTimeout);
+            this._pidPreviewTimeout = null;
+        }
+        this._manageFetchSeq += 1;
+        this._pidPreviewSeq += 1;
         this.setState(
             {
                 showManageModal: true,
@@ -1932,6 +2463,10 @@ class TagListComponent extends React.Component {
                 manageNegTotal: 0,
                 manageHasMore: false,
                 manageAddPidsValue: '',
+                managePidPreviewLoading: false,
+                managePidPreviewItems: [],
+                managePidPreviewError: '',
+                manageMutationPid: '',
             },
             () =>
                 this.fetchManageMembers({
@@ -1956,6 +2491,7 @@ class TagListComponent extends React.Component {
         // Debounce search
         if (this._searchTimeout) clearTimeout(this._searchTimeout);
         this._searchTimeout = setTimeout(() => {
+            this._searchTimeout = null;
             this.setState({ managePageNumber: 1 }, () => {
                 this.fetchManageMembers({ manageSearchValue: val, managePageNumber: 1 });
             });
@@ -1981,7 +2517,8 @@ class TagListComponent extends React.Component {
 
     async handleManageSetPid(pid, label) {
         const managingTag = this.state.managingTag;
-        if (!managingTag || !managingTag.name) return;
+        if (!managingTag || !managingTag.name || this.state.manageMutationPid) return;
+        this.setStateIfMounted({ manageMutationPid: pid });
         try {
             const resp = await csrfFetch('/api/tag_feedback', {
                 method: 'POST',
@@ -1996,7 +2533,11 @@ class TagListComponent extends React.Component {
         } catch (e) {
             const friendlyMsg = CommonUtils.handleApiError(e, 'Update Tag Feedback');
             console.error('Failed to update tag feedback:', e);
-            alert('Failed to update tag: ' + friendlyMsg);
+            notifyUser('Failed to update tag: ' + friendlyMsg);
+        } finally {
+            this.setStateIfMounted(prevState =>
+                prevState.manageMutationPid === pid ? { manageMutationPid: '' } : null
+            );
         }
     }
 
@@ -2013,8 +2554,9 @@ class TagListComponent extends React.Component {
 
         if (this._pidPreviewTimeout) clearTimeout(this._pidPreviewTimeout);
         this._pidPreviewTimeout = setTimeout(() => {
+            this._pidPreviewTimeout = null;
             const pids = this.parsePidInput(val);
-            this.fetchPidPreview(pids);
+            this.fetchPidPreview(val, pids);
         }, 250);
     }
 
@@ -2023,9 +2565,13 @@ class TagListComponent extends React.Component {
         if (!managingTag || !managingTag.name) return;
         const raw = (this.state.manageAddPidsValue || '').trim();
         if (!raw) return;
+        if (this._pidPreviewTimeout) {
+            clearTimeout(this._pidPreviewTimeout);
+            this._pidPreviewTimeout = null;
+        }
         const pids = this.parsePidInput(raw).slice(0, 200);
         if (pids.length === 0) return;
-        this.setState({ manageLoading: true });
+        this.setStateIfMounted({ manageLoading: true });
         try {
             const tasks = pids.map(pid =>
                 csrfFetch('/api/tag_feedback', {
@@ -2039,16 +2585,20 @@ class TagListComponent extends React.Component {
             const results = await Promise.all(tasks);
             const failed = results.filter(r => !r || !r.success).length;
             if (failed) {
-                alert(`Added with ${failed} failures (check PIDs).`);
+                notifyUser(`Added with ${failed} failures (check PIDs).`, 'warning');
+            } else {
+                notifyUser(`Added ${pids.length} paper IDs to "${managingTag.name}"`, 'success');
             }
-            this.setState({
+            this._pidPreviewSeq += 1;
+            this.setStateIfMounted({
                 manageAddPidsValue: '',
+                managePidPreviewLoading: false,
                 managePidPreviewItems: [],
                 managePidPreviewError: '',
             });
             await this.fetchManageMembers();
         } finally {
-            this.setState({ manageLoading: false });
+            this.setStateIfMounted({ manageLoading: false });
         }
     }
 
@@ -2060,21 +2610,21 @@ class TagListComponent extends React.Component {
         if (this.state.mutationPending) return;
         const { editingTag, editingTagName } = this.state;
         if (!editingTagName.trim()) {
-            alert('Tag name cannot be empty');
+            notifyUser('Tag name cannot be empty', 'warning');
             return;
         }
 
         const trimmedName = editingTagName.trim();
         if (trimmedName === 'all' || trimmedName === 'null') {
-            alert('Tag name is reserved');
+            notifyUser('Tag name is reserved', 'warning');
             return;
         }
         if (trimmedName.includes('/') || trimmedName.includes('\\')) {
-            alert('Tag name cannot contain slashes');
+            notifyUser('Tag name cannot contain slashes', 'warning');
             return;
         }
         if (this.state.tags.some(tag => tag.name === trimmedName && tag.name !== editingTag.name)) {
-            alert('Tag already exists');
+            notifyUser('Tag already exists', 'warning');
             return;
         }
 
@@ -2085,7 +2635,7 @@ class TagListComponent extends React.Component {
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.map(tag =>
                                 tag.name === editingTag.name ? { ...tag, name: trimmedName } : tag
@@ -2105,29 +2655,31 @@ class TagListComponent extends React.Component {
                             editingTagName: '',
                         };
                     });
+                    notifyUser(`Renamed tag to "${trimmedName}"`, 'success');
                 } else {
-                    alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error renaming tag:', error);
-                alert('Network error, rename failed');
+                notifyUser('Network error, rename failed');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
-    handleConfirmDelete() {
+    handleConfirmDelete(tagToDelete) {
         if (this.state.mutationPending) return;
-        const { deletingTag } = this.state;
+        const deletingTag = tagToDelete || this.state.deletingTag;
+        if (!deletingTag || !deletingTag.name) return;
 
         this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del/' + encodeURIComponent(deletingTag.name))
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextTags = normalizeTags(
                             prevState.tags.filter(tag => tag.name !== deletingTag.name)
                         );
@@ -2139,20 +2691,20 @@ class TagListComponent extends React.Component {
                         setGlobalTags(nextTags, { renderTags: false });
                         return {
                             tags: nextTags,
-                            showDeleteModal: false,
                             deletingTag: null,
                         };
                     });
+                    notifyUser(`Deleted tag "${deletingTag.name}"`, 'success');
                 } else {
-                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error deleting tag:', error);
-                alert('Network error, delete failed');
+                notifyUser('Network error, delete failed');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -2169,27 +2721,24 @@ class TagListComponent extends React.Component {
                 onAddTag={this.handleAddTag}
                 onManageTag={this.handleManageTag}
                 showEditModal={this.state.showEditModal}
-                showDeleteModal={this.state.showDeleteModal}
                 showAddModal={this.state.showAddModal}
                 editingTagName={this.state.editingTagName}
                 newTagName={this.state.newTagName}
-                deletingTag={this.state.deletingTag}
                 mutationPending={this.state.mutationPending}
                 mutationAction={this.state.mutationAction}
                 onCloseEditModal={this.handleCloseEditModal}
-                onCloseDeleteModal={this.handleCloseDeleteModal}
                 onCloseAddModal={this.handleCloseAddModal}
                 onEditingTagNameChange={this.handleEditingTagNameChange}
                 onNewTagNameChange={this.handleNewTagNameChange}
                 onSaveTagEdit={this.handleSaveTagEdit}
                 onSaveNewTag={this.handleSaveNewTag}
-                onConfirmDelete={this.handleConfirmDelete}
                 showManageModal={this.state.showManageModal}
                 managingTagName={managingTagName}
                 manageLabelFilter={this.state.manageLabelFilter}
                 manageSearchValue={this.state.manageSearchValue}
                 manageItems={this.state.manageItems}
                 manageLoading={this.state.manageLoading}
+                manageMutationPid={this.state.manageMutationPid}
                 managePageNumber={this.state.managePageNumber}
                 manageTotalCount={this.state.manageTotalCount}
                 managePosTotal={this.state.managePosTotal}
@@ -2216,40 +2765,55 @@ class TagListComponent extends React.Component {
 const CombinedTag = props => {
     const t = props.comtag;
     const turl = buildTagUrl(t.name, { logic: 'and' });
-    const tag_class = 'rel_utag rel_utag_all enhanced-combined-tag';
+    const tag_class = 'rel_utag';
 
-    const handleOpenReco = e => {
+    const handleEdit = e => {
         e.preventDefault();
         e.stopPropagation();
-        window.location.href = turl;
+        if (props.onEdit) props.onEdit(t);
     };
 
+    const handleDelete = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (props.onDelete) props.onDelete(t);
+    };
+
+    const combinedTagActions = [
+        {
+            key: 'view-results',
+            label: 'View results',
+            onClick: event => {
+                event.preventDefault();
+                event.stopPropagation();
+                window.location.assign(turl);
+            },
+            tone: 'primary',
+        },
+        {
+            key: 'edit',
+            label: 'Edit',
+            onClick: handleEdit,
+            tone: 'neutral',
+        },
+        {
+            key: 'delete',
+            label: 'Delete',
+            onClick: handleDelete,
+            tone: 'danger',
+        },
+    ];
+
     return (
-        <div class={tag_class}>
-            <span class="combined-tag-link combined-tag-link-static">{t.name}</span>
-            <div class="combined-tag-actions">
-                <span
-                    class="combined-tag-reco"
-                    onClick={handleOpenReco}
-                    title="Open recommendations"
-                >
-                    ↗
-                </span>
-                <span
-                    class="combined-tag-edit"
-                    onClick={() => props.onEdit(t)}
-                    title="Edit combined tag"
-                >
-                    ✎
-                </span>
-                <span
-                    class="combined-tag-delete"
-                    onClick={() => props.onDelete(t)}
-                    title="Delete combined tag"
-                >
-                    ×
-                </span>
-            </div>
+        <div class="enhanced-combined-tag">
+            <ChipActionMenu
+                className="combined-tag-actions"
+                label={`Actions for combined tag ${t.name}`}
+                triggerLabel={`Open actions for combined tag ${t.name}`}
+                triggerClassName={tag_class + ' combined-tag-link'}
+                triggerContent={<span class="combined-tag-name">{t.name}</span>}
+                actions={combinedTagActions}
+            />
         </div>
     );
 };
@@ -2260,7 +2824,7 @@ const CombinedTagList = props => {
     const mutationAction = String(props.mutationAction || '');
     const tlst = lst.map((jtag, ix) => (
         <CombinedTag
-            key={ix}
+            key={jtag && jtag.name ? jtag.name : ix}
             comtag={jtag}
             onEdit={props.onEditCombinedTag}
             onDelete={props.onDeleteCombinedTag}
@@ -2269,159 +2833,111 @@ const CombinedTagList = props => {
 
     return (
         <div class="enhanced-combined-tag-list">
-            <div class="combined-tag-list-actions">
-                <span class="tag-stats-inline">({lst.length} combined tags)</span>
-                <button
-                    class="tag-action-btn add-btn"
-                    onClick={props.onAddCombinedTag}
-                    title="Add new combined tag"
-                    disabled={mutationPending}
-                >
-                    + Add
-                </button>
+            <div class="collection-header">
+                <div class="collection-copy">
+                    <h2 class="collection-title">Combined tags</h2>
+                    <p class="collection-description">
+                        Save reusable AND queries built from your existing tags.
+                    </p>
+                </div>
+                <div class="combined-tag-list-actions">
+                    <span class="tag-stats-inline">{lst.length} combined tags</span>
+                    <button
+                        class="tag-action-btn add-btn"
+                        onClick={props.onAddCombinedTag}
+                        disabled={mutationPending}
+                    >
+                        + Add
+                    </button>
+                </div>
             </div>
             <div id="combinedTagList" class="rel_utags enhanced-combined-tags">
-                {tlst}
+                {tlst.length ? (
+                    tlst
+                ) : (
+                    <div class="collection-empty">
+                        No combined tags yet. Combine two or more tags to create a reusable
+                        recommendation view.
+                    </div>
+                )}
             </div>
 
             {/* Add/Edit Combined Tag Modal */}
-            {props.showAddEditModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseAddEditModal}
-                >
-                    <div class="modal-content wide" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>
-                                {props.editingCombinedTag
-                                    ? 'Edit Combined Tag'
-                                    : 'Add Combined Tag'}
-                            </h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseAddEditModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="form-group">
-                                <label>Select tags to combine:</label>
-                                <MultiSelectDropdown
-                                    selectedTags={props.selectedTagsForCombination}
-                                    negativeTags={[]}
-                                    availableTags={props.availableTagsForCombination}
-                                    isOpen={props.combinationDropdownOpen}
-                                    onToggle={props.onToggleCombinationDropdown}
-                                    onTagCycle={props.onCombinationTagToggle}
-                                    onClearTag={props.onRemoveCombinationTag}
-                                    newTagValue=""
-                                    onNewTagChange={() => {}}
-                                    onAddNewTag={() => {}}
-                                    dropdownId="combination-dropdown"
-                                    searchValue={props.combinationSearchValue}
-                                    onSearchChange={props.onCombinationSearchChange}
-                                    showNewTagInput={false}
-                                    pending={mutationPending}
-                                />
-                            </div>
-                            {props.selectedTagsForCombination.length > 0 && (
-                                <div class="tag-combination-preview">
-                                    <h4>Preview Combination:</h4>
-                                    <div class="tag-combination-preview-tags">
-                                        {props.selectedTagsForCombination.map((tag, ix) => (
-                                            <span key={ix} class="tag-combination-preview-tag">
-                                                {tag}
-                                            </span>
-                                        ))}
-                                    </div>
-                                    <p
-                                        style={{
-                                            marginTop: '10px',
-                                            fontSize: '12px',
-                                            color: 'var(--text-color)',
-                                            opacity: '0.8',
-                                        }}
-                                    >
-                                        Combination Name:{' '}
-                                        {props.selectedTagsForCombination.join(', ')}
-                                    </p>
-                                </div>
-                            )}
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseAddEditModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-primary"
-                                onClick={props.onSaveCombinedTag}
-                                disabled={
-                                    mutationPending || props.selectedTagsForCombination.length < 2
-                                }
-                            >
-                                {mutationPending && mutationAction === 'addedit'
-                                    ? '⏳ Saving...'
-                                    : props.editingCombinedTag
-                                      ? 'Save'
-                                      : 'Create'}
-                            </button>
-                        </div>
-                    </div>
+            <AccessibleModal
+                open={props.showAddEditModal}
+                title={props.editingCombinedTag ? 'Edit Combined Tag' : 'Add Combined Tag'}
+                onRequestClose={props.onCloseAddEditModal}
+                closeDisabled={mutationPending}
+                wide={true}
+                onEscapeKey={
+                    props.combinationDropdownOpen
+                        ? () => {
+                              props.onCloseCombinationDropdown();
+                              return true;
+                          }
+                        : null
+                }
+                footer={
+                    <>
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onCloseAddEditModal}
+                            disabled={mutationPending}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onSaveCombinedTag}
+                            disabled={
+                                mutationPending || props.selectedTagsForCombination.length < 2
+                            }
+                        >
+                            {mutationPending && mutationAction === 'addedit'
+                                ? '⏳ Saving...'
+                                : props.editingCombinedTag
+                                  ? 'Save'
+                                  : 'Create'}
+                        </button>
+                    </>
+                }
+            >
+                <div class="form-group">
+                    <label>Select tags to combine:</label>
+                    <MultiSelectDropdown
+                        selectedTags={props.selectedTagsForCombination}
+                        negativeTags={[]}
+                        availableTags={props.availableTagsForCombination}
+                        isOpen={props.combinationDropdownOpen}
+                        onToggle={props.onToggleCombinationDropdown}
+                        onTagCycle={props.onCombinationTagToggle}
+                        onClearTag={props.onRemoveCombinationTag}
+                        newTagValue=""
+                        onNewTagChange={() => {}}
+                        onAddNewTag={() => {}}
+                        dropdownId="combination-dropdown"
+                        searchValue={props.combinationSearchValue}
+                        onSearchChange={props.onCombinationSearchChange}
+                        showNewTagInput={false}
+                        pending={mutationPending}
+                    />
                 </div>
-            )}
-
-            {/* Delete Confirmation Modal */}
-            {props.showDeleteModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseDeleteModal}
-                >
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Confirm Delete</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseDeleteModal}
-                            >
-                                ×
-                            </span>
+                {props.selectedTagsForCombination.length > 0 && (
+                    <div class="tag-combination-preview">
+                        <h4>Preview Combination:</h4>
+                        <div class="tag-combination-preview-tags">
+                            {props.selectedTagsForCombination.map((tag, ix) => (
+                                <span key={ix} class="tag-combination-preview-tag">
+                                    {tag}
+                                </span>
+                            ))}
                         </div>
-                        <div class="modal-body">
-                            <p>
-                                Are you sure you want to delete combined tag "
-                                <strong>
-                                    {props.deletingCombinedTag && props.deletingCombinedTag.name}
-                                </strong>
-                                "?
-                            </p>
-                            <p class="warning-text">This action is irreversible.</p>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseDeleteModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-danger"
-                                onClick={props.onConfirmDelete}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'delete'
-                                    ? '⏳ Deleting...'
-                                    : 'Delete'}
-                            </button>
-                        </div>
+                        <p class="tag-combination-preview-name">
+                            Combination Name: {props.selectedTagsForCombination.join(', ')}
+                        </p>
                     </div>
-                </div>
-            )}
+                )}
+            </AccessibleModal>
         </div>
     );
 };
@@ -2429,6 +2945,7 @@ const CombinedTagList = props => {
 class CombinedTagListComponent extends React.Component {
     constructor(props) {
         super(props);
+        this._isMounted = false;
         this.state = {
             combined_tags: props.combined_tags,
             tags: props.tags,
@@ -2453,13 +2970,18 @@ class CombinedTagListComponent extends React.Component {
         this.handleCombinationTagToggle = this.handleCombinationTagToggle.bind(this);
         this.handleRemoveCombinationTag = this.handleRemoveCombinationTag.bind(this);
         this.handleCombinationSearchChange = this.handleCombinationSearchChange.bind(this);
+        this.handleCloseCombinationDropdown = this.handleCloseCombinationDropdown.bind(this);
         this.handleClickOutside = this.handleClickOutside.bind(this);
-        this.handleKeyDown = this.handleKeyDown.bind(this);
+    }
+
+    setStateIfMounted(nextState) {
+        if (!this._isMounted) return;
+        this.setState(nextState);
     }
 
     componentDidMount() {
+        this._isMounted = true;
         document.addEventListener('mousedown', this.handleClickOutside);
-        document.addEventListener('keydown', this.handleKeyDown);
     }
 
     componentDidUpdate(prevProps) {
@@ -2474,29 +2996,23 @@ class CombinedTagListComponent extends React.Component {
     }
 
     componentWillUnmount() {
+        this._isMounted = false;
         document.removeEventListener('mousedown', this.handleClickOutside);
-        document.removeEventListener('keydown', this.handleKeyDown);
-    }
-
-    handleKeyDown(event) {
-        if (event.key === 'Escape') {
-            if (this.state.mutationPending) return;
-            if (this.state.showAddEditModal) {
-                this.handleCloseAddEditModal();
-            }
-            if (this.state.showDeleteModal) {
-                this.handleCloseDeleteModal();
-            }
-            if (this.state.combinationDropdownOpen) {
-                this.setState({ combinationDropdownOpen: false });
-            }
-        }
     }
 
     handleClickOutside(event) {
         const dropdown = document.getElementById('combination-dropdown');
+        const target = event.target;
+        if (
+            target &&
+            (target.classList?.contains('modal-overlay') ||
+                target.closest?.('.modal-close') ||
+                target.closest?.('.btn-cancel'))
+        ) {
+            return;
+        }
         if (dropdown && !dropdown.contains(event.target)) {
-            this.setState({ combinationDropdownOpen: false });
+            this.setStateIfMounted({ combinationDropdownOpen: false });
         }
     }
 
@@ -2525,12 +3041,24 @@ class CombinedTagListComponent extends React.Component {
         });
     }
 
-    handleDeleteCombinedTag(combinedTag) {
+    async handleDeleteCombinedTag(combinedTag) {
         if (this.state.mutationPending) return;
-        this.setState({
-            showDeleteModal: true,
-            deletingCombinedTag: combinedTag,
+        if (typeof showConfirm !== 'function') {
+            notifyUser('Confirmation dialog is unavailable. Please refresh and try again.');
+            return;
+        }
+
+        const confirmed = await showConfirm({
+            title: `Delete combined tag "${combinedTag.name}"?`,
+            message: 'This removes the saved combined view.',
+            detail: 'This action is irreversible.',
+            confirmText: 'Delete',
+            cancelText: 'Cancel',
+            danger: true,
         });
+        if (!confirmed || !this._isMounted) return;
+
+        this.handleConfirmDelete(combinedTag);
     }
 
     handleCloseAddEditModal() {
@@ -2557,7 +3085,7 @@ class CombinedTagListComponent extends React.Component {
         const { editingCombinedTag, selectedTagsForCombination } = this.state;
 
         if (selectedTagsForCombination.length < 2) {
-            alert('Please select at least two tags to combine');
+            notifyUser('Please select at least two tags to combine', 'warning');
             return;
         }
 
@@ -2579,7 +3107,7 @@ class CombinedTagListComponent extends React.Component {
                 .then(parseMutationResponse)
                 .then(payload => {
                     if (payload && payload.success) {
-                        this.setState(prevState => {
+                        this.setStateIfMounted(prevState => {
                             const nextCombinedTags = renameCombinedTagInList(
                                 prevState.combined_tags,
                                 editingCombinedTag.name,
@@ -2595,6 +3123,7 @@ class CombinedTagListComponent extends React.Component {
                                 combinationSearchValue: '',
                             };
                         });
+                        notifyUser(`Updated combined tag "${combinationName}"`, 'success');
                     } else {
                         throw new Error(
                             'Rename failed: ' + ((payload && payload.error) || 'Unknown error')
@@ -2603,10 +3132,10 @@ class CombinedTagListComponent extends React.Component {
                 })
                 .catch(error => {
                     console.error('Error editing combined tag:', error);
-                    alert('Edit failed: ' + error.message);
+                    notifyUser('Edit failed: ' + error.message);
                 })
                 .finally(() => {
-                    this.setState({ mutationPending: false, mutationAction: '' });
+                    this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
                 });
         } else {
             // Add new combined tag
@@ -2614,7 +3143,7 @@ class CombinedTagListComponent extends React.Component {
                 .then(parseMutationResponse)
                 .then(payload => {
                     if (payload && payload.success) {
-                        this.setState(prevState => {
+                        this.setStateIfMounted(prevState => {
                             const nextCombinedTags = prevState.combined_tags.concat([
                                 { name: combinationName },
                             ]);
@@ -2627,50 +3156,54 @@ class CombinedTagListComponent extends React.Component {
                                 combinationSearchValue: '',
                             };
                         });
+                        notifyUser(`Created combined tag "${combinationName}"`, 'success');
                     } else {
-                        alert('Add failed: ' + ((payload && payload.error) || 'Unknown error'));
+                        notifyUser(
+                            'Add failed: ' + ((payload && payload.error) || 'Unknown error')
+                        );
                     }
                 })
                 .catch(error => {
                     console.error('Error adding combined tag:', error);
-                    alert('Network error, add failed');
+                    notifyUser('Network error, add failed');
                 })
                 .finally(() => {
-                    this.setState({ mutationPending: false, mutationAction: '' });
+                    this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
                 });
         }
     }
 
-    handleConfirmDelete() {
+    handleConfirmDelete(tagToDelete) {
         if (this.state.mutationPending) return;
-        const { deletingCombinedTag } = this.state;
+        const deletingCombinedTag = tagToDelete || this.state.deletingCombinedTag;
+        if (!deletingCombinedTag || !deletingCombinedTag.name) return;
 
         this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del_ctag/' + encodeURIComponent(deletingCombinedTag.name))
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextCombinedTags = prevState.combined_tags.filter(
                             tag => tag.name !== deletingCombinedTag.name
                         );
                         setGlobalCombinedTags(nextCombinedTags, { renderCombined: false });
                         return {
                             combined_tags: nextCombinedTags,
-                            showDeleteModal: false,
                             deletingCombinedTag: null,
                         };
                     });
+                    notifyUser(`Deleted combined tag "${deletingCombinedTag.name}"`, 'success');
                 } else {
-                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error deleting combined tag:', error);
-                alert('Network error, delete failed');
+                notifyUser('Network error, delete failed');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -2682,6 +3215,10 @@ class CombinedTagListComponent extends React.Component {
                 ? ''
                 : prevState.combinationSearchValue,
         }));
+    }
+
+    handleCloseCombinationDropdown() {
+        this.setState({ combinationDropdownOpen: false });
     }
 
     handleCombinationTagToggle(tagName) {
@@ -2724,19 +3261,16 @@ class CombinedTagListComponent extends React.Component {
                 onEditCombinedTag={this.handleEditCombinedTag}
                 onDeleteCombinedTag={this.handleDeleteCombinedTag}
                 showAddEditModal={this.state.showAddEditModal}
-                showDeleteModal={this.state.showDeleteModal}
                 editingCombinedTag={this.state.editingCombinedTag}
-                deletingCombinedTag={this.state.deletingCombinedTag}
                 mutationPending={this.state.mutationPending}
                 mutationAction={this.state.mutationAction}
                 onCloseAddEditModal={this.handleCloseAddEditModal}
-                onCloseDeleteModal={this.handleCloseDeleteModal}
                 onSaveCombinedTag={this.handleSaveCombinedTag}
-                onConfirmDelete={this.handleConfirmDelete}
                 selectedTagsForCombination={this.state.selectedTagsForCombination}
                 availableTagsForCombination={availableTagsForCombination}
                 combinationDropdownOpen={this.state.combinationDropdownOpen}
                 onToggleCombinationDropdown={this.handleToggleCombinationDropdown}
+                onCloseCombinationDropdown={this.handleCloseCombinationDropdown}
                 onCombinationTagToggle={this.handleCombinationTagToggle}
                 onRemoveCombinationTag={this.handleRemoveCombinationTag}
                 combinationSearchValue={this.state.combinationSearchValue}
@@ -2750,36 +3284,60 @@ const Key = props => {
     const k = props.jkey;
     const kurl = buildKeywordUrl(k.name);
     const key_class = 'rel_ukey';
-    const isEditable = true;
+    const count = Number(k.n || 0);
 
-    const handleOpenSearch = e => {
+    const handleEdit = e => {
         e.preventDefault();
         e.stopPropagation();
-        window.location.href = kurl;
+        if (props.onEdit) props.onEdit(k);
     };
 
+    const handleDelete = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (props.onDelete) props.onDelete(k);
+    };
+
+    const keywordActions = [
+        {
+            key: 'run-search',
+            label: 'Run search',
+            onClick: event => {
+                event.preventDefault();
+                event.stopPropagation();
+                window.location.assign(kurl);
+            },
+            tone: 'primary',
+        },
+        {
+            key: 'edit',
+            label: 'Edit',
+            onClick: handleEdit,
+            tone: 'neutral',
+        },
+        {
+            key: 'delete',
+            label: 'Delete',
+            onClick: handleDelete,
+            tone: 'danger',
+        },
+    ];
+
     return (
-        <div class={key_class + ' enhanced-keyword'}>
-            <span class="keyword-link keyword-link-static">{k.name}</span>
-            <div class="keyword-actions">
-                <span class="keyword-reco" onClick={handleOpenSearch} title="Search keyword">
-                    ↗
-                </span>
-                {isEditable && (
-                    <span class="keyword-edit" onClick={() => props.onEdit(k)} title="Edit keyword">
-                        ✎
-                    </span>
-                )}
-                {isEditable && (
-                    <span
-                        class="keyword-delete"
-                        onClick={() => props.onDelete(k)}
-                        title="Delete keyword"
-                    >
-                        ×
-                    </span>
-                )}
-            </div>
+        <div class="enhanced-keyword">
+            <ChipActionMenu
+                className="keyword-actions"
+                label={`Actions for keyword ${k.name}`}
+                triggerLabel={`Open actions for keyword ${k.name}`}
+                triggerClassName={key_class + ' keyword-link'}
+                triggerContent={
+                    <>
+                        <span class="keyword-name">{k.name}</span>
+                        {count > 0 && <span class="keyword-count">{count}</span>}
+                    </>
+                }
+                actions={keywordActions}
+            />
         </div>
     );
 };
@@ -2789,172 +3347,121 @@ const KeyList = props => {
     const mutationPending = Boolean(props.mutationPending);
     const mutationAction = String(props.mutationAction || '');
     const klst = lst.map((jkey, ix) => (
-        <Key key={ix} jkey={jkey} onEdit={props.onEditKey} onDelete={props.onDeleteKey} />
+        <Key
+            key={jkey && jkey.name ? jkey.name : ix}
+            jkey={jkey}
+            onEdit={props.onEditKey}
+            onDelete={props.onDeleteKey}
+        />
     ));
 
     return (
         <div class="enhanced-keyword-list">
-            <div class="keyword-list-actions">
-                <span class="tag-stats-inline">({lst.length} keywords)</span>
-                <button
-                    class="tag-action-btn add-btn"
-                    onClick={props.onAddKey}
-                    title="Add new keyword"
-                    disabled={mutationPending}
-                >
-                    + Add
-                </button>
+            <div class="collection-header">
+                <div class="collection-copy">
+                    <h2 class="collection-title">Keywords</h2>
+                    <p class="collection-description">
+                        Save repeat searches so they reopen with one click.
+                    </p>
+                </div>
+                <div class="keyword-list-actions">
+                    <span class="tag-stats-inline">{lst.length} keywords</span>
+                    <button
+                        class="tag-action-btn add-btn"
+                        onClick={props.onAddKey}
+                        disabled={mutationPending}
+                    >
+                        + Add
+                    </button>
+                </div>
             </div>
             <div id="keyList" class="rel_utags enhanced-keywords">
-                {klst}
+                {klst.length ? (
+                    klst
+                ) : (
+                    <div class="collection-empty">
+                        No keywords yet. Save a keyword to reopen a search instantly.
+                    </div>
+                )}
             </div>
 
             {/* Add Keyword Modal */}
-            {props.showAddModal && (
-                <div class="modal-overlay" onClick={mutationPending ? null : props.onCloseAddModal}>
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Add Keyword</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseAddModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="form-group">
-                                <label>Keyword Name:</label>
-                                <input
-                                    type="text"
-                                    value={props.newKeyName}
-                                    onChange={props.onNewKeyNameChange}
-                                    class="form-input"
-                                    placeholder="Enter keyword name"
-                                    disabled={mutationPending}
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseAddModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-primary"
-                                onClick={props.onSaveNewKey}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'add'
-                                    ? '⏳ Saving...'
-                                    : 'Save'}
-                            </button>
-                        </div>
-                    </div>
+            <AccessibleModal
+                open={props.showAddModal}
+                title="Add Keyword"
+                onRequestClose={props.onCloseAddModal}
+                closeDisabled={mutationPending}
+                footer={
+                    <>
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onCloseAddModal}
+                            disabled={mutationPending}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onSaveNewKey}
+                            disabled={mutationPending}
+                        >
+                            {mutationPending && mutationAction === 'add' ? '⏳ Saving...' : 'Save'}
+                        </button>
+                    </>
+                }
+            >
+                <div class="form-group">
+                    <label>Keyword Name:</label>
+                    <input
+                        type="text"
+                        value={props.newKeyName}
+                        onChange={props.onNewKeyNameChange}
+                        class="form-input"
+                        placeholder="Enter keyword name"
+                        disabled={mutationPending}
+                        data-modal-autofocus="true"
+                    />
                 </div>
-            )}
+            </AccessibleModal>
 
             {/* Edit Modal */}
-            {props.showEditModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseEditModal}
-                >
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Edit Keyword</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseEditModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <div class="form-group">
-                                <label>Keyword Name:</label>
-                                <input
-                                    type="text"
-                                    value={props.editingKeyName}
-                                    onChange={props.onEditingKeyNameChange}
-                                    class="form-input"
-                                    placeholder="Enter new keyword name"
-                                    disabled={mutationPending}
-                                />
-                            </div>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseEditModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-primary"
-                                onClick={props.onSaveKeyEdit}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'edit'
-                                    ? '⏳ Saving...'
-                                    : 'Save'}
-                            </button>
-                        </div>
-                    </div>
+            <AccessibleModal
+                open={props.showEditModal}
+                title="Edit Keyword"
+                onRequestClose={props.onCloseEditModal}
+                closeDisabled={mutationPending}
+                footer={
+                    <>
+                        <button
+                            class="btn btn-cancel"
+                            onClick={props.onCloseEditModal}
+                            disabled={mutationPending}
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            class="btn btn-primary"
+                            onClick={props.onSaveKeyEdit}
+                            disabled={mutationPending}
+                        >
+                            {mutationPending && mutationAction === 'edit' ? '⏳ Saving...' : 'Save'}
+                        </button>
+                    </>
+                }
+            >
+                <div class="form-group">
+                    <label>Keyword Name:</label>
+                    <input
+                        type="text"
+                        value={props.editingKeyName}
+                        onChange={props.onEditingKeyNameChange}
+                        class="form-input"
+                        placeholder="Enter new keyword name"
+                        disabled={mutationPending}
+                        data-modal-autofocus="true"
+                    />
                 </div>
-            )}
-
-            {/* Delete Confirmation Modal */}
-            {props.showDeleteModal && (
-                <div
-                    class="modal-overlay"
-                    onClick={mutationPending ? null : props.onCloseDeleteModal}
-                >
-                    <div class="modal-content" onClick={e => e.stopPropagation()}>
-                        <div class="modal-header">
-                            <h3>Confirm Delete</h3>
-                            <span
-                                class="modal-close"
-                                onClick={mutationPending ? null : props.onCloseDeleteModal}
-                            >
-                                ×
-                            </span>
-                        </div>
-                        <div class="modal-body">
-                            <p>
-                                Are you sure you want to delete keyword "
-                                <strong>{props.deletingKey && props.deletingKey.name}</strong>"?
-                            </p>
-                            <p class="warning-text">
-                                This action is irreversible, all data related to this keyword will
-                                be deleted.
-                            </p>
-                        </div>
-                        <div class="modal-footer">
-                            <button
-                                class="btn btn-cancel"
-                                onClick={props.onCloseDeleteModal}
-                                disabled={mutationPending}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                class="btn btn-danger"
-                                onClick={props.onConfirmDelete}
-                                disabled={mutationPending}
-                            >
-                                {mutationPending && mutationAction === 'delete'
-                                    ? '⏳ Deleting...'
-                                    : 'Delete'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            </AccessibleModal>
         </div>
     );
 };
@@ -2962,6 +3469,7 @@ const KeyList = props => {
 class KeyComponent extends React.Component {
     constructor(props) {
         super(props);
+        this._isMounted = false;
         this.state = {
             keys: props.keys,
             showEditModal: false,
@@ -2985,11 +3493,15 @@ class KeyComponent extends React.Component {
         this.handleSaveKeyEdit = this.handleSaveKeyEdit.bind(this);
         this.handleSaveNewKey = this.handleSaveNewKey.bind(this);
         this.handleConfirmDelete = this.handleConfirmDelete.bind(this);
-        this.handleKeyDown = this.handleKeyDown.bind(this);
+    }
+
+    setStateIfMounted(nextState) {
+        if (!this._isMounted) return;
+        this.setState(nextState);
     }
 
     componentDidMount() {
-        document.addEventListener('keydown', this.handleKeyDown);
+        this._isMounted = true;
     }
 
     componentDidUpdate(prevProps) {
@@ -2999,22 +3511,7 @@ class KeyComponent extends React.Component {
     }
 
     componentWillUnmount() {
-        document.removeEventListener('keydown', this.handleKeyDown);
-    }
-
-    handleKeyDown(event) {
-        if (event.key === 'Escape') {
-            if (this.state.mutationPending) return;
-            if (this.state.showEditModal) {
-                this.handleCloseEditModal();
-            }
-            if (this.state.showDeleteModal) {
-                this.handleCloseDeleteModal();
-            }
-            if (this.state.showAddModal) {
-                this.handleCloseAddModal();
-            }
-        }
+        this._isMounted = false;
     }
 
     handleEditKey(key) {
@@ -3026,12 +3523,24 @@ class KeyComponent extends React.Component {
         });
     }
 
-    handleDeleteKey(key) {
+    async handleDeleteKey(key) {
         if (this.state.mutationPending) return;
-        this.setState({
-            showDeleteModal: true,
-            deletingKey: key,
+        if (typeof showConfirm !== 'function') {
+            notifyUser('Confirmation dialog is unavailable. Please refresh and try again.');
+            return;
+        }
+
+        const confirmed = await showConfirm({
+            title: `Delete keyword "${key.name}"?`,
+            message: 'All saved data related to this keyword will be removed.',
+            detail: 'This action is irreversible.',
+            confirmText: 'Delete',
+            cancelText: 'Cancel',
+            danger: true,
         });
+        if (!confirmed || !this._isMounted) return;
+
+        this.handleConfirmDelete(key);
     }
 
     handleAddKey() {
@@ -3058,23 +3567,23 @@ class KeyComponent extends React.Component {
         if (this.state.mutationPending) return;
         const { newKeyName } = this.state;
         if (!newKeyName.trim()) {
-            alert('Keyword name cannot be empty');
+            notifyUser('Keyword name cannot be empty', 'warning');
             return;
         }
 
         const trimmedKey = newKeyName.trim();
         if (trimmedKey === 'null') {
-            alert('Keyword name is reserved');
+            notifyUser('Keyword name is reserved', 'warning');
             return;
         }
         if (trimmedKey.includes('/') || trimmedKey.includes('\\')) {
-            alert('Keyword cannot contain slashes');
+            notifyUser('Keyword cannot contain slashes', 'warning');
             return;
         }
 
         // Check if keyword already exists
         if (this.state.keys.some(key => key.name === trimmedKey)) {
-            alert('Keyword already exists');
+            notifyUser('Keyword already exists', 'warning');
             return;
         }
 
@@ -3083,7 +3592,7 @@ class KeyComponent extends React.Component {
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextKeys = [...prevState.keys, { name: trimmedKey, pids: [] }];
                         setGlobalKeys(nextKeys, { renderKeys: false });
                         return {
@@ -3092,18 +3601,19 @@ class KeyComponent extends React.Component {
                             newKeyName: '',
                         };
                     });
+                    notifyUser(`Created keyword "${trimmedKey}"`, 'success');
                 } else {
-                    alert(
+                    notifyUser(
                         'Failed to add keyword: ' + ((payload && payload.error) || 'Unknown error')
                     );
                 }
             })
             .catch(error => {
                 console.error('Error adding keyword:', error);
-                alert('Network error, failed to add keyword');
+                notifyUser('Network error, failed to add keyword');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -3132,17 +3642,17 @@ class KeyComponent extends React.Component {
         if (this.state.mutationPending) return;
         const { editingKey, editingKeyName } = this.state;
         if (!editingKeyName.trim()) {
-            alert('Keyword name cannot be empty');
+            notifyUser('Keyword name cannot be empty', 'warning');
             return;
         }
 
         const trimmedKeyName = editingKeyName.trim();
         if (trimmedKeyName === 'null') {
-            alert('Keyword name is reserved');
+            notifyUser('Keyword name is reserved', 'warning');
             return;
         }
         if (trimmedKeyName.includes('/') || trimmedKeyName.includes('\\')) {
-            alert('Keyword cannot contain slashes');
+            notifyUser('Keyword cannot contain slashes', 'warning');
             return;
         }
 
@@ -3150,7 +3660,7 @@ class KeyComponent extends React.Component {
         if (
             this.state.keys.some(key => key.name === trimmedKeyName && key.name !== editingKey.name)
         ) {
-            alert('Keyword already exists');
+            notifyUser('Keyword already exists', 'warning');
             return;
         }
 
@@ -3164,7 +3674,7 @@ class KeyComponent extends React.Component {
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextKeys = prevState.keys.map(key =>
                             key.name === editingKey.name ? { ...key, name: trimmedKeyName } : key
                         );
@@ -3176,49 +3686,51 @@ class KeyComponent extends React.Component {
                             editingKeyName: '',
                         };
                     });
+                    notifyUser(`Renamed keyword to "${trimmedKeyName}"`, 'success');
                 } else {
-                    alert('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Rename failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error renaming keyword:', error);
-                alert('Rename failed: ' + error.message);
+                notifyUser('Rename failed: ' + error.message);
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
-    handleConfirmDelete() {
+    handleConfirmDelete(keyToDelete) {
         if (this.state.mutationPending) return;
-        const { deletingKey } = this.state;
+        const deletingKey = keyToDelete || this.state.deletingKey;
+        if (!deletingKey || !deletingKey.name) return;
 
         this.setState({ mutationPending: true, mutationAction: 'delete' });
         csrfFetch('/del_key/' + encodeURIComponent(deletingKey.name))
             .then(parseMutationResponse)
             .then(payload => {
                 if (payload && payload.success) {
-                    this.setState(prevState => {
+                    this.setStateIfMounted(prevState => {
                         const nextKeys = prevState.keys.filter(
                             key => key.name !== deletingKey.name
                         );
                         setGlobalKeys(nextKeys, { renderKeys: false });
                         return {
                             keys: nextKeys,
-                            showDeleteModal: false,
                             deletingKey: null,
                         };
                     });
+                    notifyUser(`Deleted keyword "${deletingKey.name}"`, 'success');
                 } else {
-                    alert('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
+                    notifyUser('Delete failed: ' + ((payload && payload.error) || 'Unknown error'));
                 }
             })
             .catch(error => {
                 console.error('Error deleting keyword:', error);
-                alert('Network error, delete failed');
+                notifyUser('Network error, delete failed');
             })
             .finally(() => {
-                this.setState({ mutationPending: false, mutationAction: '' });
+                this.setStateIfMounted({ mutationPending: false, mutationAction: '' });
             });
     }
 
@@ -3230,21 +3742,17 @@ class KeyComponent extends React.Component {
                 onDeleteKey={this.handleDeleteKey}
                 onAddKey={this.handleAddKey}
                 showEditModal={this.state.showEditModal}
-                showDeleteModal={this.state.showDeleteModal}
                 showAddModal={this.state.showAddModal}
                 editingKeyName={this.state.editingKeyName}
                 newKeyName={this.state.newKeyName}
-                deletingKey={this.state.deletingKey}
                 mutationPending={this.state.mutationPending}
                 mutationAction={this.state.mutationAction}
                 onCloseEditModal={this.handleCloseEditModal}
-                onCloseDeleteModal={this.handleCloseDeleteModal}
                 onCloseAddModal={this.handleCloseAddModal}
                 onEditingKeyNameChange={this.handleEditingKeyNameChange}
                 onNewKeyNameChange={this.handleNewKeyNameChange}
                 onSaveKeyEdit={this.handleSaveKeyEdit}
                 onSaveNewKey={this.handleSaveNewKey}
-                onConfirmDelete={this.handleConfirmDelete}
             />
         );
     }

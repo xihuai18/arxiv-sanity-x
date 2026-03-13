@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import tempfile
-from typing import Generator
+from collections.abc import Generator
 
 import pytest
 
@@ -59,8 +59,9 @@ def configure_test_env() -> None:
     os.environ["ARXIV_SANITY_WARMUP_DATA"] = "0"
     os.environ["ARXIV_SANITY_WARMUP_ML"] = "0"
     os.environ["ARXIV_SANITY_ENABLE_SCHEDULER"] = "0"
-    os.environ["ARXIV_SANITY_SUMMARY_REPAIR_ENABLE"] = "0"
+    os.environ["ARXIV_SANITY_HUEY_SUMMARY_REPAIR_ENABLE"] = "0"
     os.environ["ARXIV_SANITY_ENABLE_SWAGGER"] = "0"
+    os.environ["ARXIV_SANITY_MINERU_ENABLED"] = "0"
     os.environ["ARXIV_SANITY_SECRET_KEY"] = "test-secret-key"
     os.environ.setdefault("ARXIV_SANITY_RECO_API_KEY", "test-api-key")
     os.environ.setdefault("ARXIV_SANITY_LOG_LEVEL", "ERROR")

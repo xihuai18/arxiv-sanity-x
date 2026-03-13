@@ -20,7 +20,7 @@
     background: var(--glass-bg);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    padding: 12px 14px;
+    padding: 16px 18px;
     border-radius: 16px;
     border: 1px solid var(--border-color);
     box-shadow: var(--shadow-md);
@@ -48,4 +48,33 @@
 #wordwrap {
     margin: 0 0 12px 0;
     font-size: 15px;
+}
+
+.error-page {
+    max-width: 820px;
+    margin: 24px auto;
+    padding: 24px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    box-shadow: var(--shadow-sm);
+}
+
+.error-page-title {
+    margin: 0 0 8px;
+    font-size: 24px;
+    color: var(--text-color);
+}
+
+.error-page-message {
+    margin: 0 0 16px;
+    color: var(--text-muted);
+    line-height: 1.6;
+}
+
+.error-page-actions {
+    display: flex;
+    gap: 8px;
+    margin: 0;
+    flex-wrap: wrap;
 }

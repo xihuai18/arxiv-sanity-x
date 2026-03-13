@@ -173,6 +173,8 @@
         if (!tocContainer) return;
         const toggle = tocContainer.querySelector('.toc-toggle');
         if (!toggle) return;
+        const tocLinks = tocContainer.querySelectorAll('a[href^="#"]');
+        const backTop = tocContainer.querySelector('.toc-back-top');
 
         // Mobile: use sticky TOC instead of drawer (same as desktop but with different styling)
         // No longer using bottom-drawer mode
@@ -188,6 +190,13 @@
             toggle.textContent = collapsed ? 'Expand' : 'Collapse';
         };
 
+        const collapseForMobileNavigation = () => {
+            if (!window.matchMedia('(max-width: 768px)').matches) return;
+            if (tocCollapsed) return;
+            tocCollapsed = true;
+            applyState(tocCollapsed);
+        };
+
         applyState(tocCollapsed);
 
         const onToggleClick = () => {
@@ -200,6 +209,22 @@
         }
         toggle._tocToggleClick = onToggleClick;
         toggle.addEventListener('click', onToggleClick);
+
+        tocLinks.forEach(link => {
+            if (link._tocLinkCollapse) {
+                link.removeEventListener('click', link._tocLinkCollapse);
+            }
+            link._tocLinkCollapse = collapseForMobileNavigation;
+            link.addEventListener('click', link._tocLinkCollapse);
+        });
+
+        if (backTop) {
+            if (backTop._tocBackTopCollapse) {
+                backTop.removeEventListener('click', backTop._tocBackTopCollapse);
+            }
+            backTop._tocBackTopCollapse = collapseForMobileNavigation;
+            backTop.addEventListener('click', backTop._tocBackTopCollapse);
+        }
     }
 
     function wrapMarkdownTables(container) {
@@ -498,10 +523,10 @@
     function setupImageZoom(container) {
         const images = container.querySelectorAll('img');
         images.forEach(img => {
-            const newImg = img.cloneNode(true);
-            img.parentNode.replaceChild(newImg, img);
+            if (img.dataset.summaryZoomBound === '1') return;
+            img.dataset.summaryZoomBound = '1';
 
-            newImg.addEventListener('click', event => {
+            img.addEventListener('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
 
@@ -513,8 +538,8 @@
                 zoomContainer.className = 'image-zoom-container';
 
                 const zoomImg = document.createElement('img');
-                zoomImg.src = newImg.src; // Safe: src is already validated
-                zoomImg.alt = newImg.alt || '';
+                zoomImg.src = img.src; // Safe: src is already validated
+                zoomImg.alt = img.alt || '';
 
                 const closeBtn = document.createElement('button');
                 closeBtn.className = 'image-zoom-close';
@@ -553,12 +578,14 @@
                 document.addEventListener('keydown', handleEscape);
             });
 
-            newImg.addEventListener('error', () => {
-                newImg.style.display = 'none';
+            img.addEventListener('error', () => {
+                img.style.display = 'none';
+                if (img.dataset.summaryImageErrorShown === '1') return;
+                img.dataset.summaryImageErrorShown = '1';
                 const errorMsg = document.createElement('span');
                 errorMsg.className = 'image-load-error';
                 errorMsg.textContent = '[Image failed to load]';
-                newImg.parentNode.insertBefore(errorMsg, newImg.nextSibling);
+                img.parentNode.insertBefore(errorMsg, img.nextSibling);
             });
         });
     }

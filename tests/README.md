@@ -35,6 +35,7 @@ The test framework automatically selects the data directory:
 3. **CI/New environment**: Otherwise use a temporary directory (`/tmp/arxiv_sanity_test_*`)
 
 This ensures:
+
 - Tests in development environment can use real data
 - Tests in CI environment won't crash due to missing data (tests requiring data will be skipped)
 - Real data directory won't be accidentally polluted
@@ -87,7 +88,7 @@ End-to-end tests require a running server:
 bash bin/up.sh
 
 # Also start Huey consumer if your flow triggers async tasks
-python bin/huey_consumer.py
+python bin/huey_consumer.py tasks.huey -w 4 -k thread
 
 # In another terminal, run the tests
 python tests/e2e/test_api_e2e.py --host localhost --port 55555

@@ -14,13 +14,34 @@ from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW
 from config import settings
 from tools.compute import Qwen3EmbeddingVllm
 
-EMBED_PORT = settings.embedding.port
-EMBED_USE_LLM_API = settings.embedding.use_llm_api
-EMBED_MODEL_NAME = settings.embedding.model_name
-EMBED_API_BASE = settings.embedding.api_base
-EMBED_API_KEY = settings.embedding.api_key
-LLM_BASE_URL = settings.llm.base_url
-LLM_API_KEY = settings.llm.api_key
+
+def _embed_port() -> int:
+    return int(settings.embedding.port)
+
+
+def _embed_use_llm_api() -> bool:
+    return bool(settings.embedding.use_llm_api)
+
+
+def _embed_model_name() -> str:
+    return str(settings.embedding.model_name or "")
+
+
+def _embed_api_base() -> str:
+    return str(settings.embedding.api_base or "")
+
+
+def _embed_api_key() -> str:
+    return str(settings.embedding.api_key or "")
+
+
+def _llm_base_url() -> str:
+    return str(settings.llm.base_url or "")
+
+
+def _llm_api_key() -> str:
+    return str(settings.llm.api_key or "")
+
 
 from .data_service import get_features_cached
 from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE
@@ -65,21 +86,21 @@ def get_semantic_model() -> Qwen3EmbeddingVllm | None:
             return _semantic_model
 
         try:
-            if EMBED_USE_LLM_API:
-                api_base = (EMBED_API_BASE or LLM_BASE_URL or "").rstrip("/")
-                api_key = (EMBED_API_KEY or LLM_API_KEY or "").strip() or None
+            if _embed_use_llm_api():
+                api_base = (_embed_api_base() or _llm_base_url() or "").rstrip("/")
+                api_key = (_embed_api_key() or _llm_api_key() or "").strip() or None
             else:
-                api_base = f"http://localhost:{EMBED_PORT}"
+                api_base = f"http://localhost:{_embed_port()}"
                 api_key = None
 
-            api_type = "OpenAI-compatible" if EMBED_USE_LLM_API else "Ollama"
+            api_type = "OpenAI-compatible" if _embed_use_llm_api() else "Ollama"
             logger.debug(f"Initializing semantic model {api_type} API client for query encoding...")
             model = Qwen3EmbeddingVllm(
-                model_name_or_path=EMBED_MODEL_NAME,
+                model_name_or_path=_embed_model_name(),
                 instruction="Extract key concepts from this query to search computer science and AI paper",
                 api_base=api_base,
                 api_key=api_key,
-                use_openai_api=EMBED_USE_LLM_API,
+                use_openai_api=_embed_use_llm_api(),
             )
             if not model.initialize():
                 logger.error("Failed to initialize semantic model API client")
@@ -113,23 +134,23 @@ def get_document_model() -> Qwen3EmbeddingVllm | None:
             return _document_model
 
         try:
-            if EMBED_USE_LLM_API:
-                api_base = (EMBED_API_BASE or LLM_BASE_URL or "").rstrip("/")
-                api_key = (EMBED_API_KEY or LLM_API_KEY or "").strip() or None
+            if _embed_use_llm_api():
+                api_base = (_embed_api_base() or _llm_base_url() or "").rstrip("/")
+                api_key = (_embed_api_key() or _llm_api_key() or "").strip() or None
             else:
-                api_base = f"http://localhost:{EMBED_PORT}"
+                api_base = f"http://localhost:{_embed_port()}"
                 api_key = None
 
-            api_type = "OpenAI-compatible" if EMBED_USE_LLM_API else "Ollama"
+            api_type = "OpenAI-compatible" if _embed_use_llm_api() else "Ollama"
             logger.debug(f"Initializing document embedding model {api_type} API client...")
 
             # Use instruction=None to match tools/compute.py default behavior.
             model = Qwen3EmbeddingVllm(
-                model_name_or_path=EMBED_MODEL_NAME,
+                model_name_or_path=_embed_model_name(),
                 instruction=None,
                 api_base=api_base,
                 api_key=api_key,
-                use_openai_api=EMBED_USE_LLM_API,
+                use_openai_api=_embed_use_llm_api(),
             )
             if not model.initialize():
                 logger.error("Failed to initialize document embedding model API client")
@@ -328,7 +349,12 @@ def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float
 
     cache_key = None
     try:
-        cache_key = ("sem", q.lower(), int(limit) if limit is not None else None, get_cached_embeddings_mtime())
+        cache_key = (
+            "sem",
+            q.lower(),
+            int(limit) if limit is not None else None,
+            get_cached_embeddings_mtime(),
+        )
         cached = SEARCH_RANK_CACHE.get(cache_key)
         if cached is not None:
             return cached

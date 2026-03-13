@@ -128,6 +128,30 @@ class TestUpdateSummaryStatusDb:
             update_summary_status_db("2301.00001", None, "ok", default_model="gpt-3.5")
             mock_repo.set_status.assert_called_once()
 
+    @patch("backend.services.readinglist_service.SummaryStatusRepository")
+    @patch("backend.services.readinglist_service.emit_all_event")
+    def test_update_summary_status_db_ok_with_resolved_model(self, mock_emit, mock_repo, app):
+        """Successful status should forward resolved_model."""
+        from backend.services.readinglist_service import update_summary_status_db
+
+        with app.app_context():
+            update_summary_status_db("2301.00001", "gpt-4", "ok", resolved_model="fallback-model")
+            call = mock_repo.set_status.call_args
+            assert call is not None
+            assert call.kwargs.get("resolved_model") == "fallback-model"
+
+    @patch("backend.services.readinglist_service.SummaryStatusRepository")
+    @patch("backend.services.readinglist_service.emit_all_event")
+    def test_update_summary_status_db_redacts_global_error_payload(self, mock_emit, mock_repo, app):
+        """Global SSE payload should not include raw internal error text."""
+        from backend.services.readinglist_service import update_summary_status_db
+
+        with app.app_context():
+            update_summary_status_db("2301.00001", "gpt-4", "failed", "internal stack trace")
+            payload = mock_emit.call_args[0][0]
+            assert payload.get("status") == "failed"
+            assert payload.get("error") == "failed"
+
 
 class TestTriggerSummaryAsync:
     """Tests for trigger_summary_async function."""
@@ -162,6 +186,81 @@ class TestTriggerSummaryAsync:
             )
             assert result == "task123"
             mock_enqueue.assert_called_once()
+
+    @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
+    def test_trigger_summary_async_thread_fallback_invalid_summary_marks_failed(self, app, monkeypatch):
+        """Thread fallback should not mark ok for invalid summary output."""
+        import backend.services.readinglist_service as rs
+
+        class _ImmediateThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target:
+                    self._target()
+
+        monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
+
+        db_calls = []
+
+        def _update_db(pid, model, status, error, **extra):
+            db_calls.append((pid, model, status, error, extra))
+
+        with app.app_context():
+            task_id = rs.trigger_summary_async(
+                user="test_user",
+                pid="2301.00001",
+                model="gpt-4",
+                generate_summary_fn=lambda *_a, **_k: ("# Error\n\nboom", {}),
+                update_db_fn=_update_db,
+                default_model="gpt-4",
+            )
+
+        assert task_id is None
+        assert db_calls
+        assert db_calls[-1][2] == "failed"
+
+    @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
+    def test_trigger_summary_async_thread_fallback_records_resolved_model(self, app, monkeypatch):
+        """Thread fallback should persist resolved_model for successful fallback output."""
+        import backend.services.readinglist_service as rs
+
+        class _ImmediateThread:
+            def __init__(self, target=None, name=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target:
+                    self._target()
+
+        monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
+
+        db_calls = []
+
+        def _update_db(pid, model, status, error, **extra):
+            db_calls.append((pid, model, status, error, extra))
+
+        long_body = " ".join(["detail"] * 80)
+        valid_summary = f"# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n{long_body}"
+        with app.app_context():
+            task_id = rs.trigger_summary_async(
+                user="test_user",
+                pid="2301.00001",
+                model="requested-model",
+                generate_summary_fn=lambda *_a, **_k: (valid_summary, {"llm_model": "fallback-model"}),
+                update_db_fn=_update_db,
+                default_model="requested-model",
+            )
+
+        assert task_id is None
+        assert db_calls
+        assert db_calls[-1][2] == "ok"
+        assert db_calls[-1][4].get("resolved_model") == "fallback-model"
 
 
 class TestAddToReadingList:

@@ -31,7 +31,7 @@ def _detect_process_role() -> str:
 
     Use ARXIV_SANITY_PROCESS_ROLE=web|worker to override auto detection.
     """
-    role = (os.environ.get("ARXIV_SANITY_PROCESS_ROLE") or "").strip().lower()
+    role = str(getattr(settings, "process_role", "") or "").strip().lower()
     if role in {"web", "worker"}:
         return role
 
@@ -226,7 +226,7 @@ class SqliteKV:
                         op = ""
                     logger.trace(
                         f"[BLOCKING] db._execute_with_retry: db locked/busy, op={op}, "
-                        f"retry {attempt+1}/{DB_MAX_RETRIES}, sleeping {sleep_time:.2f}s "
+                        f"retry {attempt + 1}/{DB_MAX_RETRIES}, sleeping {sleep_time:.2f}s "
                         f"(db={self.db_path}, table={self.tablename})"
                     )
                     time.sleep(sleep_time)
@@ -251,7 +251,7 @@ class SqliteKV:
                         raise
                     sleep_time = DB_RETRY_BASE_SLEEP * (2**attempt)
                     logger.trace(
-                        f"[BLOCKING] db._commit_with_retry: db locked/busy, retry {attempt+1}/{DB_MAX_RETRIES}, "
+                        f"[BLOCKING] db._commit_with_retry: db locked/busy, retry {attempt + 1}/{DB_MAX_RETRIES}, "
                         f"sleeping {sleep_time:.2f}s (db={self.db_path}, table={self.tablename})"
                     )
                     time.sleep(sleep_time)

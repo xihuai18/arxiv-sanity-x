@@ -619,6 +619,24 @@ ${qed}</div>`;
         // is in-flight, we should not write results back into stale DOM.
         const gen = container.dataset ? String(container.dataset.mjxGen || '') : '';
 
+        function syncMathJaxStyles() {
+            try {
+                if (
+                    !MathJax ||
+                    !MathJax.startup ||
+                    !MathJax.startup.document ||
+                    !MathJax.startup.document.outputJax ||
+                    typeof MathJax.startup.document.outputJax.styleSheet !== 'function'
+                ) {
+                    return;
+                }
+                // Programmatic CHTML conversions do not always materialize glyph CSS
+                // classes eagerly. Force a stylesheet sync before the document update
+                // so display equations are not rendered as tiny clipped fragments.
+                MathJax.startup.document.outputJax.styleSheet(MathJax.startup.document);
+            } catch (e) {}
+        }
+
         // Prevent timer storms when MathJax is not ready yet.
         // This flag is per-container DOM node; it is naturally reset when the DOM is replaced.
         if (container.dataset && container.dataset.mjxPending === '1') {
@@ -776,6 +794,7 @@ ${qed}</div>`;
                             MathJax.startup.document &&
                             typeof MathJax.startup.document.updateDocument === 'function'
                         ) {
+                            syncMathJaxStyles();
                             MathJax.startup.document.updateDocument();
                         }
                     } catch (e) {}
@@ -878,6 +897,7 @@ ${qed}</div>`;
                     MathJax.startup.document &&
                     typeof MathJax.startup.document.updateDocument === 'function'
                 ) {
+                    syncMathJaxStyles();
                     MathJax.startup.document.updateDocument();
                 }
             } catch (e) {}
@@ -1148,7 +1168,7 @@ ${qed}</div>`;
             const texAttr = escapeHtmlAttr(tex);
             if (tokens[idx].displayMode || tokens[idx].markup === '\\[') {
                 const fallback = escapeHtml(tex);
-                return `<span class="math-display" data-tex="${texAttr}">\\[${fallback}\\]</span>`;
+                return `<div class="math-display" data-tex="${texAttr}">\\[${fallback}\\]</div>`;
             }
             const fallback = escapeHtml(tex);
             return `<span class="math-inline" data-tex="${texAttr}">\\(${fallback}\\)</span>`;
@@ -1220,12 +1240,12 @@ ${qed}</div>`;
 
             if (caption) {
                 return `<figure>
-                <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy">
+                <img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async">
                 <figcaption>${escapeHtml(caption)}</figcaption>
             </figure>`;
             }
 
-            return `<figure><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy"></figure>`;
+            return `<figure><img src="${escapeHtml(src)}" alt="${escapeHtml(alt)}" loading="lazy" decoding="async"></figure>`;
         };
 
         markdownRenderer = md;

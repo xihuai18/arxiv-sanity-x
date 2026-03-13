@@ -118,6 +118,22 @@
     border-radius: 16px;
 }
 
+#login-link,
+#header .nav-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.nav-icon {
+    display: none;
+    line-height: 1;
+}
+
+.nav-text {
+    display: inline;
+}
+
 #header a:hover {
     --nav-highlight-color: rgba(255, 255, 255, 0.15);
     background-color: transparent;
@@ -286,7 +302,7 @@ button.link-button:hover {
 #stats-link,
 #login-link {
     float: none;
-    margin: 0 12px;
+    margin: 0 4px;
 }
 
 /* Mobile header optimizations (shared across pages) */
@@ -311,12 +327,23 @@ button.link-button:hover {
     }
 
     /* Mobile Header: hide text, show icons only */
+    #login-link,
+    #header .nav-link {
+        gap: 0;
+        justify-content: center;
+    }
+
     #header a {
         padding: 10px;
         margin: 0 2px;
         min-height: 44px;
         display: inline-flex;
         align-items: center;
+        justify-content: center;
+    }
+
+    #login-link {
+        margin: 0 2px;
     }
 
     .nav-text {
@@ -324,7 +351,8 @@ button.link-button:hover {
     }
 
     .nav-icon {
-        font-size: 1.4em;
+        display: inline-flex;
+        font-size: 1.2em;
     }
 
     .nav-link {

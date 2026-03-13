@@ -44,3 +44,38 @@ class TestReadingListWithLogin:
         """Test that remove without CSRF returns 403."""
         resp = logged_in_client.post("/api/readinglist/remove", json={"pid": "2301.00001"})
         assert resp.status_code == 403
+
+    def test_readinglist_add_hidden_task_id_does_not_overwrite_status(self, logged_in_client, csrf_token, monkeypatch):
+        """When enqueue returns hidden task marker, API should not rewrite summary status ownership."""
+        from backend import legacy
+
+        status_updates = []
+        readinglist_updates = []
+
+        monkeypatch.setattr(legacy, "_trigger_summary_async", lambda user, pid: "")
+        monkeypatch.setattr(
+            legacy, "_update_summary_status_db", lambda *args, **kwargs: status_updates.append((args, kwargs))
+        )
+        monkeypatch.setattr(
+            legacy,
+            "_update_readinglist_summary_status",
+            lambda *args, **kwargs: readinglist_updates.append((args, kwargs)),
+        )
+
+        def _fake_add_to_readinglist(
+            pid, user=None, compute_top_tags_fn=None, get_tags_fn=None, trigger_summary_fn=None
+        ):
+            if trigger_summary_fn:
+                trigger_summary_fn(user or "alice", pid)
+            return {"pid": pid}
+
+        monkeypatch.setattr("backend.services.readinglist_service.add_to_readinglist", _fake_add_to_readinglist)
+
+        resp = logged_in_client.post(
+            "/api/readinglist/add",
+            json={"pid": "2301.00001"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        assert status_updates == []
+        assert readinglist_updates == []

@@ -20,7 +20,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
 
 from loguru import logger
 
@@ -40,8 +39,11 @@ if str(_REPO_ROOT) not in sys.path:
 try:
     from config import settings
 
-    DATA_DIR = str(settings.data_dir)
-    SUMMARY_DIR = str(settings.summary_dir)
+    def _data_dir() -> str:
+        return str(settings.data_dir)
+
+    def _summary_dir() -> str:
+        return str(settings.summary_dir)
 
     try:
         DEFAULT_SUMMARY_STALE_SEC = float(settings.lock.summary_lock_stale_sec)
@@ -54,14 +56,21 @@ try:
 except ImportError:
     logger.error("Failed to import config.settings, using default paths")
     settings = None
-    DATA_DIR = "data"
-    SUMMARY_DIR = "data/summary"
+
+    def _data_dir() -> str:
+        return "data"
+
+    def _summary_dir() -> str:
+        return "data/summary"
+
     DEFAULT_SUMMARY_STALE_SEC = 600.0
     DEFAULT_MINERU_STALE_SEC = 3600.0
 
 
 class LockCleaner:
-    def __init__(self, data_dir: str = DATA_DIR, summary_dir: str = SUMMARY_DIR):
+    def __init__(self, data_dir: str | None = None, summary_dir: str | None = None):
+        data_dir = data_dir or _data_dir()
+        summary_dir = summary_dir or _summary_dir()
         self.data_dir = Path(data_dir)
         self.summary_dir = Path(summary_dir)
         self.mineru_dir = self.data_dir / "mineru"
@@ -100,7 +109,7 @@ class LockCleaner:
             return False
 
     @staticmethod
-    def read_lock_pid(lock_path: Path) -> Tuple[int | None, float | None]:
+    def read_lock_pid(lock_path: Path) -> tuple[int | None, float | None]:
         """
         Read PID and timestamp from lock file.
 
@@ -116,7 +125,7 @@ class LockCleaner:
         except (ValueError, IndexError, OSError):
             return None, None
 
-    def is_lock_orphan(self, lock_path: Path) -> Tuple[bool, str]:
+    def is_lock_orphan(self, lock_path: Path) -> tuple[bool, str]:
         """
         Check if lock file is orphaned (owner process dead).
 
@@ -135,7 +144,7 @@ class LockCleaner:
 
         return False, f"alive_pid_{pid}"
 
-    def is_lock_stale(self, lock_path: Path, stale_time: float) -> Tuple[bool, str]:
+    def is_lock_stale(self, lock_path: Path, stale_time: float) -> tuple[bool, str]:
         """
         Check if lock file is stale (too old).
 
@@ -150,7 +159,7 @@ class LockCleaner:
         except Exception as e:
             return False, f"check_failed_{e}"
 
-    def find_mineru_locks(self) -> List[Path]:
+    def find_mineru_locks(self) -> list[Path]:
         """Find all MinerU parsing lock files."""
         if not self.mineru_dir.exists():
             return []
@@ -166,7 +175,7 @@ class LockCleaner:
 
         return locks
 
-    def find_gpu_slot_locks(self) -> List[Path]:
+    def find_gpu_slot_locks(self) -> list[Path]:
         """Find all GPU slot lock files."""
         gpu_slots_dir = self.mineru_dir / ".gpu_slots"
         if not gpu_slots_dir.exists():
@@ -180,7 +189,7 @@ class LockCleaner:
 
         return locks
 
-    def find_summary_locks(self) -> List[Path]:
+    def find_summary_locks(self) -> list[Path]:
         """Find all summary cache lock files."""
         if not self.summary_dir.exists():
             return []
@@ -195,7 +204,7 @@ class LockCleaner:
 
         return locks
 
-    def scan_all_locks(self) -> List[Path]:
+    def scan_all_locks(self) -> list[Path]:
         """Scan and return all lock files."""
         locks = []
         locks.extend(self.find_mineru_locks())
@@ -203,7 +212,12 @@ class LockCleaner:
         locks.extend(self.find_summary_locks())
         return locks
 
-    def clean_locks(self, force: bool = False, delete_all: bool = False, stale_time: float | None = None) -> None:
+    def clean_locks(
+        self,
+        force: bool = False,
+        delete_all: bool = False,
+        stale_time: float | None = None,
+    ) -> None:
         """
         Clean lock files.
 

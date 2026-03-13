@@ -9,25 +9,30 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 ## 📋 Table of Contents
 
 ### Getting Started
+
 - [Core Overview](#-core-overview)
 - [Quick Start](#-quick-start)
 - [Docs](#docs)
 
 ### Usage
+
 - [User Guide](#-user-guide)
 - [AI Paper Summarization](#-ai-paper-summarization)
 - [Advanced Features](#-advanced-features)
 
 ### Configuration
+
 - [Configuration Guide](#configuration-guide)
 - [Prerequisites & OS Notes](#-prerequisites--os-notes)
 
 ### Operations
+
 - [Data Layout & Migration](#-data-layout--migration)
 - [Deployment & Security](#-deployment--security-notes)
 - [Troubleshooting](#-troubleshooting)
 
 ### Development
+
 - [Tech Stack](#-tech-stack)
 - [Project Structure](#-project-structure)
 - [Architecture](#architecture)
@@ -35,6 +40,7 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 - [Development Guide](#-development-guide)
 
 ### Other
+
 - [Changelog](#-changelog)
 - [Acknowledgments](#-acknowledgments)
 
@@ -55,8 +61,8 @@ arxiv-sanity-X is a personal research workbench for tracking arXiv papers. It co
 
 ### Key Capabilities
 
-| Feature                          | Description                                                                |
-| -------------------------------- | -------------------------------------------------------------------------- |
+| Feature                           | Description                                                                |
+| --------------------------------- | -------------------------------------------------------------------------- |
 | 🔍 **Multi-mode Search**          | Keyword (TF-IDF), semantic (Embedding), hybrid search with tunable weights |
 | 🎯 **Smart Recommendations**      | SVM classifiers trained on positive/negative feedback tags                 |
 | 🤖 **AI Summaries**               | HTML/PDF parsing + LLM-generated structured summaries, multi-model support |
@@ -189,20 +195,26 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - Use the search box at the top (keyboard shortcut: `Ctrl+K`)
 
 **Search Syntax:**
-| Syntax   | Example                  | Description                          |
+| Syntax | Example | Description |
 | -------- | ------------------------ | ------------------------------------ |
-| Title    | `ti:transformer`         | Search titles containing transformer |
-| Author   | `au:goodfellow`          | Search by author                     |
-| Category | `cat:cs.LG`              | Search specific arXiv category       |
-| ID       | `id:2312.12345`          | Find by arXiv ID                     |
-| Phrase   | `"large language model"` | Exact phrase match                   |
-| Exclude  | `-survey` or `!survey`   | Exclude results containing the term  |
+| Title | `ti:transformer` | Search titles containing transformer |
+| Author | `au:goodfellow` | Search by author |
+| Category | `cat:cs.LG` | Search specific arXiv category |
+| ID | `id:2312.12345` | Find by arXiv ID |
+| Phrase | `"large language model"` | Exact phrase match |
+| Exclude | `-survey` or `!survey` | Exclude results containing the term |
 
 **Search Mode Toggle:**
 
 - **keyword**: Fastest, TF-IDF based, no extra services required
 - **semantic**: Vector similarity based, requires Embedding enabled
 - **hybrid**: Combines keyword + semantic, adjustable weight (recommended)
+
+**Homepage Filter Rules:**
+
+- If you type a search query, the UI and backend keep ranking in query-compatible modes (`search` or `time`)
+- Advanced fields such as **Tags**, **PIDs**, **Logic**, and **SVM C** only apply when **Rank by** is `tags` or `pid`
+- Tag inputs in advanced filters support inline suggestions and keyboard selection
 
 ### 3) Tagging System and Personalized Recommendations
 
@@ -228,9 +240,10 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 
 ### 5) Reading List
 
-- Click the **📚** button on paper cards to add to reading list
+- Click the bookmark/reading-list button on paper cards to add papers to your reading list
 - Visit `/readinglist` page to manage your reading list
 - Useful for batch summarization or read-later queuing
+- The reading list page mirrors the main paper-card actions, including Similar / Inspect / Summary links and private upload actions
 
 ### 6) Other Features
 
@@ -259,15 +272,15 @@ To migrate to a new machine, you typically copy at least:
 - `data/features.p` (or regenerate it by running [tools/compute.py](tools/compute.py))
 - `data/summary/` (optional, if you want to keep cached summaries)
 
-If you enabled git backup via `data-repo/`, you can also restore from:
+If you use git backup via `data-repo/`, you can also restore from:
 
 - `data-repo/dict.db`
 
-To enable `data-repo/` backup:
+To use `data-repo/` backup with the daemon:
 
 1. Initialize the submodule: `git submodule update --init --recursive`
-2. Set `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true`
-3. Ensure `data-repo/` has a valid git remote and your runtime environment can `git push`
+2. `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP=true` is already the default; set it to `false` if you want to disable backups
+3. If you do not want remote pushes, set `ARXIV_SANITY_DAEMON_BACKUP_PUSH=false`; otherwise ensure `data-repo/` has a valid git remote and your runtime environment can `git push`
 
 ## 🔐 Deployment & Security Notes
 
@@ -279,12 +292,12 @@ To enable `data-repo/` backup:
 
 - **The website is empty / no papers**: you likely didn’t run [tools/arxiv_daemon.py](tools/arxiv_daemon.py) + [tools/compute.py](tools/compute.py) yet.
 - **Summaries always fail**: check `ARXIV_SANITY_LLM_API_KEY`, `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME` in `.env`.
-- **Summary doesn’t start generating**: the Summary page will not auto-enqueue jobs on cache misses; click **Generate**. Ensure a Huey consumer is running (recommended: `python bin/run_services.py`, or run only the consumer with `python bin/huey_consumer.py`).
+- **Summary doesn’t start generating**: the Summary page will not auto-enqueue jobs on cache misses; click **Generate**. Ensure a Huey consumer is running (recommended: `python bin/run_services.py`, or run only the consumer with `python bin/huey_consumer.py tasks.huey -w 4 -k thread`).
 - **Semantic/hybrid search has no effect**: ensure embeddings are enabled and you regenerated features with [tools/compute.py](tools/compute.py) (for hybrid features).
 - **Time-sorted lists look wrong / slow**: rebuild the metadata time index: `python -m tools rebuild_time_index`.
 - **MinerU errors**:
-    - API backend: check `MINERU_API_KEY` (or `ARXIV_SANITY_MINERU_API_KEY`)
-    - local backend: check `ARXIV_SANITY_MINERU_BACKEND` and that the service is reachable on `MINERU_PORT`
+    - API backend: check `ARXIV_SANITY_MINERU_API_KEY`
+    - local backend: check `ARXIV_SANITY_MINERU_BACKEND` and that the service is reachable on `ARXIV_SANITY_MINERU_PORT`
 - **Stuck jobs after crash (locks)**: run [scripts/cleanup_locks.py](scripts/cleanup_locks.py) or tune `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`.
 - **Stuck/ghost summary tasks (Huey)**: dry-run `python scripts/cleanup_tasks.py`, then rerun with `--force` (optionally `--flush-huey` to clear the entire queue). Use with care.
 - **Cannot load features.p due to NumPy mismatch**: regenerate features by rerunning [tools/compute.py](tools/compute.py) under the current environment.
@@ -312,6 +325,7 @@ Pick one profile first, then follow the steps below.
 # Clone and install
 git clone https://github.com/xihuai18/arxiv-sanity-x && cd arxiv-sanity-x
 pip install -r requirements.txt
+npm install
 ```
 
 ### 2. Create Configuration Files
@@ -331,10 +345,10 @@ Edit `.env` with your settings (created from [.env.example](.env.example)).
 At minimum, you should review **LLM settings**, and (optionally) **summary source / embedding / MinerU**:
 
 ```bash
-# LLM API (Required for paper summaries)
+# LLM API example (Required for paper summaries)
 ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
 ARXIV_SANITY_LLM_API_KEY=your-api-key
-ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free
+ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free  # Example provider model, not the code default
 ARXIV_SANITY_LLM_SUMMARY_LANG=zh
 
 # Web
@@ -342,7 +356,7 @@ ARXIV_SANITY_HOST=http://localhost:55555
 ARXIV_SANITY_SERVE_PORT=55555
 
 # Summary source (HTML is fast & default)
-ARXIV_SANITY_SUMMARY_SOURCE=html
+ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html
 ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
 
 # Runtime tuning (Optional, recommended for stability)
@@ -360,6 +374,9 @@ ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
 # Cache refresh throttling (serve stale cache while refreshing)
 # ARXIV_SANITY_DATA_CACHE_REFRESH_MIN_INTERVAL=60
 # ARXIV_SANITY_FEATURES_CACHE_REFRESH_MIN_INTERVAL=300
+# # Readiness checks used by launchers and health probes
+# ARXIV_SANITY_READY_REQUIRE_EMBEDDING=true
+# ARXIV_SANITY_READY_REQUIRE_MINERU=true
 #
 # Gunicorn (bin/up.sh auto-selects gevent when SSE is enabled and gevent is installed)
 # ARXIV_SANITY_GUNICORN_WORKER_CLASS=gevent
@@ -377,16 +394,17 @@ ARXIV_SANITY_EMAIL_PASSWORD=your-password
 # ARXIV_SANITY_RECO_API_KEY=your-internal-key
 
 # Embeddings (Optional)
-# ARXIV_SANITY_EMBED_USE_LLM_API=true
+# ARXIV_SANITY_EMBED_USE_LLM_API=false
 # ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
 
 # MinerU (Optional)
-# ARXIV_SANITY_MINERU_ENABLED=true
+# ARXIV_SANITY_MINERU_ENABLED=false
 # ARXIV_SANITY_MINERU_BACKEND=api
-# MINERU_API_KEY=your-mineru-api-key
+# ARXIV_SANITY_MINERU_API_KEY=your-mineru-api-key
 ```
 
-Also check the arXiv categories you want to index in [tools/arxiv_daemon.py](tools/arxiv_daemon.py) (`CORE/LANG/AGENT/APP/ALL_TAGS`).
+Also check the arXiv categories configured via `ARXIV_SANITY_ARXIV_CORE_TAGS`, `ARXIV_SANITY_ARXIV_LANG_TAGS`, `ARXIV_SANITY_ARXIV_AGENT_TAGS`, and `ARXIV_SANITY_ARXIV_APP_TAGS`.
+If you want automated fetch/compute/summary/email, remember that daemon is not started automatically; use `python -m tools daemon` or `python bin/run_services.py --with-daemon`.
 
 ### 4. Verify Configuration
 
@@ -396,6 +414,9 @@ python -m config.cli show
 
 # Validate configuration
 python -m config.cli validate
+
+# Diagnose common operator mistakes
+python -m config.cli doctor
 ```
 
 ### 5. Fetch Papers and Start
@@ -418,7 +439,10 @@ Choose the startup method based on your needs:
 #### Option 1: Minimal Startup (Web Only)
 
 ```bash
-# Development mode (with hot reload)
+# Development mode
+# Build frontend assets first if static/dist is missing
+npm run build:static
+# Set ARXIV_SANITY_RELOAD=true if you want auto-reload
 python serve.py
 
 # Production mode (Gunicorn)
@@ -428,7 +452,7 @@ bash bin/up.sh
 #### Option 2: One-Command Startup (Recommended)
 
 ```bash
-# Start Web + optional services (Embedding/MinerU/LiteLLM)
+# Start Web + Huey + optional services (Embedding/MinerU/LiteLLM)
 python bin/run_services.py
 
 # Common options
@@ -437,6 +461,8 @@ python bin/run_services.py --no-mineru     # Skip MinerU service
 python bin/run_services.py --no-litellm    # Skip LiteLLM gateway
 python bin/run_services.py --with-daemon   # Include scheduler daemon
 ```
+
+`python bin/run_services.py` does not start the daemon by default. If you want automated fetch/compute/summary/email, add `--with-daemon` or run `python -m tools daemon` separately.
 
 #### Option 3: Start Services Separately
 
@@ -453,7 +479,10 @@ bash bin/up.sh
 # Terminal 4: LiteLLM gateway (optional)
 ./bin/litellm.sh
 
-# Terminal 5: Scheduler daemon (optional)
+# Terminal 5: Huey worker (required for async jobs)
+python bin/huey_consumer.py tasks.huey -w 4 -k thread
+
+# Terminal 6: Scheduler daemon (optional)
 python -m tools daemon
 ```
 
@@ -468,16 +497,16 @@ python bin/run_services.py --fetch-compute 10000
 
 ### Configuration Checklist
 
-| Item                  | File/Location                                  | Required      | Description                                                                      |
-| --------------------- | ---------------------------------------------- | ------------- | -------------------------------------------------------------------------------- |
-| **Core Config**       | [.env](.env.example)                           | ✅ Yes         | All settings via environment variables                                           |
-| **LLM Provider**      | `.env`                                         | ✅ Yes         | `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME`, `ARXIV_SANITY_LLM_API_KEY` |
-| **arXiv Categories**  | [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | ⚙️ Important   | `CORE/LANG/AGENT/APP/ALL_TAGS` controls what you fetch & show                    |
-| **Summary Source**    | `.env`                                         | ⚙️ Recommended | `ARXIV_SANITY_SUMMARY_SOURCE=html\|mineru`                                       |
-| **Embedding Backend** | `.env`                                         | ⚙️ Optional    | `ARXIV_SANITY_EMBED_*` settings                                                  |
-| **MinerU Backend**    | `.env`                                         | ⚙️ Optional    | `ARXIV_SANITY_MINERU_*` settings + `MINERU_API_KEY`                              |
-| **Email SMTP**        | `.env`                                         | ⚙️ Optional    | `ARXIV_SANITY_EMAIL_*` settings                                                  |
-| **Session Secret**    | env/file                                       | ⚙️ Recommended | `ARXIV_SANITY_SECRET_KEY` or `secret_key.txt`                                    |
+| Item                  | File/Location        | Required       | Description                                                                      |
+| --------------------- | -------------------- | -------------- | -------------------------------------------------------------------------------- |
+| **Core Config**       | [.env](.env.example) | ✅ Yes         | All settings via environment variables                                           |
+| **LLM Provider**      | `.env`               | ✅ Yes         | `ARXIV_SANITY_LLM_BASE_URL`, `ARXIV_SANITY_LLM_NAME`, `ARXIV_SANITY_LLM_API_KEY` |
+| **arXiv Categories**  | `.env`               | ⚙️ Important   | `ARXIV_SANITY_ARXIV_*` controls what you fetch & show                            |
+| **Summary Source**    | `.env`               | ⚙️ Recommended | `ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html\|mineru`                              |
+| **Embedding Backend** | `.env`               | ⚙️ Optional    | `ARXIV_SANITY_EMBED_*` settings                                                  |
+| **MinerU Backend**    | `.env`               | ⚙️ Optional    | `ARXIV_SANITY_MINERU_*` settings                                                 |
+| **Email SMTP**        | `.env`               | ⚙️ Optional    | `ARXIV_SANITY_EMAIL_*` settings                                                  |
+| **Session Secret**    | env/file             | ⚙️ Recommended | `ARXIV_SANITY_SECRET_KEY` or `secret_key.txt`                                    |
 
 ---
 
@@ -493,7 +522,7 @@ python bin/run_services.py --fetch-compute 10000
 - **LLM provider** (OpenAI-compatible). Required for summaries.
 - **Ollama** (optional): used when you choose local embeddings via [bin/embedding_serve.sh](bin/embedding_serve.sh).
 - **MinerU** (optional):
-    - API backend uses mineru.net and requires `MINERU_API_KEY`
+    - API backend uses mineru.net and requires `ARXIV_SANITY_MINERU_API_KEY`
     - local VLM backend uses `mineru-vllm-server` via [bin/mineru_serve.sh](bin/mineru_serve.sh)
 - **LiteLLM** (optional): multi-model gateway configured by [config/llm.yml](config/llm.yml).
 
@@ -502,19 +531,21 @@ python bin/run_services.py --fetch-compute 10000
 Some launchers are bash scripts ([bin/up.sh](bin/up.sh), [bin/embedding_serve.sh](bin/embedding_serve.sh), [bin/mineru_serve.sh](bin/mineru_serve.sh), [bin/litellm.sh](bin/litellm.sh)), and [bin/run_services.py](bin/run_services.py) invokes them with `bash`.
 
 - On Windows, use **WSL** (recommended) or a bash-compatible environment.
-- Alternatively, skip those services and run only the web app with `python serve.py` while using API backends for embeddings / MinerU.
+- Alternatively, build frontend assets first (`npm run build:static`) and run only the web app with `python serve.py` while using API backends for embeddings / MinerU.
 
 ## Configuration Guide
 
 ### Configuration Overview
 
-This project uses **pydantic-settings** for configuration management. All settings are configured via environment variables or a `.env` file.
+This project uses **pydantic-settings** for configuration management. The canonical configuration surface is:
 
-| Source                                         | Purpose                                 | Required    |
-| ---------------------------------------------- | --------------------------------------- | ----------- |
-| [.env](.env.example)                           | All configuration settings              | ✅ Yes       |
-| [tools/arxiv_daemon.py](tools/arxiv_daemon.py) | arXiv category lists for paper fetching | ⚙️ Important |
-| [config/llm.yml](config/llm.yml)               | LiteLLM multi-model gateway             | ⚙️ Optional  |
+If you want the exact code defaults (as opposed to recommended example values), see `docs/DEFAULTS.md`.
+
+| Source                                   | Purpose                                       | Required    |
+| ---------------------------------------- | --------------------------------------------- | ----------- |
+| [.env](.env.example)                     | Runtime configuration and non-secret defaults | ✅ Yes      |
+| [config/settings.py](config/settings.py) | Typed schema and code defaults                | ✅ Yes      |
+| [config/llm.yml](config/llm.yml)         | LiteLLM multi-model gateway aliases           | ⚙️ Optional |
 
 **Files NOT in repository (.gitignore):**
 
@@ -526,127 +557,121 @@ This project uses **pydantic-settings** for configuration management. All settin
 
 ---
 
+### Common Scenarios
+
+- Local read/search only: configure `ARXIV_SANITY_LLM_*`, keep `ARXIV_SANITY_MINERU_ENABLED=false`, run `python bin/run_services.py`
+- Automated daily pipeline: keep `.env.example` baseline, then additionally start `python -m tools daemon` or use `python bin/run_services.py --with-daemon`
+- Email recommendations: add `ARXIV_SANITY_EMAIL_*` and `ARXIV_SANITY_RECO_API_KEY`
+- MinerU API parsing: set `ARXIV_SANITY_MINERU_ENABLED=true`, `ARXIV_SANITY_MINERU_BACKEND=api`, `ARXIV_SANITY_MINERU_API_KEY=...`
+
+---
+
 ### 1. .env File - Core Configuration
 
-Copy `.env.example` to `.env` and configure the following sections:
+Copy `.env.example` to `.env`. The project now treats `.env.example` as the operator-facing source of truth for variable names and grouping.
 
-#### 1.1 Data Storage
-
-```bash
-ARXIV_SANITY_DATA_DIR=data                    # Data storage root (SSD recommended)
-ARXIV_SANITY_SUMMARY_DIR=data/summary         # Paper summaries cache
-```
-
-#### 1.2 Service Ports
+#### 1.1 Minimal required settings
 
 ```bash
-ARXIV_SANITY_SERVE_PORT=55555      # Web application port
-ARXIV_SANITY_EMBED_PORT=54000      # Ollama embedding service port
-ARXIV_SANITY_MINERU_PORT=52000     # MinerU VLM service port
-ARXIV_SANITY_LITELLM_PORT=53000    # LiteLLM gateway port
-```
-
-#### 1.3 LLM API Configuration
-
-```bash
-# Option 1: Direct API (OpenRouter, OpenAI, etc.)
-ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
-ARXIV_SANITY_LLM_API_KEY=your-api-key
-ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free
-ARXIV_SANITY_LLM_SUMMARY_LANG=zh
-
-# Option 2: Via LiteLLM gateway (requires config/llm.yml)
 ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
-ARXIV_SANITY_LLM_API_KEY=no-key
-ARXIV_SANITY_LLM_NAME=or-mimo
+ARXIV_SANITY_LLM_API_KEY=your-api-key
+ARXIV_SANITY_LLM_NAME=gpt-5.4
 ```
 
-#### 1.4 Embedding Configuration
+#### 1.2 Recommended non-secret baseline
+
+These defaults work well for a single-user or small-team deployment. Keep your keys/passwords separate.
 
 ```bash
-# Use OpenAI-compatible API for embeddings (default)
-ARXIV_SANITY_EMBED_USE_LLM_API=true
-ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
-ARXIV_SANITY_EMBED_API_BASE=       # Empty = use LLM_BASE_URL
-ARXIV_SANITY_EMBED_API_KEY=        # Empty = use LLM_API_KEY
+ARXIV_SANITY_HOST=http://localhost:55555
+ARXIV_SANITY_SERVE_PORT=55555
+ARXIV_SANITY_LITELLM_PORT=53000
+ARXIV_SANITY_EMBED_PORT=54000
+ARXIV_SANITY_MINERU_PORT=52000
+ARXIV_SANITY_LOG_LEVEL=INFO
 
-# Or use local Ollama service
-ARXIV_SANITY_EMBED_USE_LLM_API=false  # Uses http://localhost:{EMBED_PORT}
+ARXIV_SANITY_WARMUP_DATA=true
+ARXIV_SANITY_WARMUP_ML=true
+ARXIV_SANITY_ENABLE_SCHEDULER=true
+ARXIV_SANITY_READY_REQUIRE_EMBEDDING=true
+ARXIV_SANITY_READY_REQUIRE_MINERU=true
+
+ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html
+ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
+ARXIV_SANITY_SUMMARY_FORCE_CACHE_ONLY=true
+
+ARXIV_SANITY_EMBED_USE_LLM_API=false
+ARXIV_SANITY_MINERU_ENABLED=false
+
+ARXIV_SANITY_DAEMON_FETCH_NUM=2000
+ARXIV_SANITY_DAEMON_SUMMARY_NUM=250
+ARXIV_SANITY_DAEMON_SUMMARY_WORKERS=2
+ARXIV_SANITY_DAEMON_ENABLE_SUMMARY=true
+ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS=true
+ARXIV_SANITY_DAEMON_ENABLE_PRIORITY_QUEUE=true
+ARXIV_SANITY_DAEMON_ENABLE_SUMMARY_QUEUE=true
+ARXIV_SANITY_DAEMON_PRIORITY_LIMIT=200
+ARXIV_SANITY_DAEMON_TIMEZONE=Asia/Shanghai
+
+ARXIV_SANITY_HUEY_WORKERS=4
+ARXIV_SANITY_HUEY_WORKER_TYPE=thread
+ARXIV_SANITY_SSE_ENABLED=true
+ARXIV_SANITY_GUNICORN_PRELOAD=true
+
+ARXIV_SANITY_ARXIV_CORE_TAGS=cs.AI,cs.LG,stat.ML
+ARXIV_SANITY_ARXIV_LANG_TAGS=cs.CL,cs.IR,cs.CV
+ARXIV_SANITY_ARXIV_AGENT_TAGS=cs.MA,cs.RO,cs.HC,cs.GT,cs.NE
+ARXIV_SANITY_ARXIV_APP_TAGS=cs.SE,cs.CY
 ```
 
-#### 1.5 Email Service
+#### 1.3 Canonical variable groups
+
+- `ARXIV_SANITY_LLM_*`: summary/model provider
+- `ARXIV_SANITY_EMBED_*`: embedding backend
+- `ARXIV_SANITY_MINERU_*`: PDF parsing backend
+- `ARXIV_SANITY_SUMMARY_*`: summary source and cache behavior
+- `ARXIV_SANITY_DAEMON_*`: fetch/compute/summary/email/backup automation
+- `ARXIV_SANITY_HUEY_*`: async worker queue
+- `ARXIV_SANITY_SSE_*`: cross-process SSE bus
+- `ARXIV_SANITY_ARXIV_*`: fetched arXiv category groups
+- `ARXIV_SANITY_RECO_*`: recommendation/email API behavior
+
+#### 1.4 Commonly edited sections
 
 ```bash
+# Summary source
+ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html
+ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
+
+# MinerU API backend
+ARXIV_SANITY_MINERU_ENABLED=true
+ARXIV_SANITY_MINERU_BACKEND=api
+ARXIV_SANITY_MINERU_API_KEY=your-mineru-api-key
+
+# Email recommendations
 ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
 ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
 ARXIV_SANITY_EMAIL_SMTP_PORT=465
 ARXIV_SANITY_EMAIL_USERNAME=username
 ARXIV_SANITY_EMAIL_PASSWORD=your-password
-ARXIV_SANITY_HOST=http://your-server:55555  # Public URL for email links
 ```
 
-#### 1.6 Paper Summary Configuration
+#### 1.5 arXiv category groups
+
+Customize fetched categories in `.env`, not in `tools/arxiv_daemon.py`:
 
 ```bash
-ARXIV_SANITY_SUMMARY_MIN_CHINESE_RATIO=0.25      # Min Chinese ratio for cache validity
-ARXIV_SANITY_SUMMARY_DEFAULT_SEMANTIC_WEIGHT=0.5 # Hybrid search weight (0.0-1.0)
-ARXIV_SANITY_SUMMARY_SOURCE=html                 # "html" (default) or "mineru"
-ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv    # HTML source priority order
+ARXIV_SANITY_ARXIV_CORE_TAGS=cs.AI,cs.LG,stat.ML
+ARXIV_SANITY_ARXIV_LANG_TAGS=cs.CL,cs.IR,cs.CV
+ARXIV_SANITY_ARXIV_AGENT_TAGS=cs.MA,cs.RO,cs.HC,cs.GT,cs.NE
+ARXIV_SANITY_ARXIV_APP_TAGS=cs.SE,cs.CY
 ```
 
-#### 1.7 MinerU PDF Parsing
-
-```bash
-ARXIV_SANITY_MINERU_ENABLED=true
-ARXIV_SANITY_MINERU_BACKEND=api                  # "api", "pipeline", or "vlm-http-client"
-ARXIV_SANITY_MINERU_DEVICE=cuda                  # "cuda" or "cpu" (pipeline only)
-ARXIV_SANITY_MINERU_MAX_WORKERS=2
-ARXIV_SANITY_MINERU_MAX_VRAM=4
-MINERU_API_KEY=your-mineru-api-key               # For API backend
-```
-
-#### 1.8 SVM Recommendation Parameters
-
-```bash
-ARXIV_SANITY_SVM_C=0.02
-ARXIV_SANITY_SVM_MAX_ITER=5000
-ARXIV_SANITY_SVM_TOL=0.001
-ARXIV_SANITY_SVM_NEG_WEIGHT=5.0
-```
+The fetch query is assembled from these groups. See the [arXiv category taxonomy](https://arxiv.org/category_taxonomy) for the full list.
 
 ---
 
-### 2. arxiv_daemon.py - arXiv Categories
-
-The paper fetching query is built from `ALL_TAGS` in [tools/arxiv_daemon.py](tools/arxiv_daemon.py). Customize these groups to control which arXiv categories to fetch:
-
-```python
-# Default category groups (edit as needed)
-CORE = ["cs.AI", "cs.LG", "stat.ML"]           # Core AI/ML
-LANG = ["cs.CL", "cs.IR", "cs.CV"]             # NLP, IR, Computer Vision
-AGENT = ["cs.MA", "cs.RO", "cs.HC", "cs.GT", "cs.NE"]  # Agents, Robotics, HCI
-APP = ["cs.SE", "cs.CY"]                        # Software Engineering, Cybersecurity
-
-ALL_TAGS = CORE + LANG + AGENT + APP
-```
-
-The query is constructed as `cat:cs.AI OR cat:cs.LG OR ...`. Add or remove categories based on your research interests.
-
-**Common arXiv CS categories:**
-
-- `cs.AI` - Artificial Intelligence
-- `cs.LG` - Machine Learning
-- `cs.CL` - Computation and Language (NLP)
-- `cs.CV` - Computer Vision
-- `cs.RO` - Robotics
-- `cs.NE` - Neural and Evolutionary Computing
-- `stat.ML` - Statistics Machine Learning
-
-See [arXiv category taxonomy](https://arxiv.org/category_taxonomy) for the full list.
-
----
-
-### 3. llm.yml - LiteLLM Gateway
+### 2. llm.yml - LiteLLM Gateway
 
 Copy `llm_template.yml` to `llm.yml` if you want to use LiteLLM as a unified gateway for multiple LLM providers.
 
@@ -688,9 +713,13 @@ ARXIV_SANITY_LLM_API_KEY=no-key
 ARXIV_SANITY_LLM_NAME=or-mimo  # Use alias from llm.yml
 ```
 
+If you copy `config/llm_template.yml` unchanged, also set `ARXIV_SANITY_EXTRACT_MODEL_NAME` to a model alias defined there, or add a matching `qwen3.5-plus` route yourself.
+
+For uploaded-paper metadata extraction, the code default is `ARXIV_SANITY_EXTRACT_MODEL_NAME=qwen3.5-plus`. If `ARXIV_SANITY_EXTRACT_BASE_URL` / `ARXIV_SANITY_EXTRACT_API_KEY` are empty, extraction reuses the main LLM endpoint and credentials, so that endpoint must be able to route the `qwen3.5-plus` alias.
+
 ---
 
-### 4. Configuration CLI Tool
+### 3. Configuration CLI Tool
 
 The project provides a CLI tool for configuration management:
 
@@ -701,11 +730,17 @@ python -m config.cli show
 # Show configuration in JSON format
 python -m config.cli show --json
 
+# Show configuration in JSON format, including secrets
+python -m config.cli show --json --include-secrets
+
 # Validate configuration
 python -m config.cli validate
 
-# Generate environment variable template
+# Generate environment variable template (secrets redacted by default)
 python -m config.cli env
+
+# Generate environment variable template including secrets
+python -m config.cli env --include-secrets
 ```
 
 #### Using Configuration in Code
@@ -736,22 +771,22 @@ print(settings.email.smtp_server)
 
 #### Summary Source
 
-| Variable                      | Default       | Description                         |
-| ----------------------------- | ------------- | ----------------------------------- |
-| `ARXIV_SANITY_SUMMARY_SOURCE` | `html`        | Markdown source: `html` or `mineru` |
-| `ARXIV_SANITY_HTML_SOURCES`   | `ar5iv,arxiv` | HTML source priority order          |
+| Variable                               | Default       | Description                         |
+| -------------------------------------- | ------------- | ----------------------------------- |
+| `ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE` | `html`        | Markdown source: `html` or `mineru` |
+| `ARXIV_SANITY_SUMMARY_HTML_SOURCES`    | `ar5iv,arxiv` | HTML source priority order          |
 
 #### MinerU Backend
 
-| Variable                          | Default | Description                             |
-| --------------------------------- | ------- | --------------------------------------- |
-| `ARXIV_SANITY_MINERU_ENABLED`     | `true`  | Enable/disable MinerU                   |
-| `ARXIV_SANITY_MINERU_BACKEND`     | `api`   | `api`, `pipeline`, or `vlm-http-client` |
-| `ARXIV_SANITY_MINERU_DEVICE`      | `cuda`  | Device for pipeline backend             |
-| `ARXIV_SANITY_MINERU_MAX_WORKERS` | `2`     | Max concurrent minerU processes         |
-| `ARXIV_SANITY_MINERU_MAX_VRAM`    | `3`     | Max VRAM per process (GB)               |
-| `MINERU_API_POLL_INTERVAL`        | `5`     | API polling interval (seconds)          |
-| `MINERU_API_TIMEOUT`              | `900`   | API task timeout (seconds)              |
+| Variable                                | Default | Description                             |
+| --------------------------------------- | ------- | --------------------------------------- |
+| `ARXIV_SANITY_MINERU_ENABLED`           | `false` | Enable/disable MinerU                   |
+| `ARXIV_SANITY_MINERU_BACKEND`           | `api`   | `api`, `pipeline`, or `vlm-http-client` |
+| `ARXIV_SANITY_MINERU_DEVICE`            | `cuda`  | Device for pipeline backend             |
+| `ARXIV_SANITY_MINERU_MAX_WORKERS`       | `2`     | Max concurrent minerU processes         |
+| `ARXIV_SANITY_MINERU_MAX_VRAM`          | `4`     | Max VRAM per process (GB)               |
+| `ARXIV_SANITY_MINERU_API_POLL_INTERVAL` | `5`     | API polling interval (seconds)          |
+| `ARXIV_SANITY_MINERU_API_TIMEOUT`       | `900`   | API task timeout (seconds)              |
 
 #### Locks & Concurrency
 
@@ -764,22 +799,22 @@ print(settings.email.smtp_server)
 
 | Variable                         | Default | Description                |
 | -------------------------------- | ------- | -------------------------- |
-| `ARXIV_SANITY_EMBED_USE_LLM_API` | `true`  | Use LLM API for embeddings |
+| `ARXIV_SANITY_EMBED_USE_LLM_API` | `false` | Use LLM API for embeddings |
 
 #### Daemon/Scheduler
 
-| Variable                         | Default | Description                         |
-| -------------------------------- | ------- | ----------------------------------- |
-| `ARXIV_SANITY_FETCH_NUM`         | `2000`  | Papers to fetch per run             |
-| `ARXIV_SANITY_FETCH_MAX`         | `1000`  | Max results per API query           |
-| `ARXIV_SANITY_SUMMARY_NUM`       | `200`   | Papers to summarize per run         |
-| `ARXIV_SANITY_SUMMARY_WORKERS`   | `2`     | Summary worker threads              |
-| `ARXIV_SANITY_DAEMON_SUMMARY`    | `1`     | Enable summary generation in daemon |
-| `ARXIV_SANITY_DAEMON_EMBEDDINGS` | `1`     | Enable embeddings in daemon         |
-| `ARXIV_SANITY_PRIORITY_QUEUE`    | `1`     | Enable priority queue for summaries |
-| `ARXIV_SANITY_PRIORITY_DAYS`     | `2`     | Priority window (days)              |
-| `ARXIV_SANITY_PRIORITY_LIMIT`    | `100`   | Max priority papers                 |
-| `ARXIV_SANITY_ENABLE_GIT_BACKUP` | `1`     | Enable git backup of dict.db        |
+| Variable                                    | Default | Description                         |
+| ------------------------------------------- | ------- | ----------------------------------- |
+| `ARXIV_SANITY_DAEMON_FETCH_NUM`             | `2000`  | Papers to fetch per run             |
+| `ARXIV_SANITY_DAEMON_FETCH_MAX`             | `1000`  | Max results per API query           |
+| `ARXIV_SANITY_DAEMON_SUMMARY_NUM`           | `250`   | Papers to summarize per run         |
+| `ARXIV_SANITY_DAEMON_SUMMARY_WORKERS`       | `2`     | Summary worker threads              |
+| `ARXIV_SANITY_DAEMON_ENABLE_SUMMARY`        | `1`     | Enable summary generation in daemon |
+| `ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS`     | `1`     | Enable embeddings in daemon         |
+| `ARXIV_SANITY_DAEMON_ENABLE_PRIORITY_QUEUE` | `1`     | Enable priority queue for summaries |
+| `ARXIV_SANITY_DAEMON_PRIORITY_DAYS`         | `2`     | Priority window (days)              |
+| `ARXIV_SANITY_DAEMON_PRIORITY_LIMIT`        | `200`   | Max priority papers                 |
+| `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP`     | `1`     | Enable git backup of dict.db        |
 
 #### Network / Proxy
 
@@ -787,16 +822,18 @@ print(settings.email.smtp_server)
 
 #### Gunicorn (up.sh)
 
-| Variable                        | Default | Description                   |
-| ------------------------------- | ------- | ----------------------------- |
-| `GUNICORN_WORKERS`              | `2`     | Number of worker processes    |
-| `GUNICORN_THREADS`              | `4`     | Threads per worker            |
-| `ARXIV_SANITY_GUNICORN_PRELOAD` | `1`     | Preload app in master process |
-| `GUNICORN_EXTRA_ARGS`           | ``      | Additional gunicorn arguments |
+| Variable                           | Default | Description                   |
+| ---------------------------------- | ------- | ----------------------------- |
+| `ARXIV_SANITY_GUNICORN_WORKERS`    | `2`     | Number of worker processes    |
+| `ARXIV_SANITY_GUNICORN_THREADS`    | `2`     | Threads per worker            |
+| `ARXIV_SANITY_GUNICORN_PRELOAD`    | `1`     | Preload app in master process |
+| `ARXIV_SANITY_GUNICORN_EXTRA_ARGS` | ``      | Additional gunicorn arguments |
+
+Legacy `GUNICORN_WORKERS`, `GUNICORN_THREADS`, and `GUNICORN_EXTRA_ARGS` are still accepted by `bin/up.sh` for compatibility, but prefer the `ARXIV_SANITY_GUNICORN_*` names in new deployments.
 
 ---
 
-### 5. Startup Parameters
+### 4. Startup Parameters
 
 #### run_services.py
 
@@ -946,7 +983,8 @@ To enable Sentry error reporting (optional), set `ARXIV_SANITY_SENTRY_ENABLED=tr
 
 | Route              | Description                        |
 | ------------------ | ---------------------------------- |
-| `GET /health`      | Health check                       |
+| `GET /health`      | Liveness/degraded health check     |
+| `GET /ready`       | Strict readiness check             |
 | `GET /`            | Homepage, paper list               |
 | `GET /inspect`     | Debug inspect page (auth required) |
 | `GET /summary`     | Paper summary page                 |
@@ -956,7 +994,7 @@ To enable Sentry error reporting (optional), set `ARXIV_SANITY_SENTRY_ENABLED=tr
 | `GET /readinglist` | Reading list page                  |
 | `GET /metrics`     | Prometheus metrics (optional)      |
 
-Note: `GET /health` returns `503` during cold start (e.g. `{"status":"loading"}`), and `200` when ready (e.g. `{"status":"ok","papers":<count>,"deps":{...}}`).
+Note: `GET /health` is non-strict and may return `200` with `loading` or `degraded` status during cold start or dependency issues. Use `GET /ready` for strict readiness; it returns `503` until papers and required dependencies are ready.
 
 ### Search & Recommendations (`api_search.py`)
 
@@ -984,17 +1022,18 @@ Note: `tools/send_emails.py` may call tag-search endpoints without a browser ses
 
 ### Paper Summarization (`api_summary.py`)
 
-| Endpoint                          | Description                             |
-| --------------------------------- | --------------------------------------- |
-| `POST /api/get_paper_summary`     | Get/generate paper summary              |
-| `POST /api/trigger_paper_summary` | Enqueue summary generation task (async) |
+| Endpoint                               | Description                                       |
+| -------------------------------------- | ------------------------------------------------- |
+| `POST /api/get_paper_summary`          | Get paper summary (cache-only by default)         |
+| `POST /api/get_paper_tldr`             | Get cached paper TL;DR (best-effort)              |
+| `POST /api/trigger_paper_summary`      | Enqueue summary generation task (async)           |
 | `POST /api/trigger_paper_summary_bulk` | Enqueue summary generation tasks in batch (async) |
-| `GET /api/task_status/<task_id>`  | Get Huey task status                    |
-| `GET /api/queue_stats`            | Huey queue stats                        |
-| `POST /api/summary_status`        | Get summary status (JSON)               |
-| `POST /api/clear_model_summary`   | Clear specific model's summary cache    |
-| `POST /api/clear_paper_cache`     | Clear all paper caches                  |
-| `GET /api/check_paper_summaries`  | Validate/recheck summary caches         |
+| `GET /api/task_status/<task_id>`       | Get Huey task status                              |
+| `GET /api/queue_stats`                 | Huey queue stats                                  |
+| `POST /api/summary_status`             | Get summary status (JSON)                         |
+| `POST /api/clear_model_summary`        | Clear specific model's summary cache              |
+| `POST /api/clear_paper_cache`          | Clear all paper caches                            |
+| `GET /api/check_paper_summaries`       | Validate/recheck summary caches                   |
 
 Note: for the task owner, `GET /api/task_status/<task_id>` also includes additional fields such as `pid`, `model`, `error`, `priority`, and `stage` (coarse-grained progress marker). Some queued tasks may also return `queue_rank` / `queue_total`.
 
@@ -1007,15 +1046,15 @@ Note: for the task owner, `GET /api/task_status/<task_id>` also includes additio
 | `GET /api/tag_members`            | Get tag members                              |
 | `POST /api/paper_titles`          | Get paper titles (batch)                     |
 | `POST /add_tag/<tag>`             | Create tag                                   |
-| `GET/POST /add/<pid>/<tag>`       | Add tag to paper                             |
-| `GET/POST /sub/<pid>/<tag>`       | Remove tag from paper                        |
-| `GET/POST /del/<tag>`             | Delete tag                                   |
-| `GET/POST /rename/<otag>/<ntag>`  | Rename tag                                   |
-| `GET/POST /add_ctag/<ctag>`       | Add combined tag                             |
-| `GET/POST /del_ctag/<ctag>`       | Delete combined tag                          |
+| `POST /add/<pid>/<tag>`           | Add tag to paper                             |
+| `POST /sub/<pid>/<tag>`           | Remove tag from paper                        |
+| `POST /del/<tag>`                 | Delete tag                                   |
+| `POST /rename/<otag>/<ntag>`      | Rename tag                                   |
+| `POST /add_ctag/<ctag>`           | Add combined tag                             |
+| `POST /del_ctag/<ctag>`           | Delete combined tag                          |
 | `POST /rename_ctag/<otag>/<ntag>` | Rename combined tag                          |
-| `GET/POST /add_key/<keyword>`     | Add tracking keyword                         |
-| `GET/POST /del_key/<keyword>`     | Remove tracking keyword                      |
+| `POST /add_key/<keyword>`         | Add tracking keyword                         |
+| `POST /del_key/<keyword>`         | Remove tracking keyword                      |
 | `POST /rename_key/<okey>/<nkey>`  | Rename tracking keyword                      |
 
 ### Papers & Assets (`api_papers.py`)
@@ -1032,6 +1071,7 @@ Note: for the task owner, `GET /api/task_status/<task_id>` also includes additio
 | ------------------------------ | ------------------------------ |
 | `POST /api/readinglist/add`    | Add paper to reading list      |
 | `POST /api/readinglist/remove` | Remove paper from reading list |
+| `GET /api/readinglist/paper`   | Get one reading-list paper     |
 | `GET /api/readinglist/list`    | List reading list items        |
 
 ### User & Session (`api_user.py`)
@@ -1045,15 +1085,15 @@ Note: for the task owner, `GET /api/task_status/<task_id>` also includes additio
 
 ### Real-time Updates (`api_sse.py`)
 
-| Endpoint               | Description     |
-| ---------------------- | --------------- |
-| `GET /api/user_stream` | User SSE stream |
+| Endpoint               | Description             |
+| ---------------------- | ----------------------- |
+| `GET /api/user_stream` | User SSE stream         |
 | `GET /api/sse_stats`   | SSE stats (per process) |
 
 ### Uploads (Experimental) (`api_uploads.py`)
 
-| Endpoint                             | Description                                         |
-| ------------------------------------ | --------------------------------------------------- |
+| Endpoint                                 | Description                                         |
+| ---------------------------------------- | --------------------------------------------------- |
 | `POST /api/upload_pdf`                   | Upload private PDF                                  |
 | `GET /api/uploaded_papers/list`          | List uploaded papers                                |
 | `POST /api/uploaded_papers/process`      | Process upload (parse + extract + summary)          |
@@ -1113,7 +1153,10 @@ npm run format
 ### Backend Development
 
 ```bash
-# Run development server with auto-reload
+# Run development server
+# Build frontend assets first if static/dist is missing
+npm run build:static
+# Set ARXIV_SANITY_RELOAD=true if you want auto-reload
 python serve.py
 
 # Or use gunicorn for production-like testing
@@ -1131,6 +1174,9 @@ python -m config.cli validate
 
 # Generate environment variable template
 python -m config.cli env
+
+# Include secret values when you explicitly need them
+python -m config.cli env --include-secrets
 ```
 
 ### Testing
@@ -1164,7 +1210,7 @@ pytest tests/e2e/
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │  API Layer (backend/blueprints/)                            │
-│  - 8 Flask blueprints organizing routes by domain           │
+│  - 10 Flask blueprints organizing routes by domain          │
 │  - Request validation, authentication, response formatting  │
 └─────────────────────────────────────────────────────────────┘
                             ↓
@@ -1223,16 +1269,16 @@ Click Summary → Huey Task → HTML/PDF Parse → LLM → Cache → SSE Push
 - 📤 **Paper Upload**: Upload private PDFs for similarity search against the paper corpus (experimental)
 - 🧪 **Test Suite Enhancement**: Comprehensive unit and integration tests for APIs, services, and utilities
 - 🔒 **Security Fixes**:
-  - Tag search APIs (`/api/tag_search`, `/api/tags_search`) now require authentication and validate user identity
-  - Email validation accepts modern long TLDs (up to 63 characters, e.g., `.engineering`, `.museum`)
-  - Semantic search guards against missing pid list to prevent IndexError
+    - Tag search APIs (`/api/tag_search`, `/api/tags_search`) now require authentication and validate user identity
+    - Email validation accepts modern long TLDs (up to 63 characters, e.g., `.engineering`, `.museum`)
+    - Semantic search guards against missing pid list to prevent IndexError
 - 🛠️ **Daemon Improvements**:
-  - `ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS=false` now correctly disables embeddings via `--no-embeddings` flag
-  - Email dry-run mode support (`ARXIV_SANITY_DAEMON_EMAIL_DRY_RUN`)
+    - `ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS=false` now correctly disables embeddings via `--no-embeddings` flag
+    - Email dry-run mode support (`ARXIV_SANITY_DAEMON_EMAIL_DRY_RUN`)
 - 🏗️ **Architecture Refactoring**:
-  - Repository pattern for cleaner data access (`aslite/repositories.py`)
-  - Native SQLite3 replacing sqlitedict for improved concurrency
-  - Cross-process locking for database operations
+    - Repository pattern for cleaner data access (`aslite/repositories.py`)
+    - Native SQLite3 replacing sqlitedict for improved concurrency
+    - Cross-process locking for database operations
 - 🎨 **Frontend Polish**: MathJax integration refactoring, static asset cleanup, synchronous loading optimization
 
 ### v3.1 - Reading List & Enhanced Tagging

@@ -13,13 +13,28 @@ from loguru import logger
 
 from config import settings
 
-SUMMARY_DEFAULT_SEMANTIC_WEIGHT = settings.summary.default_semantic_weight
+
+def _summary_default_semantic_weight() -> float:
+    return float(settings.summary.default_semantic_weight)
+
 
 from ..utils.cache import LRUCacheTTL
 
+
 # Constants (from centralized settings)
-RET_NUM = settings.search.ret_num
-MAX_RESULTS = settings.search.max_results
+def _ret_num() -> int:
+    return int(settings.search.ret_num)
+
+
+def _max_results() -> int:
+    return int(settings.search.max_results)
+
+
+# Keep module-level exports for callers that import these names directly.
+SUMMARY_DEFAULT_SEMANTIC_WEIGHT = _summary_default_semantic_weight()
+RET_NUM = _ret_num()
+MAX_RESULTS = _max_results()
+
 
 # Query parsing patterns
 TFIDF_TOKEN_PATTERN = r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|\b[a-zA-Z]+\-[a-zA-Z]+\b"
@@ -236,7 +251,10 @@ def time_rank(metas: dict[str, Any], limit: int | None = None) -> tuple[list[str
 
 
 def filter_by_time(
-    pids: list[str], metas: dict[str, Any], time_filter: str, user_tagged_pids: set | None = None
+    pids: list[str],
+    metas: dict[str, Any],
+    time_filter: str,
+    user_tagged_pids: set | None = None,
 ) -> tuple[list[str], list[int]]:
     """Filter papers by time, keeping tagged papers."""
     if not time_filter:
@@ -401,7 +419,14 @@ def compute_paper_score_parsed(
     # Negation
     neg = parsed.get("neg_terms_norm") or []
     if neg:
-        hay = " ".join((fields["title_norm"], fields["authors_norm"], fields["tags_norm"], fields["summary_norm"]))
+        hay = " ".join(
+            (
+                fields["title_norm"],
+                fields["authors_norm"],
+                fields["tags_norm"],
+                fields["summary_norm"],
+            )
+        )
         for t in neg:
             if t and t in hay:
                 return -50.0
@@ -527,7 +552,14 @@ def compute_paper_score_parsed(
 
     # Boost coverage for multi-keyword queries
     if general and len(general) > 1 and not has_field_filters:
-        hay = " ".join((fields["title_norm"], fields["authors_norm"], fields["tags_norm"], fields["summary_norm"]))
+        hay = " ".join(
+            (
+                fields["title_norm"],
+                fields["authors_norm"],
+                fields["tags_norm"],
+                fields["summary_norm"],
+            )
+        )
         matched = {t for t in general if t and t in hay}
         if matched:
             coverage = len(matched) / max(1, len(general))
@@ -1486,7 +1518,7 @@ def search_rank(
             get_papers_bulk_fn=get_papers_bulk_fn,
             paper_text_fields_fn=paper_text_fields_fn,
             get_metas_fn=get_metas_fn,
-            max_results=MAX_RESULTS,
+            max_results=_max_results(),
             limit=limit,
         )
         if cache_key is not None:
@@ -1514,7 +1546,7 @@ def search_rank(
                                 cand_k = max(cand_k, int(limit) * 20)
                             except Exception:
                                 pass
-                        cand_k = min(cand_k, MAX_RESULTS)
+                        cand_k = min(cand_k, _max_results())
 
                         if scores_sparse.nnz > cand_k:
                             top_ix = np.argpartition(-vals, cand_k - 1)[:cand_k]
@@ -1536,7 +1568,7 @@ def search_rank(
             get_papers_bulk_fn=get_papers_bulk_fn,
             paper_text_fields_fn=paper_text_fields_fn,
             get_metas_fn=get_metas_fn,
-            max_results=MAX_RESULTS,
+            max_results=_max_results(),
             limit=limit,
         )
         if cache_key is not None:
@@ -1639,7 +1671,7 @@ def hybrid_search_rank(
         Tuple of (pids, scores, score_details)
     """
     if semantic_weight is None:
-        semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+        semantic_weight = _summary_default_semantic_weight()
 
     q = (q or "").strip()
     if not q:
@@ -1677,7 +1709,7 @@ def hybrid_search_rank(
 
     candidate_k = None
     if limit is not None:
-        candidate_k = min(int(limit) * 2, MAX_RESULTS)
+        candidate_k = min(int(limit) * 2, _max_results())
 
     keyword_pids, keyword_scores = search_rank_fn(q, limit=candidate_k)
     semantic_pids, semantic_scores = semantic_search_fn(q, limit=candidate_k)
@@ -1685,7 +1717,11 @@ def hybrid_search_rank(
     if not keyword_pids and not semantic_pids:
         return [], [], {}
     if not semantic_pids:
-        return keyword_pids[:limit] if limit else keyword_pids, keyword_scores[:limit] if limit else keyword_scores, {}
+        return (
+            keyword_pids[:limit] if limit else keyword_pids,
+            keyword_scores[:limit] if limit else keyword_scores,
+            {},
+        )
     if not keyword_pids:
         return (
             semantic_pids[:limit] if limit else semantic_pids,
@@ -1770,7 +1806,7 @@ def enhanced_search_rank(
     logger.trace(f"[API] enhanced_search_rank: q='{q[:50]}...', mode={search_mode}, limit={limit}")
 
     if semantic_weight is None:
-        semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+        semantic_weight = _summary_default_semantic_weight()
 
     if not q:
         return [], [], {}

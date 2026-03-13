@@ -5,6 +5,7 @@ Tests summary service functions using mocks to avoid file system dependencies.
 
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import patch
 
@@ -142,7 +143,7 @@ class TestSanitizeSummaryMeta:
 class TestGetSummaryStatus:
     """Tests for get_summary_status function."""
 
-    @patch("backend.services.summary_service.LLM_NAME", "")
+    @patch("backend.services.summary_service._default_llm_name", lambda: "")
     def test_get_summary_status_no_model(self):
         """Test get_summary_status with no model."""
         from backend.services.summary_service import get_summary_status
@@ -151,7 +152,7 @@ class TestGetSummaryStatus:
         assert status == ""
         assert error is None
 
-    @patch("backend.services.summary_service.LLM_NAME", "gpt-4")
+    @patch("backend.services.summary_service._default_llm_name", lambda: "gpt-4")
     @patch("backend.services.summary_service.summary_cache_paths")
     @patch("backend.services.summary_service.normalize_summary_source")
     def test_get_summary_status_cache_exists(self, mock_normalize, mock_paths):
@@ -165,8 +166,8 @@ class TestGetSummaryStatus:
         # Create mock paths
         cache_file = MagicMock()
         cache_file.exists.return_value = True
+        cache_file.read_text.return_value = "# Title\n\n## TL;DR\n\nhello\n\n## Body\n\nworld"
         meta_file = MagicMock()
-        meta_file.exists.return_value = False
         lock_file = MagicMock()
         lock_file.exists.return_value = False
         legacy_cache = MagicMock()
@@ -175,16 +176,121 @@ class TestGetSummaryStatus:
         legacy_lock = MagicMock()
         legacy_lock.exists.return_value = False
 
-        mock_paths.return_value = (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock)
+        mock_paths.return_value = (
+            cache_file,
+            meta_file,
+            lock_file,
+            legacy_cache,
+            legacy_meta,
+            legacy_lock,
+        )
 
         with patch("backend.services.summary_service.read_summary_meta") as mock_read:
             mock_read.return_value = {"source": "mineru"}
             with patch("backend.services.summary_service.summary_source_matches") as mock_match:
                 mock_match.return_value = True
+                with patch(
+                    "backend.services.summary_service.looks_like_valid_cached_summary_markdown",
+                    return_value=True,
+                ):
+                    status, error = get_summary_status("2301.00001", "gpt-4")
+                    assert status == "ok"
+                    assert error is None
 
-                status, error = get_summary_status("2301.00001", "gpt-4")
-                assert status == "ok"
-                assert error is None
+    def test_get_summary_status_ok_with_resolved_model_cache(self, monkeypatch, tmp_path):
+        """DB status=ok should remain ok when resolved_model cache is valid."""
+        from backend.services import summary_service as ss
+
+        pid = "2301.00001"
+        request_model = "requested-model"
+        resolved_model = "fallback-model"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        body = cache_dir / f"{resolved_model}.md"
+        meta = cache_dir / f"{resolved_model}.meta.json"
+        long_body = " ".join(["detail"] * 80)
+        body.write_text(f"# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n{long_body}", encoding="utf-8")
+        meta.write_text(json.dumps({"source": "html", "model": resolved_model}), encoding="utf-8")
+
+        def _paths(_pid, _model):
+            cache_file = cache_dir / f"{_model}.md"
+            meta_file = cache_dir / f"{_model}.meta.json"
+            lock_file = cache_dir / f".{_model}.lock"
+            legacy_cache = tmp_path / f"{_pid}.md"
+            legacy_meta = tmp_path / f"{_pid}.meta.json"
+            legacy_lock = tmp_path / f".{_pid}.lock"
+            return (
+                cache_file,
+                meta_file,
+                lock_file,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            )
+
+        monkeypatch.setattr(ss, "summary_cache_paths", _paths)
+        monkeypatch.setattr(ss, "_summary_markdown_source", lambda: "html")
+        monkeypatch.setattr(
+            ss.SummaryStatusRepository,
+            "get_status",
+            lambda _pid, _model: {"status": "ok", "resolved_model": resolved_model},
+        )
+
+        status, error = ss.get_summary_status(pid, request_model)
+        assert status == "ok"
+        assert error is None
+
+    def test_generate_paper_summary_reads_resolved_model_cache(self, monkeypatch, tmp_path):
+        """Cache-only read should fall back to resolved_model cache path."""
+        from backend.services import summary_service as ss
+
+        pid = "2301.00001"
+        request_model = "requested-model"
+        resolved_model = "fallback-model"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        body = cache_dir / f"{resolved_model}.md"
+        meta = cache_dir / f"{resolved_model}.meta.json"
+        long_body = " ".join(["detail"] * 80)
+        body.write_text(f"# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n{long_body}", encoding="utf-8")
+        meta.write_text(json.dumps({"source": "html", "model": resolved_model}), encoding="utf-8")
+
+        def _paths(_pid, _model):
+            cache_file = cache_dir / f"{_model}.md"
+            meta_file = cache_dir / f"{_model}.meta.json"
+            lock_file = cache_dir / f".{_model}.lock"
+            legacy_cache = tmp_path / f"{_pid}.md"
+            legacy_meta = tmp_path / f"{_pid}.meta.json"
+            legacy_lock = tmp_path / f".{_pid}.lock"
+            return (
+                cache_file,
+                meta_file,
+                lock_file,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            )
+
+        monkeypatch.setattr(ss, "summary_cache_paths", _paths)
+        monkeypatch.setattr(ss, "_summary_markdown_source", lambda: "html")
+        monkeypatch.setattr(ss.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
+        monkeypatch.setattr(
+            ss.SummaryStatusRepository,
+            "get_status",
+            lambda _pid, _model: {"status": "ok", "resolved_model": resolved_model},
+        )
+
+        content, meta_out = ss.generate_paper_summary(
+            pid,
+            model=request_model,
+            cache_only=True,
+            metas_getter=lambda: {},
+            paper_exists_fn=lambda _pid: True,
+        )
+        assert "## TL;DR" in content
+        assert meta_out.get("source") == "html"
 
 
 class TestExtractTldrFromSummary:

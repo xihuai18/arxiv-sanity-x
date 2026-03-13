@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from flask import g
 from loguru import logger
@@ -23,6 +24,10 @@ from ..utils.sse import emit_all_event, emit_user_event
 
 if TYPE_CHECKING:
     pass
+
+
+def _default_summary_model() -> str:
+    return str(settings.llm.name or "")
 
 
 # Optional task queue integration (Huey)
@@ -58,6 +63,7 @@ def update_summary_status(
     status: str,
     error: str | None = None,
     task_id: str | None = None,
+    model: str | None = None,
 ) -> None:
     """Update summary generation status in user's reading list.
 
@@ -67,26 +73,37 @@ def update_summary_status(
         status: Status string (queued, running, ok, failed)
         error: Error message if failed
         task_id: Task ID if queued
+        model: Model for this status update; reading list persistence tracks the default model only
     """
     try:
         # Check if item exists first
         if ReadingListRepository.get_reading_list_item(user, pid) is None:
             return
 
-        # Update the item
-        updates = {
-            "summary_status": status,
-            "summary_last_error": error,
-            "summary_updated_time": time.time(),
+        default_model = (_default_summary_model() or "").strip()
+        event_model = (model or default_model or "").strip()
+        should_persist = not event_model or not default_model or event_model == default_model
+
+        if should_persist:
+            updates = {
+                "summary_status": status,
+                "summary_last_error": error,
+                "summary_updated_time": time.time(),
+            }
+            if status not in ("queued", "running"):
+                updates["summary_task_id"] = None
+            elif task_id is not None:
+                updates["summary_task_id"] = str(task_id)
+
+            ReadingListRepository.update_reading_list_item(user, pid, updates)
+
+        payload = {
+            "type": "summary_status",
+            "pid": pid,
+            "model": event_model or None,
+            "status": status,
+            "error": error,
         }
-        if status not in ("queued", "running"):
-            updates["summary_task_id"] = None
-        elif task_id is not None:
-            updates["summary_task_id"] = str(task_id)
-
-        ReadingListRepository.update_reading_list_item(user, pid, updates)
-
-        payload = {"type": "summary_status", "pid": pid, "status": status, "error": error}
         if task_id is not None:
             payload["task_id"] = str(task_id)
         emit_user_event(user, payload)
@@ -101,6 +118,7 @@ def update_summary_status_db(
     error: str | None = None,
     task_id: str | None = None,
     task_user: str | None = None,
+    resolved_model: str | None = None,
     default_model: str | None = None,
 ) -> None:
     """Persist summary status for main list usage.
@@ -112,6 +130,7 @@ def update_summary_status_db(
         error: Error message if failed
         task_id: Task ID if queued
         task_user: User who triggered the task
+        resolved_model: Actual model used for successful generation
         default_model: Default model name to use if model is None
     """
     model = (model or default_model or "").strip()
@@ -124,12 +143,27 @@ def update_summary_status_db(
             extra["task_id"] = str(task_id)
         if task_user is not None:
             extra["task_user"] = task_user
+        if status == "ok":
+            rm = (resolved_model or "").strip()
+            if rm:
+                extra["resolved_model"] = rm
+        else:
+            extra["resolved_model"] = None
         if status not in ("queued", "running"):
             extra["task_id"] = None
             extra["task_user"] = None
 
         SummaryStatusRepository.set_status(pid, model, status, error, **extra)
-        emit_all_event({"type": "summary_status", "pid": pid, "status": status, "error": error})
+        public_error = "failed" if error else None
+        emit_all_event(
+            {
+                "type": "summary_status",
+                "pid": pid,
+                "model": model,
+                "status": status,
+                "error": public_error,
+            }
+        )
     except Exception as e:
         logger.warning(f"Failed to update summary status db for {pid}: {e}")
 
@@ -233,8 +267,37 @@ def trigger_summary_async(
             if update_db_fn:
                 update_db_fn(pid, model, "running", None)
 
+            result = None
             if generate_summary_fn:
-                generate_summary_fn(pid, model=model, force_refresh=bool(force_refresh), cache_only=False)
+                result = generate_summary_fn(
+                    pid,
+                    model=model,
+                    force_refresh=bool(force_refresh),
+                    cache_only=False,
+                )
+                summary_content = ""
+                resolved_model = (model or "").strip()
+                if isinstance(result, tuple):
+                    summary_content = str(result[0] or "")
+                    if len(result) > 1 and isinstance(result[1], dict):
+                        resolved_model = str(result[1].get("llm_model") or resolved_model or "").strip()
+                elif result is not None:
+                    summary_content = str(result or "")
+
+                from tools.paper_summarizer import (
+                    looks_like_valid_cached_summary_markdown,
+                )
+
+                if not looks_like_valid_cached_summary_markdown(summary_content):
+                    if "Summary is being generated" in summary_content:
+                        if user and update_readinglist_fn:
+                            update_readinglist_fn(user, pid, "queued", None, task_id=None)
+                        if update_db_fn:
+                            update_db_fn(pid, model, "queued", None, task_id=None, task_user=user)
+                        return
+                    raise RuntimeError("Summary generation failed: invalid summary content")
+            else:
+                resolved_model = (model or "").strip()
 
             # If canceled mid-flight, do not mark ok.
             try:
@@ -242,7 +305,14 @@ def trigger_summary_async(
                     if user and update_readinglist_fn:
                         update_readinglist_fn(user, pid, "canceled", "Canceled by user", task_id=None)
                     if update_db_fn:
-                        update_db_fn(pid, model, "canceled", "Canceled by user", task_id=None, task_user=user)
+                        update_db_fn(
+                            pid,
+                            model,
+                            "canceled",
+                            "Canceled by user",
+                            task_id=None,
+                            task_user=user,
+                        )
                     return
             except Exception:
                 pass
@@ -250,7 +320,7 @@ def trigger_summary_async(
             if user and update_readinglist_fn:
                 update_readinglist_fn(user, pid, "ok", None)
             if update_db_fn:
-                update_db_fn(pid, model, "ok", None)
+                update_db_fn(pid, model, "ok", None, resolved_model=resolved_model)
         except Exception as e:
             logger.warning(f"Failed to generate summary for {pid}: {e}")
             if user and update_readinglist_fn:

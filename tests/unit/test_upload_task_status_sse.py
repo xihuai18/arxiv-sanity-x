@@ -17,7 +17,7 @@ def test_process_uploaded_pdf_emits_sse_running_ok(monkeypatch, tmp_path):
     updates = []
     events = []
 
-    monkeypatch.setattr(upload_service, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(upload_service, "_data_dir", lambda: str(tmp_path))
 
     def fake_get(upload_pid):
         assert upload_pid == pid
@@ -31,7 +31,11 @@ def test_process_uploaded_pdf_emits_sse_running_ok(monkeypatch, tmp_path):
 
     monkeypatch.setattr(upload_service.UploadedPaperRepository, "get", fake_get)
     monkeypatch.setattr(upload_service.UploadedPaperRepository, "update", fake_update)
-    monkeypatch.setattr(upload_service, "_emit_upload_event", lambda _u, payload: events.append(dict(payload)))
+    monkeypatch.setattr(
+        upload_service,
+        "_emit_upload_event",
+        lambda _u, payload: events.append(dict(payload)),
+    )
 
     pdf_path = upload_service.get_upload_pdf_path(pid, str(tmp_path))
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +87,7 @@ def test_process_uploaded_pdf_emits_sse_failed_on_parse_error(monkeypatch, tmp_p
     }
     events = []
 
-    monkeypatch.setattr(upload_service, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(upload_service, "_data_dir", lambda: str(tmp_path))
     monkeypatch.setattr(upload_service.UploadedPaperRepository, "get", lambda _pid: dict(record))
 
     def fake_update(_pid, patch):
@@ -91,7 +95,11 @@ def test_process_uploaded_pdf_emits_sse_failed_on_parse_error(monkeypatch, tmp_p
         return True
 
     monkeypatch.setattr(upload_service.UploadedPaperRepository, "update", fake_update)
-    monkeypatch.setattr(upload_service, "_emit_upload_event", lambda _u, payload: events.append(dict(payload)))
+    monkeypatch.setattr(
+        upload_service,
+        "_emit_upload_event",
+        lambda _u, payload: events.append(dict(payload)),
+    )
 
     # No PDF file -> FileNotFoundError in process_uploaded_pdf
     try:
@@ -109,7 +117,9 @@ def test_register_upload_task_enqueue_writes_task_status(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        upload_service.UploadedPaperRepository, "update", lambda pid, patch: calls.append((pid, dict(patch)))
+        upload_service.UploadedPaperRepository,
+        "update",
+        lambda pid, patch: calls.append((pid, dict(patch))),
     )
 
     task_calls = []

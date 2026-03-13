@@ -22,8 +22,12 @@ import zipfile
 from pathlib import Path
 
 import openai
-import requests
 from loguru import logger
+
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - optional in lightweight test envs
+    requests = None
 
 # Ensure repository root is importable when executing this file directly.
 # e.g. `python tools/paper_summarizer.py` would otherwise miss sibling packages like `config/`.
@@ -37,28 +41,95 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from config import settings
 
-DATA_DIR = str(settings.data_dir)
-SUMMARY_DIR = str(settings.summary_dir)
-LLM_BASE_URL = settings.llm.base_url
-LLM_API_KEY = settings.llm.api_key
-LLM_NAME = settings.llm.name
-LLM_SUMMARY_LANG = settings.llm.summary_lang
-LLM_TIMEOUT = int(getattr(settings.llm, "timeout", 180))
-SUMMARY_MIN_CHINESE_RATIO = settings.summary.min_chinese_ratio
-SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
-SUMMARY_HTML_SOURCES = settings.summary.html_sources
-MINERU_ENABLED = settings.mineru.enabled
-MINERU_PORT = settings.mineru.port
-MINERU_BACKEND = settings.mineru.backend
-MINERU_DEVICE = settings.mineru.device
-MINERU_MAX_WORKERS = settings.mineru.max_workers
-MINERU_MAX_VRAM = settings.mineru.max_vram
-MINERU_API_KEY = settings.mineru.api_key
-MINERU_API_POLL_INTERVAL = settings.mineru.api_poll_interval
-MINERU_API_TIMEOUT = settings.mineru.api_timeout
-MAIN_CONTENT_MIN_RATIO = settings.main_content_min_ratio
+
+def _data_dir() -> str:
+    return str(settings.data_dir)
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
+
+def _llm_base_url() -> str:
+    return str(settings.llm.base_url or "")
+
+
+def _llm_api_key() -> str:
+    return str(settings.llm.api_key or "")
+
+
+def _llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _llm_summary_lang() -> str:
+    return str(settings.llm.summary_lang or "")
+
+
+def _llm_timeout() -> int:
+    return int(getattr(settings.llm, "timeout", 180) or 180)
+
+
+def _summary_min_chinese_ratio() -> float:
+    return float(settings.summary.min_chinese_ratio)
+
+
+def _summary_markdown_source() -> str:
+    return str(settings.summary.markdown_source or "")
+
+
+def _summary_html_sources() -> str:
+    return str(settings.summary.html_sources or "")
+
+
+def _mineru_enabled() -> bool:
+    return bool(settings.mineru.enabled)
+
+
+def _mineru_port() -> int:
+    return int(settings.mineru.port)
+
+
+def _mineru_backend() -> str:
+    return str(settings.mineru.backend or "")
+
+
+def _mineru_device() -> str:
+    return str(settings.mineru.device or "")
+
+
+def _mineru_max_workers() -> int:
+    return int(settings.mineru.max_workers)
+
+
+def _mineru_max_vram() -> int:
+    return int(settings.mineru.max_vram)
+
+
+def _mineru_api_key() -> str:
+    return str(settings.mineru.api_key or "")
+
+
+def _mineru_api_poll_interval() -> int:
+    return int(settings.mineru.api_poll_interval)
+
+
+def _mineru_api_timeout() -> int:
+    return int(settings.mineru.api_timeout)
+
+
+def _main_content_min_ratio() -> float:
+    return float(settings.main_content_min_ratio)
+
 
 _RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+_GPT_VERSIONED_MODEL_RE = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?=$|[._-])", re.IGNORECASE)
+
+
+def _require_requests():
+    if requests is None:
+        raise RuntimeError("requests is required for network-backed summary operations")
+    return requests
 
 
 def _sleep_backoff(attempt: int, base_s: float = 0.5, cap_s: float = 8.0) -> None:
@@ -86,11 +157,12 @@ def _request_with_retry(
 
     retry_status = _RETRYABLE_HTTP_STATUS if retry_on_status is None else retry_on_status
     last_exc: Exception | None = None
+    requests_mod = _require_requests()
 
     for attempt in range(max(1, int(retries))):
         try:
-            resp = requests.request(method, url, timeout=timeout, **kwargs)
-        except requests.RequestException as e:
+            resp = requests_mod.request(method, url, timeout=timeout, **kwargs)
+        except requests_mod.RequestException as e:
             last_exc = e
             if attempt >= retries - 1:
                 raise
@@ -124,7 +196,7 @@ class PaperSummarizer:
     _mineru_lock = threading.Lock()
 
     def __init__(self):
-        self.data_dir = Path(DATA_DIR)
+        self.data_dir = Path(_data_dir())
         self.pdfs_dir = self.data_dir / "pdfs"
         self.mineru_dir = self.data_dir / "mineru"
         self.html_md_dir = self.data_dir / "html_md"
@@ -136,7 +208,7 @@ class PaperSummarizer:
         self.html_md_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize OpenAI client
-        self.client = openai.OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        self.client = openai.OpenAI(api_key=_llm_api_key(), base_url=_llm_base_url())
 
     @staticmethod
     def _should_fallback_llm_error(exc: Exception) -> bool:
@@ -223,9 +295,290 @@ class PaperSummarizer:
         return any(m in msg for m in markers)
 
     @staticmethod
+    def _should_fallback_to_chat_completions_for_responses_error(
+        exc: Exception,
+    ) -> bool:
+        """Detect proxies that expose chat completions but not the Responses API."""
+
+        msg = str(exc or "").lower()
+        markers = [
+            "/responses",
+            "responses api",
+            "not found",
+            "404",
+            "405",
+            "501",
+            "unsupported",
+            "unknown endpoint",
+            "no route",
+        ]
+        return any(marker in msg for marker in markers)
+
+    @staticmethod
     def _build_summary_result(content: str, meta: dict | None = None) -> dict:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
+
+    @staticmethod
+    def _extract_responses_completed_payload(raw_text: str | None) -> dict | None:
+        """Extract the final `response.completed` payload from an SSE-like text body."""
+
+        text = str(raw_text or "")
+        if not text.strip():
+            return None
+
+        event_name = None
+        data_lines: list[str] = []
+        completed_payload = None
+
+        def _flush_event() -> dict | None:
+            if event_name != "response.completed" or not data_lines:
+                return None
+            try:
+                payload = json.loads("\n".join(data_lines))
+            except Exception:
+                return None
+            if isinstance(payload, dict):
+                return payload
+            return None
+
+        for line in text.splitlines():
+            stripped = line.rstrip("\n")
+            if stripped.startswith("event:"):
+                maybe_payload = _flush_event()
+                if maybe_payload is not None:
+                    completed_payload = maybe_payload
+                event_name = stripped.split(":", 1)[1].strip()
+                data_lines = []
+                continue
+            if stripped.startswith("data:"):
+                data_lines.append(stripped.split(":", 1)[1].strip())
+                continue
+            if not stripped.strip() and event_name is not None:
+                maybe_payload = _flush_event()
+                if maybe_payload is not None:
+                    completed_payload = maybe_payload
+                event_name = None
+                data_lines = []
+
+        maybe_payload = _flush_event()
+        if maybe_payload is not None:
+            completed_payload = maybe_payload
+        return completed_payload
+
+    @classmethod
+    def _extract_responses_text_fields(cls, response) -> tuple[str | None, str | None, object | None]:
+        """Best-effort extraction for normal and proxy-wrapped Responses API outputs."""
+
+        if isinstance(response, str):
+            completed = cls._extract_responses_completed_payload(response)
+        else:
+            completed = None
+
+        output_text = None
+        status = None
+        usage = None
+
+        if response is not None and not isinstance(response, str):
+            try:
+                output_text = getattr(response, "output_text", None)
+            except Exception:
+                output_text = None
+            try:
+                status = getattr(response, "status", None)
+            except Exception:
+                status = None
+            try:
+                usage = getattr(response, "usage", None)
+            except Exception:
+                usage = None
+
+            if completed is None:
+                err = None
+                try:
+                    err = getattr(response, "error", None)
+                except Exception:
+                    err = None
+                raw_err = None
+                try:
+                    raw_err = getattr(err, "message", None) if err is not None else None
+                except Exception:
+                    raw_err = None
+                completed = cls._extract_responses_completed_payload(raw_err)
+
+        if completed and isinstance(completed, dict):
+            resp_obj = completed.get("response")
+            if isinstance(resp_obj, dict):
+                if not status:
+                    status = resp_obj.get("status")
+                if usage is None:
+                    usage = resp_obj.get("usage")
+                if not output_text:
+                    outputs = resp_obj.get("output") or []
+                    texts: list[str] = []
+                    if isinstance(outputs, list):
+                        for item in outputs:
+                            if not isinstance(item, dict):
+                                continue
+                            contents = item.get("content") or []
+                            if not isinstance(contents, list):
+                                continue
+                            for part in contents:
+                                if not isinstance(part, dict):
+                                    continue
+                                if str(part.get("type") or "") != "output_text":
+                                    continue
+                                text_part = part.get("text")
+                                if isinstance(text_part, str) and text_part:
+                                    texts.append(text_part)
+                    if texts:
+                        output_text = "\n".join(texts).strip()
+
+        return output_text, status, usage
+
+    @staticmethod
+    def _should_use_responses_api(model_name: str | None) -> bool:
+        """Use the Responses API for GPT-5.4+ style versioned OpenAI models."""
+
+        model_name = (model_name or "").strip()
+        if not model_name:
+            return False
+
+        match = _GPT_VERSIONED_MODEL_RE.match(model_name)
+        if not match:
+            return False
+
+        try:
+            major = int(match.group("major"))
+        except (TypeError, ValueError):
+            return False
+
+        minor_raw = match.group("minor")
+        try:
+            minor = int(minor_raw) if minor_raw is not None else None
+        except (TypeError, ValueError):
+            minor = None
+
+        if major > 5:
+            return True
+        if major < 5:
+            return False
+        return minor is not None and minor >= 4
+
+    @staticmethod
+    def _resolve_api_key_value(raw_value: str | None) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        if value.startswith("os.environ/"):
+            env_name = value.split("/", 1)[1].strip()
+            resolved = str(os.environ.get(env_name, "") or "").strip()
+            if not resolved:
+                logger.warning(f"Environment variable '{env_name}' is missing for direct Responses route")
+            return resolved
+        return value
+
+    @classmethod
+    def _resolve_direct_responses_route(cls, model_name: str | None) -> dict | None:
+        """Resolve a direct upstream route from `config/llm.yml` for Responses API calls."""
+
+        if not cls._should_use_responses_api(model_name):
+            return None
+
+        try:
+            import yaml
+        except Exception:
+            return None
+
+        try:
+            from config.llm_model_order import default_llm_yml_path
+
+            cfg_path = default_llm_yml_path()
+            text = cfg_path.read_text(encoding="utf-8", errors="ignore")
+            cfg = yaml.safe_load(text)
+        except Exception:
+            return None
+
+        if not isinstance(cfg, dict):
+            return None
+
+        model_list = cfg.get("model_list") or []
+        if not isinstance(model_list, list):
+            return None
+
+        target_name = str(model_name or "").strip()
+        for item in model_list:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("model_name") or "").strip() != target_name:
+                continue
+            params = item.get("litellm_params") or {}
+            if not isinstance(params, dict):
+                continue
+
+            base_url = str(params.get("api_base") or "").strip().rstrip("/")
+            api_key = cls._resolve_api_key_value(params.get("api_key"))
+            upstream_model = str(params.get("model") or "").strip()
+            if upstream_model.lower().startswith("openai/"):
+                upstream_model = upstream_model.split("/")[-1].strip()
+            extra_body = params.get("extra_body") if isinstance(params.get("extra_body"), dict) else {}
+            max_tokens = params.get("max_tokens")
+            max_output_tokens = None
+            try:
+                if max_tokens is not None:
+                    max_output_tokens = int(max_tokens)
+            except Exception:
+                max_output_tokens = None
+
+            if not base_url or not api_key:
+                return None
+
+            return {
+                "base_url": base_url,
+                "api_key": api_key,
+                "model": upstream_model or target_name,
+                "extra_body": dict(extra_body or {}),
+                "max_output_tokens": max_output_tokens,
+            }
+
+        return None
+
+    def _create_chat_completion_no_tools(self, *, model: str, prompt_for_call: str):
+        """Create a chat completion while discouraging tool calls across proxies."""
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You must not call tools/functions. Produce the final answer directly as markdown.",
+            },
+            {"role": "user", "content": prompt_for_call},
+        ]
+        base_kwargs = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.3,
+            "top_p": 0.95,
+            "timeout": _llm_timeout(),
+        }
+
+        try:
+            return self.client.chat.completions.create(
+                **base_kwargs,
+                tool_choice="none",
+            )
+        except Exception as tool_exc:
+            msg = str(tool_exc or "").lower()
+            if "tool_choice" in msg and any(k in msg for k in ("object", "dict", "type")):
+                try:
+                    return self.client.chat.completions.create(
+                        **base_kwargs,
+                        tool_choice={"type": "none"},
+                    )
+                except Exception:
+                    pass
+            if "tool_choice" in msg or "tools" in msg:
+                return self.client.chat.completions.create(**base_kwargs)
+            raise
 
     @staticmethod
     def _extract_version_from_url(url: str, raw_pid: str) -> str | None:
@@ -451,14 +804,14 @@ class PaperSummarizer:
         return raw_pid
 
     def _normalize_summary_source(self, source: str | None) -> str:
-        src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
+        src = (source or _summary_markdown_source() or "html").strip().lower()
         if src not in {"html", "mineru"}:
             logger.trace(f"Unknown summary source '{src}', fallback to html")
             return "html"
         return src
 
     def _normalize_mineru_backend(self, backend: str | None = None) -> str:
-        raw = (backend or MINERU_BACKEND or "pipeline").strip().lower()
+        raw = (backend or _mineru_backend() or "pipeline").strip().lower()
         aliases = {
             "vlm": "vlm-http-client",
             "http-client": "vlm-http-client",
@@ -551,7 +904,7 @@ class PaperSummarizer:
         self._atomic_write_json(meta_path, meta)
 
     def _parse_html_sources(self) -> list[str]:
-        raw = (SUMMARY_HTML_SOURCES or "").strip()
+        raw = (_summary_html_sources() or "").strip()
         if not raw:
             raw = "ar5iv,arxiv"
         sources: list[str] = []
@@ -967,14 +1320,14 @@ class PaperSummarizer:
             timeout: Maximum wait time in seconds
 
         Returns:
-            Slot number (0 to MINERU_MAX_WORKERS-1) if acquired, None if timeout
+            Slot number (0 to mineru_max_workers-1) if acquired, None if timeout
         """
         slots_dir = self.mineru_dir / ".gpu_slots"
         slots_dir.mkdir(parents=True, exist_ok=True)
 
         start_time = time.time()
         logged_wait = False
-        max_workers = max(1, MINERU_MAX_WORKERS)
+        max_workers = max(1, _mineru_max_workers())
 
         try:
             stale_s = float(settings.lock.mineru_lock_stale_sec)
@@ -1118,14 +1471,14 @@ class PaperSummarizer:
                     return existing_md_path
 
                 # Normalize device setting
-                device = (MINERU_DEVICE or "cuda").strip().lower()
+                device = (_mineru_device() or "cuda").strip().lower()
                 if device not in ["cuda", "cpu"]:
                     logger.trace(f"Invalid device '{device}', fallback to cuda")
                     device = "cuda"
 
                 # Acquire GPU slot for pipeline backend with GPU (limit concurrent GPU processes)
                 if backend == "pipeline" and device == "cuda":
-                    logger.trace(f"Waiting for GPU slot (max workers: {MINERU_MAX_WORKERS})...")
+                    logger.trace(f"Waiting for GPU slot (max workers: {_mineru_max_workers()})...")
                     gpu_slot = self._acquire_gpu_slot(timeout=600)
                     if gpu_slot is None:
                         logger.trace(f"Failed to acquire GPU slot for {pdf_name}, skipping")
@@ -1150,10 +1503,10 @@ class PaperSummarizer:
                     # Use configured device (cuda or cpu)
                     cmd.extend(["-d", device])
                     # Only set VRAM limit for GPU mode
-                    if device == "cuda" and MINERU_MAX_VRAM > 0:
-                        cmd.extend(["--vram", str(MINERU_MAX_VRAM)])
+                    if device == "cuda" and _mineru_max_vram() > 0:
+                        cmd.extend(["--vram", str(_mineru_max_vram())])
                 elif backend == "vlm-http-client":
-                    cmd.extend(["-u", f"http://127.0.0.1:{MINERU_PORT}"])
+                    cmd.extend(["-u", f"http://127.0.0.1:{_mineru_port()}"])
 
                 logger.trace(f"Executing command: {' '.join(cmd)}")
                 start_time = time.time()
@@ -1243,7 +1596,11 @@ class PaperSummarizer:
             return None
 
     def _parse_pdf_with_mineru_api(
-        self, pdf_path: Path, pdf_name: str, cached_version: str | None = None, keep_pdf: bool = False
+        self,
+        pdf_path: Path,
+        pdf_name: str,
+        cached_version: str | None = None,
+        keep_pdf: bool = False,
     ) -> Path | None:
         """
         Parse PDF using MinerU API service with file upload mode.
@@ -1258,7 +1615,7 @@ class PaperSummarizer:
             keep_pdf: If True, do not delete the PDF file after parsing (for uploaded papers)
         """
         # Check API key
-        if not MINERU_API_KEY or not MINERU_API_KEY.strip():
+        if not _mineru_api_key() or not _mineru_api_key().strip():
             logger.error("MinerU API key not configured")
             raise ValueError("MINERU_API_KEY_MISSING")
 
@@ -1289,13 +1646,18 @@ class PaperSummarizer:
 
             header = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {MINERU_API_KEY.strip()}",
+                "Authorization": f"Bearer {_mineru_api_key().strip()}",
             }
 
             # === Step 1: Request upload URL ===
             batch_url = "https://mineru.net/api/v4/file-urls/batch"
             data = {
-                "files": [{"name": f"{pdf_name}.pdf", "data_id": f"arxiv_{pdf_name.replace('.', '_')}"}],
+                "files": [
+                    {
+                        "name": f"{pdf_name}.pdf",
+                        "data_id": f"arxiv_{pdf_name.replace('.', '_')}",
+                    }
+                ],
                 "model_version": "vlm",
                 "enable_formula": True,
                 "enable_table": True,
@@ -1337,7 +1699,7 @@ class PaperSummarizer:
             logger.trace(f"Uploading PDF to: {upload_url[:80]}...")
             with open(pdf_path, "rb") as f:
                 t_up = time.time()
-                upload_res = requests.put(upload_url, data=f, timeout=300)
+                upload_res = _require_requests().put(upload_url, data=f, timeout=300)
                 logger.trace(
                     f"[BLOCKING] MinerU API: upload completed in {time.time() - t_up:.2f}s (status={upload_res.status_code})"
                 )
@@ -1355,11 +1717,11 @@ class PaperSummarizer:
             while True:
                 # Check timeout
                 elapsed = time.time() - start_time
-                if elapsed > MINERU_API_TIMEOUT:
-                    logger.error(f"Batch {batch_id} timed out after {MINERU_API_TIMEOUT}s")
+                if elapsed > _mineru_api_timeout():
+                    logger.error(f"Batch {batch_id} timed out after {_mineru_api_timeout()}s")
                     raise ValueError("MINERU_API_TIMEOUT")
 
-                time.sleep(MINERU_API_POLL_INTERVAL)
+                time.sleep(_mineru_api_poll_interval())
 
                 t_poll = time.time()
                 res = _request_with_retry("GET", query_url, headers=header, timeout=30, retries=3)
@@ -1720,9 +2082,9 @@ class PaperSummarizer:
             main_content = "\n".join(lines[:end_index])
 
             # If extracted content is too short, return original content
-            if len(main_content.strip()) < len(markdown_content.strip()) * MAIN_CONTENT_MIN_RATIO:
+            if len(main_content.strip()) < len(markdown_content.strip()) * _main_content_min_ratio():
                 logger.trace(
-                    f"Extracted main content too short ({len(main_content.strip())} < {len(markdown_content.strip()) * MAIN_CONTENT_MIN_RATIO:.0f}), using original content"
+                    f"Extracted main content too short ({len(main_content.strip())} < {len(markdown_content.strip()) * _main_content_min_ratio():.0f}), using original content"
                 )
                 return markdown_content
 
@@ -1779,10 +2141,10 @@ class PaperSummarizer:
                     out[key] = val
             return out or None
 
-        # Model try-order: explicit override first, then default LLM_NAME,
+        # Model try-order: explicit override first, then configured default model,
         # then optional fallbacks from config.
         requested = (model or "").strip()
-        default_model = (LLM_NAME or "").strip()
+        default_model = (_llm_name() or "").strip()
         fallback_models: list[str] = []
         try:
             raw = str(getattr(settings.llm, "fallback_models", "") or "").strip()
@@ -1827,7 +2189,7 @@ class PaperSummarizer:
         for idx, modelid in enumerate(model_candidates):
             try:
                 # Choose language prompt based on configuration
-                if LLM_SUMMARY_LANG == "en":
+                if _llm_summary_lang() == "en":
                     # English prompt - Academic technical blog style
                     prompt = rf"""
 You are an experienced academic technical blogger who excels at transforming research papers into rigorous yet accessible technical blog posts with proper academic conventions.
@@ -2133,6 +2495,7 @@ Please output strictly according to the following structure:
                 # We do a best-effort guard: forbid tool calls, and if the response still looks
                 # incomplete, retry once with a stronger "no tools, output final markdown" hint.
                 response = None
+                response_api = "chat_completions"
                 last_finish_reason = None
                 last_tool_call_count = 0
                 for content_try in range(2):
@@ -2157,45 +2520,60 @@ Please output strictly according to the following structure:
                     response = None
                     for llm_try in range(2):
                         try:
-                            # Prefer disabling tools explicitly (OpenAI-compatible); fall back if proxy rejects params.
-                            messages = [
-                                {
-                                    "role": "system",
-                                    "content": "You must not call tools/functions. Produce the final answer directly as markdown.",
-                                },
-                                {"role": "user", "content": prompt_for_call},
-                            ]
-                            base_kwargs = {
-                                "model": modelid,
-                                "messages": messages,
-                                "temperature": 0.3,
-                                "top_p": 0.95,
-                                "timeout": LLM_TIMEOUT,
-                            }
-
-                            try:
-                                response = self.client.chat.completions.create(
-                                    **base_kwargs,
-                                    tool_choice="none",
-                                    tools=[],
-                                )
-                            except Exception as tool_exc:
-                                msg = str(tool_exc or "").lower()
-                                # Some proxies require object-style tool_choice.
-                                if "tool_choice" in msg and any(k in msg for k in ("object", "dict", "type")):
-                                    try:
-                                        response = self.client.chat.completions.create(
-                                            **base_kwargs,
-                                            tool_choice={"type": "none"},
-                                            tools=[],
+                            if self._should_use_responses_api(modelid):
+                                response_api = "responses"
+                                responses_client = self.client
+                                responses_model = modelid
+                                responses_extra_body = {}
+                                # Some OpenAI-compatible gateways expose `/chat/completions`
+                                # but do not correctly normalize `/responses` SSE payloads.
+                                # When `config/llm.yml` contains a concrete upstream route for
+                                # the selected alias, prefer calling that upstream directly.
+                                direct_route = self._resolve_direct_responses_route(modelid)
+                                if direct_route:
+                                    responses_client = openai.OpenAI(
+                                        api_key=direct_route["api_key"],
+                                        base_url=direct_route["base_url"],
+                                    )
+                                    responses_model = direct_route["model"]
+                                    responses_extra_body = direct_route["extra_body"]
+                                    if direct_route.get("max_output_tokens"):
+                                        responses_extra_body.setdefault(
+                                            "max_output_tokens",
+                                            direct_route["max_output_tokens"],
                                         )
-                                    except Exception:
-                                        response = None
-                                # Unknown/unsupported tool params: retry without them.
-                                if response is None and ("tool_choice" in msg or "tools" in msg):
-                                    response = self.client.chat.completions.create(**base_kwargs)
-                                elif response is None:
-                                    raise
+                                try:
+                                    response = responses_client.responses.create(
+                                        model=responses_model,
+                                        instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
+                                        input=[
+                                            {
+                                                "role": "user",
+                                                "content": prompt_for_call,
+                                            }
+                                        ],
+                                        temperature=0.3,
+                                        top_p=0.95,
+                                        timeout=_llm_timeout(),
+                                        **responses_extra_body,
+                                    )
+                                except Exception as responses_exc:
+                                    if not self._should_fallback_to_chat_completions_for_responses_error(responses_exc):
+                                        raise
+                                    logger.warning(
+                                        f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
+                                    )
+                                    response_api = "chat_completions"
+                                    response = self._create_chat_completion_no_tools(
+                                        model=modelid,
+                                        prompt_for_call=prompt_for_call,
+                                    )
+                            else:
+                                response_api = "chat_completions"
+                                response = self._create_chat_completion_no_tools(
+                                    model=modelid,
+                                    prompt_for_call=prompt_for_call,
+                                )
                             break
                         except Exception as e:
                             if llm_try < 1 and self._is_transient_llm_error(e):
@@ -2207,17 +2585,20 @@ Please output strictly according to the following structure:
                         raise RuntimeError("LLM call returned no response")
 
                     # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
-                    try:
-                        usage = getattr(response, "usage", None)
-                    except Exception:
-                        usage = None
+                    if response_api == "responses":
+                        summary, finish_reason, usage = self._extract_responses_text_fields(response)
+                    else:
+                        try:
+                            usage = getattr(response, "usage", None)
+                        except Exception:
+                            usage = None
 
-                    finish_reason = None
-                    try:
-                        if getattr(response, "choices", None):
-                            finish_reason = getattr(response.choices[0], "finish_reason", None)
-                    except Exception:
                         finish_reason = None
+                        try:
+                            if getattr(response, "choices", None):
+                                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                        except Exception:
+                            finish_reason = None
                     last_finish_reason = finish_reason
 
                     llm_info = {}
@@ -2225,15 +2606,23 @@ Please output strictly according to the following structure:
                     if usage_dump is not None:
                         llm_info["usage"] = usage_dump
                     if finish_reason is not None:
-                        llm_info["finish_reason"] = finish_reason
+                        if response_api == "responses":
+                            llm_info["response_status"] = finish_reason
+                        else:
+                            llm_info["finish_reason"] = finish_reason
+                    llm_info["api"] = response_api
 
                     # Validate response structure
-                    if not response.choices:
-                        logger.trace("LLM returned empty choices")
-                        return self._build_summary_result("# Error\n\nLLM returned no response", summary_meta)
+                    message = None
+                    if response_api == "responses":
+                        summary = summary
+                    else:
+                        if not response.choices:
+                            logger.trace("LLM returned empty choices")
+                            return self._build_summary_result("# Error\n\nLLM returned no response", summary_meta)
 
-                    message = response.choices[0].message
-                    summary = message.content if message else None
+                        message = response.choices[0].message
+                        summary = message.content if message else None
 
                     # Detect tool calls (OpenAI schema); if present, treat as invalid for this app.
                     tool_calls = None
@@ -2265,9 +2654,11 @@ Please output strictly according to the following structure:
                     # Attach reasoning to meta if provider returns it (can be large)
                     reasoning = None
                     try:
-                        if hasattr(message, "reasoning") and message.reasoning:
+                        if message is not None and hasattr(message, "reasoning") and message.reasoning:
                             reasoning = message.reasoning
-                        elif hasattr(message, "reasoning_content") and message.reasoning_content:
+                        elif (
+                            message is not None and hasattr(message, "reasoning_content") and message.reasoning_content
+                        ):
                             reasoning = message.reasoning_content
                     except Exception:
                         reasoning = None
@@ -2288,9 +2679,9 @@ Please output strictly according to the following structure:
                         return self._build_summary_result("# Error\n\nLLM returned empty content", summary_meta)
 
                     # Log reasoning content if available
-                    if hasattr(message, "reasoning") and message.reasoning:
+                    if message is not None and hasattr(message, "reasoning") and message.reasoning:
                         logger.trace(f"Original summary Thinking:\n{message.reasoning}")
-                    elif hasattr(message, "reasoning_content") and message.reasoning_content:
+                    elif message is not None and hasattr(message, "reasoning_content") and message.reasoning_content:
                         logger.trace(f"Original summary Thinking:\n{message.reasoning_content}")
                     else:
                         logger.trace(f"Original summary content:\n{summary[:500]}...")
@@ -2619,13 +3010,13 @@ Please output strictly according to the following structure:
                     return summary
                 logger.debug(f"HTML fetch/parse failed for {pid}, fallback to minerU.")
                 # Check if MinerU is enabled before fallback
-                if not MINERU_ENABLED:
+                if not _mineru_enabled():
                     return self._build_summary_result(
                         "# PDF Parsing Service Unavailable\n\nThe PDF parsing service is currently disabled. Unable to generate paper summary. Please contact the administrator to enable the MinerU service or use HTML parsing."
                     )
 
             # MinerU is explicitly requested, check if enabled
-            if not MINERU_ENABLED:
+            if not _mineru_enabled():
                 return self._build_summary_result(
                     "# PDF Parsing Service Unavailable\n\nThe PDF parsing service is currently disabled. Unable to generate paper summary. Please contact the administrator to enable the MinerU service or use HTML parsing."
                 )
@@ -2960,15 +3351,15 @@ def summary_cache_paths(cache_pid: str, model: str | None) -> tuple[Path, Path, 
     Returns:
         Tuple of (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock)
     """
-    base_dir = Path(SUMMARY_DIR) / cache_pid
+    base_dir = Path(_summary_dir()) / cache_pid
     model_key = model_cache_key(model)
     cache_file = base_dir / f"{model_key}.md"
     meta_file = base_dir / f"{model_key}.meta.json"
     lock_file = base_dir / f".{model_key}.lock"
 
-    legacy_cache = Path(SUMMARY_DIR) / f"{cache_pid}.md"
-    legacy_meta = Path(SUMMARY_DIR) / f"{cache_pid}.meta.json"
-    legacy_lock = Path(SUMMARY_DIR) / f".{cache_pid}.lock"
+    legacy_cache = Path(_summary_dir()) / f"{cache_pid}.md"
+    legacy_meta = Path(_summary_dir()) / f"{cache_pid}.meta.json"
+    legacy_lock = Path(_summary_dir()) / f".{cache_pid}.lock"
     return cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock
 
 
@@ -2982,7 +3373,7 @@ def normalize_summary_source(source: str | None) -> str:
     Returns:
         Normalized source string
     """
-    src = (source or SUMMARY_MARKDOWN_SOURCE or "html").strip().lower()
+    src = (source or _summary_markdown_source() or "html").strip().lower()
     if src not in {"html", "mineru"}:
         return "html"
     return src
@@ -3003,7 +3394,7 @@ def summary_source_matches(meta: dict, summary_source: str) -> bool:
     # - `meta.source` is still useful for debugging and for generation-time decisions
     #   (e.g., how image links were post-processed).
     # - But using it as a hard cache filter causes bad UX when HTML fails and MinerU
-    #   fallback generated the cached summary while SUMMARY_MARKDOWN_SOURCE remains 'html'.
+    #   fallback generated the cached summary while the configured markdown source remains 'html'.
     # So we only validate that cached source kind is known; we don't require it to
     # equal the current requested `summary_source`.
     raw = meta.get("source") if isinstance(meta, dict) else None
@@ -3100,10 +3491,10 @@ def summary_quality(summary_content: str) -> tuple[str, float | None]:
         Tuple of (quality, chinese_ratio). Quality is "ok" or "low_chinese".
         chinese_ratio is None for non-Chinese languages.
     """
-    lang = (LLM_SUMMARY_LANG or "").strip().lower()
+    lang = (_llm_summary_lang() or "").strip().lower()
     if lang.startswith("zh"):
         ratio = calculate_chinese_ratio(summary_content)
-        quality = "ok" if ratio >= SUMMARY_MIN_CHINESE_RATIO else "low_chinese"
+        quality = "ok" if ratio >= _summary_min_chinese_ratio() else "low_chinese"
         return quality, ratio
     return "ok", None
 

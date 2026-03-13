@@ -36,32 +36,32 @@
 
     /* Optimized Shortcuts for Mobile */
     .shortcut-buttons {
-        flex-direction: row;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
-        justify-content: center;
     }
 
     .shortcut-btn {
-        width: auto;
-        flex: 1 1 auto;
+        width: 100%;
         text-align: center;
         padding: 8px 12px;
+        min-width: 0;
+        font-size: 13px;
     }
 }
 
 /* Very small screens - single column */
 @media (max-width: 400px) {
+    .shortcut-buttons {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
     .filter-group.primary-filters .filter-item {
         flex: 1 1 100%;
     }
 
     .shortcut-btn {
-        max-width: 160px;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        font-size: 13px;
+        max-width: none;
     }
 }
 
@@ -92,7 +92,8 @@
 }
 
 /* Improved form validation styles */
-.filter-item input.error {
+.filter-item input.error,
+.filter-item select.error {
     border-color: #dc3545 !important;
     box-shadow: 0 0 0 2px rgba(220, 53, 69, 0.25) !important;
 }
@@ -105,6 +106,10 @@
     background: #fff7e6;
     color: #8a5a0a;
     font-size: 13px;
+}
+
+.form-errors[hidden] {
+    display: none !important;
 }
 .form-errors ul {
     margin: 0;
@@ -139,6 +144,10 @@
     min-width: 28px;
     text-align: center;
     line-height: 1;
+}
+
+.semantic-weight-slider {
+    width: 80px;
 }
 
 [data-theme='dark'] .weight-value-badge {
@@ -287,6 +296,10 @@ input[type='range']::-moz-range-thumb {
     box-sizing: border-box;
 }
 
+.adv-filter-panel[hidden] {
+    display: none !important;
+}
+
 [data-theme='dark'] .adv-filter-panel {
     background: #1e2329;
     border-color: #374151;
@@ -299,6 +312,16 @@ input[type='range']::-moz-range-thumb {
     align-items: stretch;
     gap: 6px;
     min-width: 0;
+}
+
+.adv-filter-panel .filter-item.is-disabled {
+    opacity: 0.62;
+}
+
+.adv-filter-panel .filter-item.is-disabled label,
+.adv-filter-panel .filter-item.is-disabled input,
+.adv-filter-panel .filter-item.is-disabled select {
+    cursor: not-allowed;
 }
 
 .adv-filter-panel .filter-item label {
@@ -352,6 +375,19 @@ input[type='range']::-moz-range-thumb {
     border-radius: 0 6px 6px 0;
     box-sizing: border-box;
     color: var(--text-muted);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+}
+
+.filter-note strong {
+    color: var(--text-color);
+    font-size: 13px;
+}
+
+.filter-note small {
+    display: block;
+    line-height: 1.5;
 }
 
 [data-theme='dark'] .filter-note {
@@ -510,11 +546,16 @@ input[type='range']::-moz-range-thumb {
 }
 
 @media (max-width: 480px) {
-    .primary-btn .btn-icon {
+    .search-row .primary-btn {
+        gap: 8px;
+    }
+
+    .search-row .primary-btn .btn-icon {
         display: inline;
     }
-    .primary-btn .btn-text {
-        display: none;
+
+    .search-row .primary-btn .btn-text {
+        display: inline;
     }
 }
 
@@ -661,39 +702,59 @@ input[type='range']::-moz-range-thumb {
 
     /* Paper Actions Mobile Optimization */
     .paper-actions-footer {
-        flex-direction: row;
-        flex-wrap: wrap;
-        gap: 8px;
+        flex-direction: column;
+        gap: 12px;
         align-items: stretch;
-        justify-content: flex-start;
+    }
+
+    .paper-actions-group {
+        width: 100%;
+        margin-left: 0;
+    }
+
+    .paper-actions-group-primary,
+    .paper-actions-group-secondary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
     }
 
     .rel_more,
     .rel_inspect,
+    .rel_summary_trigger,
     .rel_summary,
     .rel_alphaxiv,
-    .rel_cool {
-        flex: 1 1 140px;
-        width: auto;
-        display: block;
+    .rel_cool,
+    .rel_extract {
+        width: 100%;
+        display: flex;
         margin: 0;
+    }
+
+    .rel_readinglist {
+        display: flex;
+        align-items: center;
     }
 
     .rel_more a,
     .rel_inspect a,
     .rel_summary a,
+    .rel_summary_trigger .summary-trigger-btn,
+    .rel_extract .action-btn,
+    .rel_more .upload-similar-btn,
     .rel_alphaxiv a,
     .rel_cool a {
-        width: auto;
+        width: 100%;
         display: inline-flex;
         padding: 6px 12px;
         font-size: 13px;
-        white-space: nowrap;
+        white-space: normal;
         justify-content: center;
     }
 
-    .rel_alphaxiv {
-        margin-left: 0; /* Remove right alignment, not needed in vertical layout */
+    .paper-actions-group-primary .rel_readinglist {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
     }
 
     .rel_paper {

@@ -158,8 +158,10 @@ unset _parse_state _line EXTRA_ARGS_PARSE
 # - Allow explicit override via ARXIV_SANITY_GUNICORN_WORKER_CLASS / EXTRA_ARGS (-k/--worker-class).
 SSE_ENABLED_CFG=$(python3 -c "from config import settings; print('1' if getattr(settings, 'sse', None) and settings.sse.enabled else '0')")
 SSE_STRICT_WORKER_CLASS_CFG=$(python3 -c "from config import settings; print('1' if getattr(settings, 'sse', None) and getattr(settings.sse, 'strict_worker_class', False) else '0')")
+GUNICORN_WORKER_CLASS_CFG=$(python3 -c "from config import settings; print((getattr(settings.gunicorn, 'worker_class', '') or '').strip())")
+GUNICORN_FORCE_WORKERS_CFG=$(python3 -c "from config import settings; print('1' if getattr(settings.gunicorn, 'force_workers', False) else '')")
 
-WORKER_CLASS_OVERRIDE="${ARXIV_SANITY_GUNICORN_WORKER_CLASS:-}"
+WORKER_CLASS_OVERRIDE="${ARXIV_SANITY_GUNICORN_WORKER_CLASS:-$GUNICORN_WORKER_CLASS_CFG}"
 WORKER_CLASS=""
 if [ -n "${WORKER_CLASS_OVERRIDE}" ]; then
   WORKER_CLASS="${WORKER_CLASS_OVERRIDE}"
@@ -200,7 +202,7 @@ WORKERS="${GUNICORN_WORKERS:-$GUNICORN_WORKERS_CFG}"
 # large in-memory caches (e.g., cache_papers) and warmup on startup. If the user wants
 # the full worker count anyway, set ARXIV_SANITY_GUNICORN_FORCE_WORKERS=1.
 if [ "${WORKER_CLASS}" = "gevent" ]; then
-  FORCE_WORKERS="${ARXIV_SANITY_GUNICORN_FORCE_WORKERS:-}"
+  FORCE_WORKERS="${ARXIV_SANITY_GUNICORN_FORCE_WORKERS:-$GUNICORN_FORCE_WORKERS_CFG}"
   if [ -z "${FORCE_WORKERS}" ]; then
     CACHE_PAPERS_CFG=$(python3 -c "from config import settings; print('1' if settings.web.cache_papers else '0')")
     WARMUP_DATA_CFG=$(python3 -c "from config import settings; print('1' if settings.web.warmup_data else '0')")

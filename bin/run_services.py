@@ -42,7 +42,11 @@ except Exception as e:
     # Keep launcher robust, but make the root cause visible.
     import traceback
 
-    print(f"[launcher] Failed to import config.settings: {e!r}", file=sys.stderr, flush=True)
+    print(
+        f"[launcher] Failed to import config.settings: {e!r}",
+        file=sys.stderr,
+        flush=True,
+    )
     traceback.print_exc()
     settings = None
 
@@ -262,7 +266,10 @@ def _log_litellm_models(port: int, *, verbose: bool) -> None:
 
     models = data.get("data")
     if not isinstance(models, list):
-        print(f"[launcher] LiteLLM models: unexpected response schema from {url}", flush=True)
+        print(
+            f"[launcher] LiteLLM models: unexpected response schema from {url}",
+            flush=True,
+        )
         return
 
     ids: list[str] = []
@@ -309,7 +316,10 @@ def _log_ollama_models(port: int, *, verbose: bool) -> None:
 
     names_sorted = sorted(set(names))
     if verbose or len(names_sorted) <= 20:
-        print(f"[launcher] Ollama models ({len(names_sorted)}): {names_sorted}", flush=True)
+        print(
+            f"[launcher] Ollama models ({len(names_sorted)}): {names_sorted}",
+            flush=True,
+        )
     else:
         head = names_sorted[:20]
         print(
@@ -374,7 +384,10 @@ def _wait_for_all_services(
         # Final status for any services that didn't become ready
         for name, url in services_to_wait:
             if not status[name]:
-                print(f"[launcher] {name} not ready after {timeout_s:.1f}s: {url}", flush=True)
+                print(
+                    f"[launcher] {name} not ready after {timeout_s:.1f}s: {url}",
+                    flush=True,
+                )
 
     except KeyboardInterrupt:
         raise
@@ -386,7 +399,7 @@ def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
     """Check if MinerU API is available and key is valid."""
     if not api_key or not api_key.strip():
         print(
-            "[launcher] Error: MINERU_API_KEY is not set. API backend requires a valid API key.",
+            "[launcher] Error: ARXIV_SANITY_MINERU_API_KEY is not set. API backend requires a valid API key.",
             file=sys.stderr,
             flush=True,
         )
@@ -402,7 +415,7 @@ def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
 
         if response.status_code == 401:
             print(
-                "[launcher] Error: MinerU API key is invalid or expired. Please check your MINERU_API_KEY.",
+                "[launcher] Error: MinerU API key is invalid or expired. Please check your ARXIV_SANITY_MINERU_API_KEY.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -435,7 +448,11 @@ def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
         )
         return False
     except Exception as e:
-        print(f"[launcher] Warning: Failed to verify MinerU API availability: {e}", file=sys.stderr, flush=True)
+        print(
+            f"[launcher] Warning: Failed to verify MinerU API availability: {e}",
+            file=sys.stderr,
+            flush=True,
+        )
         return True  # Don't block startup for network issues
 
 
@@ -573,6 +590,12 @@ def _run_fetch_compute(repo_root: Path, tools_dir: Path, num_papers: int, max_r:
     return 0
 
 
+def _configure_web_readiness_env(*, no_embed: bool, no_mineru: bool) -> None:
+    """Align web /ready strict checks with launcher-managed services."""
+    os.environ.setdefault("ARXIV_SANITY_READY_REQUIRE_EMBEDDING", "0" if no_embed else "1")
+    os.environ.setdefault("ARXIV_SANITY_READY_REQUIRE_MINERU", "0" if no_mineru else "1")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run arxiv-sanity-X services in one terminal.")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose launcher logs.")
@@ -586,7 +609,11 @@ def main() -> int:
         help="How to start the web server (default: gunicorn).",
     )
     parser.add_argument("--with-daemon", action="store_true", help="Also start scheduler daemon.py.")
-    parser.add_argument("--no-huey", action="store_true", help="Disable Huey task worker (enabled by default).")
+    parser.add_argument(
+        "--no-huey",
+        action="store_true",
+        help="Disable Huey task worker (enabled by default).",
+    )
     parser.add_argument(
         "--huey-workers",
         type=int,
@@ -601,7 +628,12 @@ def main() -> int:
         help="Huey worker type (default: env ARXIV_SANITY_HUEY_WORKER_TYPE or thread).",
     )
     parser.add_argument("--no-wait", action="store_true", help="Skip health-check waits.")
-    parser.add_argument("--wait-timeout", type=float, default=60.0, help="Health-check wait timeout seconds.")
+    parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=60.0,
+        help="Health-check wait timeout seconds.",
+    )
     parser.add_argument(
         "--fetch-compute",
         type=int,
@@ -617,6 +649,7 @@ def main() -> int:
         help="Markdown source for paper summaries (default: html).",
     )
     args = parser.parse_args()
+    user_disabled_mineru = bool(args.no_mineru)
 
     if settings is None:
         print("[launcher] Failed to import config.settings", file=sys.stderr)
@@ -631,18 +664,23 @@ def main() -> int:
 
     # Allow choosing summary source when launching the web service.
     if args.summary_source:
-        os.environ["ARXIV_SANITY_SUMMARY_SOURCE"] = args.summary_source
+        os.environ["ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE"] = args.summary_source
 
     EMBED_PORT = settings.embedding.port
     LITELLM_PORT = settings.litellm_port
     MINERU_PORT = settings.mineru.port
     MINERU_ENABLED = settings.mineru.enabled
     MINERU_BACKEND = settings.mineru.backend
-    MINERU_API_KEY = settings.mineru.api_key
+    mineru_api_key = settings.mineru.api_key
     SERVE_PORT = settings.serve_port
 
     if args.fetch_compute is not None:
-        return _run_fetch_compute(repo_root=repo_root, tools_dir=tools_dir, num_papers=args.fetch_compute, max_r=1000)
+        return _run_fetch_compute(
+            repo_root=repo_root,
+            tools_dir=tools_dir,
+            num_papers=args.fetch_compute,
+            max_r=1000,
+        )
 
     # Check if MinerU is disabled globally
     if not MINERU_ENABLED and not args.no_mineru:
@@ -654,6 +692,12 @@ def main() -> int:
         args.no_mineru = True
 
     mineru_backend = (MINERU_BACKEND or "pipeline").strip().lower()
+    if mineru_backend == "api" and user_disabled_mineru and MINERU_ENABLED:
+        print(
+            "[launcher] Warning: --no-mineru skips MinerU API preflight checks while backend=api.",
+            file=sys.stderr,
+            flush=True,
+        )
     if mineru_backend == "pipeline" and not args.no_mineru:
         print(
             "[launcher] Warning: ARXIV_SANITY_MINERU_BACKEND=pipeline, skip starting minerU vLLM service. "
@@ -664,7 +708,7 @@ def main() -> int:
         args.no_mineru = True
     elif mineru_backend == "api" and not args.no_mineru:
         # For API backend, check API availability instead of starting local service
-        api_key = MINERU_API_KEY
+        api_key = mineru_api_key
         if not _check_mineru_api(api_key, verbose=verbose):
             print(
                 "[launcher] Error: MinerU API backend is not available. Fix the API key issue or disable MinerU.",
@@ -678,6 +722,8 @@ def main() -> int:
                 flush=True,
             )
         args.no_mineru = True
+
+    _configure_web_readiness_env(no_embed=bool(args.no_embed), no_mineru=bool(args.no_mineru))
 
     services: list[ServiceSpec] = []
 
@@ -718,7 +764,7 @@ def main() -> int:
                 name="web",
                 cmd=[sys.executable, str(repo_root / "serve.py")],
                 cwd=repo_root,
-                health_url=f"http://localhost:{SERVE_PORT}/health",
+                health_url=f"http://localhost:{SERVE_PORT}/ready",
             )
         )
     elif args.web == "gunicorn":
@@ -727,12 +773,18 @@ def main() -> int:
                 name="web",
                 cmd=["bash", str(bin_dir / "up.sh")],
                 cwd=repo_root,
-                health_url=f"http://localhost:{SERVE_PORT}/health",
+                health_url=f"http://localhost:{SERVE_PORT}/ready",
             )
         )
 
     if args.with_daemon:
-        services.append(ServiceSpec(name="daemon", cmd=[sys.executable, str(tools_dir / "daemon.py")], cwd=repo_root))
+        services.append(
+            ServiceSpec(
+                name="daemon",
+                cmd=[sys.executable, str(tools_dir / "daemon.py")],
+                cwd=repo_root,
+            )
+        )
 
     # Huey task worker (default enabled unless --no-huey)
     if not args.no_huey:
@@ -775,7 +827,10 @@ def main() -> int:
     # process is not started unless --with-daemon is passed.
     try:
         if settings is not None and getattr(settings.daemon, "enable_git_backup", False) and not args.with_daemon:
-            print("[launcher] Warning: git backup is enabled but daemon is not started; pass --with-daemon", flush=True)
+            print(
+                "[launcher] Warning: git backup is enabled but daemon is not started; pass --with-daemon",
+                flush=True,
+            )
     except Exception:
         pass
 
@@ -793,7 +848,10 @@ def main() -> int:
             services_to_wait = [(spec.name, spec.health_url) for spec, _ in procs if spec.health_url]
 
             if services_to_wait:
-                print(f"[launcher] Waiting for {len(services_to_wait)} service(s)...", flush=True)
+                print(
+                    f"[launcher] Waiting for {len(services_to_wait)} service(s)...",
+                    flush=True,
+                )
                 status = _wait_for_all_services(services_to_wait, timeout_s=args.wait_timeout, verbose=verbose)
 
                 # Log additional info for ready services
@@ -811,12 +869,19 @@ def main() -> int:
                     web_url = None
                     for spec, _ in procs:
                         if spec.name == "web" and spec.health_url:
-                            web_url = spec.health_url.replace("/health", "/")
+                            web_url = spec.health_url.replace("/ready", "/").replace("/health", "/")
                             break
                     if web_url:
                         print(f"[launcher] All services ready: {web_url}", flush=True)
                     else:
                         print("[launcher] All services ready", flush=True)
+                else:
+                    not_ready = [name for name, ok in status.items() if not ok]
+                    print(
+                        f"[launcher] Readiness check failed for: {', '.join(not_ready)}",
+                        flush=True,
+                    )
+                    raise SystemExit(2)
 
         # main loop
         while True:

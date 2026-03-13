@@ -17,18 +17,18 @@ This project is designed primarily for **personal / intranet** usage.
 
 - Recommended: set `ARXIV_SANITY_SECRET_KEY` (strong random string).
 - `secret_key.txt` is a local fallback for convenience and is ignored by git. Treat it as a secret:
-  - Do not commit it
-  - Rotate it if you suspect it was leaked
+    - Do not commit it
+    - Rotate it if you suspect it was leaked
 
 ## CSRF
 
 - State-changing endpoints require CSRF (header `X-CSRF-Token`) for browser sessions.
 - For internal service-to-service calls (e.g. `tools/send_emails.py`), use `ARXIV_SANITY_RECO_API_KEY` and send:
-  - `X-ARXIV-SANITY-API-KEY: ...` (or `Authorization: Bearer ...`)
+    - `X-ARXIV-SANITY-API-KEY: ...` (or `Authorization: Bearer ...`)
 
 ## Health/Metrics Exposure
 
-- `GET /health` is safe for basic readiness checks; still avoid exposing internal status to untrusted networks.
+- `GET /health` is the safer liveness/degraded probe; use `GET /ready` only for trusted readiness checks and internal automation.
 - `GET /metrics` should be protected with `ARXIV_SANITY_METRICS_KEY` if reachable from untrusted networks.
 
 ## Uploaded PDFs (Experimental)

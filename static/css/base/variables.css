@@ -26,6 +26,24 @@
     --warning-color: #f59e0b;
     --danger-color: #ef4444;
     --info-color: #06b6d4;
+    --link-soft-bg: rgba(37, 99, 235, 0.1);
+    --link-soft-border: rgba(37, 99, 235, 0.3);
+    --link-soft-text: #2563eb;
+    --success-soft-bg: rgba(16, 185, 129, 0.12);
+    --success-soft-border: rgba(16, 185, 129, 0.35);
+    --success-soft-text: #10b981;
+    --warning-soft-bg: rgba(245, 158, 11, 0.12);
+    --warning-soft-border: rgba(245, 158, 11, 0.35);
+    --warning-soft-text: #b45309;
+    --danger-soft-bg: rgba(239, 68, 68, 0.12);
+    --danger-soft-border: rgba(239, 68, 68, 0.35);
+    --danger-soft-text: #dc2626;
+    --info-soft-bg: rgba(6, 182, 212, 0.12);
+    --info-soft-border: rgba(6, 182, 212, 0.35);
+    --info-soft-text: #0891b2;
+    --surface-muted-bg: #f8fafc;
+    --surface-muted-text: #475569;
+    --font-mono: 'SFMono-Regular', 'Cascadia Code', 'Fira Code', 'Menlo', 'Consolas', monospace;
 
     /* Tag colors (blue series) - More vibrant */
     --tag-bg-light: #eff6ff; /* Soft blue background */
@@ -88,6 +106,24 @@
     --warning-color: #fbbf24;
     --danger-color: #f87171;
     --info-color: #22d3ee;
+    --link-soft-bg: rgba(96, 165, 250, 0.15);
+    --link-soft-border: rgba(96, 165, 250, 0.4);
+    --link-soft-text: #60a5fa;
+    --success-soft-bg: rgba(52, 211, 153, 0.15);
+    --success-soft-border: rgba(52, 211, 153, 0.35);
+    --success-soft-text: #34d399;
+    --warning-soft-bg: rgba(251, 191, 36, 0.15);
+    --warning-soft-border: rgba(251, 191, 36, 0.35);
+    --warning-soft-text: #fbbf24;
+    --danger-soft-bg: rgba(248, 113, 113, 0.16);
+    --danger-soft-border: rgba(248, 113, 113, 0.35);
+    --danger-soft-text: #f87171;
+    --info-soft-bg: rgba(34, 211, 238, 0.15);
+    --info-soft-border: rgba(34, 211, 238, 0.35);
+    --info-soft-text: #22d3ee;
+    --surface-muted-bg: rgba(255, 255, 255, 0.05);
+    --surface-muted-text: #cbd5e1;
+    --font-mono: 'SFMono-Regular', 'Cascadia Code', 'Fira Code', 'Menlo', 'Consolas', monospace;
 
     /* Tag colors (dark mode - blue series) */
     --tag-bg-dark: #1e293b; /* Deep blue background */

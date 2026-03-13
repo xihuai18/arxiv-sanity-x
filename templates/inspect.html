@@ -3,8 +3,18 @@
 {% block head_extra %}
 <!-- Markdown + Math rendering for abstract -->
 {% if asset_cdn_enabled %}
-<script src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/markdown-it.min.js') }}';"></script>
+<script>
+document.addEventListener('error', function(event) {
+    var target = event.target;
+    if (!target || target.tagName !== 'SCRIPT') return;
+    var fallbackSrc = target.getAttribute('data-fallback-src');
+    if (!fallbackSrc || target.getAttribute('data-fallback-loaded') === '1') return;
+    target.setAttribute('data-fallback-loaded', '1');
+    target.src = fallbackSrc;
+}, true);
+</script>
+<script defer src="{{ npm_cdn_url('markdown-it@13.0.1/dist/markdown-it.min.js') }}"
+    data-fallback-src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/markdown-it.min.js') }}"></script>
 {% endif %}
@@ -23,19 +33,31 @@ var words_desc = {{ words_desc | tojson }};
 {% endblock %}
 
 {% block content %}
-<div id="wrap">
-</div>
-<div id="wordwrap">
+<div class="inspect-page">
+    <div class="inspect-header">
+        <h1 class="inspect-title">Inspect feature weights</h1>
+        <p class="inspect-subtitle">Review the paper details together with the SVM word weights that shape recommendation behavior.</p>
+    </div>
+    <div class="inspect-content">
+        <section class="inspect-section">
+            <h2 class="inspect-section-title">Paper</h2>
+            <div id="wrap"></div>
+        </section>
+        <section class="inspect-section">
+            <h2 class="inspect-section-title">Model weights</h2>
+            <div id="wordwrap"></div>
+        </section>
+    </div>
 </div>
 {% endblock %}
 
 {% block elements %}
 <!-- React (only needed on pages with JSX/React components) -->
 {% if asset_cdn_enabled %}
-<script src="{{ npm_cdn_url('react@16.14.0/umd/react.production.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react.production.min.js') }}';"></script>
-<script src="{{ npm_cdn_url('react-dom@16.14.0/umd/react-dom.production.min.js') }}"
-    onerror="this.onerror=null;this.src='{{ url_for('static', filename='lib/react-dom.production.min.js') }}';"></script>
+<script defer src="{{ npm_cdn_url('react@16.14.0/umd/react.production.min.js') }}"
+    data-fallback-src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
+<script defer src="{{ npm_cdn_url('react-dom@16.14.0/umd/react-dom.production.min.js') }}"
+    data-fallback-src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>
 {% else %}
 <script defer src="{{ url_for('static', filename='lib/react.production.min.js') }}"></script>
 <script defer src="{{ url_for('static', filename='lib/react-dom.production.min.js') }}"></script>

@@ -40,6 +40,14 @@ def test_compute_auto_fallback_models_anchor_missing_uses_default_anchor():
     ]
 
 
+def test_compute_auto_fallback_models_anchor_and_default_missing_returns_empty():
+    """When both anchors are unknown, auto fallback should be conservative."""
+    from config.llm_model_order import compute_auto_fallback_models
+
+    order = ["qwen3.5-plus", "glm-5", "kimi-k2.5", "gpt-5.2", "claude-opus-4-6"]
+    assert compute_auto_fallback_models(yml_order=order, anchor="unknown", default_anchor="also-unknown") == []
+
+
 def test_llm_settings_auto_fallback_defaults_when_no_llm_yml(monkeypatch):
     """When llm.yml is missing/unreadable, settings uses a deterministic default fallback."""
     import config.llm_model_order as llm_model_order

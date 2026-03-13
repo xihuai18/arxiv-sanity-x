@@ -202,13 +202,32 @@ button:disabled {
 /* === Additional styles from style.css L2011-L2110 === */
 
 .paper-actions-footer {
-    /* New parent container */
     display: flex;
-    align-items: center; /* Ensure vertical alignment */
-    gap: 10px; /* Spacing between buttons */
-    margin-top: 16px; /* Spacing from elements above */
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 16px;
     padding-top: 16px;
     border-top: 1px solid var(--border-color);
+}
+
+.paper-actions-group {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    min-width: 0;
+}
+
+.paper-actions-group-primary {
+    flex: 1 1 auto;
+    row-gap: 12px;
+}
+
+.paper-actions-group-secondary {
+    margin-left: auto;
+    justify-content: flex-end;
 }
 
 /*
@@ -219,6 +238,7 @@ button:disabled {
  */
 .paper-actions-footer .summary-trigger-btn,
 .paper-actions-footer .action-btn,
+.paper-actions-footer .upload-similar-btn,
 .paper-actions-footer .rel_more a,
 .paper-actions-footer .rel_inspect a,
 .paper-actions-footer .rel_summary a {
@@ -287,7 +307,7 @@ button:disabled {
 
 /* alphaXiv - modern pill style */
 .rel_alphaxiv {
-    margin-left: auto; /* Push alphaXiv and Cool to the right */
+    margin-left: 0;
 }
 
 .rel_alphaxiv a {

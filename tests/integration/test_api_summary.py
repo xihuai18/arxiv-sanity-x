@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 
 class TestSummaryStatusApi:
     """Tests for summary status API."""
@@ -69,6 +71,175 @@ class TestSummaryStatusApi:
         assert info.get("status") == "failed"
         assert info.get("last_error") is None
         assert "task_id" not in info
+
+    def test_summary_status_fallback_path_hides_last_error_for_other_user(self, client, csrf_token, monkeypatch):
+        """Fallback query path should keep last_error redaction semantics."""
+        from backend import legacy
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(
+            legacy, "get_summary_status", lambda _pid, _model=None: ("failed", "secret failure details")
+        )
+        monkeypatch.setattr(
+            legacy.SummaryStatusRepository,
+            "get_status",
+            lambda _pid, _model=None: {"status": "failed", "task_user": "alice"},
+        )
+
+        class _BrokenDB:
+            def __enter__(self):
+                raise RuntimeError("db down")
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(legacy, "get_summary_status_db", lambda *args, **kwargs: _BrokenDB())
+
+        pid = "9998.99998"
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": [pid], "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        info = (data.get("statuses") or {}).get(pid) or {}
+        assert info.get("status") == "failed"
+        assert info.get("last_error") is None
+
+    def test_summary_status_invalid_cache_is_not_ok(self, client, csrf_token, monkeypatch, tmp_path):
+        """Invalid cached markdown should not be reported as status=ok."""
+        from backend import legacy
+
+        pid = "8888.88888"
+        model = "test-model"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{model}.md"
+        meta_file = cache_dir / f"{model}.meta.json"
+        cache_file.write_text("# Error\n\nbroken cache", encoding="utf-8")
+        meta_file.write_text(json.dumps({"source": "html"}), encoding="utf-8")
+        lock_file = cache_dir / f".{model}.lock"
+        legacy_cache = tmp_path / f"{pid}.md"
+        legacy_meta = tmp_path / f"{pid}.meta.json"
+        legacy_lock = tmp_path / f".{pid}.lock"
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(
+            legacy,
+            "summary_cache_paths",
+            lambda _pid, _model: (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock),
+        )
+
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": [pid], "model": model},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        info = (data.get("statuses") or {}).get(pid) or {}
+        assert info.get("status") != "ok"
+
+    def test_summary_status_stale_db_ok_is_downgraded(self, client, csrf_token, monkeypatch, tmp_path):
+        """DB status=ok must not override invalid/missing cache reality."""
+        from backend import legacy
+
+        pid = "7777.77777"
+        model = "test-model"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{model}.md"
+        meta_file = cache_dir / f"{model}.meta.json"
+        cache_file.write_text("# Error\n\nbroken cache", encoding="utf-8")
+        meta_file.write_text(json.dumps({"source": "html"}), encoding="utf-8")
+        lock_file = cache_dir / f".{model}.lock"
+        legacy_cache = tmp_path / f"{pid}.md"
+        legacy_meta = tmp_path / f"{pid}.meta.json"
+        legacy_lock = tmp_path / f".{pid}.lock"
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(
+            legacy,
+            "summary_cache_paths",
+            lambda _pid, _model: (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock),
+        )
+
+        class _FakeDB:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def get_many(self, keys):
+                return {k: {"status": "ok", "last_error": None} for k in keys}
+
+        monkeypatch.setattr(legacy, "get_summary_status_db", lambda *args, **kwargs: _FakeDB())
+
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": [pid], "model": model},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        info = (data.get("statuses") or {}).get(pid) or {}
+        assert info.get("status") != "ok"
+
+    def test_summary_status_db_ok_with_resolved_model_cache_is_ok(self, client, csrf_token, monkeypatch, tmp_path):
+        """DB status=ok may map to resolved_model cache when request model file is absent."""
+        from backend import legacy
+
+        pid = "6666.66666"
+        model = "requested-model"
+        resolved_model = "fallback-model"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        fallback_cache = cache_dir / f"{resolved_model}.md"
+        fallback_meta = cache_dir / f"{resolved_model}.meta.json"
+        long_body = " ".join(["detail"] * 80)
+        fallback_cache.write_text(f"# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n{long_body}", encoding="utf-8")
+        fallback_meta.write_text(json.dumps({"source": "html", "model": resolved_model}), encoding="utf-8")
+
+        def _paths(_pid, _model):
+            model_cache = cache_dir / f"{_model}.md"
+            model_meta = cache_dir / f"{_model}.meta.json"
+            model_lock = cache_dir / f".{_model}.lock"
+            legacy_cache = tmp_path / f"{_pid}.md"
+            legacy_meta = tmp_path / f"{_pid}.meta.json"
+            legacy_lock = tmp_path / f".{_pid}.lock"
+            return model_cache, model_meta, model_lock, legacy_cache, legacy_meta, legacy_lock
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(legacy, "summary_cache_paths", _paths)
+
+        class _FakeDB:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def get_many(self, keys):
+                return {k: {"status": "ok", "last_error": None, "resolved_model": resolved_model} for k in keys}
+
+        monkeypatch.setattr(legacy, "get_summary_status_db", lambda *args, **kwargs: _FakeDB())
+
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": [pid], "model": model},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("success") is True
+        info = (data.get("statuses") or {}).get(pid) or {}
+        assert info.get("status") == "ok"
 
 
 class TestSummaryGetApi:

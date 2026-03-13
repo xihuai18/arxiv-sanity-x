@@ -1,10 +1,14 @@
 # LiteLLM Configuration Template
-# Copy this file to llm.yml and fill in your API keys
-# Usage: cp llm_template.yml llm.yml
+# Copy this file to config/llm.yml and fill in your API keys
+# Usage: cp config/llm_template.yml config/llm.yml
 #
 # LiteLLM acts as a unified gateway for multiple LLM providers.
-# Start with: litellm -c llm.yml --port 53000
-# Or use: python3 run_services.py (auto-starts LiteLLM)
+# Start with: litellm -c config/llm.yml --port 53000
+# Or use: python bin/run_services.py (auto-starts LiteLLM)
+# Note: the repository code defaults are `ARXIV_SANITY_LLM_NAME=gpt-5.4` and
+# `ARXIV_SANITY_EXTRACT_MODEL_NAME=qwen3.5-plus`, but this starter template only
+# defines the OpenRouter aliases below. If you copy it unchanged, also override
+# those env vars to one of the aliases here, or add matching routes.
 
 model_list:
   # OpenRouter - Recommended for free models

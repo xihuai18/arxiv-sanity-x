@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import requests
 from flask import (  # global session-level object
     Response,
     abort,
@@ -114,20 +113,53 @@ from .utils.sse import (
 )
 from .utils.sse import unregister_user_stream as _unregister_user_stream
 
+
 # -----------------------------------------------------------------------------
 # Configuration constants (loaded from settings)
 # -----------------------------------------------------------------------------
-DATA_DIR = str(settings.data_dir)
-SUMMARY_DIR = str(settings.summary_dir)
-LLM_NAME = settings.llm.name
-LLM_BASE_URL = settings.llm.base_url
-LLM_API_KEY = settings.llm.api_key
-EMBED_PORT = settings.embedding.port
-MINERU_ENABLED = settings.mineru.enabled
-MINERU_PORT = settings.mineru.port
-SUMMARY_MARKDOWN_SOURCE = settings.summary.markdown_source
-SUMMARY_DEFAULT_SEMANTIC_WEIGHT = settings.summary.default_semantic_weight
-SVM_C = settings.svm.c
+def _data_dir() -> str:
+    return str(settings.data_dir)
+
+
+def _summary_dir() -> str:
+    return str(settings.summary_dir)
+
+
+def _llm_name() -> str:
+    return str(settings.llm.name or "")
+
+
+def _llm_base_url() -> str:
+    return str(settings.llm.base_url or "")
+
+
+def _llm_api_key() -> str:
+    return str(settings.llm.api_key or "")
+
+
+def _embed_port() -> int:
+    return int(settings.embedding.port)
+
+
+def _mineru_enabled() -> bool:
+    return bool(settings.mineru.enabled)
+
+
+def _mineru_port() -> int:
+    return int(settings.mineru.port)
+
+
+def _summary_markdown_source() -> str:
+    return str(settings.summary.markdown_source or "")
+
+
+def _summary_default_semantic_weight() -> float:
+    return float(settings.summary.default_semantic_weight)
+
+
+def _svm_c() -> float:
+    return float(settings.svm.c)
+
 
 # Configure loguru early to reduce import-time noise
 _DEFAULT_LOG_LEVEL = settings.log_level.upper()
@@ -613,8 +645,9 @@ def paper_exists(pid: str) -> bool:
             return False
         return record.get("parse_status") == "ok"
 
-    mdb = get_metas()
-    return pid in mdb
+    from backend.services.data_service import get_meta as _get_meta
+
+    return _get_meta(pid) is not None
 
 
 def get_paper(pid: str) -> Any:
@@ -982,11 +1015,14 @@ def semantic_search_rank(q: str = "", limit=None) -> Any:
     return _semantic_search_rank(q, limit)
 
 
-def hybrid_search_rank(q: str = "", limit=None, semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT) -> Any:
+def hybrid_search_rank(q: str = "", limit=None, semantic_weight=None) -> Any:
     """Hybrid search - delegates to search_service.hybrid_search_rank."""
     from backend.services.search_service import (
         hybrid_search_rank as _hybrid_search_rank,
     )
+
+    if semantic_weight is None:
+        semantic_weight = _summary_default_semantic_weight()
 
     return _hybrid_search_rank(
         q=q,
@@ -1001,12 +1037,15 @@ def enhanced_search_rank(
     q: str = "",
     limit=None,
     search_mode="keyword",
-    semantic_weight=SUMMARY_DEFAULT_SEMANTIC_WEIGHT,
+    semantic_weight=None,
 ) -> Any:
     """Enhanced search - delegates to search_service.enhanced_search_rank."""
     from backend.services.search_service import (
         enhanced_search_rank as _enhanced_search_rank,
     )
+
+    if semantic_weight is None:
+        semantic_weight = _summary_default_semantic_weight()
 
     return _enhanced_search_rank(
         q=q,
@@ -1052,6 +1091,8 @@ def main() -> ResponseReturnValue:
     allowed_logic = {"and", "or"}
     allowed_search_modes = {"keyword", "semantic", "hybrid"}
     allowed_skip_have = {"yes", "no"}
+    query_supported_ranks = {"search", "time"}
+    advanced_rank_modes = {"tags", "pid"}
 
     # Check if rank was explicitly provided in the request
     rank_explicitly_set = "rank" in request.args
@@ -1065,7 +1106,7 @@ def main() -> ResponseReturnValue:
     opt_svm_c = request.args.get("svm_c", "")  # svm C parameter
     opt_page_number = request.args.get("page_number", "1")  # page number for pagination
     opt_search_mode = _normalize_name(request.args.get("search_mode", "hybrid")).lower()
-    opt_semantic_weight = request.args.get("semantic_weight", str(SUMMARY_DEFAULT_SEMANTIC_WEIGHT))
+    opt_semantic_weight = request.args.get("semantic_weight", str(_summary_default_semantic_weight()))
 
     if opt_rank not in allowed_ranks:
         form_errors.append(f"Unknown rank '{opt_rank}', using '{default_rank}'.")
@@ -1088,11 +1129,35 @@ def main() -> ResponseReturnValue:
         form_errors.append("Search mode must be keyword, semantic, or hybrid; using hybrid.")
         opt_search_mode = "hybrid"
 
-    # if a query is given and rank was not explicitly set, override rank to be of type "search"
-    # this allows the user to simply hit ENTER in the search field and have the correct thing happen
-    # but respects explicit rank choices (e.g., user wants to search within time-sorted results)
+    # If a query is given and rank was not explicitly set, default to search ranking.
     if opt_q and not rank_explicitly_set:
         opt_rank = "search"
+
+    # Keep the query/rank contract explicit. Query-based requests only work in search/time
+    # flows; rank=search without a query falls back to time ranking.
+    if opt_q and opt_rank not in query_supported_ranks:
+        form_errors.append("Search query only works with rank 'search' or 'time'; switched to 'search'.")
+        opt_rank = "search"
+    elif not opt_q and opt_rank == "search":
+        form_errors.append("Rank 'search' requires a query; using 'time' instead.")
+        opt_rank = default_rank
+
+    # Tags/PIDs/SVM C are only meaningful for tag-based ranking modes.
+    if opt_rank not in advanced_rank_modes:
+        ignored_advanced_fields = []
+        if opt_tags:
+            ignored_advanced_fields.append("Tags")
+        if opt_pid:
+            ignored_advanced_fields.append("PIDs")
+        if (opt_svm_c or "").strip():
+            ignored_advanced_fields.append("SVM C")
+        if ignored_advanced_fields:
+            joined_fields = ", ".join(ignored_advanced_fields)
+            form_errors.append(f"{joined_fields} only apply when rank is 'tags' or 'pid'; ignoring them.")
+        opt_tags = ""
+        opt_pid = ""
+        opt_logic = default_logic
+        opt_svm_c = ""
 
     # Parse time filter (days)
     opt_time_filter = (opt_time_filter or "").strip()
@@ -1123,28 +1188,28 @@ def main() -> ResponseReturnValue:
         try:
             C = float(opt_svm_c)
         except Exception:
-            C = SVM_C
+            C = _svm_c()
             form_errors.append(f"SVM C must be a positive number; using default {C}.")
         else:
             if C <= 0:
-                C = SVM_C
+                C = _svm_c()
                 form_errors.append(f"SVM C must be a positive number; using default {C}.")
     else:
-        C = SVM_C
+        C = _svm_c()
 
     # parse semantic weight (0..1)
-    semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+    semantic_weight = _summary_default_semantic_weight()
     opt_semantic_weight = (opt_semantic_weight or "").strip()
     if opt_semantic_weight:
         try:
             semantic_weight = float(opt_semantic_weight)
         except Exception:
             form_errors.append("Semantic weight must be between 0 and 1; using default.")
-            semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+            semantic_weight = _summary_default_semantic_weight()
         else:
             if semantic_weight < 0 or semantic_weight > 1:
                 form_errors.append("Semantic weight must be between 0 and 1; using default.")
-                semantic_weight = SUMMARY_DEFAULT_SEMANTIC_WEIGHT
+                semantic_weight = _summary_default_semantic_weight()
     opt_semantic_weight = str(semantic_weight)
 
     # Calculate required number of results for pagination (page slicing only).
@@ -1378,7 +1443,7 @@ def main() -> ResponseReturnValue:
     context["gvars"]["search_mode"] = opt_search_mode
     context["gvars"]["semantic_weight"] = opt_semantic_weight
     context["show_score_breakdown"] = opt_rank == "search" and opt_search_mode == "hybrid"
-    context["default_summary_model"] = LLM_NAME or ""
+    context["default_summary_model"] = _llm_name() or ""
     logger.trace(
         f"User: {context['user']}\ntags {context['tags']}\nkeys {context['keys']}\nctags {context['combined_tags']}"
     )
@@ -1516,7 +1581,10 @@ def inspect() -> ResponseReturnValue:
 
     if not paper_exists(pid):
         safe_pid = escape(pid or "")
-        return f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>", 404
+        return (
+            f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>",
+            404,
+        )
 
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
@@ -1581,7 +1649,10 @@ def _inspect_uploaded_paper(pid: str) -> ResponseReturnValue:
     record = UploadedPaperRepository.get(pid)
     if not record:
         safe_pid = escape(pid or "")
-        return f"<h1>Error</h1><p>Uploaded paper with ID '{safe_pid}' not found.</p>", 404
+        return (
+            f"<h1>Error</h1><p>Uploaded paper with ID '{safe_pid}' not found.</p>",
+            404,
+        )
 
     if record.get("owner") != g.user:
         return "<h1>Error</h1><p>Paper not found.</p>", 404
@@ -1596,7 +1667,10 @@ def _inspect_uploaded_paper(pid: str) -> ResponseReturnValue:
                 "<h1>Error</h1><p>Paper is being parsed. Please wait for parsing to complete before inspection.</p>",
                 400,
             )
-        return "<h1>Error</h1><p>Paper must be parsed before inspection. Please parse the PDF first.</p>", 400
+        return (
+            "<h1>Error</h1><p>Paper must be parsed before inspection. Please parse the PDF first.</p>",
+            400,
+        )
 
     # Check if metadata has been extracted
     meta = record.get("meta_extracted", {})
@@ -1627,7 +1701,10 @@ def _inspect_uploaded_paper(pid: str) -> ResponseReturnValue:
         if tfidf_vec is None:
             tfidf_vec = features.get("tfidf")
         if tfidf_vec is None:
-            return "<h1>Error</h1><p>No TF-IDF features available for this paper.</p>", 500
+            return (
+                "<h1>Error</h1><p>No TF-IDF features available for this paper.</p>",
+                500,
+            )
 
         # Load global features for vocab and idf
         global_features = get_features_cached()
@@ -1727,7 +1804,7 @@ def summary() -> ResponseReturnValue:
         # Add common context
         base_context = default_context()
         base_context.update(context)
-        base_context["default_summary_model"] = LLM_NAME or ""
+        base_context["default_summary_model"] = _llm_name() or ""
         base_context["tags"] = _build_user_tag_list() if g.user else []
         base_context["title"] = f"Paper Summary - {context['paper']['title']}"
         return render_template("summary.html", **base_context)
@@ -1743,7 +1820,10 @@ def summary() -> ResponseReturnValue:
 
     if not paper_exists(raw_pid):
         safe_pid = escape(pid or "")
-        return f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>", 404
+        return (
+            f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>",
+            404,
+        )
 
     # Get basic paper information with user tags (positive + negative)
     pid_to_utags = None
@@ -1780,7 +1860,7 @@ def summary() -> ResponseReturnValue:
     context = default_context()
     context["paper"] = paper
     context["pid"] = raw_pid  # Always use raw_pid (unversioned)
-    context["default_summary_model"] = LLM_NAME or ""
+    context["default_summary_model"] = _llm_name() or ""
     context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
     # Add paper name to page title
     context["title"] = f"Paper Summary - {paper['title']}"
@@ -1797,7 +1877,7 @@ def api_get_paper_summary() -> ResponseReturnValue:
             return err
 
         pid = data.get("pid", "").strip()
-        model = (data.get("model") or LLM_NAME or "").strip()
+        model = (data.get("model") or _llm_name() or "").strip()
         if not model:
             return _api_error("Model is required", 400)
 
@@ -1903,7 +1983,7 @@ def api_trigger_paper_summary() -> ResponseReturnValue:
                 return _api_error("Paper not parsed yet. Parse PDF first.", 400)
         # Non-upload summaries are public resources. Allow anonymous callers to enqueue work.
 
-        model = (data.get("model") or LLM_NAME or "").strip()
+        model = (data.get("model") or _llm_name() or "").strip()
         force_regen = bool(data.get("force", False) or data.get("force_regenerate", False))
         logger.trace(f"[API] api_trigger_paper_summary: pid={raw_pid}, model={model}")
         if not model:
@@ -1949,7 +2029,10 @@ def api_trigger_paper_summary() -> ResponseReturnValue:
             ret_status = "queued"
             try:
                 info = SummaryStatusRepository.get_status(raw_pid, model)
-                if isinstance(info, dict) and info.get("status") in ("queued", "running"):
+                if isinstance(info, dict) and info.get("status") in (
+                    "queued",
+                    "running",
+                ):
                     ret_status = info.get("status") or ret_status
             except Exception:
                 pass
@@ -1968,14 +2051,11 @@ def api_trigger_paper_summary() -> ResponseReturnValue:
             err_msg = err_msg or "Failed to enqueue summary task"
             _update_summary_status_db(raw_pid, model, "failed", err_msg, task_user=g.user)
             if g.user:
-                _update_readinglist_summary_status(g.user, raw_pid, "failed", err_msg)
+                _update_readinglist_summary_status(g.user, raw_pid, "failed", err_msg, model=model)
             return _api_error(err_msg, 503, code="summary_queue_unavailable")
 
-        # Thread fallback: no task_id. Best-effort mark queued for UI (without claiming a task_id).
-        if task_id is None and settings.huey.allow_thread_fallback:
-            _update_summary_status_db(raw_pid, model, "queued", None, task_user=g.user)
-            if g.user:
-                _update_readinglist_summary_status(g.user, raw_pid, "queued", None)
+        # Thread fallback: no task_id. The fallback worker writes running/ok/failed states itself.
+        # Do not overwrite it with "queued" here to avoid status regressions.
 
         logger.trace(f"[API] api_trigger_paper_summary: completed in {time.time() - t_start:.2f}s")
         return _api_success(pid=raw_pid, status="queued", last_error=None, task_id=task_id)
@@ -2023,15 +2103,29 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
                             "type": e.get("type", ""),
                         }
                     )
-                results.append({"index": ix, "success": False, "error": "Invalid item", "details": errors})
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "error": "Invalid item",
+                        "details": errors,
+                    }
+                )
                 continue
 
             pid = payload.get("pid") or ""
             raw_pid, _ = split_pid_version(pid)
 
-            model = (payload.get("model") or LLM_NAME or "").strip()
+            model = (payload.get("model") or _llm_name() or "").strip()
             if not model:
-                results.append({"index": ix, "success": False, "pid": raw_pid, "error": "Model is required"})
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "pid": raw_pid,
+                        "error": "Model is required",
+                    }
+                )
                 continue
 
             force_regen = bool(payload.get("force", False) or payload.get("force_regenerate", False))
@@ -2045,7 +2139,14 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
 
                 record = UploadedPaperRepository.get(raw_pid)
                 if not record or record.get("owner") != g.user:
-                    results.append({"index": ix, "success": False, "pid": raw_pid, "error": "Paper not found"})
+                    results.append(
+                        {
+                            "index": ix,
+                            "success": False,
+                            "pid": raw_pid,
+                            "error": "Paper not found",
+                        }
+                    )
                     continue
                 parse_status, _parse_error = _normalize_upload_parse_status(raw_pid, record)
                 if parse_status != "ok":
@@ -2077,7 +2178,15 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
 
             if not force_regen:
                 if status == "ok":
-                    results.append({"index": ix, "success": True, "pid": raw_pid, "status": "ok", "task_id": None})
+                    results.append(
+                        {
+                            "index": ix,
+                            "success": True,
+                            "pid": raw_pid,
+                            "status": "ok",
+                            "task_id": None,
+                        }
+                    )
                     continue
                 if status in ("running", "queued"):
                     task_id = None
@@ -2089,7 +2198,15 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
                                 task_id = info.get("task_id")
                     except Exception:
                         task_id = None
-                    results.append({"index": ix, "success": True, "pid": raw_pid, "status": status, "task_id": task_id})
+                    results.append(
+                        {
+                            "index": ix,
+                            "success": True,
+                            "pid": raw_pid,
+                            "status": status,
+                            "task_id": task_id,
+                        }
+                    )
                     continue
 
             priority = payload.get("priority")
@@ -2110,11 +2227,22 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
                 ret_status = "queued"
                 try:
                     info = SummaryStatusRepository.get_status(raw_pid, model)
-                    if isinstance(info, dict) and info.get("status") in ("queued", "running"):
+                    if isinstance(info, dict) and info.get("status") in (
+                        "queued",
+                        "running",
+                    ):
                         ret_status = info.get("status") or ret_status
                 except Exception:
                     pass
-                results.append({"index": ix, "success": True, "pid": raw_pid, "status": ret_status, "task_id": None})
+                results.append(
+                    {
+                        "index": ix,
+                        "success": True,
+                        "pid": raw_pid,
+                        "status": ret_status,
+                        "task_id": None,
+                    }
+                )
                 continue
 
             if task_id is None and not settings.huey.allow_thread_fallback:
@@ -2130,7 +2258,15 @@ def api_trigger_paper_summary_bulk() -> ResponseReturnValue:
                 continue
 
             # Thread fallback: no task_id.
-            results.append({"index": ix, "success": True, "pid": raw_pid, "status": "queued", "task_id": task_id})
+            results.append(
+                {
+                    "index": ix,
+                    "success": True,
+                    "pid": raw_pid,
+                    "status": "queued",
+                    "task_id": task_id,
+                }
+            )
 
         logger.trace(
             f"[API] api_trigger_paper_summary_bulk: completed in {time.time() - t_start:.2f}s ({len(results)} items)"
@@ -2239,7 +2375,7 @@ def api_summary_status() -> ResponseReturnValue:
         if len(pids) > MAX_SUMMARY_STATUS_PIDS:
             return _api_error(f"Too many paper IDs (max {MAX_SUMMARY_STATUS_PIDS})", 400)
 
-        model = (data.get("model") or LLM_NAME or "").strip()
+        model = (data.get("model") or _llm_name() or "").strip()
         if not model:
             return _api_error("Model is required", 400)
 
@@ -2268,7 +2404,55 @@ def api_summary_status() -> ResponseReturnValue:
         # Batch get summary status (preserve cache/lock priority)
         statuses = {}
         pending_db = []
-        summary_source = normalize_summary_source(SUMMARY_MARKDOWN_SOURCE)
+        summary_source = normalize_summary_source(_summary_markdown_source())
+
+        def _is_valid_cached_summary_path(md_path: Path) -> bool:
+            try:
+                content = md_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                return False
+            return bool(looks_like_valid_cached_summary_markdown(content))
+
+        def _is_cache_ok_for_pid(raw_pid: str, *, target_model: str | None = None) -> bool:
+            m = (target_model or model or "").strip()
+            if not m:
+                return False
+            (
+                cache_file,
+                meta_file,
+                _lock_file,
+                legacy_cache,
+                legacy_meta,
+                _legacy_lock,
+            ) = summary_cache_paths(raw_pid, m)
+            if cache_file.exists():
+                meta = read_summary_meta(meta_file)
+                if summary_source_matches(meta, summary_source) and _is_valid_cached_summary_path(cache_file):
+                    return True
+            if legacy_cache.exists():
+                legacy_meta_data = read_summary_meta(legacy_meta)
+                legacy_model = (legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or "").strip()
+                if (
+                    summary_source_matches(legacy_meta_data, summary_source)
+                    and legacy_model == m
+                    and _is_valid_cached_summary_path(legacy_cache)
+                ):
+                    return True
+            return False
+
+        def _has_lock_for_pid(raw_pid: str, *, target_model: str | None = None) -> bool:
+            m = (target_model or model or "").strip()
+            if not m:
+                return False
+            (
+                _cache_file,
+                _meta_file,
+                lock_file,
+                _legacy_cache,
+                _legacy_meta,
+                legacy_lock,
+            ) = summary_cache_paths(raw_pid, m)
+            return lock_file.exists() or legacy_lock.exists()
 
         for raw_pid in raw_pids:
             if raw_pid not in existing_pids:
@@ -2282,11 +2466,9 @@ def api_summary_status() -> ResponseReturnValue:
                 raw_pid, model
             )
 
-            if cache_file.exists() or legacy_cache.exists():
-                meta = read_summary_meta(meta_file) if meta_file.exists() else read_summary_meta(legacy_meta)
-                if summary_source_matches(meta, summary_source):
-                    statuses[raw_pid] = {"status": "ok", "last_error": None}
-                    continue
+            if _is_cache_ok_for_pid(raw_pid):
+                statuses[raw_pid] = {"status": "ok", "last_error": None}
+                continue
 
             if lock_file.exists() or legacy_lock.exists():
                 statuses[raw_pid] = {"status": "running", "last_error": None}
@@ -2309,11 +2491,25 @@ def api_summary_status() -> ResponseReturnValue:
                     info = status_data.get(key)
                     if isinstance(info, dict):
                         allow_sensitive = _allow_task_id(info)
+                        status_value = str(info.get("status") or "")
+                        if status_value == "ok":
+                            resolved_model = (info.get("resolved_model") or info.get("llm_model") or "").strip()
+                            cache_ok = _is_cache_ok_for_pid(raw_pid)
+                            if not cache_ok and resolved_model and resolved_model != model:
+                                cache_ok = _is_cache_ok_for_pid(raw_pid, target_model=resolved_model)
+                            if not cache_ok:
+                                # Re-check lock to avoid returning empty state while generation just started.
+                                running = _has_lock_for_pid(raw_pid)
+                                if not running and resolved_model and resolved_model != model:
+                                    running = _has_lock_for_pid(raw_pid, target_model=resolved_model)
+                                status_value = "running" if running else ""
                         payload = {
-                            "status": info.get("status") or "",
+                            "status": status_value,
                             # Do not leak errors across users: only return last_error to the
                             # task owner (or when task_user is unset).
-                            "last_error": info.get("last_error") if allow_sensitive else None,
+                            "last_error": (
+                                (info.get("last_error") if allow_sensitive else None) if status_value else None
+                            ),
                         }
                         if allow_sensitive:
                             task_id = info.get("task_id")
@@ -2326,6 +2522,13 @@ def api_summary_status() -> ResponseReturnValue:
                 logger.warning(f"Batch status query failed, falling back: {e}")
                 for raw_pid in pending_db:
                     status, last_error = get_summary_status(raw_pid, model)
+                    if last_error:
+                        try:
+                            info = SummaryStatusRepository.get_status(raw_pid, model)
+                            if isinstance(info, dict) and not _allow_task_id(info):
+                                last_error = None
+                        except Exception:
+                            last_error = None
                     statuses[raw_pid] = {"status": status, "last_error": last_error}
 
         logger.trace(f"[API] api_summary_status: completed in {time.time() - t_start:.2f}s, {len(statuses)} results")
@@ -2429,7 +2632,7 @@ def api_paper_image(pid: str, filename: str) -> ResponseReturnValue:
             if not record or record.get("owner") != g.user:
                 abort(404)
 
-        return _serve_paper_image(pid, filename, Path(DATA_DIR) / "html_md")
+        return _serve_paper_image(pid, filename, Path(_data_dir()) / "html_md")
     except Exception as e:
         if hasattr(e, "code"):
             raise
@@ -2450,7 +2653,7 @@ def api_mineru_image(pid: str, filename: str) -> ResponseReturnValue:
             if not record or record.get("owner") != g.user:
                 abort(404)
 
-        return _serve_paper_image(pid, filename, Path(DATA_DIR) / "mineru", ["auto", "vlm", "api"])
+        return _serve_paper_image(pid, filename, Path(_data_dir()) / "mineru", ["auto", "vlm", "api"])
     except Exception as e:
         if hasattr(e, "code"):
             raise
@@ -2460,9 +2663,9 @@ def api_mineru_image(pid: str, filename: str) -> ResponseReturnValue:
 
 def api_llm_models() -> ResponseReturnValue:
     try:
-        base_url = (LLM_BASE_URL or "").rstrip("/")
+        base_url = (_llm_base_url() or "").rstrip("/")
         if not base_url:
-            models = [{"id": LLM_NAME}] if LLM_NAME else []
+            models = [{"id": _llm_name()}] if _llm_name() else []
             # Keep response usable for clients: if we can provide a fallback model,
             # return success=True with a warning instead of HTTP-200+success=False.
             if models:
@@ -2484,8 +2687,8 @@ def api_llm_models() -> ResponseReturnValue:
             return _api_success(models=cached_models)
 
         headers = {}
-        if LLM_API_KEY:
-            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+        if _llm_api_key():
+            headers["Authorization"] = f"Bearer {_llm_api_key()}"
 
         candidate_urls = []
         if base_url.endswith("/v1"):
@@ -2496,12 +2699,14 @@ def api_llm_models() -> ResponseReturnValue:
 
         # If a refresh is already running, return stale cache/fallback quickly.
         if in_progress:
-            models = cached_models or ([{"id": LLM_NAME}] if LLM_NAME else [])
+            models = cached_models or ([{"id": _llm_name()}] if _llm_name() else [])
             if models:
                 return _api_success(models=models, warning="Refreshing model list...")
             return _api_error("Refreshing model list...", 503, models=[])
 
         def _fetch_models() -> tuple[list[dict], str | None]:
+            import requests
+
             sess = requests.Session()
             sess.trust_env = False
             payload = None
@@ -2525,7 +2730,7 @@ def api_llm_models() -> ResponseReturnValue:
                     continue
 
             if payload is None:
-                models = [{"id": LLM_NAME}] if LLM_NAME else []
+                models = [{"id": _llm_name()}] if _llm_name() else []
                 if models:
                     return models, "Failed to fetch model list from LLM endpoint"
                 raise RuntimeError(f"Failed to fetch models from {candidate_urls}. Last error: {last_error}")
@@ -2535,8 +2740,8 @@ def api_llm_models() -> ResponseReturnValue:
                 mid = item.get("id")
                 if mid:
                     models.append(item)
-            if not models and LLM_NAME:
-                models = [{"id": LLM_NAME}]
+            if not models and _llm_name():
+                models = [{"id": _llm_name()}]
             # Prefer config/llm.yml ordering for UI stability (LiteLLM may return arbitrary order).
             try:
                 from config.llm_model_order import (
@@ -2573,7 +2778,7 @@ def api_llm_models() -> ResponseReturnValue:
                 models, warning = _fetch_models()
             except Exception as e:
                 logger.error(f"Failed to fetch LLM models: {e}")
-                models = [{"id": LLM_NAME}] if LLM_NAME else []
+                models = [{"id": _llm_name()}] if _llm_name() else []
                 warning = "Failed to fetch model list from LLM endpoint"
             finally:
                 with _LLM_MODELS_CACHE_LOCK:
@@ -2598,14 +2803,18 @@ def api_llm_models() -> ResponseReturnValue:
                     )
                 except Exception:
                     Thread = threading.Thread
-                Thread(target=_refresh_cache_in_background, name="llm-models-refresh", daemon=True).start()
+                Thread(
+                    target=_refresh_cache_in_background,
+                    name="llm-models-refresh",
+                    daemon=True,
+                ).start()
             return _api_success(models=cached_models, warning="Using cached model list (refreshing...)")
 
         # No cache yet: fetch synchronously once (still with tight timeouts).
         # Double-check `in_progress` under lock to avoid multiple concurrent first-time fetches.
         with _LLM_MODELS_CACHE_LOCK:
             if _LLM_MODELS_CACHE.get("in_progress"):
-                models = list(_LLM_MODELS_CACHE.get("models") or []) or ([{"id": LLM_NAME}] if LLM_NAME else [])
+                models = list(_LLM_MODELS_CACHE.get("models") or []) or ([{"id": _llm_name()}] if _llm_name() else [])
                 if models:
                     return _api_success(models=models, warning="Refreshing model list...")
                 return _api_error("Refreshing model list...", 503, models=[])
@@ -2617,7 +2826,7 @@ def api_llm_models() -> ResponseReturnValue:
             models, warning = _fetch_models()
         except Exception as e:
             logger.error(f"Failed to fetch LLM models: {e}")
-            models = [{"id": LLM_NAME}] if LLM_NAME else []
+            models = [{"id": _llm_name()}] if _llm_name() else []
             warning = "Failed to fetch model list from LLM endpoint"
         finally:
             with _LLM_MODELS_CACHE_LOCK:
@@ -2632,7 +2841,7 @@ def api_llm_models() -> ResponseReturnValue:
         return _api_success(models=models)
     except Exception as e:
         logger.error(f"Failed to fetch LLM models: {e}")
-        models = [{"id": LLM_NAME}] if LLM_NAME else []
+        models = [{"id": _llm_name()}] if _llm_name() else []
         if models:
             return _api_success(models=models, warning="Failed to fetch model list from LLM endpoint")
         return _api_error("Failed to load model list", 502, models=[])
@@ -2670,7 +2879,7 @@ def api_check_paper_summaries() -> ResponseReturnValue:
             return bool(looks_like_valid_cached_summary_markdown(text))
 
         # Check summary directory for this paper
-        summary_dir = Path(SUMMARY_DIR) / raw_pid
+        summary_dir = Path(_summary_dir()) / raw_pid
         available_models = []
 
         if summary_dir.exists() and summary_dir.is_dir():
@@ -3283,6 +3492,8 @@ def cache_status() -> ResponseReturnValue:
     def check_http_service(port, path, service_name):
         """Check if a local HTTP service is available"""
         try:
+            import requests
+
             logger.trace(f"Checking {service_name} at port {port}...")
             sess = requests.Session()
             sess.trust_env = False
@@ -3307,14 +3518,16 @@ def cache_status() -> ResponseReturnValue:
 
     backend_services = {
         "embedding_service": check_http_service(
-            EMBED_PORT, "/api/version", f"Ollama Embedding Service (port {EMBED_PORT})"
+            _embed_port(),
+            "/api/version",
+            f"Ollama Embedding Service (port {_embed_port()})",
         ),
     }
 
     # Only check MinerU service if it's enabled
-    if MINERU_ENABLED:
+    if _mineru_enabled():
         backend_services["mineru_service"] = check_http_service(
-            MINERU_PORT, "/health", f"MinerU VLM Service (port {MINERU_PORT})"
+            _mineru_port(), "/health", f"MinerU VLM Service (port {_mineru_port()})"
         )
     else:
         backend_services["mineru_service"] = {
@@ -3462,7 +3675,14 @@ def api_tag_feedback_bulk() -> ResponseReturnValue:
                             "type": e.get("type", ""),
                         }
                     )
-                results.append({"index": ix, "success": False, "error": "Invalid item", "details": errors})
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "error": "Invalid item",
+                        "details": errors,
+                    }
+                )
                 continue
 
             pid = payload["pid"]
@@ -3471,7 +3691,15 @@ def api_tag_feedback_bulk() -> ResponseReturnValue:
 
             err_name = _validate_tag_name(tag)
             if err_name:
-                results.append({"index": ix, "success": False, "pid": pid, "tag": tag, "error": err_name})
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "pid": pid,
+                        "tag": tag,
+                        "error": err_name,
+                    }
+                )
                 continue
 
             try:
@@ -3834,11 +4062,12 @@ def _update_readinglist_summary_status(
     status: str,
     error: str | None = None,
     task_id: str | None = None,
+    model: str | None = None,
 ) -> None:
     """Update summary status in reading list - delegates to readinglist_service."""
     from backend.services.readinglist_service import update_summary_status
 
-    update_summary_status(user, pid, status, error, task_id)
+    update_summary_status(user, pid, status, error, task_id, model=model)
 
 
 def _update_summary_status_db(
@@ -3848,11 +4077,21 @@ def _update_summary_status_db(
     error: str | None = None,
     task_id: str | None = None,
     task_user: str | None = None,
+    resolved_model: str | None = None,
 ) -> None:
     """Persist summary status - delegates to readinglist_service."""
     from backend.services.readinglist_service import update_summary_status_db
 
-    update_summary_status_db(pid, model, status, error, task_id, task_user, default_model=LLM_NAME)
+    update_summary_status_db(
+        pid,
+        model,
+        status,
+        error,
+        task_id,
+        task_user,
+        resolved_model=resolved_model,
+        default_model=_llm_name(),
+    )
 
 
 def _trigger_summary_async(
@@ -3874,7 +4113,7 @@ def _trigger_summary_async(
         generate_summary_fn=generate_paper_summary,
         update_readinglist_fn=_update_readinglist_summary_status,
         update_db_fn=_update_summary_status_db,
-        default_model=LLM_NAME,
+        default_model=_llm_name(),
     )
 
 
@@ -3888,7 +4127,7 @@ def readinglist_page() -> ResponseReturnValue:
         context["papers"] = []
         context["tags"] = []
         context["message"] = "Please log in to use reading list."
-        context["default_summary_model"] = LLM_NAME or ""
+        context["default_summary_model"] = _llm_name() or ""
         return render_template("readinglist.html", **context)
 
     t0 = time.time()
@@ -3959,7 +4198,7 @@ def readinglist_page() -> ResponseReturnValue:
     logger.trace(f"[BLOCKING] readinglist_page: rendered {len(papers)} cards in {time.time() - t0:.2f}s")
 
     context["papers"] = papers
-    context["default_summary_model"] = LLM_NAME or ""
+    context["default_summary_model"] = _llm_name() or ""
     # Provide tag list for tag dropdown (same shape as main page)
     if g.user:
         rtags = []
@@ -4007,20 +4246,31 @@ def api_readinglist_add() -> ResponseReturnValue:
             if task_id is None and not settings.huey.allow_thread_fallback:
                 err_msg = None
                 try:
-                    info = SummaryStatusRepository.get_status(pid, (LLM_NAME or "").strip())
+                    info = SummaryStatusRepository.get_status(pid, (_llm_name() or "").strip())
                     if isinstance(info, dict):
                         err_msg = info.get("last_error")
                 except Exception:
                     err_msg = None
                 err_msg = err_msg or "Failed to enqueue summary task"
                 _update_summary_status_db(pid, None, "failed", err_msg, task_user=user)
-                _update_readinglist_summary_status(user, pid, "failed", err_msg)
+                _update_readinglist_summary_status(
+                    user,
+                    pid,
+                    "failed",
+                    err_msg,
+                    model=(_llm_name() or "").strip() or None,
+                )
                 return None
             if task_id:
                 _update_summary_status_db(pid, None, "queued", None, task_id=task_id, task_user=user)
-                _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id)
-            else:
-                _update_summary_status_db(pid, None, "queued", None, task_user=user)
+                _update_readinglist_summary_status(
+                    user,
+                    pid,
+                    "queued",
+                    None,
+                    task_id=task_id,
+                    model=(_llm_name() or "").strip() or None,
+                )
             return task_id
 
         result = add_to_readinglist(

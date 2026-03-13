@@ -30,13 +30,34 @@ from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, load_features, save_feat
 from aslite.repositories import PaperRepository
 from config import settings
 
-EMBED_PORT = settings.embedding.port
-EMBED_USE_LLM_API = settings.embedding.use_llm_api
-EMBED_MODEL_NAME = settings.embedding.model_name
-EMBED_API_BASE = settings.embedding.api_base
-EMBED_API_KEY = settings.embedding.api_key
-LLM_BASE_URL = settings.llm.base_url
-LLM_API_KEY = settings.llm.api_key
+
+def _embed_port() -> int:
+    return int(settings.embedding.port)
+
+
+def _embed_use_llm_api() -> bool:
+    return bool(settings.embedding.use_llm_api)
+
+
+def _embed_model_name() -> str:
+    return str(settings.embedding.model_name or "")
+
+
+def _embed_api_base() -> str:
+    return str(settings.embedding.api_base or "")
+
+
+def _embed_api_key() -> str:
+    return str(settings.embedding.api_key or "")
+
+
+def _llm_base_url() -> str:
+    return str(settings.llm.base_url or "")
+
+
+def _llm_api_key() -> str:
+    return str(settings.llm.api_key or "")
+
 
 # Multi-core optimization configuration - Ubuntu system
 
@@ -143,24 +164,31 @@ def sparse_dense_concatenation(tfidf_sparse, embedding_dense):
 class Qwen3EmbeddingVllm:
     """Embedding model API client via Ollama `/api/embed` or OpenAI-compatible `/v1/embeddings`."""
 
-    def __init__(self, model_name_or_path, instruction=None, api_base=None, api_key=None, use_openai_api=None):
+    def __init__(
+        self,
+        model_name_or_path,
+        instruction=None,
+        api_base=None,
+        api_key=None,
+        use_openai_api=None,
+    ):
         # Determine whether to use OpenAI-compatible API or Ollama API
         if use_openai_api is None:
-            use_openai_api = EMBED_USE_LLM_API
+            use_openai_api = _embed_use_llm_api()
         self.use_openai_api = use_openai_api
 
         # Determine API base URL
         if api_base is None:
             if self.use_openai_api:
                 # Use EMBED_API_BASE if set, otherwise fallback to LLM_BASE_URL
-                api_base = EMBED_API_BASE if EMBED_API_BASE else LLM_BASE_URL
+                api_base = _embed_api_base() if _embed_api_base() else _llm_base_url()
             else:
-                api_base = f"http://localhost:{EMBED_PORT}"
+                api_base = f"http://localhost:{_embed_port()}"
 
         # Determine API key (only needed for OpenAI-compatible API)
         if api_key is None:
             if self.use_openai_api:
-                api_key = EMBED_API_KEY if EMBED_API_KEY else LLM_API_KEY
+                api_key = _embed_api_key() if _embed_api_key() else _llm_api_key()
             else:
                 api_key = None
         self.api_key = api_key
@@ -454,7 +482,7 @@ def generate_embeddings_incremental(
         embeddings: numpy array (n_samples, embed_dim)
     """
     if api_base is None:
-        api_base = f"http://localhost:{EMBED_PORT}"
+        api_base = f"http://localhost:{_embed_port()}"
     logger.debug("Checking for existing embeddings...")
     existing = load_existing_embeddings(embed_dim)
 
@@ -490,7 +518,12 @@ def generate_embeddings_incremental(
         # Prepare corpus only for papers that need updates
         logger.debug(f"Preparing embedding corpus for {len(new_pids)} new papers...")
         new_texts = []
-        for pid in tqdm(new_pids, desc="Preparing new paper embedding corpus", ncols=100, file=sys.stderr):
+        for pid in tqdm(
+            new_pids,
+            desc="Preparing new paper embedding corpus",
+            ncols=100,
+            file=sys.stderr,
+        ):
             d = papers_db[pid]
             # Build text for embedding
             text = f"Title: {d['title']}\n"
@@ -539,10 +572,10 @@ def generate_embeddings_incremental(
                     if batch_output is not None:
                         new_embeddings_list.append(batch_output.cpu().numpy())
                     else:
-                        logger.warning(f"Batch {i//batch_size + 1} encoding returned None, using random embeddings")
+                        logger.warning(f"Batch {i // batch_size + 1} encoding returned None, using random embeddings")
                         new_embeddings_list.append(np.random.randn(len(batch_texts), embed_dim).astype(np.float32))
                 except Exception as e:
-                    logger.error(f"Batch {i//batch_size + 1} failed to generate embeddings: {e}")
+                    logger.error(f"Batch {i // batch_size + 1} failed to generate embeddings: {e}")
                     new_embeddings_list.append(np.random.randn(len(batch_texts), embed_dim).astype(np.float32))
 
             # Clean up model
@@ -652,11 +685,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--embed_model",
         type=str,
-        default=EMBED_MODEL_NAME,
+        default=_embed_model_name(),
         help="Ollama embedding model name (or legacy local path basename)",
     )
     parser.add_argument("--embed_dim", type=int, default=512, help="Embedding vector dimension")
-    parser.add_argument("--embed_batch_size", type=int, default=2048, help="Embedding generation batch size")
+    parser.add_argument(
+        "--embed_batch_size",
+        type=int,
+        default=2048,
+        help="Embedding generation batch size",
+    )
     parser.add_argument(
         "--embed_api_base",
         type=str,
@@ -731,7 +769,13 @@ def main(argv: list[str] | None = None) -> int:
         "nlin.",
     )
     # Use items() to avoid keys() + get() double access
-    for pid, p in tqdm(papers_db_local.items(), desc="Scanning papers", total=total_papers, ncols=100, file=sys.stderr):
+    for pid, p in tqdm(
+        papers_db_local.items(),
+        desc="Scanning papers",
+        total=total_papers,
+        ncols=100,
+        file=sys.stderr,
+    ):
         is_new = pid not in old_pids
         for tag in p.get("tags", []):
             term = tag.get("term", "")
@@ -744,11 +788,11 @@ def main(argv: list[str] | None = None) -> int:
     new_total = len(papers_db_local) - len(old_pids & set(papers_db_local.keys()))
     print("\n=== Paper Database Summary ===", flush=True)
     print(f"Total papers: {len(papers_db_local)} (+{new_total} new)", flush=True)
-    print("Papers by category:", flush=True)
-    for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-        new_count = new_category_counts.get(cat, 0)
-        print(f"  {cat}: {count} (+{new_count})", flush=True)
-    print(flush=True)
+    # print("Papers by category:", flush=True)
+    # for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
+    #     new_count = new_category_counts.get(cat, 0)
+    #     print(f"  {cat}: {count} (+{new_count})", flush=True)
+    # print(flush=True)
 
     def make_corpus(training: bool):
         assert isinstance(training, bool)

@@ -24,17 +24,44 @@
     // Shared utilities
     const csrfFetch = CommonUtils.csrfFetch;
     const fetchUserState = CommonUtils.fetchUserState;
+    const showToast = CommonUtils.showToast;
+    const showConfirm = CommonUtils.showConfirm;
+    const sharedShowSimilarPapersModal = CommonUtils.showSimilarPapersModal;
 
     // Summary status polling (shared from common_utils.js)
     const markSummaryPending = CommonUtils.markSummaryPending;
     const unmarkSummaryPending = CommonUtils.unmarkSummaryPending;
     const canTriggerSummary = CommonUtils.canTriggerSummary;
     const formatSummaryStatus = CommonUtils.formatSummaryStatus;
+    const isSummaryModelMatch =
+        CommonUtils.isSummaryModelMatch ||
+        function () {
+            return true;
+        };
     const fetchTaskStatus = CommonUtils.fetchTaskStatus;
 
-    let pendingRemove = null;
     const readinglistDropdowns = new Map();
     const readinglistSummaryUI = new Map();
+
+    function notify(message, type) {
+        if (typeof showToast === 'function') {
+            showToast(String(message || ''), { type: type || 'error' });
+            return;
+        }
+        console.warn(String(message || ''));
+    }
+
+    let pageIsUnloading = false;
+    if (typeof global.addEventListener === 'function') {
+        global.addEventListener('pagehide', function () {
+            pageIsUnloading = true;
+        });
+    }
+
+    function shouldSuppressMutationError(error) {
+        const message = String((error && error.message) || error || '');
+        return pageIsUnloading && /failed to fetch|networkerror|load failed/i.test(message);
+    }
 
     function escapeCssAttrValue(value) {
         const text = String(value == null ? '' : value);
@@ -53,7 +80,8 @@
     }
 
     // Register callback for summary status updates
-    CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId) {
+    CommonUtils.setSummaryStatusCallback(function (pid, status, lastError, taskId, model) {
+        if (!isSummaryModelMatch(model)) return;
         updateSummaryStatusFromEvent(pid, status, lastError, { task_id: taskId });
     });
 
@@ -325,6 +353,7 @@
             }
             fetchUserStateAndApply();
         } else if (event.type === 'summary_status') {
+            if (!isSummaryModelMatch(event.model)) return;
             updateSummaryStatusFromEvent(event.pid, event.status, event.error, event);
         } else if (event.type === 'readinglist_changed') {
             handleReadingListEvent(event);
@@ -343,27 +372,8 @@
         CommonUtils.setupUserEventStream(global.user, applyUserState);
     }
 
-    function closeRemoveConfirm() {
-        if (!pendingRemove) return;
-        const { popup } = pendingRemove;
-        if (popup && popup.parentNode) {
-            popup.parentNode.removeChild(popup);
-        }
-        pendingRemove = null;
-    }
-
-    function confirmRemoveFromReadingList() {
-        if (!pendingRemove) return;
-        const { pid, element } = pendingRemove;
-        closeRemoveConfirm();
-        performRemoveFromReadingList(pid, element);
-    }
-
     function openRemoveConfirm(pid, element) {
         if (!element) return;
-        closeRemoveConfirm();
-
-        const wrap = element.closest('.rl-remove-wrap') || element.parentElement;
         const card = element.closest('.rl-paper-card');
         const paperTitle = card
             ? (
@@ -375,63 +385,24 @@
         const desc = paperTitle
             ? `Remove “${paperTitle}” from your reading list?`
             : 'Remove this paper from your reading list?';
-
-        const popup = document.createElement('div');
-        popup.className = 'confirm-popup';
-        popup.setAttribute('role', 'dialog');
-        const content = document.createElement('div');
-        content.className = 'confirm-content';
-
-        const titleEl = document.createElement('strong');
-        titleEl.textContent = 'Remove from reading list?';
-
-        const descEl = document.createElement('p');
-        descEl.textContent = desc;
-
-        const hintEl = document.createElement('p');
-        hintEl.textContent = 'You can add it back anytime.';
-
-        const actionsEl = document.createElement('div');
-        actionsEl.className = 'confirm-actions';
-
-        const yesBtn = document.createElement('button');
-        yesBtn.className = 'confirm-btn confirm-yes';
-        yesBtn.type = 'button';
-        yesBtn.textContent = 'Remove';
-        yesBtn.addEventListener('click', confirmRemoveFromReadingList);
-
-        const noBtn = document.createElement('button');
-        noBtn.className = 'confirm-btn confirm-no';
-        noBtn.type = 'button';
-        noBtn.textContent = 'Cancel';
-        noBtn.addEventListener('click', closeRemoveConfirm);
-
-        actionsEl.appendChild(yesBtn);
-        actionsEl.appendChild(noBtn);
-        content.appendChild(titleEl);
-        content.appendChild(descEl);
-        content.appendChild(hintEl);
-        content.appendChild(actionsEl);
-        popup.appendChild(content);
-
-        if (wrap) {
-            wrap.appendChild(popup);
+        if (typeof showConfirm !== 'function') {
+            notify('Confirmation dialog is unavailable. Please refresh and try again.');
+            return;
         }
-        pendingRemove = { pid, element, popup, wrap };
+        showConfirm({
+            title: 'Remove from reading list?',
+            message: desc,
+            detail: 'You can add it back anytime.',
+            detailTone: 'muted',
+            confirmText: 'Remove',
+            cancelText: 'Cancel',
+            danger: true,
+        }).then(confirmed => {
+            if (confirmed) {
+                performRemoveFromReadingList(pid, element);
+            }
+        });
     }
-
-    document.addEventListener('mousedown', event => {
-        if (!pendingRemove) return;
-        const { wrap } = pendingRemove;
-        if (wrap && wrap.contains(event.target)) return;
-        closeRemoveConfirm();
-    });
-
-    document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') {
-            closeRemoveConfirm();
-        }
-    });
 
     function performRemoveFromReadingList(pid, element) {
         const card = element ? element.closest('.rl-paper-card') : null;
@@ -443,6 +414,7 @@
         }
         csrfFetch('/api/readinglist/remove', {
             method: 'POST',
+            keepalive: true,
             body: JSON.stringify({ pid: pid }),
         })
             .then(response => response.json())
@@ -473,17 +445,20 @@
                         removeBtn.removeAttribute('aria-disabled');
                         removeBtn.title = '';
                     }
-                    alert('Failed to remove: ' + (data.error || 'Unknown error'));
+                    notify('Failed to remove: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
+                if (shouldSuppressMutationError(err)) {
+                    return;
+                }
                 console.error('Error removing from reading list:', err);
                 if (removeBtn) {
                     removeBtn.classList.remove('disabled');
                     removeBtn.removeAttribute('aria-disabled');
                     removeBtn.title = '';
                 }
-                alert('Failed to remove paper');
+                notify('Failed to remove paper');
             });
     }
 
@@ -755,9 +730,11 @@
         const removeWrap = document.createElement('div');
         removeWrap.className = 'rl-remove-wrap summary-btn-group';
 
-        const removeBtn = document.createElement('div');
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
         removeBtn.className = 'readinglist-btn active rl-remove-btn';
         removeBtn.title = 'Remove from reading list';
+        removeBtn.setAttribute('aria-label', 'Remove from reading list');
         removeBtn.textContent = '✕';
         removeBtn.addEventListener('click', function (event) {
             event.stopPropagation();
@@ -867,12 +844,19 @@
         const actions = document.createElement('div');
         actions.className = 'paper-actions-footer';
 
+        const primaryActions = document.createElement('div');
+        primaryActions.className = 'paper-actions-group paper-actions-group-primary';
+
+        const secondaryActions = document.createElement('div');
+        secondaryActions.className = 'paper-actions-group paper-actions-group-secondary';
+
         const triggerWrap = document.createElement('div');
-        triggerWrap.className = 'rel_summary';
+        triggerWrap.className = 'rel_summary_trigger';
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'summary-trigger-btn';
         triggerBtn.textContent = '✨ Generate Summary';
         triggerBtn.title = 'Generate summary';
+        triggerBtn.setAttribute('aria-label', 'Generate summary');
         triggerWrap.appendChild(triggerBtn);
 
         const similarWrap = document.createElement('div');
@@ -964,6 +948,7 @@
                         }
                         if (summaryState.status === 'queued' || summaryState.status === 'running') {
                             markSummaryPending(p.id);
+                            notify('Summary generation started', 'success');
                         } else {
                             unmarkSummaryPending(p.id);
                         }
@@ -975,7 +960,7 @@
                         summaryState.queueTotal = 0;
                         stopQueueRankPolling(p.id);
                         unmarkSummaryPending(p.id);
-                        alert('Failed to trigger summary: ' + summaryState.lastError);
+                        notify('Failed to trigger summary: ' + summaryState.lastError);
                     }
                     updateSummaryBadge(
                         statusBadge,
@@ -1003,7 +988,7 @@
                         summaryState.queueTotal
                     );
                     syncTriggerState();
-                    alert('Network error, failed to trigger summary');
+                    notify('Network error, failed to trigger summary');
                 });
         });
 
@@ -1016,12 +1001,14 @@
             card: card,
         });
 
-        actions.appendChild(triggerWrap);
-        actions.appendChild(similarWrap);
-        actions.appendChild(inspectWrap);
-        actions.appendChild(summaryWrap);
-        actions.appendChild(alphaWrap);
-        actions.appendChild(coolWrap);
+        primaryActions.appendChild(triggerWrap);
+        primaryActions.appendChild(similarWrap);
+        primaryActions.appendChild(inspectWrap);
+        primaryActions.appendChild(summaryWrap);
+        secondaryActions.appendChild(alphaWrap);
+        secondaryActions.appendChild(coolWrap);
+        actions.appendChild(primaryActions);
+        actions.appendChild(secondaryActions);
         card.appendChild(actions);
 
         if (options && options.prepend && container.firstChild) {
@@ -1039,7 +1026,6 @@
     let uploadedPapers = [];
     const uploadedDropdowns = new Map();
     const uploadedSummaryUI = new Map();
-    let activeUploadDeleteConfirmCleanup = null;
     const uploadedPendingOps = new Map(); // pid -> { kind: 'parse'|'extract', startedAt }
     let uploadedPendingPoller = null;
     let uploadedPendingPollInFlight = false;
@@ -1469,13 +1455,15 @@
         const deleteWrap = document.createElement('div');
         deleteWrap.className = 'rl-remove-wrap summary-btn-group';
 
-        const deleteBtn = document.createElement('div');
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
         deleteBtn.className = 'readinglist-btn active rl-remove-btn';
         deleteBtn.title = 'Delete uploaded paper';
+        deleteBtn.setAttribute('aria-label', 'Delete uploaded paper');
         deleteBtn.textContent = '✕';
         deleteBtn.addEventListener('click', function (event) {
             event.stopPropagation();
-            showUploadDeleteConfirm(deleteWrap, p.id, card);
+            showUploadDeleteConfirm(p.id, card);
         });
 
         deleteWrap.appendChild(deleteBtn);
@@ -1570,13 +1558,17 @@
         const actions = document.createElement('div');
         actions.className = 'paper-actions-footer';
 
+        const primaryActions = document.createElement('div');
+        primaryActions.className = 'paper-actions-group paper-actions-group-primary';
+
         // Generate Summary button
         const triggerWrap = document.createElement('div');
-        triggerWrap.className = 'rel_summary';
+        triggerWrap.className = 'rel_summary_trigger';
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'summary-trigger-btn';
         triggerBtn.textContent = '✨ Generate Summary';
         triggerBtn.title = 'Generate summary';
+        triggerBtn.setAttribute('aria-label', 'Generate summary');
         triggerWrap.appendChild(triggerBtn);
 
         // Similar and Inspect require both parse and metadata extraction
@@ -1785,6 +1777,7 @@
                         }
                         if (summaryState.status === 'queued' || summaryState.status === 'running') {
                             markSummaryPending(p.id);
+                            notify('Summary generation started', 'success');
                         } else {
                             unmarkSummaryPending(p.id);
                         }
@@ -1796,7 +1789,7 @@
                         summaryState.queueTotal = 0;
                         stopQueueRankPolling(p.id);
                         unmarkSummaryPending(p.id);
-                        alert('Failed to trigger summary: ' + summaryState.lastError);
+                        notify('Failed to trigger summary: ' + summaryState.lastError);
                     }
                     updateSummaryBadge(
                         statusBadge,
@@ -1824,7 +1817,7 @@
                         summaryState.queueTotal
                     );
                     syncTriggerState();
-                    alert('Network error, failed to trigger summary');
+                    notify('Network error, failed to trigger summary');
                 });
         });
 
@@ -1833,10 +1826,10 @@
 
         syncTriggerState();
 
-        actions.appendChild(triggerWrap);
-        actions.appendChild(summaryWrap);
-        actions.appendChild(similarWrap);
-        actions.appendChild(inspectWrap);
+        primaryActions.appendChild(triggerWrap);
+        primaryActions.appendChild(summaryWrap);
+        primaryActions.appendChild(similarWrap);
+        primaryActions.appendChild(inspectWrap);
 
         // Process button (parse + extract + summary). Disabled once parsed.
         const parseWrap = document.createElement('div');
@@ -1865,7 +1858,7 @@
             }
         });
         parseWrap.appendChild(parseBtn);
-        actions.appendChild(parseWrap);
+        primaryActions.appendChild(parseWrap);
 
         // Extract Info button (disabled if not parsed or already extracted)
         const extractWrap = document.createElement('div');
@@ -1889,7 +1882,7 @@
             }
         });
         extractWrap.appendChild(extractBtn);
-        actions.appendChild(extractWrap);
+        primaryActions.appendChild(extractWrap);
 
         // Retry parse (if failed)
         if (p.parse_status === 'failed') {
@@ -1902,9 +1895,10 @@
                 retryParse(p.id, parseStatusBadge, retryBtn, parseBtn, extractBtn);
             });
             retryWrap.appendChild(retryBtn);
-            actions.appendChild(retryWrap);
+            primaryActions.appendChild(retryWrap);
         }
 
+        actions.appendChild(primaryActions);
         card.appendChild(actions);
 
         // Store UI references for SSE event handling
@@ -1931,101 +1925,23 @@
         container.appendChild(card);
     }
 
-    function showUploadDeleteConfirm(wrapElement, pid, cardElement) {
-        if (activeUploadDeleteConfirmCleanup) {
-            activeUploadDeleteConfirmCleanup();
+    function showUploadDeleteConfirm(pid, cardElement) {
+        if (typeof showConfirm !== 'function') {
+            notify('Confirmation dialog is unavailable. Please refresh and try again.');
+            return;
         }
-
-        const popup = document.createElement('div');
-        popup.className = 'confirm-popup upload-confirm-popup';
-        popup.setAttribute('role', 'dialog');
-
-        const content = document.createElement('div');
-        content.className = 'confirm-content';
-
-        const titleEl = document.createElement('strong');
-        titleEl.textContent = 'Delete this uploaded paper?';
-
-        const descEl = document.createElement('p');
-        descEl.textContent = 'This will permanently remove the PDF and all associated data.';
-
-        const warningEl = document.createElement('p');
-        warningEl.className = 'confirm-warning';
-        warningEl.textContent = 'This action cannot be undone!';
-
-        const actionsEl = document.createElement('div');
-        actionsEl.className = 'confirm-actions';
-
-        const confirmBtn = document.createElement('button');
-        confirmBtn.className = 'confirm-btn confirm-yes';
-        confirmBtn.setAttribute('data-action', 'confirm');
-        confirmBtn.type = 'button';
-        confirmBtn.textContent = 'Delete';
-
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'confirm-btn confirm-no';
-        cancelBtn.setAttribute('data-action', 'cancel');
-        cancelBtn.type = 'button';
-        cancelBtn.textContent = 'Cancel';
-
-        actionsEl.appendChild(confirmBtn);
-        actionsEl.appendChild(cancelBtn);
-        content.appendChild(titleEl);
-        content.appendChild(descEl);
-        content.appendChild(warningEl);
-        content.appendChild(actionsEl);
-        popup.appendChild(content);
-
-        let closed = false;
-        let bindOutsideClickTimer = null;
-        function cleanup() {
-            if (closed) return;
-            closed = true;
-            if (bindOutsideClickTimer) {
-                clearTimeout(bindOutsideClickTimer);
-                bindOutsideClickTimer = null;
+        showConfirm({
+            title: 'Delete this uploaded paper?',
+            message: 'This will permanently remove the PDF and all associated data.',
+            detail: 'This action cannot be undone.',
+            confirmText: 'Delete',
+            cancelText: 'Cancel',
+            danger: true,
+        }).then(confirmed => {
+            if (confirmed) {
+                deleteUploadedPaper(pid, cardElement);
             }
-            if (popup && popup.parentNode) popup.parentNode.removeChild(popup);
-            document.removeEventListener('click', handleClickOutside);
-            document.removeEventListener('keydown', handleEscape);
-            if (activeUploadDeleteConfirmCleanup === cleanup) {
-                activeUploadDeleteConfirmCleanup = null;
-            }
-        }
-        activeUploadDeleteConfirmCleanup = cleanup;
-
-        // Handle button clicks
-        confirmBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            cleanup();
-            deleteUploadedPaper(pid, cardElement);
         });
-
-        cancelBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            cleanup();
-        });
-
-        // Close on click outside
-        function handleClickOutside(e) {
-            if (!popup.contains(e.target) && !wrapElement.contains(e.target)) {
-                cleanup();
-            }
-        }
-        bindOutsideClickTimer = setTimeout(function () {
-            if (closed) return;
-            document.addEventListener('click', handleClickOutside);
-        }, 0);
-
-        // Close on Escape key
-        function handleEscape(e) {
-            if (e.key === 'Escape') {
-                cleanup();
-            }
-        }
-        document.addEventListener('keydown', handleEscape);
-
-        wrapElement.appendChild(popup);
     }
 
     function deleteUploadedPaper(pid, cardElement) {
@@ -2079,15 +1995,16 @@
                         }, 300);
                     }
                     uploadedPapers = uploadedPapers.filter(p => p.id !== pid);
+                    notify('Uploaded paper deleted', 'success');
                 } else {
                     rollback();
-                    alert('Failed to delete: ' + (data.error || 'Unknown error'));
+                    notify('Failed to delete: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
                 console.error('Error deleting uploaded paper:', err);
                 rollback();
-                alert('Failed to delete paper: ' + err.message);
+                notify('Failed to delete paper: ' + err.message);
             });
     }
 
@@ -2105,12 +2022,13 @@
             .then(data => {
                 if (data.success) {
                     markUploadedPending(pid, 'parse');
+                    notify('Processing started', 'success');
                     if (statusBadge) {
                         statusBadge.textContent = '⏳ Parsing...';
                         statusBadge.className = 'parse-status-badge running';
                     }
                 } else {
-                    alert('Failed to process: ' + (data.error || 'Unknown error'));
+                    notify('Failed to process: ' + (data.error || 'Unknown error'));
                     if (parseBtn) {
                         parseBtn.disabled = false;
                         parseBtn.textContent = '⚡ Process';
@@ -2119,7 +2037,7 @@
             })
             .catch(err => {
                 console.error('Error triggering parse:', err);
-                alert('Failed to start processing');
+                notify('Failed to start processing');
                 if (parseBtn) {
                     parseBtn.disabled = false;
                     parseBtn.textContent = '⚡ Process';
@@ -2141,8 +2059,9 @@
             .then(data => {
                 if (data.success) {
                     markUploadedPending(pid, 'extract');
+                    notify('Metadata extraction started', 'success');
                 } else {
-                    alert('Failed to extract: ' + (data.error || 'Unknown error'));
+                    notify('Failed to extract: ' + (data.error || 'Unknown error'));
                     if (extractBtn) {
                         extractBtn.disabled = false;
                         extractBtn.textContent = '🔍 Extract Info';
@@ -2151,7 +2070,7 @@
             })
             .catch(err => {
                 console.error('Error triggering extract:', err);
-                alert('Failed to trigger extraction');
+                notify('Failed to trigger extraction');
                 if (extractBtn) {
                     extractBtn.disabled = false;
                     extractBtn.textContent = '🔍 Extract Info';
@@ -2173,113 +2092,24 @@
                     similarBtn.textContent = 'Similar';
                 }
                 if (data.success && data.papers && data.papers.length > 0) {
-                    showSimilarPapersModal(data.papers);
+                    sharedShowSimilarPapersModal(data.papers);
                 } else if (data.success && (!data.papers || data.papers.length === 0)) {
-                    alert(
-                        'No similar papers found. This may happen if the paper content is too short or unique.'
+                    notify(
+                        'No similar papers found. This may happen if the paper content is too short or unique.',
+                        'info'
                     );
                 } else {
-                    alert('Failed to find similar papers: ' + (data.error || 'Unknown error'));
+                    notify('Failed to find similar papers: ' + (data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
                 console.error('Error finding similar papers:', err);
-                alert('Failed to find similar papers');
+                notify('Failed to find similar papers');
                 if (similarBtn) {
                     similarBtn.disabled = false;
                     similarBtn.textContent = 'Similar';
                 }
             });
-    }
-
-    function showSimilarPapersModal(papers) {
-        // Remove existing modal if any
-        const existingModal = document.getElementById('similar-papers-modal');
-        if (existingModal) {
-            if (typeof existingModal._cleanupModal === 'function') {
-                existingModal._cleanupModal();
-            } else {
-                existingModal.remove();
-            }
-        }
-
-        const modal = document.createElement('div');
-        modal.id = 'similar-papers-modal';
-        modal.className = 'similar-modal-overlay';
-
-        const buildPaperItem = (p, i) => {
-            const titleSafe = escapeHtml(p.title || p.id);
-            const authorsSafe = escapeHtml(p.authors || '');
-            const timeSafe = escapeHtml(p.time || '');
-            const scoreNum = Number(p && p.score);
-            const scoreSafe = Number.isFinite(scoreNum) ? scoreNum.toFixed(3) : '—';
-            // Prefer TL;DR over abstract
-            const contentText = p.tldr || p.abstract || '';
-            const contentSafe = escapeHtml(contentText);
-            const contentLabel = p.tldr ? '💡 TL;DR' : p.abstract ? 'Abstract' : '';
-
-            return `
-                <div class="similar-paper-item">
-                    <span class="similar-paper-rank">${i + 1}</span>
-                    <div class="similar-paper-info">
-                        <a href="/summary?pid=${encodeURIComponent(p.id)}" target="_blank" rel="noopener noreferrer" class="similar-paper-title">${titleSafe}</a>
-                        ${authorsSafe ? `<div class="similar-paper-authors">${authorsSafe}</div>` : ''}
-                        <div class="similar-paper-meta-line">
-                            ${timeSafe ? `<span class="similar-paper-time">${timeSafe}</span>` : ''}
-                            <span class="similar-paper-score">Score: ${scoreSafe}</span>
-                        </div>
-                        ${
-                            contentSafe
-                                ? `
-                            <div class="similar-paper-content">
-                                ${contentLabel ? `<span class="similar-paper-content-label">${contentLabel}</span>` : ''}
-                                <span class="similar-paper-content-text">${contentSafe}</span>
-                            </div>
-                        `
-                                : ''
-                        }
-                    </div>
-                </div>
-            `;
-        };
-
-        modal.innerHTML = `
-            <div class="similar-modal-content">
-                <div class="similar-modal-header">
-                    <h3>Similar Papers (${papers.length})</h3>
-                    <button class="similar-modal-close">&times;</button>
-                </div>
-                <div class="similar-modal-body">
-                    ${papers.map((p, i) => buildPaperItem(p, i)).join('')}
-                </div>
-            </div>
-        `;
-
-        document.body.appendChild(modal);
-
-        // Close handlers
-        let modalClosed = false;
-        function cleanupModal() {
-            if (modalClosed) return;
-            modalClosed = true;
-            if (modal && modal.parentNode) modal.parentNode.removeChild(modal);
-            document.removeEventListener('keydown', escHandler);
-        }
-        function escHandler(e) {
-            if (e.key === 'Escape') cleanupModal();
-        }
-        modal._cleanupModal = cleanupModal;
-        modal.querySelector('.similar-modal-close').addEventListener('click', cleanupModal);
-        modal.addEventListener('click', e => {
-            if (e.target === modal) cleanupModal();
-        });
-        document.addEventListener('keydown', escHandler);
-    }
-
-    function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
     }
 
     function retryParse(pid, statusBadge, retryBtn, parseBtn, extractBtn) {
@@ -2302,13 +2132,14 @@
             .then(data => {
                 if (data.success) {
                     markUploadedPending(pid, 'parse');
+                    notify('Retry started', 'success');
                     if (statusBadge) {
                         statusBadge.textContent = '⏳ Parsing...';
                         statusBadge.className = 'parse-status-badge running';
                     }
                     if (retryBtn) retryBtn.style.display = 'none';
                 } else {
-                    alert('Failed to retry: ' + (data.error || 'Unknown error'));
+                    notify('Failed to retry: ' + (data.error || 'Unknown error'));
                     if (retryBtn) retryBtn.disabled = false;
                     if (parseBtn) {
                         parseBtn.disabled = true;
@@ -2320,7 +2151,7 @@
             })
             .catch(err => {
                 console.error('Error retrying parse:', err);
-                alert('Failed to retry parse');
+                notify('Failed to retry parse');
                 if (retryBtn) retryBtn.disabled = false;
                 if (parseBtn) {
                     parseBtn.disabled = true;
@@ -2349,12 +2180,12 @@
             if (!file) return;
 
             if (!file.name.toLowerCase().endsWith('.pdf')) {
-                alert('Please select a PDF file');
+                notify('Please select a PDF file', 'warning');
                 return;
             }
 
             if (file.size > 50 * 1024 * 1024) {
-                alert('File too large (max 50MB)');
+                notify('File too large (max 50MB)', 'warning');
                 return;
             }
 
@@ -2393,7 +2224,7 @@
         xhr.ontimeout = function () {
             uploadBtn.style.display = 'inline-flex';
             uploadProgress.style.display = 'none';
-            alert('Upload failed: Request timed out. Please try again.');
+            notify('Upload failed: Request timed out. Please try again.');
         };
 
         xhr.onload = function () {
@@ -2401,7 +2232,7 @@
             if (xhr.status === 413) {
                 uploadBtn.style.display = 'inline-flex';
                 uploadProgress.style.display = 'none';
-                alert('Upload failed: File too large. Please upload a smaller file.');
+                notify('Upload failed: File too large. Please upload a smaller file.');
                 return;
             }
 
@@ -2410,9 +2241,9 @@
                 uploadProgress.style.display = 'none';
                 try {
                     const data = JSON.parse(xhr.responseText);
-                    alert('Upload failed: ' + (data.error || `Server error (${xhr.status})`));
+                    notify('Upload failed: ' + (data.error || `Server error (${xhr.status})`));
                 } catch (e) {
-                    alert('Upload failed: Server error (' + xhr.status + ')');
+                    notify('Upload failed: Server error (' + xhr.status + ')');
                 }
                 return;
             }
@@ -2430,22 +2261,23 @@
                         .finally(() => {
                             uploadProgress.style.display = 'none';
                         });
+                    notify('Upload complete. Processing started.', 'success');
                 } else {
                     uploadBtn.style.display = 'inline-flex';
                     uploadProgress.style.display = 'none';
-                    alert('Upload failed: ' + (data.error || 'Unknown error'));
+                    notify('Upload failed: ' + (data.error || 'Unknown error'));
                 }
             } catch (e) {
                 uploadBtn.style.display = 'inline-flex';
                 uploadProgress.style.display = 'none';
-                alert('Upload failed: Invalid response');
+                notify('Upload failed: Invalid response');
             }
         };
 
         xhr.onerror = function () {
             uploadBtn.style.display = 'inline-flex';
             uploadProgress.style.display = 'none';
-            alert('Upload failed: Network error');
+            notify('Upload failed: Network error');
         };
 
         xhr.send(formData);

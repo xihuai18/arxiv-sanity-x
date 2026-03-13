@@ -12,7 +12,9 @@ from loguru import logger
 from backend.utils.upload_utils import validate_upload_pid
 from config import settings
 
-DATA_DIR = settings.data_dir
+
+def _data_dir() -> Path:
+    return Path(settings.data_dir)
 
 
 def get_upload_features_path(pid: str) -> Path:
@@ -29,7 +31,7 @@ def get_upload_features_path(pid: str) -> Path:
     """
     if not validate_upload_pid(pid):
         raise ValueError(f"Invalid upload PID format: {pid}")
-    return Path(DATA_DIR) / "uploads" / pid / "features.npz"
+    return _data_dir() / "uploads" / pid / "features.npz"
 
 
 def _get_upload_meta_fields(pid: str) -> dict[str, Any] | None:
@@ -437,7 +439,8 @@ def load_upload_features(pid: str) -> dict | None:
         # Reconstruct TF-IDF sparse matrix
         if "tfidf_data" in data:
             tfidf = sp.csr_matrix(
-                (data["tfidf_data"], data["tfidf_indices"], data["tfidf_indptr"]), shape=tuple(data["tfidf_shape"])
+                (data["tfidf_data"], data["tfidf_indices"], data["tfidf_indptr"]),
+                shape=tuple(data["tfidf_shape"]),
             )
             result["tfidf"] = tfidf
 

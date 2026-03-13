@@ -134,7 +134,7 @@ def compute_auto_fallback_models(
     Behavior:
     - If `anchor` exists in `yml_order`: return models *before* it, in reverse order.
     - Else if `default_anchor` exists in `yml_order`: fallback relative to `default_anchor`.
-    - Else: return `yml_order` as-is (best-effort).
+    - Else: return an empty list (conservative; avoid broad fallback on misconfig).
     """
 
     order = list(yml_order or [])
@@ -156,4 +156,4 @@ def compute_auto_fallback_models(
     out = _before_in_reverse(d)
     if out is not None:
         return out
-    return order
+    return []

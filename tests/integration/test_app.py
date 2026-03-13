@@ -62,6 +62,8 @@ class TestRouteRegistration:
 
         critical_routes = [
             "/",
+            "/health",
+            "/ready",
             "/about",
             "/stats",
             "/profile",

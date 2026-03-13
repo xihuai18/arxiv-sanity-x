@@ -11,7 +11,7 @@
     margin: 1em 0 !important;
     text-align: center !important;
     overflow-x: auto !important;
-    overflow-y: hidden !important;
+    overflow-y: visible !important;
 }
 
 /* MathJax container styles */
@@ -34,7 +34,7 @@ mjx-container[display='true'] {
     margin: 1em 0 !important;
     text-align: center !important;
     overflow-x: auto !important;
-    overflow-y: hidden !important;
+    overflow-y: visible !important;
 }
 
 /* Fallback math styles for when MathJax is not available */
@@ -68,7 +68,7 @@ mjx-container[display='true'] {
 .markdown-content .MathJax_Display,
 .markdown-content mjx-container[display='true'] {
     overflow-x: auto;
-    overflow-y: hidden;
+    overflow-y: visible;
 }
 
 .markdown-content .MathJax_Display .MathJax,

@@ -534,11 +534,34 @@ def get_metas() -> dict[str, Any]:
     return get_data_cached()["metas"]
 
 
+def get_meta(pid: str) -> dict[str, Any] | None:
+    """Get metadata for a single paper without forcing a cold full-cache wait.
+
+    Summary/detail endpoints often need only one PID. When a worker is cold,
+    waiting for the full metas cache to load can add tens of seconds to the
+    first request. Prefer the in-memory cache when it is already warm; otherwise
+    fall back to a direct repository lookup for this PID only.
+    """
+    if not pid:
+        return None
+
+    with _DATA_LOCK:
+        metas = _METAS_CACHE
+    if isinstance(metas, dict):
+        return metas.get(pid)
+
+    try:
+        return MetaRepository.get_by_id(pid)
+    except Exception as exc:
+        logger.warning(f"Failed to read meta for {pid}: {exc}")
+        return None
+
+
 def paper_exists(pid: str) -> bool:
     """Check if paper exists."""
     if not pid:
         return False
-    return pid in get_metas()
+    return get_meta(pid) is not None
 
 
 def get_paper(pid: str) -> dict[str, Any] | None:
