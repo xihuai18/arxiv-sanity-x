@@ -4,8 +4,6 @@ API Blueprint for uploaded papers functionality.
 All endpoints require authentication.
 """
 
-import time
-
 from flask import Blueprint, abort, g, request, send_file
 from loguru import logger
 
@@ -117,10 +115,9 @@ def api_upload_pdf():
             logger.warning(f"Failed to restore missing PDF for {pid}: {e}")
 
         # Only trigger async processing if not already processed/processing.
-        # For duplicate uploads (same SHA256), we must transition parse_status to
-        # "queued" atomically to avoid duplicate enqueues before the worker flips it.
         parse_status = paper_data.get("parse_status", "") or ""
         should_enqueue = False
+        task_id = str(paper_data.get("parse_task_id") or "")
 
         if is_new:
             should_enqueue = True
@@ -128,26 +125,30 @@ def api_upload_pdf():
         else:
             if parse_status not in ("ok", "running", "queued"):
                 try:
-                    from aslite.db import get_uploaded_papers_db
+                    from aslite.repositories import UploadedPaperRepository
+                    from backend.services.upload_service import (
+                        UploadServiceError,
+                        trigger_process_uploaded_paper,
+                    )
 
-                    with get_uploaded_papers_db(flag="c", autocommit=False) as updb:
-                        with updb.transaction(mode="IMMEDIATE"):
-                            record = updb.get(pid)
-                            if isinstance(record, dict) and record.get("owner") == g.user:
-                                current = (record.get("parse_status") or "").strip()
-                                if current not in ("ok", "running", "queued"):
-                                    record["parse_status"] = "queued"
-                                    record["parse_error"] = None
-                                    record["updated_time"] = time.time()
-                                    updb[pid] = record
-                                    paper_data = record
-                                    parse_status = "queued"
-                                    should_enqueue = True
-                                else:
-                                    paper_data = record
-                                    parse_status = current
-                except Exception as e:
-                    logger.warning(f"Failed to update parse_status for re-upload {pid}: {e}")
+                    result = trigger_process_uploaded_paper(pid, g.user)
+                    parse_status = "queued" if result.status == "already_in_progress" else result.status
+                    task_id = result.task_id
+                    refreshed = UploadedPaperRepository.get(pid)
+                    if isinstance(refreshed, dict):
+                        paper_data = refreshed
+                except UploadServiceError as e:
+                    logger.warning(f"Failed to restart processing for duplicate upload {pid}: {e}")
+                    if e.code == "not_found":
+                        return _api_error("Paper not found", 404)
+                    if e.code == "deleting":
+                        return _api_error("Paper is being deleted", 409)
+                    if e.code == "already_parsed":
+                        return _api_error("Paper already parsed successfully", 409)
+                    if e.code == "invalid_pid":
+                        return _api_error("Invalid paper ID", 400)
+                    if e.code == "enqueue_failed":
+                        return _api_error("Failed to enqueue processing. Please retry.", 500)
                     return _api_error("Failed to update upload status. Please retry.", 500)
 
         if should_enqueue:
@@ -176,8 +177,6 @@ def api_upload_pdf():
                 except Exception as update_err:
                     logger.warning(f"Failed to mark enqueue failure for {pid}: {update_err}")
                 return _api_error("Failed to enqueue processing. Please retry.", 500)
-        else:
-            task_id = str(paper_data.get("parse_task_id") or "")
 
         return _api_success(
             pid=pid,

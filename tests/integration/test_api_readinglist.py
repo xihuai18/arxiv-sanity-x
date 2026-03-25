@@ -42,14 +42,10 @@ class TestReadingListWithLogin:
 
     def test_readinglist_remove_without_csrf_returns_403(self, logged_in_client):
         """Test that remove without CSRF returns 403."""
-        resp = logged_in_client.post(
-            "/api/readinglist/remove", json={"pid": "2301.00001"}
-        )
+        resp = logged_in_client.post("/api/readinglist/remove", json={"pid": "2301.00001"})
         assert resp.status_code == 403
 
-    def test_readinglist_remove_empty_pid_returns_400(
-        self, logged_in_client, csrf_token
-    ):
+    def test_readinglist_remove_empty_pid_returns_400(self, logged_in_client, csrf_token):
         resp = logged_in_client.post(
             "/api/readinglist/remove",
             json={"pid": ""},
@@ -57,9 +53,7 @@ class TestReadingListWithLogin:
         )
         assert resp.status_code == 400
 
-    def test_readinglist_add_hidden_task_id_does_not_overwrite_status(
-        self, logged_in_client, csrf_token, monkeypatch
-    ):
+    def test_readinglist_add_hidden_task_id_does_not_overwrite_status(self, logged_in_client, csrf_token, monkeypatch):
         """When enqueue returns hidden task marker, API should not rewrite summary status ownership."""
         from backend import legacy
 
@@ -67,9 +61,7 @@ class TestReadingListWithLogin:
         readinglist_updates = []
 
         monkeypatch.setattr("backend.legacy.paper_exists", lambda _pid: True)
-        monkeypatch.setattr(
-            "backend.services.data_service.paper_exists", lambda _pid: True
-        )
+        monkeypatch.setattr("backend.services.data_service.paper_exists", lambda _pid: True)
 
         monkeypatch.setattr(legacy, "_trigger_summary_async", lambda user, pid: "")
         monkeypatch.setattr(
@@ -108,9 +100,7 @@ class TestReadingListWithLogin:
         assert status_updates == []
         assert readinglist_updates == []
 
-    def test_readinglist_add_upload_waits_for_parse_before_summary(
-        self, logged_in_client, csrf_token, monkeypatch
-    ):
+    def test_readinglist_add_upload_waits_for_parse_before_summary(self, logged_in_client, csrf_token, monkeypatch):
         from backend import legacy
 
         trigger_calls = []
@@ -142,24 +132,18 @@ class TestReadingListWithLogin:
         listing = logged_in_client.get("/api/readinglist/list")
         assert listing.status_code == 200
         items = (listing.get_json(silent=True) or {}).get("items") or []
-        item = next(
-            (entry for entry in items if entry.get("pid") == "up_waitparse001"), None
-        )
+        item = next((entry for entry in items if entry.get("pid") == "up_waitparse001"), None)
         assert item is not None
         assert item.get("summary_status") in ("", None)
         assert item.get("summary_task_id") in (None, "")
 
-    def test_readinglist_add_reuses_ready_summary_without_enqueue(
-        self, logged_in_client, csrf_token, monkeypatch
-    ):
+    def test_readinglist_add_reuses_ready_summary_without_enqueue(self, logged_in_client, csrf_token, monkeypatch):
         from backend import legacy
 
         trigger_calls = []
 
         monkeypatch.setattr("backend.legacy.paper_exists", lambda _pid: True)
-        monkeypatch.setattr(
-            "backend.services.data_service.paper_exists", lambda _pid: True
-        )
+        monkeypatch.setattr("backend.services.data_service.paper_exists", lambda _pid: True)
 
         monkeypatch.setattr(
             "backend.services.summary_service.get_summary_status",
@@ -186,9 +170,7 @@ class TestReadingListWithLogin:
         listing = logged_in_client.get("/api/readinglist/list")
         assert listing.status_code == 200
         items = (listing.get_json(silent=True) or {}).get("items") or []
-        item = next(
-            (entry for entry in items if entry.get("pid") == "2301.00001"), None
-        )
+        item = next((entry for entry in items if entry.get("pid") == "2301.00001"), None)
         assert item is not None
         assert item.get("summary_status") == "ok"
 
@@ -215,9 +197,7 @@ class TestReadingListWithLogin:
             dead_pid,
             {"added_time": 1, "top_tags": []},
         )
-        PaperTombstoneRepository.save(
-            dead_pid, {"pid": dead_pid, "reason": "withdrawn_only"}
-        )
+        PaperTombstoneRepository.save(dead_pid, {"pid": dead_pid, "reason": "withdrawn_only"})
         invalidate_cache()
 
         resp = logged_in_client.get("/api/readinglist/list")
@@ -228,9 +208,7 @@ class TestReadingListWithLogin:
         assert live_pid in item_pids
         assert dead_pid not in item_pids
 
-    def test_readinglist_paper_prefers_global_summary_status(
-        self, logged_in_client, monkeypatch
-    ):
+    def test_readinglist_paper_prefers_global_summary_status(self, logged_in_client, monkeypatch):
         from aslite.repositories import ReadingListRepository
 
         ReadingListRepository.add_to_reading_list(
@@ -257,9 +235,7 @@ class TestReadingListWithLogin:
         )
         monkeypatch.setattr(
             "backend.legacy.get_papers_bulk",
-            lambda _pids: {
-                "2301.00001": {"_rawid": "2301.00001", "title": "Paper", "authors": []}
-            },
+            lambda _pids: {"2301.00001": {"_rawid": "2301.00001", "title": "Paper", "authors": []}},
         )
         monkeypatch.setattr(
             "backend.legacy.render_pid",
@@ -272,17 +248,13 @@ class TestReadingListWithLogin:
             },
         )
 
-        resp = logged_in_client.get(
-            "/api/readinglist/paper", query_string={"pid": "2301.00001"}
-        )
+        resp = logged_in_client.get("/api/readinglist/paper", query_string={"pid": "2301.00001"})
         assert resp.status_code == 200
         paper = (resp.get_json(silent=True) or {}).get("paper") or {}
         assert paper.get("summary_status") == "ok"
         assert paper.get("summary_task_id") in (None, "")
 
-    def test_readinglist_paper_returns_uploaded_payload(
-        self, logged_in_client, monkeypatch
-    ):
+    def test_readinglist_paper_returns_uploaded_payload(self, logged_in_client, monkeypatch):
         from aslite.repositories import ReadingListRepository
 
         ReadingListRepository.add_to_reading_list(
@@ -322,9 +294,7 @@ class TestReadingListWithLogin:
             ],
         )
 
-        resp = logged_in_client.get(
-            "/api/readinglist/paper", query_string={"pid": "up_uploaded001"}
-        )
+        resp = logged_in_client.get("/api/readinglist/paper", query_string={"pid": "up_uploaded001"})
 
         assert resp.status_code == 200
         paper = (resp.get_json(silent=True) or {}).get("paper") or {}

@@ -102,7 +102,7 @@ class TestUploadPdfApi:
         from aslite.repositories import UploadedPaperRepository
 
         user = "test_user"
-        pid = "up_reupload12345"
+        pid = "up_reup123abcde"
 
         # Seed an existing failed record in db so the endpoint can CAS-update it.
         try:

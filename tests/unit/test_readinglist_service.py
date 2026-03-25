@@ -27,9 +27,7 @@ class TestGetUserReadinglist:
         """Test get_user_readinglist with a logged in user."""
         from backend.services.readinglist_service import get_user_readinglist
 
-        mock_repo.get_user_reading_list.return_value = {
-            "2301.00001": {"added_time": 123}
-        }
+        mock_repo.get_user_reading_list.return_value = {"2301.00001": {"added_time": 123}}
 
         with app.app_context():
             from flask import g
@@ -89,9 +87,7 @@ class TestUpdateSummaryStatus:
         mock_repo.get_reading_list_item.return_value = {"pid": "2301.00001"}
 
         with app.app_context():
-            update_summary_status(
-                "test_user", "2301.00001", "queued", task_id="task123"
-            )
+            update_summary_status("test_user", "2301.00001", "queued", task_id="task123")
             call_args = mock_repo.update_reading_list_item.call_args
             assert call_args is not None
             updates = call_args[0][2]
@@ -124,9 +120,7 @@ class TestUpdateSummaryStatusDb:
 
     @patch("backend.services.readinglist_service.SummaryStatusRepository")
     @patch("backend.services.readinglist_service.emit_all_event")
-    def test_update_summary_status_db_with_default_model(
-        self, mock_emit, mock_repo, app
-    ):
+    def test_update_summary_status_db_with_default_model(self, mock_emit, mock_repo, app):
         """Test summary status db update with default model."""
         from backend.services.readinglist_service import update_summary_status_db
 
@@ -136,16 +130,12 @@ class TestUpdateSummaryStatusDb:
 
     @patch("backend.services.readinglist_service.SummaryStatusRepository")
     @patch("backend.services.readinglist_service.emit_all_event")
-    def test_update_summary_status_db_ok_with_resolved_model(
-        self, mock_emit, mock_repo, app
-    ):
+    def test_update_summary_status_db_ok_with_resolved_model(self, mock_emit, mock_repo, app):
         """Successful status should forward resolved_model."""
         from backend.services.readinglist_service import update_summary_status_db
 
         with app.app_context():
-            update_summary_status_db(
-                "2301.00001", "gpt-4", "ok", resolved_model="fallback-model"
-            )
+            update_summary_status_db("2301.00001", "gpt-4", "ok", resolved_model="fallback-model")
             call = mock_repo.set_status.call_args
             assert call is not None
             assert call.kwargs.get("resolved_model") == "fallback-model"
@@ -154,16 +144,12 @@ class TestUpdateSummaryStatusDb:
 
     @patch("backend.services.readinglist_service.SummaryStatusRepository")
     @patch("backend.services.readinglist_service.emit_all_event")
-    def test_update_summary_status_db_redacts_global_error_payload(
-        self, mock_emit, mock_repo, app
-    ):
+    def test_update_summary_status_db_redacts_global_error_payload(self, mock_emit, mock_repo, app):
         """Global SSE payload should not include raw internal error text."""
         from backend.services.readinglist_service import update_summary_status_db
 
         with app.app_context():
-            update_summary_status_db(
-                "2301.00001", "gpt-4", "failed", "internal stack trace"
-            )
+            update_summary_status_db("2301.00001", "gpt-4", "failed", "internal stack trace")
             payload = mock_emit.call_args[0][0]
             assert payload.get("status") == "failed"
             assert payload.get("error") == "failed"
@@ -178,9 +164,7 @@ class TestUpdateSummaryStatusDb:
         from backend.services.readinglist_service import update_summary_status_db
 
         with app.app_context():
-            update_summary_status_db(
-                "up_secret002", "gpt-4", "failed", "private detail", task_user="alice"
-            )
+            update_summary_status_db("up_secret002", "gpt-4", "failed", "private detail", task_user="alice")
 
         mock_repo.set_status.assert_called_once()
         mock_emit_all.assert_not_called()
@@ -224,9 +208,7 @@ class TestTriggerSummaryAsync:
             mock_enqueue.assert_called_once()
 
     @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
-    def test_trigger_summary_async_thread_fallback_invalid_summary_marks_failed(
-        self, app, monkeypatch
-    ):
+    def test_trigger_summary_async_thread_fallback_invalid_summary_marks_failed(self, app, monkeypatch):
         """Thread fallback should not mark ok for invalid summary output."""
         import backend.services.readinglist_service as rs
 
@@ -240,9 +222,7 @@ class TestTriggerSummaryAsync:
 
         monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
-        monkeypatch.setattr(
-            rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0
-        )
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
 
         db_calls = []
 
@@ -264,9 +244,7 @@ class TestTriggerSummaryAsync:
         assert db_calls[-1][2] == "failed"
 
     @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
-    def test_trigger_summary_async_thread_fallback_records_resolved_model(
-        self, app, monkeypatch
-    ):
+    def test_trigger_summary_async_thread_fallback_records_resolved_model(self, app, monkeypatch):
         """Thread fallback should persist resolved_model for successful fallback output."""
         import backend.services.readinglist_service as rs
 
@@ -280,9 +258,7 @@ class TestTriggerSummaryAsync:
 
         monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
-        monkeypatch.setattr(
-            rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0
-        )
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
 
         db_calls = []
 
@@ -310,9 +286,7 @@ class TestTriggerSummaryAsync:
         assert db_calls[-1][4].get("resolved_model") == "fallback-model"
 
     @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
-    def test_trigger_summary_async_thread_fallback_preserves_task_user_and_queued_status(
-        self, app, monkeypatch
-    ):
+    def test_trigger_summary_async_thread_fallback_preserves_task_user_and_queued_status(self, app, monkeypatch):
         """Thread fallback should write queued/running/ok with owner context."""
         import backend.services.readinglist_service as rs
 
@@ -326,9 +300,7 @@ class TestTriggerSummaryAsync:
 
         monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
-        monkeypatch.setattr(
-            rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0
-        )
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
 
         db_calls = []
 
@@ -356,9 +328,7 @@ class TestTriggerSummaryAsync:
         assert db_calls[-1][4].get("resolved_model") == "fallback-model"
 
     @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
-    def test_trigger_summary_async_thread_fallback_failure_preserves_task_user(
-        self, app, monkeypatch
-    ):
+    def test_trigger_summary_async_thread_fallback_failure_preserves_task_user(self, app, monkeypatch):
         """Thread fallback failures should remain owner-scoped for upload summaries."""
         import backend.services.readinglist_service as rs
 
@@ -372,9 +342,7 @@ class TestTriggerSummaryAsync:
 
         monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
-        monkeypatch.setattr(
-            rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0
-        )
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
 
         db_calls = []
 
@@ -386,9 +354,7 @@ class TestTriggerSummaryAsync:
                 user="alice",
                 pid="up_secret_thread_fail",
                 model="requested-model",
-                generate_summary_fn=lambda *_a, **_k: (_ for _ in ()).throw(
-                    RuntimeError("boom")
-                ),
+                generate_summary_fn=lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
                 update_db_fn=_update_db,
                 default_model="requested-model",
             )
@@ -398,9 +364,7 @@ class TestTriggerSummaryAsync:
         assert all(call[4].get("task_user") == "alice" for call in db_calls)
 
     @patch("backend.services.readinglist_service._TASK_QUEUE_AVAILABLE", False)
-    def test_trigger_summary_async_thread_fallback_cancel_marks_canceled(
-        self, app, monkeypatch
-    ):
+    def test_trigger_summary_async_thread_fallback_cancel_marks_canceled(self, app, monkeypatch):
         """Thread fallback should preserve canceled semantics from summary service."""
         import backend.services.readinglist_service as rs
 
@@ -414,9 +378,7 @@ class TestTriggerSummaryAsync:
 
         monkeypatch.setattr(rs.threading, "Thread", _ImmediateThread)
         monkeypatch.setattr(rs.settings.huey, "allow_thread_fallback", True)
-        monkeypatch.setattr(
-            rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0
-        )
+        monkeypatch.setattr(rs.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
 
         db_calls = []
 
@@ -474,9 +436,7 @@ class TestAddToReadingList:
 
     @patch("backend.services.readinglist_service.ReadingListRepository")
     @patch("backend.services.readinglist_service.emit_user_event")
-    def test_add_to_readinglist_accepts_explicit_user(
-        self, mock_emit, mock_repo, app, monkeypatch
-    ):
+    def test_add_to_readinglist_accepts_explicit_user(self, mock_emit, mock_repo, app, monkeypatch):
         from backend.services.readinglist_service import add_to_readinglist
 
         mock_repo.get_reading_list_item.return_value = None
@@ -513,9 +473,7 @@ class TestAddToReadingList:
 
     @patch("backend.services.readinglist_service.ReadingListRepository")
     @patch("backend.services.readinglist_service.emit_user_event")
-    def test_add_to_readinglist_does_not_retrigger_when_already_queued(
-        self, mock_emit, mock_repo, app
-    ):
+    def test_add_to_readinglist_does_not_retrigger_when_already_queued(self, mock_emit, mock_repo, app):
         from backend.services.readinglist_service import add_to_readinglist
 
         calls = []
@@ -560,9 +518,7 @@ class TestListReadingList:
     def test_list_readinglist_prefers_global_summary_status(self, app, monkeypatch):
         from backend.services.readinglist_service import list_readinglist
 
-        monkeypatch.setattr(
-            "backend.services.data_service.paper_exists", lambda pid: True
-        )
+        monkeypatch.setattr("backend.services.data_service.paper_exists", lambda pid: True)
         monkeypatch.setattr(
             "backend.services.readinglist_service.get_user_readinglist",
             lambda user=None: {
@@ -656,9 +612,7 @@ class TestListReadingList:
         )
         monkeypatch.setattr(
             "backend.services.readinglist_service.SummaryStatusRepository.get_status",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("single get_status should not be used")
-            ),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("single get_status should not be used")),
         )
         monkeypatch.setattr(
             "backend.services.readinglist_service._default_summary_model",
@@ -702,9 +656,7 @@ class TestListReadingList:
 
     @patch("backend.services.readinglist_service.ReadingListRepository")
     @patch("backend.services.readinglist_service.emit_user_event")
-    def test_remove_from_readinglist_accepts_explicit_user(
-        self, mock_emit, mock_repo, app
-    ):
+    def test_remove_from_readinglist_accepts_explicit_user(self, mock_emit, mock_repo, app):
         from backend.services.readinglist_service import remove_from_readinglist
 
         mock_repo.remove_from_reading_list.return_value = True
@@ -712,9 +664,7 @@ class TestListReadingList:
         with app.app_context():
             result = remove_from_readinglist("2301.00001", user="explicit_user")
 
-        mock_repo.remove_from_reading_list.assert_called_once_with(
-            "explicit_user", "2301.00001"
-        )
+        mock_repo.remove_from_reading_list.assert_called_once_with("explicit_user", "2301.00001")
         assert result.get("pid") == "2301.00001"
 
     @patch("backend.services.readinglist_service.ReadingListRepository")
@@ -784,9 +734,7 @@ class TestListReadinglist:
 
     @patch("backend.services.readinglist_service.get_user_readinglist")
     @patch("backend.services.data_service.paper_exists")
-    def test_list_readinglist_skips_missing_public_pids(
-        self, mock_exists, mock_get, app
-    ):
+    def test_list_readinglist_skips_missing_public_pids(self, mock_exists, mock_get, app):
         """Missing/tombstoned public papers should be hidden from API results."""
         from backend.services.readinglist_service import list_readinglist
 
@@ -827,9 +775,7 @@ class TestReadingListLegacyAlignment:
         monkeypatch.setattr(
             legacy,
             "get_papers_bulk",
-            lambda _pids: {
-                "2301.00001": {"_rawid": "2301.00001", "title": "Paper", "authors": []}
-            },
+            lambda _pids: {"2301.00001": {"_rawid": "2301.00001", "title": "Paper", "authors": []}},
         )
         monkeypatch.setattr(legacy, "get_tags", lambda: {})
         monkeypatch.setattr(legacy, "get_neg_tags", lambda: {})
@@ -874,9 +820,7 @@ class TestReadingListLegacyAlignment:
         assert papers[0]["summary_status"] == "ok"
         assert papers[0]["summary_task_id"] is None
 
-    def test_list_readinglist_prefetches_upload_records_for_upload_items(
-        self, app, monkeypatch
-    ):
+    def test_list_readinglist_prefetches_upload_records_for_upload_items(self, app, monkeypatch):
         from backend.services.readinglist_service import list_readinglist
 
         monkeypatch.setattr(
@@ -904,9 +848,7 @@ class TestReadingListLegacyAlignment:
         )
         monkeypatch.setattr(
             "backend.services.readinglist_service.UploadedPaperRepository.get",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("single upload get should not be used")
-            ),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("single upload get should not be used")),
         )
         monkeypatch.setattr(
             "backend.services.upload_service._normalize_upload_parse_status",
@@ -928,9 +870,7 @@ class TestReadingListLegacyAlignment:
         assert items[0]["pid"] == "up_abc123def456"
         assert items[0]["summary_status"] == "ok"
 
-    def test_list_readinglist_falls_back_when_upload_batch_lookup_fails(
-        self, app, monkeypatch
-    ):
+    def test_list_readinglist_falls_back_when_upload_batch_lookup_fails(self, app, monkeypatch):
         from backend.services.readinglist_service import list_readinglist
 
         monkeypatch.setattr(
@@ -978,9 +918,7 @@ class TestReadingListLegacyAlignment:
         assert items[0]["pid"] == "up_abc123def456"
         assert items[0]["summary_status"] == "ok"
 
-    def test_overlay_summary_status_clears_hidden_foreign_task_id(
-        self, app, monkeypatch
-    ):
+    def test_overlay_summary_status_clears_hidden_foreign_task_id(self, app, monkeypatch):
         from backend.services.readinglist_service import overlay_summary_status_for_user
 
         monkeypatch.setattr(
@@ -1061,9 +999,7 @@ class TestReadingListLegacyAlignment:
         assert item["summary_last_error"] == "stale_queued_repaired"
         assert item["summary_task_id"] is None
 
-    def test_overlay_summary_status_keeps_existing_state_on_probe_failure(
-        self, app, monkeypatch
-    ):
+    def test_overlay_summary_status_keeps_existing_state_on_probe_failure(self, app, monkeypatch):
         from backend.services.readinglist_service import overlay_summary_status_for_user
 
         monkeypatch.setattr(
@@ -1104,9 +1040,7 @@ class TestReadingListLegacyAlignment:
         assert item["summary_last_error"] is None
         assert item["summary_task_id"] == "task-current"
 
-    def test_overlay_summary_status_ignores_stale_summary_for_upload_waiting_parse(
-        self, app, monkeypatch
-    ):
+    def test_overlay_summary_status_ignores_stale_summary_for_upload_waiting_parse(self, app, monkeypatch):
         from backend.services.readinglist_service import overlay_summary_status_for_user
 
         monkeypatch.setattr(
@@ -1146,9 +1080,7 @@ class TestReadingListLegacyAlignment:
         assert item["summary_status"] == ""
         assert item["summary_task_id"] is None
 
-    def test_overlay_summary_status_for_upload_keeps_ok_state_via_single_record_fallback(
-        self, app, monkeypatch
-    ):
+    def test_overlay_summary_status_for_upload_keeps_ok_state_via_single_record_fallback(self, app, monkeypatch):
         from backend.services.readinglist_service import overlay_summary_status_for_user
 
         monkeypatch.setattr(

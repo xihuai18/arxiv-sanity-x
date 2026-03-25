@@ -3,7 +3,12 @@ from __future__ import annotations
 import threading
 import time
 
-from aslite.repositories import ReadingListRepository, TagRepository, readinglist_key
+from aslite.repositories import (
+    MetaRepository,
+    ReadingListRepository,
+    TagRepository,
+    readinglist_key,
+)
 
 
 def test_concurrent_readinglist_updates_no_lost_update(monkeypatch):
@@ -28,6 +33,7 @@ def test_concurrent_readinglist_updates_no_lost_update(monkeypatch):
             "top_tags": [],
         },
     )
+    MetaRepository.save_many({pid: {"_time": 1.0}})
 
     import aslite.db as db_mod
 

@@ -87,9 +87,7 @@ def delete_keyword(keyword: str, *, user: str | None = None) -> str:
     return "ok"
 
 
-def rename_keyword(
-    old_keyword: str, new_keyword: str, *, user: str | None = None
-) -> str:
+def rename_keyword(old_keyword: str, new_keyword: str, *, user: str | None = None) -> str:
     """Rename a keyword for the current user.
 
     Args:
@@ -122,9 +120,7 @@ def rename_keyword(
         return result
 
     invalidate_user_state_cache(current_user)
-    logger.debug(
-        f"renamed keyword {old_keyword} to {new_keyword} for user {current_user}"
-    )
+    logger.debug(f"renamed keyword {old_keyword} to {new_keyword} for user {current_user}")
     emit_user_event(
         current_user,
         {

@@ -115,9 +115,7 @@ def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
     pid_to_tags = {}
     pid_filter = None
     if candidate_pids is not None:
-        pid_filter = {
-            str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()
-        }
+        pid_filter = {str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()}
 
     for tag, tag_pids in (tag_map or {}).items():
         normalized_tag = str(tag or "").strip()

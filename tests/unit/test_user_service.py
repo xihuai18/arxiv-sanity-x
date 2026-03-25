@@ -225,9 +225,7 @@ class TestTemporaryUserContext:
 
         assert callable(temporary_user_context)
 
-    def test_temporary_user_context_swaps_and_restores_all_cached_user_fields(
-        self, app, monkeypatch
-    ):
+    def test_temporary_user_context_swaps_and_restores_all_cached_user_fields(self, app, monkeypatch):
         from backend.services.user_service import temporary_user_context
 
         monkeypatch.setattr(

@@ -57,9 +57,7 @@ def create_empty_tag(tag: str, *, user: str | None = None) -> str:
 
     invalidate_user_state_cache(current_user)
     logger.debug(f"added empty tag {tag} for user {current_user}")
-    emit_user_event(
-        current_user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag}
-    )
+    emit_user_event(current_user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag})
     return "ok"
 
 
@@ -150,9 +148,7 @@ def delete_tag(tag: str, *, user: str | None = None) -> str:
     deleted_ctags: list[str] = []
     try:
         combined = CombinedTagRepository.get_user_combined_tags(current_user) or set()
-        deleted_ctags = sorted(
-            [ct for ct in combined if tag in map(str.strip, (ct or "").split(","))]
-        )
+        deleted_ctags = sorted([ct for ct in combined if tag in map(str.strip, (ct or "").split(","))])
     except Exception:
         deleted_ctags = []
 
@@ -272,9 +268,7 @@ def create_combined_tag(ctag: str, *, user: str | None = None) -> str:
 
     invalidate_user_state_cache(current_user)
     logger.debug(f"added ctag {ctag} for user {current_user}")
-    emit_user_event(
-        current_user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag}
-    )
+    emit_user_event(current_user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag})
     return "ok"
 
 
@@ -310,9 +304,7 @@ def delete_combined_tag(ctag: str, *, user: str | None = None) -> str:
     return "ok"
 
 
-def rename_combined_tag(
-    old_ctag: str, new_ctag: str, *, user: str | None = None
-) -> str:
+def rename_combined_tag(old_ctag: str, new_ctag: str, *, user: str | None = None) -> str:
     """Rename a combined tag.
 
     Args:
@@ -380,9 +372,7 @@ def rename_combined_tag(
 # -----------------------------------------------------------------------------
 
 
-def set_tag_feedback(
-    pid: str, tag: str, label: int, *, user: str | None = None
-) -> None:
+def set_tag_feedback(pid: str, tag: str, label: int, *, user: str | None = None) -> None:
     """Set tag feedback (positive/negative/remove) for a paper.
 
     Args:
@@ -453,9 +443,7 @@ def get_tag_members(
     elif label == "neg":
         pairs = [(pid, -1) for pid in neg_set]
     else:
-        pairs = [(pid, 1) for pid in pos_set] + [
-            (pid, -1) for pid in (neg_set - pos_set)
-        ]
+        pairs = [(pid, 1) for pid in pos_set] + [(pid, -1) for pid in (neg_set - pos_set)]
 
     # Pre-fetch all paper info for sorting and searching
     all_pids = [pid for pid, _ in pairs]
@@ -486,11 +474,7 @@ def get_tag_members(
     def _build_upload_paper(record: dict, pid: str) -> dict:
         meta = record.get("meta_extracted", {})
         override = record.get("meta_override", {})
-        title = (
-            override.get("title")
-            or meta.get("title")
-            or record.get("original_filename", pid)
-        )
+        title = override.get("title") or meta.get("title") or record.get("original_filename", pid)
         authors_list = override.get("authors") or meta.get("authors") or []
         return {
             "title": title,
@@ -549,18 +533,12 @@ def get_tag_members(
             authors_val = p.get("authors") or []
             if isinstance(authors_val, list):
                 if authors_val and isinstance(authors_val[0], dict):
-                    authors = " ".join(
-                        a.get("name", "") for a in authors_val if a
-                    ).lower()
+                    authors = " ".join(a.get("name", "") for a in authors_val if a).lower()
                 else:
                     authors = " ".join(str(a) for a in authors_val if a).lower()
             else:
                 authors = str(authors_val).lower()
-            if (
-                search_text in pid.lower()
-                or search_text in title
-                or search_text in authors
-            ):
+            if search_text in pid.lower() or search_text in title or search_text in authors:
                 filtered.append((pid, lab))
         pairs = filtered
 

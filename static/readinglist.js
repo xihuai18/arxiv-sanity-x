@@ -200,6 +200,43 @@
             });
     }
 
+    function resetUploadedSummaryState(ui) {
+        if (!ui) return;
+        const pid =
+            (ui.paperData && ui.paperData.id) ||
+            (ui.card && ui.card.dataset ? ui.card.dataset.pid : '') ||
+            '';
+
+        if (ui.state) {
+            ui.state.status = '';
+            ui.state.lastError = '';
+            ui.state.taskId = '';
+            ui.state.queueRank = 0;
+            ui.state.queueTotal = 0;
+        }
+        if (ui.paperData) {
+            ui.paperData.summary_status = '';
+            ui.paperData.summary_last_error = '';
+            ui.paperData.summary_task_id = '';
+            ui.paperData.tldr = '';
+        }
+        if (ui.badge) {
+            updateSummaryBadge(ui.badge, '', '', 0, 0);
+        }
+        if (pid) {
+            stopQueueRankPolling(pid);
+            unmarkSummaryPending(pid);
+        }
+        if (typeof ui.syncTriggerState === 'function') {
+            ui.syncTriggerState();
+        }
+        if (ui.tldrEl && ui.tldrEl.parentNode) {
+            ui.tldrEl.parentNode.removeChild(ui.tldrEl);
+        }
+        ui.tldrEl = null;
+        ui.tldrTextEl = null;
+    }
+
     // Update TL;DR display in the card
     function updateTldrDisplay(ui, tldr) {
         if (!ui || !ui.card || !tldr) return;
@@ -1250,6 +1287,13 @@
                 ui.parseBtn.title = 'Parse failed: use Retry Parse';
             }
         }
+        if (status !== 'ok') {
+            resetUploadedSummaryState(ui);
+        }
+
+        if (typeof ui.updateRetryParseState === 'function') {
+            ui.updateRetryParseState(status);
+        }
 
         // Update dependent buttons via updateParseStatus
         if (typeof ui.updateParseStatus === 'function') {
@@ -1464,10 +1508,11 @@
         (uploadedPapers || []).forEach(p => {
             if (!p || !p.id) return;
             const pid = String(p.id);
-            const ui = uploadedSummaryUI.get(pid);
+            let ui = uploadedSummaryUI.get(pid);
             if (!ui) {
                 createUploadedPaperCard(p, container);
-                return;
+                ui = uploadedSummaryUI.get(pid);
+                if (!ui) return;
             }
 
             // Best-effort state sync for cases where SSE is delayed/missed.
@@ -1503,6 +1548,14 @@
                 updateSummaryStatusFromEvent(pid, p.summary_status, p.summary_last_error || '', {
                     task_id: p.summary_task_id || '',
                 });
+            } else {
+                resetUploadedSummaryState(ui);
+            }
+            if (p.summary_status === 'queued' || p.summary_status === 'running') {
+                markSummaryPending(pid);
+                if (p.summary_task_id) {
+                    startQueueRankPolling(pid);
+                }
             }
         });
 
@@ -1784,8 +1837,9 @@
             syncTriggerState();
 
             // Similar and Inspect require both parse and metadata extraction
-            const metaExtracted = p.meta_extracted_ok === true;
+            const metaExtracted = uiState.paperData && uiState.paperData.meta_extracted_ok === true;
             const featureDisabled = currentParseStatus !== 'ok' || !metaExtracted;
+            const summaryLinkDisabled = currentParseStatus !== 'ok';
 
             // Update Similar button state
             if (featureDisabled) {
@@ -1814,12 +1868,9 @@
             }
 
             // Update Summary link state
-            if (featureDisabled) {
+            if (summaryLinkDisabled) {
                 summaryLink.classList.add('disabled-link');
-                summaryLink.title =
-                    currentParseStatus !== 'ok'
-                        ? 'Parse PDF first to view summary'
-                        : 'Extract metadata first to view summary';
+                summaryLink.title = 'Parse PDF first to view summary';
             } else {
                 summaryLink.classList.remove('disabled-link');
                 summaryLink.title = 'View summary';
@@ -1838,6 +1889,21 @@
                     extractBtn.title = 'Extract metadata with LLM';
                 }
             }
+        };
+
+        const retryWrap = document.createElement('div');
+        retryWrap.className = 'rel_retry';
+        const retryBtn = document.createElement('button');
+        retryBtn.className = 'retry-parse-btn';
+        retryBtn.textContent = '🔄 Retry Parse';
+        retryBtn.addEventListener('click', function () {
+            retryParse(p.id, parseStatusBadge, retryBtn, parseBtn, extractBtn);
+        });
+        retryWrap.appendChild(retryBtn);
+
+        const updateRetryParseState = newStatus => {
+            const showRetry = newStatus === 'failed';
+            retryWrap.style.display = showRetry ? '' : 'none';
         };
 
         triggerBtn.addEventListener('click', function () {
@@ -1976,33 +2042,25 @@
         extractWrap.appendChild(extractBtn);
         primaryActions.appendChild(extractWrap);
 
-        // Retry parse (if failed)
-        if (p.parse_status === 'failed') {
-            const retryWrap = document.createElement('div');
-            retryWrap.className = 'rel_retry';
-            const retryBtn = document.createElement('button');
-            retryBtn.className = 'retry-parse-btn';
-            retryBtn.textContent = '🔄 Retry Parse';
-            retryBtn.addEventListener('click', function () {
-                retryParse(p.id, parseStatusBadge, retryBtn, parseBtn, extractBtn);
-            });
-            retryWrap.appendChild(retryBtn);
-            primaryActions.appendChild(retryWrap);
-        }
+        updateRetryParseState(p.parse_status);
+        primaryActions.appendChild(retryWrap);
 
         actions.appendChild(primaryActions);
         card.appendChild(actions);
 
-        uploadedSummaryUI.set(p.id, {
+        const uiState = {
             badge: statusBadge,
             state: summaryState,
             syncTriggerState,
             updateParseStatus,
+            updateRetryParseState,
             card: card,
             titleDiv: titleDiv,
             parseStatusBadge: parseStatusBadge,
             parseBtn: parseBtn,
             extractBtn: extractBtn,
+            retryBtn: retryBtn,
+            retryWrap: retryWrap,
             similarBtn: similarBtn,
             inspectLink: inspectLink,
             summaryLink: summaryLink,
@@ -2016,7 +2074,9 @@
             abstractEl: abstractEl,
             removeBtn: deleteBtn,
             paperData: p,
-        });
+        };
+
+        uploadedSummaryUI.set(p.id, uiState);
 
         container.appendChild(card);
     }
