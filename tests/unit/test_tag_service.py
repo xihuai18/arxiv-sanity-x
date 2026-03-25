@@ -252,3 +252,49 @@ class TestCreateCombinedTag:
             g.user = "test_user"
             result = create_combined_tag("null")
             assert "error" in result.lower() or "cannot" in result.lower()
+
+
+class TestGetTagMembers:
+    def test_get_tag_members_search_uses_metas_before_bulk_fetch(self, app, monkeypatch):
+        from backend.services.tag_service import get_tag_members
+
+        calls = {"bulk": 0}
+
+        monkeypatch.setattr(
+            "backend.services.tag_service.get_tags",
+            lambda: {"ml": {"2301.00001", "2301.00002"}},
+        )
+        monkeypatch.setattr("backend.services.tag_service.get_neg_tags", lambda: {})
+
+        def _get_papers_bulk(pids):
+            calls["bulk"] += 1
+            return {pid: {"title": "fallback", "authors": [], "_time_str": ""} for pid in pids}
+
+        with app.app_context():
+            from flask import g
+
+            g.user = "test_user"
+            result = get_tag_members(
+                "ml",
+                search="graph",
+                page_number=1,
+                page_size=20,
+                get_metas_fn=lambda: {
+                    "2301.00001": {
+                        "title": "Graph Networks",
+                        "authors": [{"name": "Alice"}],
+                        "_time": 2.0,
+                        "_time_str": "2024-01-02",
+                    },
+                    "2301.00002": {
+                        "title": "Vision Transformers",
+                        "authors": [{"name": "Bob"}],
+                        "_time": 1.0,
+                        "_time_str": "2024-01-01",
+                    },
+                },
+                get_papers_bulk_fn=_get_papers_bulk,
+            )
+
+        assert calls["bulk"] == 0
+        assert [item["pid"] for item in result["items"]] == ["2301.00001"]

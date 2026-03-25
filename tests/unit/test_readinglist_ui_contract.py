@@ -38,6 +38,7 @@ def test_readinglist_mutations_use_keepalive_for_fast_navigation():
     repo_root = _repo_root()
     homepage_js = (repo_root / "static" / "paper_list.js").read_text(encoding="utf-8", errors="ignore")
     readinglist_js = (repo_root / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    summary_js = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")
 
     assert "csrfFetch('/api/readinglist/add'" in homepage_js
     assert "csrfFetch('/api/readinglist/remove'" in homepage_js
@@ -49,3 +50,62 @@ def test_readinglist_mutations_use_keepalive_for_fast_navigation():
     assert "csrfFetch('/api/readinglist/remove'" in readinglist_js
     assert "keepalive: true" in readinglist_js
     assert "shouldSuppressMutationError" in readinglist_js
+    assert "csrfFetch('/api/readinglist/add'" in summary_js
+    assert "csrfFetch('/api/readinglist/remove'" in summary_js
+    assert "keepalive: true" in summary_js
+
+
+def test_homepage_readinglist_add_uses_backend_summary_status():
+    text = (_repo_root() / "static" / "paper_list.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "const responseStatus = String(data.summary_status || '').trim();" in text
+    assert "summaryStatus: 'queued'" not in text
+
+
+def test_uploaded_summary_link_requires_parse_only_not_metadata():
+    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "const summaryDisabled = p.parse_status !== 'ok';" in text
+    assert "if (summaryDisabled) {" in text
+
+
+def test_readinglist_empty_state_checks_only_for_any_card_not_all_cards():
+    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "container.querySelector('.rl-paper-card')" in text
+    assert "querySelectorAll('.rl-paper-card')" not in text
+
+
+def test_uploaded_readinglist_ui_stores_hot_dom_refs_for_follow_up_updates():
+    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "uploadedSummaryUI.set(p.id, {" in text
+    assert "titleDiv: titleDiv" in text
+    assert "utagsWrap: utagsWrap" in text
+    assert "tldrEl: tldrDiv" in text
+    assert "tldrTextEl: tldrTextEl" in text
+    assert "abstractDetailsEl: abstractDetailsEl" in text
+    assert "abstractEl: abstractEl" in text
+
+
+def test_uploaded_tldr_and_extract_updates_reuse_cached_dom_refs():
+    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+
+    tldr_start = text.find("function updateTldrDisplay(ui, tldr)")
+    tldr_end = text.find("function handleReadingListEvent", tldr_start)
+    assert tldr_start != -1 and tldr_end != -1
+    tldr_block = text[tldr_start:tldr_end]
+    assert "ui.tldrEl" in tldr_block
+    assert "ui.tldrTextEl" in tldr_block
+    assert "ui.abstractDetailsEl" in tldr_block
+    assert "ui.abstractEl" in tldr_block
+    assert "ui.utagsWrap" in tldr_block
+
+    extract_start = text.find("function handleUploadExtractStatusEvent(event)")
+    extract_end = text.find("function handleUploadDeletedEvent", extract_start)
+    assert extract_start != -1 and extract_end != -1
+    extract_block = text[extract_start:extract_end]
+    assert "ui.titleDiv" in extract_block
+    assert "ui.tldrEl || null" in extract_block
+    assert "ui.abstractEl || null" in extract_block
+    assert "ui.utagsWrap || null" in extract_block

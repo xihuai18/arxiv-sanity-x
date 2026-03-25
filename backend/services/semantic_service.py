@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 from loguru import logger
 
-from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW
+from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, PAPERS_DB_FILE
 from config import settings
 from tools.compute import Qwen3EmbeddingVllm
 
@@ -44,7 +44,7 @@ def _llm_api_key() -> str:
 
 
 from .data_service import get_features_cached
-from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE
+from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE, filter_public_results
 
 # Lock ordering:
 # - get_paper_embeddings() avoids holding _EMBEDDINGS_LOCK while calling get_features_cached()
@@ -349,11 +349,14 @@ def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float
 
     cache_key = None
     try:
+        from backend.services.data_service import _sqlite_effective_mtime
+
         cache_key = (
             "sem",
             q.lower(),
             int(limit) if limit is not None else None,
             get_cached_embeddings_mtime(),
+            float(_sqlite_effective_mtime(PAPERS_DB_FILE) or 0.0),
         )
         cached = SEARCH_RANK_CACHE.get(cache_key)
         if cached is not None:
@@ -413,6 +416,7 @@ def semantic_search_rank(q: str = "", limit=None) -> tuple[list[str], list[float
 
     out_pids = [pids_all[int(i)] for i in top_indices]
     out_scores = [float(similarities[int(i)]) * 100.0 for i in top_indices]
+    out_pids, out_scores = filter_public_results(out_pids, out_scores)
 
     if cache_key is not None:
         try:

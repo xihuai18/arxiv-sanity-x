@@ -14,38 +14,38 @@ from unittest.mock import MagicMock, patch
 class TestGetEmailTimeDelta:
     """Tests for _get_email_time_delta function."""
 
-    @patch("tools.daemon.datetime")
-    @patch("tools.daemon.holidays")
-    def test_get_email_time_delta_monday(self, mock_holidays, mock_datetime):
+    @patch("tools.daemon._us_holidays")
+    @patch("tools.daemon._now_in_daemon_timezone")
+    def test_get_email_time_delta_monday(self, mock_now, mock_us_holidays):
         """Test time delta on Monday (should be 4 days)."""
         import tools.daemon as d
 
-        mock_now = MagicMock()
-        mock_now.weekday.return_value = 0  # Monday
-        mock_datetime.datetime.now.return_value = mock_now
-        mock_datetime.timedelta = datetime.timedelta
+        now = MagicMock()
+        now.weekday.return_value = 0  # Monday
+        now.date.return_value = datetime.date(2026, 3, 16)
+        mock_now.return_value = now
 
-        mock_us_holidays = MagicMock()
-        mock_us_holidays.__contains__ = MagicMock(return_value=False)
-        mock_holidays.UnitedStates.return_value = mock_us_holidays
+        holidays_set = MagicMock()
+        holidays_set.__contains__ = MagicMock(return_value=False)
+        mock_us_holidays.return_value = holidays_set
 
         result = d._get_email_time_delta()
         assert result == 4.0
 
-    @patch("tools.daemon.datetime")
-    @patch("tools.daemon.holidays")
-    def test_get_email_time_delta_wednesday(self, mock_holidays, mock_datetime):
+    @patch("tools.daemon._us_holidays")
+    @patch("tools.daemon._now_in_daemon_timezone")
+    def test_get_email_time_delta_wednesday(self, mock_now, mock_us_holidays):
         """Test time delta on Wednesday (should be 2 days)."""
         import tools.daemon as d
 
-        mock_now = MagicMock()
-        mock_now.weekday.return_value = 2  # Wednesday
-        mock_datetime.datetime.now.return_value = mock_now
-        mock_datetime.timedelta = datetime.timedelta
+        now = MagicMock()
+        now.weekday.return_value = 2  # Wednesday
+        now.date.return_value = datetime.date(2026, 3, 18)
+        mock_now.return_value = now
 
-        mock_us_holidays = MagicMock()
-        mock_us_holidays.__contains__ = MagicMock(return_value=False)
-        mock_holidays.UnitedStates.return_value = mock_us_holidays
+        holidays_set = MagicMock()
+        holidays_set.__contains__ = MagicMock(return_value=False)
+        mock_us_holidays.return_value = holidays_set
 
         result = d._get_email_time_delta()
         assert result == 2.0
@@ -58,7 +58,7 @@ class TestGenSummary:
         """Test gen_summary returns True when disabled."""
         import tools.daemon as d
 
-        monkeypatch.setattr(d, "ENABLE_SUMMARY", False)
+        monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
         result = d.gen_summary()
         assert result is True
 
@@ -73,11 +73,11 @@ class TestGenSummary:
             return True
 
         monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
-        monkeypatch.setattr(d, "ENABLE_SUMMARY", True)
-        monkeypatch.setattr(d, "ENABLE_PRIORITY_QUEUE", True)
-        monkeypatch.setattr(d, "ENABLE_SUMMARY_QUEUE", False)
-        monkeypatch.setattr(d, "PRIORITY_DAYS", 3.0)
-        monkeypatch.setattr(d, "PRIORITY_LIMIT", 50)
+        monkeypatch.setattr(d.settings.daemon, "enable_summary", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "enable_priority_queue", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "enable_summary_queue", False, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "priority_days", 3.0, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "priority_limit", 50, raising=False)
 
         d.gen_summary()
 
@@ -98,9 +98,9 @@ class TestGenSummary:
             return True
 
         monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
-        monkeypatch.setattr(d, "ENABLE_SUMMARY", True)
-        monkeypatch.setattr(d, "ENABLE_SUMMARY_QUEUE", True)
-        monkeypatch.setattr(d, "ENABLE_PRIORITY_QUEUE", False)
+        monkeypatch.setattr(d.settings.daemon, "enable_summary", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "enable_summary_queue", True, raising=False)
+        monkeypatch.setattr(d.settings.daemon, "enable_priority_queue", False, raising=False)
 
         d.gen_summary()
 
@@ -113,20 +113,10 @@ class TestSendEmail:
     """Tests for send_email function."""
 
     @patch("tools.daemon.subprocess")
-    @patch("tools.daemon.datetime")
-    @patch("tools.daemon.holidays")
-    def test_send_email_weekday(self, mock_holidays, mock_datetime, mock_subprocess):
+    @patch("tools.daemon._get_email_time_delta", return_value=2.0)
+    def test_send_email_weekday(self, _mock_time_delta, mock_subprocess):
         """Test send_email on a regular weekday."""
         import tools.daemon as d
-
-        mock_now = MagicMock()
-        mock_now.weekday.return_value = 2  # Wednesday
-        mock_datetime.datetime.now.return_value = mock_now
-        mock_datetime.timedelta = datetime.timedelta
-
-        mock_us_holidays = MagicMock()
-        mock_us_holidays.__contains__ = MagicMock(return_value=False)
-        mock_holidays.UnitedStates.return_value = mock_us_holidays
 
         d.send_email()
 
@@ -138,20 +128,10 @@ class TestSendEmail:
         assert call_args[t_index + 1] == "2"
 
     @patch("tools.daemon.subprocess")
-    @patch("tools.daemon.datetime")
-    @patch("tools.daemon.holidays")
-    def test_send_email_monday(self, mock_holidays, mock_datetime, mock_subprocess):
+    @patch("tools.daemon._get_email_time_delta", return_value=4.0)
+    def test_send_email_monday(self, _mock_time_delta, mock_subprocess):
         """Test send_email on Monday (should use 4 days)."""
         import tools.daemon as d
-
-        mock_now = MagicMock()
-        mock_now.weekday.return_value = 0  # Monday
-        mock_datetime.datetime.now.return_value = mock_now
-        mock_datetime.timedelta = datetime.timedelta
-
-        mock_us_holidays = MagicMock()
-        mock_us_holidays.__contains__ = MagicMock(return_value=False)
-        mock_holidays.UnitedStates.return_value = mock_us_holidays
 
         d.send_email()
 
@@ -159,6 +139,39 @@ class TestSendEmail:
         call_args = mock_subprocess.call.call_args[0][0]
         t_index = call_args.index("-t")
         assert call_args[t_index + 1] == "4"
+
+    @patch("tools.daemon.logger")
+    @patch("tools.daemon.subprocess")
+    @patch("tools.daemon._get_email_time_delta", return_value=2.0)
+    def test_send_email_warns_on_nonzero_exit(self, _mock_time_delta, mock_subprocess, mock_logger):
+        import tools.daemon as d
+
+        mock_subprocess.call.return_value = 1
+
+        d.send_email()
+
+        mock_logger.warning.assert_any_call("[pipeline] send_email: returned code 1")
+
+    @patch("tools.daemon.subprocess")
+    @patch("tools.daemon._now_in_daemon_timezone")
+    @patch("tools.daemon._us_holidays")
+    def test_send_email_tuesday_uses_two_days(self, mock_us_holidays, mock_now, mock_subprocess):
+        import tools.daemon as d
+
+        mock_dt = MagicMock()
+        mock_dt.weekday.return_value = 1  # Tuesday
+        mock_dt.date.return_value = datetime.date(2026, 3, 17)
+        mock_now.return_value = mock_dt
+
+        holidays_set = MagicMock()
+        holidays_set.__contains__ = MagicMock(return_value=False)
+        mock_us_holidays.return_value = holidays_set
+
+        d.send_email()
+
+        call_args = mock_subprocess.call.call_args[0][0]
+        t_index = call_args.index("-t")
+        assert call_args[t_index + 1] == "2"
 
 
 class TestBackupUserData:
@@ -371,17 +384,16 @@ class TestLogStartupInfo:
         from contextlib import ExitStack
 
         with ExitStack() as stack:
-            stack.enter_context(patch.object(d, "ENABLE_SUMMARY", True))
-            stack.enter_context(patch.object(d, "ENABLE_PRIORITY_QUEUE", True))
-            stack.enter_context(patch.object(d, "ENABLE_SUMMARY_QUEUE", False))
-            stack.enter_context(patch.object(d, "ENABLE_EMBEDDINGS", True))
-            stack.enter_context(patch.object(d, "PRIORITY_DAYS", 2.0))
-            stack.enter_context(patch.object(d, "PRIORITY_LIMIT", 100))
-            stack.enter_context(patch.object(d, "FETCH_NUM", 2000))
-            stack.enter_context(patch.object(d, "FETCH_MAX", 1000))
-            stack.enter_context(patch.object(d, "SUMMARY_NUM", 200))
-            stack.enter_context(patch.object(d, "SUMMARY_WORKERS", 2))
             stack.enter_context(patch.object(d, "_get_email_time_delta", return_value=2.0))
+            mock_settings.daemon.enable_summary = True
+            mock_settings.daemon.enable_priority_queue = True
+            mock_settings.daemon.enable_summary_queue = False
+            mock_settings.daemon.enable_embeddings = True
+            mock_settings.daemon.priority_limit = 100
+            mock_settings.daemon.fetch_num = 2000
+            mock_settings.daemon.fetch_max = 1000
+            mock_settings.daemon.summary_num = 200
+            mock_settings.daemon.summary_workers = 2
             d._log_startup_info()
 
         mock_print.assert_called_once()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import time
@@ -13,7 +14,7 @@ from typing import Any
 
 from loguru import logger
 
-from aslite.repositories import SummaryStatusRepository
+from aslite.repositories import SummaryStatusRepository, UploadedPaperRepository
 from config import settings
 from tools.paper_summarizer import (
     acquire_summary_lock,
@@ -456,72 +457,306 @@ _SUMMARY_CACHE_STATS = {
 }
 
 
-def get_summary_status(pid: str, model: str | None = None) -> tuple[str, str | None]:
-    """Return (status, last_error) for summary generation."""
+def _summary_repair_ttl() -> float:
+    try:
+        ttl = float(settings.huey.summary_repair_ttl or 0)
+    except Exception:
+        ttl = 0.0
+    return max(0.0, ttl)
+
+
+def _summary_lock_is_active(lock_path: Path) -> bool:
+    """Return whether a summary lock still looks active.
+
+    Best-effort stale/orphan cleanup mirrors acquire-time handling so read paths do
+    not get stuck on leftover lock files forever.
+    """
+    if not lock_path.exists():
+        return False
+
+    try:
+        stale_s = float(getattr(settings.lock, "summary_lock_stale_sec", 3600.0) or 3600.0)
+    except Exception:
+        stale_s = 3600.0
+
+    if stale_s > 0:
+        try:
+            age = time.time() - float(lock_path.stat().st_mtime or 0.0)
+            if age > stale_s:
+                lock_path.unlink(missing_ok=True)
+                return False
+        except FileNotFoundError:
+            return False
+        except Exception:
+            pass
+
+    try:
+        lines = lock_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        owner_pid = int(lines[0]) if lines and lines[0] else None
+        if owner_pid:
+            try:
+                os.kill(owner_pid, 0)
+            except OSError:
+                lock_path.unlink(missing_ok=True)
+                return False
+    except FileNotFoundError:
+        return False
+    except Exception:
+        pass
+
+    return lock_path.exists()
+
+
+def has_active_summary_lock(pid: str, model: str) -> bool:
+    target_model = (model or "").strip()
+    if not pid or not target_model:
+        return False
+    _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
+        pid, target_model
+    )
+    return _summary_lock_is_active(lock_file) or _summary_lock_is_active(legacy_lock)
+
+
+def _repair_stale_summary_state(pid: str, model: str, info: dict[str, Any]) -> dict[str, Any]:
+    """Repair stale queued/running summary states and return normalized info."""
+    status = str(info.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return info
+
+    ttl = _summary_repair_ttl()
+    if ttl <= 0:
+        return info
+
+    try:
+        updated_time = float(info.get("updated_time") or 0.0)
+    except Exception:
+        updated_time = 0.0
+    if updated_time > 0 and (time.time() - updated_time) < ttl:
+        return info
+
+    if has_active_summary_lock(pid, model):
+        if status == "queued":
+            normalized = dict(info)
+            normalized["status"] = "running"
+            normalized["last_error"] = None
+            return normalized
+        return info
+
+    task_id = str(info.get("task_id") or "").strip()
+    stale_error = f"stale_{status}_repaired"
+
+    if task_id:
+        try:
+            task_info = SummaryStatusRepository.get_task_status(task_id)
+        except Exception:
+            task_info = None
+        if isinstance(task_info, dict):
+            task_status = str(task_info.get("status") or "").strip().lower()
+            try:
+                task_updated = float(task_info.get("updated_time") or 0.0)
+            except Exception:
+                task_updated = 0.0
+            if task_status in {"queued", "running"} and task_updated > 0 and (time.time() - task_updated) < ttl:
+                return info
+
+    task_user = info.get("task_user")
+    try:
+        SummaryStatusRepository.set_status(
+            pid,
+            model,
+            "failed",
+            stale_error,
+            task_id=None,
+            task_user=None,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to repair stale summary status for {pid}::{model}: {e}")
+
+    if task_id:
+        try:
+            SummaryStatusRepository.set_task_status(
+                task_id,
+                "failed",
+                error=stale_error,
+                pid=pid,
+                model=model,
+                user=task_user,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to repair stale summary task {task_id} for {pid}::{model}: {e}")
+
+    if pid.startswith("up_"):
+        try:
+            record = UploadedPaperRepository.get(pid)
+            if isinstance(record, dict):
+                current_task_id = str(record.get("summary_task_id") or "").strip()
+                if not task_id or current_task_id == task_id:
+                    UploadedPaperRepository.update(pid, {"summary_task_id": None})
+        except Exception:
+            pass
+
+    repaired = dict(info)
+    repaired["status"] = "failed"
+    repaired["last_error"] = stale_error
+    repaired.pop("task_id", None)
+    repaired.pop("task_user", None)
+    repaired.pop("resolved_model", None)
+    repaired["updated_time"] = time.time()
+    return repaired
+
+
+def _get_summary_render_snapshot(
+    pid: str,
+    model: str | None = None,
+    *,
+    include_tldr: bool = False,
+    prefetched_status_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a render-friendly summary snapshot for one paper."""
     model = (model or _default_llm_name() or "").strip()
     if not model:
-        return "", None
+        return {"status": "", "last_error": None, "tldr": ""}
 
     summary_source = normalize_summary_source(_summary_markdown_source())
 
-    def _is_valid_cache(body_path: Path, meta_path: Path, *, expected_legacy_model: str | None) -> bool:
+    def _tldr_from_content(content: str) -> str:
+        if not include_tldr:
+            return ""
+        from backend.utils.summary_utils import extract_tldr_from_content
+
+        cached = TLDR_CACHE.get(pid)
+        if cached is not None:
+            return cached
+        tldr = extract_tldr_from_content(content)
+        if tldr:
+            TLDR_CACHE.set(pid, tldr)
+        return tldr
+
+    def _is_valid_cache(body_path: Path, meta_path: Path, *, expected_legacy_model: str | None) -> str | None:
         if not body_path.exists():
-            return False
+            return None
+        try:
+            if body_path.stat().st_size < 40:
+                return None
+        except Exception:
+            return None
         meta = read_summary_meta(meta_path)
         if not summary_source_matches(meta, summary_source):
-            return False
+            return None
         if expected_legacy_model is not None:
             legacy_model = (meta.get("model") or meta.get("llm_model") or "").strip()
             if expected_legacy_model and (not legacy_model or legacy_model != expected_legacy_model):
-                return False
+                return None
         try:
             content = body_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:
-            return False
-        return bool(looks_like_valid_cached_summary_markdown(content))
+            return None
+        if not looks_like_valid_cached_summary_markdown(content):
+            return None
+        return content
 
-    def _has_valid_cache_for_model(target_model: str) -> bool:
+    def _get_valid_cache_content_for_model(target_model: str) -> tuple[str, str | None]:
         cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(
             pid, target_model
         )
-        return _is_valid_cache(cache_file, meta_file, expected_legacy_model=None) or _is_valid_cache(
-            legacy_cache, legacy_meta, expected_legacy_model=target_model
-        )
+        content = _is_valid_cache(cache_file, meta_file, expected_legacy_model=None)
+        if content is not None:
+            return target_model, content
+        content = _is_valid_cache(legacy_cache, legacy_meta, expected_legacy_model=target_model)
+        if content is not None:
+            return target_model, content
+        return "", None
 
-    def _has_any_lock(target_model: str) -> bool:
-        _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
-            pid, target_model
-        )
-        return lock_file.exists() or legacy_lock.exists()
+    resolved_model, content = _get_valid_cache_content_for_model(model)
+    if content is not None:
+        return {
+            "status": "ok",
+            "last_error": None,
+            "tldr": _tldr_from_content(content),
+            "resolved_model": resolved_model or model,
+        }
 
-    if _has_valid_cache_for_model(model):
-        return "ok", None
+    if has_active_summary_lock(pid, model):
+        return {"status": "running", "last_error": None, "tldr": ""}
 
-    if _has_any_lock(model):
-        return "running", None
-
+    info = prefetched_status_info if isinstance(prefetched_status_info, dict) else None
     try:
-        info = SummaryStatusRepository.get_status(pid, model or "")
+        if info is None:
+            info = SummaryStatusRepository.get_status(pid, model or "")
         if isinstance(info, dict):
+            info = _repair_stale_summary_state(pid, model, info)
             status = info.get("status") or ""
             last_error = info.get("last_error")
             if status == "ok":
                 resolved_model = (info.get("resolved_model") or info.get("llm_model") or "").strip()
                 if resolved_model and resolved_model != model:
-                    if _has_valid_cache_for_model(resolved_model):
-                        return "ok", None
-                    if _has_any_lock(resolved_model):
-                        return "running", None
+                    _resolved_model_key, resolved_content = _get_valid_cache_content_for_model(resolved_model)
+                    if resolved_content is not None:
+                        return {
+                            "status": "ok",
+                            "last_error": None,
+                            "tldr": _tldr_from_content(resolved_content),
+                            "resolved_model": resolved_model,
+                        }
+                    if has_active_summary_lock(pid, resolved_model):
+                        return {
+                            "status": "running",
+                            "last_error": None,
+                            "tldr": "",
+                        }
                 # Defensive: avoid stale DB "ok" when current cache is absent/invalid.
                 # Re-check lock to avoid returning empty state while generation just started.
-                if _has_any_lock(model):
-                    return "running", None
-                return "", None
-            return status, last_error
+                if has_active_summary_lock(pid, model):
+                    return {"status": "running", "last_error": None, "tldr": ""}
+                return {"status": "", "last_error": None, "tldr": ""}
+            return {"status": status, "last_error": last_error, "tldr": ""}
     except Exception as e:
         logger.warning(f"Failed to read summary status for {pid}: {e}")
 
-    return "", None
+    return {"status": "", "last_error": None, "tldr": ""}
+
+
+def get_summary_status(pid: str, model: str | None = None) -> tuple[str, str | None]:
+    """Return (status, last_error) for summary generation."""
+    snapshot = _get_summary_render_snapshot(pid, model, include_tldr=False)
+    return str(snapshot.get("status") or ""), snapshot.get("last_error")
+
+
+def get_summary_render_snapshots(
+    pids: list[str],
+    model: str | None = None,
+    *,
+    include_tldr: bool = True,
+    prefetched_status_rows: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return render-friendly summary snapshots for multiple papers."""
+    resolved_model = (model or _default_llm_name() or "").strip()
+    snapshots: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    for pid in pids or []:
+        normalized_pid = str(pid or "").strip()
+        if not normalized_pid or normalized_pid in seen:
+            continue
+        seen.add(normalized_pid)
+
+    prefetched_rows: dict[str, dict[str, Any]] = dict(prefetched_status_rows or {})
+    missing_pids = [pid for pid in seen if pid not in prefetched_rows]
+    if resolved_model and missing_pids:
+        try:
+            fetched_rows = SummaryStatusRepository.get_status_many(missing_pids, resolved_model)
+            if fetched_rows:
+                prefetched_rows.update(fetched_rows)
+        except Exception:
+            pass
+
+    for normalized_pid in seen:
+        snapshots[normalized_pid] = _get_summary_render_snapshot(
+            normalized_pid,
+            resolved_model,
+            include_tldr=include_tldr,
+            prefetched_status_info=prefetched_rows.get(normalized_pid),
+        )
+    return snapshots
 
 
 def extract_tldr_from_summary(pid: str) -> str:

@@ -19,10 +19,15 @@ if _REPO_ROOT not in sys.path:
 
 import tqdm
 
-from aslite.arxiv import get_response, parse_response
+from aslite.arxiv import (
+    get_response,
+    is_withdrawn_entry,
+    parse_response,
+    resolve_latest_nonwithdrawn_version,
+)
 
 # Repository layer for cleaner data access
-from aslite.repositories import MetaRepository, PaperRepository
+from aslite.repositories import PaperCorpusRepository, PaperRepository
 
 # arXiv AI tag groups (shared for collection and display)
 # Note: these are default values, actual usage reads from settings.arxiv
@@ -91,7 +96,7 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
             continue
         if args.num_total > 0 and total_fetched >= args.num_total:
             break
-        cat_new, cat_replace, cat_had = 0, 0, 0
+        cat_new, cat_replace, cat_had, cat_deleted = 0, 0, 0, 0
         prevn = 0
 
         # fetch the latest papers
@@ -155,19 +160,59 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
                 break
 
             # process the batch of retrieved papers
-            nhad, nnew, nreplace = 0, 0, 0
+            nhad, nnew, nreplace, ndeleted = 0, 0, 0, 0
+
+            effective_papers = []
+            skipped_withdrawn = 0
+            tombstone_updates = {}
+            for latest_paper in papers:
+                selected_paper = latest_paper
+                latest_is_withdrawn = bool(is_withdrawn_entry(latest_paper))
+                if latest_is_withdrawn:
+                    selected_paper = resolve_latest_nonwithdrawn_version(latest_paper)
+                    if selected_paper is None:
+                        skipped_withdrawn += 1
+                        raw_pid = latest_paper.get("_id")
+                        tombstone_updates[raw_pid] = {
+                            "pid": raw_pid,
+                            "reason": "withdrawn_only",
+                            "deleted_at": time.time(),
+                            "seen_at": time.time(),
+                            "latest_idv": latest_paper.get("_idv"),
+                            "latest_version": latest_paper.get("_version"),
+                            "latest_comment": latest_paper.get("arxiv_comment") or latest_paper.get("comment") or "",
+                        }
+                        logging.info(
+                            "Skipping withdrawn-only paper %s (latest %s)",
+                            latest_paper.get("_id"),
+                            latest_paper.get("_idv"),
+                        )
+                        continue
+
+                effective_paper = dict(selected_paper)
+                effective_paper["_effective_idv"] = effective_paper.get("_idv")
+                effective_paper["_effective_version"] = effective_paper.get("_version")
+                effective_paper["_latest_idv"] = latest_paper.get("_idv")
+                effective_paper["_latest_version"] = latest_paper.get("_version")
+                effective_paper["_latest_withdrawn"] = latest_is_withdrawn
+                effective_papers.append(effective_paper)
 
             # batch write - open one connection at a time to avoid lock conflicts
             for retry in range(5):
-                nhad_try, nnew_try, nreplace_try = 0, 0, 0
+                nhad_try, nnew_try, nreplace_try, ndeleted_try = 0, 0, 0, 0
                 metas_updates = {}
                 papers_updates = {}
                 try:
                     # First pass: compute stats and prepare batch updates using Repository
-                    pids_to_check = [p["_id"] for p in papers]
+                    pids_to_check = [p["_id"] for p in effective_papers] + list(tombstone_updates.keys())
                     existing = PaperRepository.get_by_ids(pids_to_check)
 
-                    for p in tqdm.tqdm(papers, "Preparing updates", ncols=100, file=sys.stderr):
+                    for p in tqdm.tqdm(
+                        effective_papers,
+                        "Preparing updates",
+                        ncols=100,
+                        file=sys.stderr,
+                    ):
                         pid = p["_id"]
                         old = existing.get(pid)
                         if old is None:
@@ -179,42 +224,72 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
                                 nhad_try += 1
 
                         papers_updates[pid] = p
-                        metas_updates[pid] = {"_time": p["_time"]}
+                        metas_updates[pid] = {
+                            "_time": p["_time"],
+                            "_id": p.get("_id"),
+                            "_idv": p.get("_idv"),
+                            "_version": p.get("_version"),
+                            "_effective_idv": p.get("_effective_idv"),
+                            "_effective_version": p.get("_effective_version"),
+                            "_latest_idv": p.get("_latest_idv"),
+                            "_latest_version": p.get("_latest_version"),
+                            "_latest_withdrawn": bool(p.get("_latest_withdrawn", False)),
+                        }
 
-                    # Batch write papers using Repository
-                    PaperRepository.set_many(papers_updates)
+                    for pid, tombstone in tombstone_updates.items():
+                        old = existing.get(pid)
+                        if old is not None:
+                            ndeleted_try += 1
+                            tombstone["previous_effective_idv"] = old.get("_effective_idv") or old.get("_idv") or ""
+                            tombstone["previous_effective_version"] = old.get("_effective_version") or old.get(
+                                "_version"
+                            )
+                            tombstone["previous_title"] = old.get("title") or ""
+
+                    PaperCorpusRepository.apply_daemon_batch(
+                        papers=papers_updates,
+                        metas=metas_updates,
+                        tombstones=tombstone_updates,
+                    )
                     prevn = PaperRepository.count()
 
-                    # Then batch write metas
-                    MetaRepository.save_many_no_commit(metas_updates)
-
-                    nhad, nnew, nreplace = nhad_try, nnew_try, nreplace_try
+                    nhad, nnew, nreplace, ndeleted = (
+                        nhad_try,
+                        nnew_try,
+                        nreplace_try,
+                        ndeleted_try,
+                    )
                     break
                 except Exception as e:
-                    logging.warning(f"DB write failed (attempt {retry+1}): {e}")
+                    logging.warning(f"DB write failed (attempt {retry + 1}): {e}")
                     time.sleep(2 + random.uniform(0, 3))
             else:
                 logging.error("Failed to write to database after 5 retries")
 
-            total_updated += nreplace + nnew
+            total_updated += nreplace + nnew + ndeleted
             cat_new += nnew
             cat_replace += nreplace
             cat_had += nhad
+            cat_deleted += ndeleted
 
             # some diagnostic information on how things are coming along
-            logging.debug(papers[0]["_time_str"])
+            if papers:
+                logging.debug(papers[0]["_time_str"])
             logging.debug(
-                "k=%d, out of %d: had %d, replaced %d, new %d. now have: %d",
+                "k=%d, out of %d: had %d, replaced %d, new %d, deleted %d. now have: %d",
                 k,
-                len(papers),
+                len(effective_papers),
                 nhad,
                 nreplace,
                 nnew,
+                ndeleted,
                 prevn,
             )
+            if skipped_withdrawn:
+                logging.info("Skipped %d withdrawn-only papers in this batch", skipped_withdrawn)
 
             # early termination criteria
-            if nnew == 0:
+            if (nnew + nreplace + ndeleted) == 0:
                 zero_updates_in_a_row += 1
                 if args.break_after > 0 and zero_updates_in_a_row >= args.break_after:
                     logging.debug(
@@ -233,13 +308,20 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
         if stop_all:
             break
         # Record stats for this category
-        category_stats[q_each] = {"new": cat_new, "replace": cat_replace, "had": cat_had}
-        print(f"[{q_each}] new: {cat_new}, replaced: {cat_replace}, existed: {cat_had}")
+        category_stats[q_each] = {
+            "new": cat_new,
+            "replace": cat_replace,
+            "had": cat_had,
+            "deleted": cat_deleted,
+        }
+        print(f"[{q_each}] new: {cat_new}, replaced: {cat_replace}, deleted: {cat_deleted}, existed: {cat_had}")
 
     # Print summary
     print("\n=== Category Summary ===")
     for cat, stats in category_stats.items():
-        print(f"  {cat}: +{stats['new']} new, ~{stats['replace']} replaced, ={stats['had']} existed")
+        print(
+            f"  {cat}: +{stats['new']} new, ~{stats['replace']} replaced, -{stats['deleted']} deleted, ={stats['had']} existed"
+        )
     print(f"Total updated: {total_updated}")
 
     # exit code: keep legacy behavior (1 means nothing updated)

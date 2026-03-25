@@ -36,8 +36,10 @@ Migration strategy:
 - Maintain compatibility with direct database access
 """
 
+import pickle
 import re
 import time
+import zlib
 from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Any
@@ -45,11 +47,13 @@ from typing import Any
 from loguru import logger
 
 from aslite.db import (
+    delete_metas_time_index,
     get_combined_tags_db,
     get_email_db,
     get_keywords_db,
     get_metas_db,
     get_neg_tags_db,
+    get_paper_tombstones_db,
     get_papers_db,
     get_readinglist_db,
     get_readinglist_index_db,
@@ -140,6 +144,83 @@ def _kv_set(conn, tablename: str, key: str, value: Any, encode_fn) -> None:
         f"INSERT OR REPLACE INTO {tablename} (key, value) VALUES (?, ?)",
         (key, encode_fn(value)),
     )
+
+
+def _kv_delete(conn, tablename: str, key: str) -> int:
+    if not _VALID_TABLENAME_RE.match(tablename):
+        raise ValueError(f"Invalid table name: {tablename}")
+    cursor = conn.execute(f"DELETE FROM {tablename} WHERE key=?", (key,))
+    return int(getattr(cursor, "rowcount", 0) or 0)
+
+
+def _encode_value(value: Any, *, compressed: bool) -> bytes:
+    payload = pickle.dumps(value, pickle.HIGHEST_PROTOCOL)
+    if compressed:
+        payload = zlib.compress(payload)
+    return payload
+
+
+def _is_upload_style_pid(pid: str) -> bool:
+    return bool(pid and str(pid).startswith("up_"))
+
+
+def _filter_visible_public_pids(pids: set[str]) -> set[str]:
+    normalized = {str(pid or "").strip() for pid in (pids or set()) if str(pid or "").strip()}
+    if not normalized:
+        return set()
+    upload_pids = {pid for pid in normalized if _is_upload_style_pid(pid)}
+    public_pids = [pid for pid in normalized if pid not in upload_pids]
+    if not public_pids:
+        return normalized
+    try:
+        with get_paper_tombstones_db() as tdb:
+            tombstones = tdb.get_many(public_pids)
+        visible_candidates = [pid for pid in public_pids if pid not in tombstones]
+        if not visible_candidates:
+            return set(upload_pids)
+        with get_metas_db() as mdb:
+            metas = mdb.get_many(visible_candidates)
+        return set(upload_pids) | {pid for pid in visible_candidates if pid in metas}
+    except Exception:
+        return normalized
+
+
+def _sanitize_user_pid_mapping(
+    mapping: dict[str, set[str]] | None,
+    *,
+    keep_empty: bool,
+) -> tuple[dict[str, set[str]], bool]:
+    if not isinstance(mapping, dict):
+        return {}, not (mapping in ({}, None))
+    cleaned: dict[str, set[str]] = {}
+    changed = False
+    for name, raw_pids in mapping.items():
+        pid_set = set(raw_pids or set())
+        visible_pids = _filter_visible_public_pids(pid_set)
+        if visible_pids != pid_set:
+            changed = True
+        if visible_pids or keep_empty:
+            cleaned[name] = visible_pids
+        else:
+            changed = True
+    if set(cleaned.keys()) != set(mapping.keys()):
+        changed = True
+    return cleaned, changed
+
+
+def _get_clean_user_pid_mapping(db_getter, user: str, *, keep_empty: bool) -> dict[str, set[str]]:
+    with db_getter() as db:
+        current = db.get(user, {})
+    cleaned, changed = _sanitize_user_pid_mapping(current, keep_empty=keep_empty)
+    if not changed:
+        return cleaned
+
+    with db_getter(flag="c", autocommit=False) as db:
+        with db.transaction(mode="IMMEDIATE"):
+            latest = db.get(user, {})
+            latest_cleaned, _changed = _sanitize_user_pid_mapping(latest, keep_empty=keep_empty)
+            db[user] = latest_cleaned
+            return latest_cleaned
 
 
 # -----------------------------------------------------------------------------
@@ -290,6 +371,15 @@ class PaperRepository:
         """Alias for save_many to keep naming consistent with lower-level API."""
         PaperRepository.save_many(papers)
 
+    @staticmethod
+    def delete(pid: str) -> bool:
+        """Delete a single paper record."""
+        with get_papers_db(flag="c") as pdb:
+            if pid not in pdb:
+                return False
+            del pdb[pid]
+            return True
+
 
 # -----------------------------------------------------------------------------
 # Meta Repository
@@ -349,6 +439,21 @@ class MetaRepository:
             except Exception:
                 # Don't fail the main operation if index update fails
                 pass
+
+    @staticmethod
+    def delete(pid: str) -> bool:
+        """Delete metadata for a single paper and remove its time index row."""
+        deleted = False
+        with get_metas_db(flag="c") as mdb:
+            if pid in mdb:
+                del mdb[pid]
+                deleted = True
+        if deleted:
+            try:
+                delete_metas_time_index([pid])
+            except Exception:
+                pass
+        return deleted
 
     @staticmethod
     def iter_all_metas():
@@ -411,7 +516,109 @@ class MetaRepository:
                     heapq.heapreplace(heap, (t, pid, meta))
 
         # Sort by time descending
-        return sorted([(pid, meta) for _t, pid, meta in heap], key=lambda x: x[1].get("_time", 0), reverse=True)
+        return sorted(
+            [(pid, meta) for _t, pid, meta in heap],
+            key=lambda x: x[1].get("_time", 0),
+            reverse=True,
+        )
+
+
+class PaperTombstoneRepository:
+    """Repository for public paper tombstones."""
+
+    @staticmethod
+    def get_by_id(pid: str) -> dict | None:
+        with get_paper_tombstones_db() as tdb:
+            return tdb.get(pid)
+
+    @staticmethod
+    def get_by_ids(pids: list[str]) -> dict[str, dict]:
+        if not pids:
+            return {}
+        with get_paper_tombstones_db() as tdb:
+            return tdb.get_many(pids)
+
+    @staticmethod
+    def save(pid: str, data: dict) -> None:
+        with get_paper_tombstones_db(flag="c") as tdb:
+            tdb[pid] = data
+
+    @staticmethod
+    def delete(pid: str) -> bool:
+        with get_paper_tombstones_db(flag="c") as tdb:
+            if pid not in tdb:
+                return False
+            del tdb[pid]
+            return True
+
+    @staticmethod
+    def iter_all():
+        with get_paper_tombstones_db() as tdb:
+            yield from tdb.items()
+
+
+class PaperCorpusRepository:
+    """Atomic public corpus mutations for daemon-driven paper lifecycle updates."""
+
+    @staticmethod
+    def apply_daemon_batch(
+        *,
+        papers: dict[str, dict] | None = None,
+        metas: dict[str, dict] | None = None,
+        tombstones: dict[str, dict] | None = None,
+    ) -> None:
+        papers = papers or {}
+        metas = metas or {}
+        tombstones = tombstones or {}
+        if papers or metas:
+            if set(papers.keys()) != set(metas.keys()):
+                raise ValueError("papers and metas must contain the same pid set")
+        if not papers and not metas and not tombstones:
+            return
+
+        with get_paper_tombstones_db(flag="c", autocommit=False) as tdb:
+            conn = tdb.conn
+            _ensure_kv_table(conn, "papers")
+            _ensure_kv_table(conn, "metas")
+            _ensure_kv_table(conn, "paper_tombstones")
+            conn.execute("CREATE TABLE IF NOT EXISTS metas_time_index (pid TEXT PRIMARY KEY, _time REAL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_metas_time ON metas_time_index (_time)")
+
+            with tdb.transaction(mode="IMMEDIATE"):
+                for pid, paper in papers.items():
+                    _kv_set(
+                        conn,
+                        "papers",
+                        pid,
+                        paper,
+                        lambda value: _encode_value(value, compressed=True),
+                    )
+                for pid, meta in metas.items():
+                    _kv_set(
+                        conn,
+                        "metas",
+                        pid,
+                        meta,
+                        lambda value: _encode_value(value, compressed=False),
+                    )
+                    _time = meta.get("_time", 0) if isinstance(meta, dict) else 0
+                    conn.execute(
+                        "INSERT OR REPLACE INTO metas_time_index (pid, _time) VALUES (?, ?)",
+                        (pid, _time),
+                    )
+                    _kv_delete(conn, "paper_tombstones", pid)
+
+                for pid, tombstone in tombstones.items():
+                    _kv_set(
+                        conn,
+                        "paper_tombstones",
+                        pid,
+                        tombstone,
+                        lambda value: _encode_value(value, compressed=False),
+                    )
+                    _kv_delete(conn, "papers", pid)
+                    _kv_delete(conn, "metas", pid)
+                    conn.execute("DELETE FROM metas_time_index WHERE pid = ?", (pid,))
 
 
 # -----------------------------------------------------------------------------
@@ -433,8 +640,7 @@ class TagRepository:
         Returns:
             Dictionary mapping tag name to set of paper IDs
         """
-        with get_tags_db() as tdb:
-            return tdb.get(user, {})
+        return _get_clean_user_pid_mapping(get_tags_db, user, keep_empty=True)
 
     @staticmethod
     def get_all_tags() -> dict[str, dict[str, set[str]]]:
@@ -552,22 +758,23 @@ class TagRepository:
         Returns:
             "ok" if removed, otherwise legacy error message.
         """
-        with get_tags_db(flag="c") as tdb:
-            if user not in tdb:
-                return r"user has no library of tags ¯\_(ツ)_/¯"
+        with get_tags_db(flag="c", autocommit=False) as tdb:
+            with tdb.transaction(mode="IMMEDIATE"):
+                if user not in tdb:
+                    return r"user has no library of tags ¯\_(ツ)_/¯"
 
-            tags = tdb[user]
-            if tag not in tags:
-                return f"user doesn't have the tag {tag}"
+                tags = tdb[user]
+                if tag not in tags:
+                    return f"user doesn't have the tag {tag}"
 
-            if pid in tags[tag]:
-                tags[tag].remove(pid)
-                if len(tags[tag]) == 0:
-                    del tags[tag]
-                tdb[user] = tags
-                return "ok"
+                if pid in tags[tag]:
+                    tags[tag].remove(pid)
+                    if len(tags[tag]) == 0:
+                        del tags[tag]
+                    tdb[user] = tags
+                    return "ok"
 
-            return f"user doesn't have paper {pid} in tag {tag}"
+                return f"user doesn't have paper {pid} in tag {tag}"
 
     @staticmethod
     def delete_tag(user: str, tag: str) -> bool:
@@ -813,31 +1020,32 @@ class NegativeTagRepository:
     @staticmethod
     def get_user_neg_tags(user: str) -> dict[str, set[str]]:
         """Get all negative tags for a user."""
-        with get_neg_tags_db() as ntdb:
-            return ntdb.get(user, {})
+        return _get_clean_user_pid_mapping(get_neg_tags_db, user, keep_empty=False)
 
     @staticmethod
     def add_paper_to_neg_tag(user: str, pid: str, tag: str):
         """Add a paper to a user's negative tag."""
-        with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user, {})
-            if tag not in neg_tags:
-                neg_tags[tag] = set()
-            neg_tags[tag].add(pid)
-            ntdb[user] = neg_tags
+        with get_neg_tags_db(flag="c", autocommit=False) as ntdb:
+            with ntdb.transaction(mode="IMMEDIATE"):
+                neg_tags = ntdb.get(user, {})
+                if tag not in neg_tags:
+                    neg_tags[tag] = set()
+                neg_tags[tag].add(pid)
+                ntdb[user] = neg_tags
 
     @staticmethod
     def remove_paper_from_neg_tag(user: str, pid: str, tag: str) -> bool:
         """Remove a paper from a user's negative tag."""
-        with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user, {})
-            if tag in neg_tags and pid in neg_tags[tag]:
-                neg_tags[tag].discard(pid)
-                if not neg_tags[tag]:
-                    del neg_tags[tag]
-                ntdb[user] = neg_tags
-                return True
-            return False
+        with get_neg_tags_db(flag="c", autocommit=False) as ntdb:
+            with ntdb.transaction(mode="IMMEDIATE"):
+                neg_tags = ntdb.get(user, {})
+                if tag in neg_tags and pid in neg_tags[tag]:
+                    neg_tags[tag].discard(pid)
+                    if not neg_tags[tag]:
+                        del neg_tags[tag]
+                    ntdb[user] = neg_tags
+                    return True
+                return False
 
     @staticmethod
     def ensure_users(users: Iterable[str]) -> int:
@@ -888,21 +1096,23 @@ class CombinedTagRepository:
             user: Username
             combined_tag: Combined tag string (e.g., "RL,NLP")
         """
-        with get_combined_tags_db(flag="c") as ctdb:
-            ctags = ctdb.get(user, set())
-            ctags.add(combined_tag)
-            ctdb[user] = ctags
+        with get_combined_tags_db(flag="c", autocommit=False) as ctdb:
+            with ctdb.transaction(mode="IMMEDIATE"):
+                ctags = ctdb.get(user, set())
+                ctags.add(combined_tag)
+                ctdb[user] = ctags
 
     @staticmethod
     def remove_combined_tag(user: str, combined_tag: str) -> bool:
         """Remove a combined tag for a user."""
-        with get_combined_tags_db(flag="c") as ctdb:
-            ctags = ctdb.get(user, set())
-            if combined_tag in ctags:
-                ctags.discard(combined_tag)
-                ctdb[user] = ctags
-                return True
-            return False
+        with get_combined_tags_db(flag="c", autocommit=False) as ctdb:
+            with ctdb.transaction(mode="IMMEDIATE"):
+                ctags = ctdb.get(user, set())
+                if combined_tag in ctags:
+                    ctags.discard(combined_tag)
+                    ctdb[user] = ctags
+                    return True
+                return False
 
     @staticmethod
     def rename_combined_tag(user: str, old_tag: str, new_tag: str) -> bool:
@@ -917,14 +1127,15 @@ class CombinedTagRepository:
         Returns:
             True if renamed successfully, False if old tag not found
         """
-        with get_combined_tags_db(flag="c") as ctdb:
-            ctags = ctdb.get(user, set())
-            if old_tag not in ctags:
-                return False
-            ctags.discard(old_tag)
-            ctags.add(new_tag)
-            ctdb[user] = ctags
-            return True
+        with get_combined_tags_db(flag="c", autocommit=False) as ctdb:
+            with ctdb.transaction(mode="IMMEDIATE"):
+                ctags = ctdb.get(user, set())
+                if old_tag not in ctags:
+                    return False
+                ctags.discard(old_tag)
+                ctags.add(new_tag)
+                ctdb[user] = ctags
+                return True
 
     @staticmethod
     def has_combined_tag(user: str, combined_tag: str) -> bool:
@@ -953,8 +1164,7 @@ class KeywordRepository:
         Returns:
             Dictionary mapping keyword to set of paper IDs
         """
-        with get_keywords_db() as kdb:
-            return kdb.get(user, {})
+        return _get_clean_user_pid_mapping(get_keywords_db, user, keep_empty=True)
 
     @staticmethod
     def get_all_keywords() -> dict[str, dict[str, set[str]]]:
@@ -971,32 +1181,35 @@ class KeywordRepository:
             user: Username
             keyword: Keyword to track
         """
-        with get_keywords_db(flag="c") as kdb:
-            keywords = kdb.get(user, {})
-            if keyword not in keywords:
-                keywords[keyword] = set()
-            kdb[user] = keywords
+        with get_keywords_db(flag="c", autocommit=False) as kdb:
+            with kdb.transaction(mode="IMMEDIATE"):
+                keywords = kdb.get(user, {})
+                if keyword not in keywords:
+                    keywords[keyword] = set()
+                kdb[user] = keywords
 
     @staticmethod
     def remove_keyword(user: str, keyword: str) -> bool:
         """Remove a keyword for a user."""
-        with get_keywords_db(flag="c") as kdb:
-            keywords = kdb.get(user, {})
-            if keyword in keywords:
-                del keywords[keyword]
-                kdb[user] = keywords
-                return True
-            return False
+        with get_keywords_db(flag="c", autocommit=False) as kdb:
+            with kdb.transaction(mode="IMMEDIATE"):
+                keywords = kdb.get(user, {})
+                if keyword in keywords:
+                    del keywords[keyword]
+                    kdb[user] = keywords
+                    return True
+                return False
 
     @staticmethod
     def add_paper_to_keyword(user: str, keyword: str, pid: str):
         """Add a paper to a keyword's tracking set."""
-        with get_keywords_db(flag="c") as kdb:
-            keywords = kdb.get(user, {})
-            if keyword not in keywords:
-                keywords[keyword] = set()
-            keywords[keyword].add(pid)
-            kdb[user] = keywords
+        with get_keywords_db(flag="c", autocommit=False) as kdb:
+            with kdb.transaction(mode="IMMEDIATE"):
+                keywords = kdb.get(user, {})
+                if keyword not in keywords:
+                    keywords[keyword] = set()
+                keywords[keyword].add(pid)
+                kdb[user] = keywords
 
     @staticmethod
     def rename_keyword(user: str, old_keyword: str, new_keyword: str) -> str:
@@ -1006,20 +1219,21 @@ class KeywordRepository:
         Returns:
             "ok" if renamed, otherwise legacy error message.
         """
-        with get_keywords_db(flag="c") as kdb:
-            keywords = kdb.get(user, {})
-            if not keywords:
-                return "user does not have a library"
-            if old_keyword not in keywords:
-                return "user does not have this keyword"
+        with get_keywords_db(flag="c", autocommit=False) as kdb:
+            with kdb.transaction(mode="IMMEDIATE"):
+                keywords = kdb.get(user, {})
+                if not keywords:
+                    return "user does not have a library"
+                if old_keyword not in keywords:
+                    return "user does not have this keyword"
 
-            # Merge if new keyword exists, otherwise rename
-            if new_keyword in keywords:
-                keywords[new_keyword] = keywords[new_keyword].union(keywords[old_keyword])
-            else:
-                keywords[new_keyword] = keywords[old_keyword]
-            del keywords[old_keyword]
-            kdb[user] = keywords
+                # Merge if new keyword exists, otherwise rename
+                if new_keyword in keywords:
+                    keywords[new_keyword] = keywords[new_keyword].union(keywords[old_keyword])
+                else:
+                    keywords[new_keyword] = keywords[old_keyword]
+                del keywords[old_keyword]
+                kdb[user] = keywords
         return "ok"
 
 
@@ -1177,12 +1391,18 @@ class ReadingListRepository:
             user: Username
             pid: Paper ID
             updates: Dictionary of fields to update
+
+        Note: If the item has been deleted (key absent), no-op to avoid
+        resurrecting a deleted entry via a late background update.
         """
         rl_key = readinglist_key(user, pid)
         # Use a transaction to avoid lost updates under concurrent read-modify-write.
         with get_readinglist_db(flag="c", autocommit=False) as rldb:
             with rldb.transaction(mode="IMMEDIATE"):
-                item = rldb.get(rl_key, {})
+                item = rldb.get(rl_key)
+                # Guard: do not create an entry that was never added or was deleted.
+                if item is None:
+                    return
                 if not isinstance(item, dict):
                     item = {}
                 next_item = dict(item)
@@ -1228,6 +1448,25 @@ class SummaryStatusRepository:
         key = summary_status_key(pid, model)
         with get_summary_status_db() as sdb:
             return sdb.get(key)
+
+    @staticmethod
+    def get_status_many(pids: list[str], model: str = None) -> dict[str, dict]:
+        """Batch get summary status rows for multiple papers."""
+        normalized_pids = [str(pid or "").strip() for pid in (pids or [])]
+        normalized_pids = [pid for pid in normalized_pids if pid]
+        if not normalized_pids:
+            return {}
+
+        keys = [summary_status_key(pid, model) for pid in normalized_pids]
+        with get_summary_status_db() as sdb:
+            fetched = sdb.get_many(keys)
+
+        result: dict[str, dict] = {}
+        for pid, key in zip(normalized_pids, keys):
+            value = fetched.get(key)
+            if isinstance(value, dict):
+                result[pid] = value
+        return result
 
     @staticmethod
     def set_status(pid: str, model: str, status: str, error: str = None, **extra):
@@ -1290,10 +1529,15 @@ class SummaryStatusRepository:
             updates: Dictionary of fields to update
         """
         key = summary_status_key(pid, model)
-        with get_summary_status_db(flag="c") as sdb:
-            status = sdb.get(key, {})
-            status.update(updates)
-            sdb[key] = status
+        with get_summary_status_db(flag="c", autocommit=False) as sdb:
+            with sdb.transaction(mode="IMMEDIATE"):
+                status = sdb.get(key, {})
+                if not isinstance(status, dict):
+                    status = {}
+                next_status = dict(status)
+                if isinstance(updates, dict) and updates:
+                    next_status.update(updates)
+                sdb[key] = next_status
 
     @staticmethod
     def delete_status(pid: str, model: str) -> bool:
@@ -1430,21 +1674,26 @@ class SummaryStatusRepository:
 
     @staticmethod
     def bump_generation_epoch(pid: str, model: str) -> int:
-        """Increment cancellation epoch for a (pid, model) pair and return new value."""
+        """Increment cancellation epoch for a (pid, model) pair and return new value.
+
+        Uses an IMMEDIATE transaction to prevent lost increments when
+        concurrent callers read-modify-write the same epoch counter.
+        """
         pid = (pid or "").strip()
         model = (model or "").strip()
         if not pid or not model:
             return 0
         key = summary_generation_epoch_key(pid, model)
-        with get_summary_status_db(flag="c") as sdb:
-            cur = sdb.get(key)
-            try:
-                cur_i = int(cur or 0)
-            except Exception:
-                cur_i = 0
-            cur_i += 1
-            sdb[key] = cur_i
-            return cur_i
+        with get_summary_status_db(flag="c", autocommit=False) as sdb:
+            with sdb.transaction(mode="IMMEDIATE"):
+                cur = sdb.get(key)
+                try:
+                    cur_i = int(cur or 0)
+                except Exception:
+                    cur_i = 0
+                cur_i += 1
+                sdb[key] = cur_i
+                return cur_i
 
 
 # -----------------------------------------------------------------------------
@@ -1651,6 +1900,17 @@ class UploadedPaperRepository:
                 pass
 
         return result
+
+    @staticmethod
+    def get_by_owner_for_pids(owner: str, pids: list[str]) -> dict[str, dict]:
+        """Batch get a user's uploaded papers for a target pid subset."""
+        normalized_pids = [str(pid or "").strip() for pid in (pids or [])]
+        normalized_pids = [pid for pid in normalized_pids if pid]
+        if not normalized_pids:
+            return {}
+        with get_uploaded_papers_db() as updb:
+            fetched = updb.get_many(normalized_pids)
+        return {pid: data for pid, data in fetched.items() if isinstance(data, dict) and data.get("owner") == owner}
 
     @staticmethod
     def get_by_sha256(owner: str, sha256: str) -> tuple[str, dict] | None:

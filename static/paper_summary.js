@@ -57,6 +57,11 @@ var renderAbstractMarkdown =
         return s || '';
     };
 var triggerMathJax = CommonUtils.triggerMathJax || function () {};
+var hasMathContent =
+    CommonUtils.hasMathContent ||
+    function () {
+        return false;
+    };
 var handleApiError =
     CommonUtils.handleApiError ||
     function (err) {
@@ -85,6 +90,14 @@ var showConfirm =
         : function () {
               return Promise.resolve(false);
           };
+var summaryTimestampFormatter = new Intl.DateTimeFormat(undefined, {
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+});
 var sharedShowSimilarPapersModal =
     typeof CommonUtils.showSimilarPapersModal === 'function'
         ? CommonUtils.showSimilarPapersModal
@@ -476,14 +489,85 @@ function handleUserEvent(event, options = {}) {
             return;
         }
 
-        const currentModel = String(summaryApp.getCurrentModel() || '').trim();
         const eventModel = String(event.model || '').trim();
-        if (!currentModel || !eventModel || eventModel !== currentModel) {
+        if (!eventModel) {
+            return;
+        }
+        const status = String(event.status || '').trim();
+        const taskId = event.task_id ? String(event.task_id) : '';
+        const eventError = event.error ? String(event.error).trim() : '';
+        const resolvedEventModel = String(event.resolved_model || '').trim();
+        const nowTs = typeof Date !== 'undefined' ? Date.now() : 0;
+
+        summaryApp.summaryStatusCacheByModel[eventModel] = {
+            status,
+            last_error: eventError,
+            task_id: taskId,
+            resolved_model: resolvedEventModel,
+            ts: nowTs || 0,
+        };
+        if (resolvedEventModel && resolvedEventModel !== eventModel) {
+            summaryApp.summaryStatusCacheByModel[resolvedEventModel] = {
+                status,
+                last_error: eventError,
+                task_id: taskId,
+                resolved_model: resolvedEventModel,
+                ts: nowTs || 0,
+            };
+        }
+
+        if (status === 'queued' || status === 'running') {
+            summaryApp.inflightModels[eventModel] = true;
+            if (taskId) {
+                summaryApp.taskIdsByModel[eventModel] = taskId;
+            }
+        } else {
+            summaryApp.inflightModels[eventModel] = false;
+            summaryApp.clearAutoRetry(eventModel);
+            summaryApp.resetAutoRetry(eventModel);
+            summaryApp.taskIdsByModel[eventModel] = '';
+            summaryApp.queueRankByModel[eventModel] = 0;
+            summaryApp.queueTotalByModel[eventModel] = 0;
+            if (summaryApp.pendingGenerationModel === eventModel) {
+                summaryApp.pendingGenerationModel = '';
+            }
+        }
+
+        if (status === 'ok') {
+            const key = modelCacheKey(eventModel);
+            if (
+                key &&
+                Array.isArray(summaryApp.availableSummaries) &&
+                !summaryApp.availableSummaries.includes(key)
+            ) {
+                summaryApp.availableSummaries = [...summaryApp.availableSummaries, key];
+            }
+            if (resolvedEventModel && resolvedEventModel !== eventModel) {
+                summaryApp.setModelAlias(eventModel, resolvedEventModel);
+                const resolvedKey = modelCacheKey(resolvedEventModel);
+                if (
+                    resolvedKey &&
+                    Array.isArray(summaryApp.availableSummaries) &&
+                    !summaryApp.availableSummaries.includes(resolvedKey)
+                ) {
+                    summaryApp.availableSummaries = [...summaryApp.availableSummaries, resolvedKey];
+                }
+            } else {
+                summaryApp.clearModelAlias(eventModel);
+            }
+        } else if (status === 'failed' || status === 'canceled') {
+            summaryApp.clearModelAlias(eventModel);
+        }
+
+        const currentModel = String(summaryApp.getCurrentModel() || '').trim();
+        const currentMatchesEvent =
+            currentModel &&
+            (eventModel === currentModel ||
+                (status === 'ok' && resolvedEventModel && resolvedEventModel === currentModel));
+        if (!currentMatchesEvent) {
             return;
         }
 
-        const status = String(event.status || '').trim();
-        const taskId = event.task_id ? String(event.task_id) : '';
         const hasCurrentContent =
             Boolean(summaryApp.content) &&
             String(summaryApp.contentModel || '').trim() === currentModel;
@@ -509,38 +593,12 @@ function handleUserEvent(event, options = {}) {
             return;
         }
 
-        summaryApp.inflightModels[currentModel] = false;
-        if (summaryApp.pendingGenerationModel === currentModel) {
-            summaryApp.pendingGenerationModel = '';
-        }
-        summaryApp.taskIdsByModel[currentModel] = '';
-        summaryApp.queueRankByModel[currentModel] = 0;
-        summaryApp.queueTotalByModel[currentModel] = 0;
-
-        try {
-            delete summaryApp.summaryStatusCacheByModel[currentModel];
-        } catch (e) {}
-        try {
-            if (summaryApp._summaryStatusPromisesByModel) {
-                delete summaryApp._summaryStatusPromisesByModel[currentModel];
-            }
-        } catch (e) {}
-
         if (status === 'ok') {
-            const key = modelCacheKey(currentModel);
-            if (
-                key &&
-                Array.isArray(summaryApp.availableSummaries) &&
-                !summaryApp.availableSummaries.includes(key)
-            ) {
-                summaryApp.availableSummaries = [...summaryApp.availableSummaries, key];
-            }
             summaryApp.loadSummary(summaryApp.pid, { model: currentModel, cache_only: true });
             return;
         }
 
         if (status === 'failed' || status === 'canceled') {
-            const eventError = event.error ? String(event.error).trim() : '';
             const notice =
                 status === 'failed'
                     ? eventError
@@ -645,8 +703,8 @@ class SummaryState {
         this.modelsError = null;
         this.regenerating = false;
         this.selectedModel = '';
-        this.autoRetryCount = 0;
-        this.autoRetryTimer = null;
+        this.autoRetryCountsByModel = Object.create(null);
+        this.autoRetryTimersByModel = Object.create(null);
         this.maxAutoRetries = 20;
         this.notice = '';
         this.clearing = null;
@@ -687,10 +745,19 @@ class SummaryState {
         this.summaryStatusCacheByModel = Object.create(null);
         this._summaryStatusPromisesByModel = Object.create(null);
         this._modelSwitchStatusTimer = null;
+        this._statusWatchTimer = null;
+        this._statusWatchModel = '';
+        this._statusWatchFailures = 0;
 
         // Track forced regenerations so we don't stop polling on stale cached content
         // Shape: { [modelId]: { generatedAt: number|null, contentHash: string } }
         this.pendingRegenerations = Object.create(null);
+
+        // Track requested-model -> resolved-model aliases when the backend serves a
+        // fallback cache under a different actual model. This keeps local per-model
+        // caches and availability badges from drifting after clear/regenerate flows.
+        this.resolvedModelByRequested = Object.create(null);
+        this.requestedModelsByResolved = Object.create(null);
 
         // Timer for renderMath to avoid stale callbacks (fix for issue #4)
         this._renderMathTimer = null;
@@ -799,7 +866,11 @@ class SummaryState {
             // NOTE: We use triggerMathJax only for abstract, not for summary content
             // Summary content uses tex2chtmlPromise via renderSummaryMarkdown (fix for issue #3)
             const abstractContainer = container.querySelector('.paper-abstract');
-            if (abstractContainer && triggerMathJax) {
+            if (
+                abstractContainer &&
+                triggerMathJax &&
+                hasMathContent((this.paper && this.paper.summary) || '')
+            ) {
                 triggerMathJax(abstractContainer);
             }
             // After initial render, set up font-aware re-render.
@@ -1016,17 +1087,209 @@ class SummaryState {
         return '';
     }
 
-    clearAutoRetry() {
-        if (this.autoRetryTimer) {
-            clearTimeout(this.autoRetryTimer);
-            this.autoRetryTimer = null;
+    setModelAlias(requestedModel, resolvedModel) {
+        const requested = String(requestedModel || '').trim();
+        const resolved = String(resolvedModel || '').trim();
+        if (!requested) return;
+        this.clearModelAlias(requested);
+        if (!resolved || requested === resolved) return;
+        this.resolvedModelByRequested[requested] = resolved;
+        if (!Array.isArray(this.requestedModelsByResolved[resolved])) {
+            this.requestedModelsByResolved[resolved] = [];
+        }
+        if (!this.requestedModelsByResolved[resolved].includes(requested)) {
+            this.requestedModelsByResolved[resolved].push(requested);
         }
     }
 
+    clearModelAlias(requestedModel) {
+        const requested = String(requestedModel || '').trim();
+        if (!requested) return;
+        const resolved = String(this.resolvedModelByRequested[requested] || '').trim();
+        if (resolved && Array.isArray(this.requestedModelsByResolved[resolved])) {
+            this.requestedModelsByResolved[resolved] = this.requestedModelsByResolved[
+                resolved
+            ].filter(model => model !== requested);
+            if (!this.requestedModelsByResolved[resolved].length) {
+                delete this.requestedModelsByResolved[resolved];
+            }
+        }
+        delete this.resolvedModelByRequested[requested];
+    }
+
+    getAliasModelsForResolved(resolvedModel) {
+        const resolved = String(resolvedModel || '').trim();
+        if (!resolved || !Array.isArray(this.requestedModelsByResolved[resolved])) {
+            return [];
+        }
+        return this.requestedModelsByResolved[resolved].slice();
+    }
+
+    clearModelLocalState(model, options = {}) {
+        const targetModel = String(model || '').trim();
+        if (!targetModel) return;
+        const removeAvailability = options.removeAvailability !== false;
+        this.clearAutoRetry(targetModel);
+        this.resetAutoRetry(targetModel);
+        this.inflightModels[targetModel] = false;
+        this.taskIdsByModel[targetModel] = '';
+        this.queueRankByModel[targetModel] = 0;
+        this.queueTotalByModel[targetModel] = 0;
+        try {
+            delete this.summaryCacheByModel[targetModel];
+        } catch (e) {}
+        try {
+            delete this.summaryStatusCacheByModel[targetModel];
+        } catch (e) {}
+        try {
+            if (this._summaryStatusPromisesByModel) {
+                delete this._summaryStatusPromisesByModel[targetModel];
+            }
+        } catch (e) {}
+        if (this.pendingRegenerations) {
+            delete this.pendingRegenerations[targetModel];
+        }
+        if (removeAvailability) {
+            const key = modelCacheKey(targetModel);
+            if (key) {
+                this.availableSummaries = this.availableSummaries.filter(
+                    existing => existing !== key
+                );
+            }
+        }
+    }
+
+    clearModelAndAliasState(model, options = {}) {
+        const targetModel = String(model || '').trim();
+        if (!targetModel) return;
+        const resolved = String(this.resolvedModelByRequested[targetModel] || '').trim();
+        if (resolved) {
+            this.clearModelLocalState(targetModel, options);
+            this.clearModelAlias(targetModel);
+            return;
+        }
+
+        const relatedModels = new Set([targetModel]);
+        this.getAliasModelsForResolved(targetModel).forEach(alias => relatedModels.add(alias));
+        relatedModels.forEach(modelId => this.clearModelLocalState(modelId, options));
+        this.getAliasModelsForResolved(targetModel).forEach(alias => this.clearModelAlias(alias));
+    }
+
+    getAutoRetryKey(model) {
+        const key = String(model || '').trim();
+        return key || '__default__';
+    }
+
+    clearAutoRetry(model) {
+        if (!model) {
+            Object.keys(this.autoRetryTimersByModel || {}).forEach(key => {
+                const timer = this.autoRetryTimersByModel[key];
+                if (timer) clearTimeout(timer);
+            });
+            this.autoRetryTimersByModel = Object.create(null);
+            return;
+        }
+        const retryKey = this.getAutoRetryKey(model);
+        const timer = this.autoRetryTimersByModel[retryKey];
+        if (timer) {
+            clearTimeout(timer);
+            delete this.autoRetryTimersByModel[retryKey];
+        }
+    }
+
+    resetAutoRetry(model) {
+        const retryKey = this.getAutoRetryKey(model);
+        this.autoRetryCountsByModel[retryKey] = 0;
+    }
+
+    clearStatusWatch() {
+        if (this._statusWatchTimer) {
+            clearTimeout(this._statusWatchTimer);
+            this._statusWatchTimer = null;
+        }
+        this._statusWatchModel = '';
+        this._statusWatchFailures = 0;
+    }
+
+    scheduleStatusWatch(pid, options = {}) {
+        const targetModel = String(options.model || this.getCurrentModel() || '').trim();
+        if (!pid || !targetModel || this.clearing) return;
+
+        this.clearStatusWatch();
+
+        const immediate = Boolean(options.immediate);
+        const baseDelayMs = immediate
+            ? 1500
+            : Math.min(30000, 12000 + Number(this._statusWatchFailures || 0) * 4000);
+        const hidden = typeof document !== 'undefined' && document.hidden;
+        const delayMs = hidden ? Math.max(baseDelayMs, 30000) : baseDelayMs;
+        this._statusWatchModel = targetModel;
+
+        this._statusWatchTimer = setTimeout(
+            async () => {
+                this._statusWatchTimer = null;
+                if (this.clearing) return;
+                if (String(this.pid || '').trim() !== String(pid || '').trim()) return;
+                if (String(this.getCurrentModel() || '').trim() !== targetModel) return;
+
+                const contentModel = String(this.contentModel || '').trim();
+                const hasCurrentContent = Boolean(this.content) && contentModel === targetModel;
+                if (hasCurrentContent && !this.inflightModels[targetModel]) {
+                    this._statusWatchFailures = 0;
+                    return;
+                }
+
+                try {
+                    const statusInfo = await _fetchSummaryStatusCached(this, pid, targetModel, {
+                        force: true,
+                    });
+                    this._statusWatchFailures = 0;
+                    if (String(this.getCurrentModel() || '').trim() !== targetModel) return;
+                    const status = String((statusInfo && statusInfo.status) || '').trim();
+                    if (!status) {
+                        this.scheduleStatusWatch(pid, { model: targetModel });
+                        return;
+                    }
+                    if (status === 'ok') {
+                        const key = modelCacheKey(targetModel);
+                        if (
+                            key &&
+                            Array.isArray(this.availableSummaries) &&
+                            !this.availableSummaries.includes(key)
+                        ) {
+                            this.availableSummaries = [...this.availableSummaries, key];
+                        }
+                        this.loadSummary(pid, { model: targetModel, cache_only: true });
+                        return;
+                    }
+                    if (status === 'queued' || status === 'running') {
+                        if (statusInfo && statusInfo.task_id) {
+                            const statusTaskId = String(statusInfo.task_id);
+                            this.taskIdsByModel[targetModel] = statusTaskId;
+                            this.lastTaskId = statusTaskId;
+                            this.refreshQueueRank();
+                        }
+                        this.inflightModels[targetModel] = true;
+                        this.pendingGenerationModel = targetModel;
+                        this.scheduleAutoRetry(pid, { model: targetModel, cache_only: true });
+                        return;
+                    }
+                    this.scheduleStatusWatch(pid, { model: targetModel });
+                } catch (e) {
+                    this._statusWatchFailures = Number(this._statusWatchFailures || 0) + 1;
+                    this.scheduleStatusWatch(pid, { model: targetModel });
+                }
+            },
+            Math.max(0, delayMs)
+        );
+    }
+
     scheduleAutoRetry(pid, options = {}) {
-        if (this.autoRetryCount >= this.maxAutoRetries) {
+        const targetModel = String(options.model || '').trim();
+        const retryKey = this.getAutoRetryKey(targetModel);
+        const retryCount = Number(this.autoRetryCountsByModel[retryKey] || 0);
+        if (retryCount >= this.maxAutoRetries) {
             // Avoid getting stuck in "generating" state forever if the backend never produces a cache.
-            const targetModel = String(options.model || '').trim();
             if (targetModel) {
                 if (this.inflightModels) {
                     this.inflightModels[targetModel] = false;
@@ -1047,20 +1310,13 @@ class SummaryState {
             });
             return;
         }
-        this.autoRetryCount += 1;
-        const delayMs = Math.min(15000, 5000 + this.autoRetryCount * 2000);
-        this.clearAutoRetry();
-        this.autoRetryTimer = setTimeout(() => {
-            const targetModel = String(options.model || '').trim();
+        this.autoRetryCountsByModel[retryKey] = retryCount + 1;
+        const delayMs = Math.min(15000, 5000 + this.autoRetryCountsByModel[retryKey] * 2000);
+        this.clearAutoRetry(targetModel);
+        this.autoRetryTimersByModel[retryKey] = setTimeout(() => {
+            delete this.autoRetryTimersByModel[retryKey];
             // Don't steal the UI back if user switched models.
             if (targetModel && String(this.getCurrentModel() || '') !== targetModel) {
-                return;
-            }
-            if (
-                targetModel &&
-                this.pendingGenerationModel &&
-                this.pendingGenerationModel !== targetModel
-            ) {
                 return;
             }
             this.refreshQueueRank();
@@ -1077,7 +1333,7 @@ class SummaryState {
         if (ts === undefined || ts === null || Number.isNaN(Number(ts))) return '';
         const date = new Date(Number(ts) * 1000);
         if (Number.isNaN(date.getTime())) return '';
-        return date.toLocaleString();
+        return summaryTimestampFormatter.format(date);
     }
 
     renderModelOptions() {
@@ -1229,6 +1485,9 @@ class SummaryState {
     getHTML() {
         // Paper header section - styled like paper list with full abstract
         const pidSafe = this.paper ? String(this.paper.id || '') : '';
+        const linkPidSafe = this.paper
+            ? String(this.paper.versioned_id || this.paper.id || '')
+            : '';
         const titleSafe = this.paper ? escapeHtml(this.paper.title) : '';
         const authorsFull = this.paper ? String(this.paper.authors || '') : '';
         const authorsDisplay = formatAuthorsText(authorsFull, { maxAuthors: 10, head: 5, tail: 3 });
@@ -1311,20 +1570,20 @@ class SummaryState {
             : `
                 <div class="paper-nav paper-actions-footer">
                     <div class="paper-actions-group paper-actions-group-primary">
-                        <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
-                        <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
+                        <div class="rel_more"><a href="/?rank=pid&pid=${encodeURIComponent(linkPidSafe)}" target="_blank" rel="noopener noreferrer">Similar</a></div>
+                        <div class="rel_inspect"><a href="/inspect?pid=${encodeURIComponent(linkPidSafe)}" target="_blank" rel="noopener noreferrer">Inspect</a></div>
                         ${readingListHTML}
                     </div>
                     <div class="paper-actions-group paper-actions-group-secondary">
-                        <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
-                        <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
+                        <div class="rel_alphaxiv"><a href="https://www.alphaxiv.org/overview/${encodeURIComponent(linkPidSafe)}" target="_blank" rel="noopener noreferrer">alphaXiv</a></div>
+                        <div class="rel_cool"><a href="https://papers.cool/arxiv/${encodeURIComponent(linkPidSafe)}" target="_blank" rel="noopener noreferrer">Cool</a></div>
                     </div>
                 </div>`;
 
         // Title link - for uploaded papers, link to PDF download; for arXiv papers, link to arXiv
         const titleLinkHTML = isUploadedPaper
             ? `<a href="/api/uploaded_papers/pdf/${encodeURIComponent(pidSafe)}" title="Download PDF">${titleSafe}</a>`
-            : `<a href="https://arxiv.org/abs/${encodeURIComponent(pidSafe)}" target="_blank" rel="noopener noreferrer">${titleSafe}</a>`;
+            : `<a href="https://arxiv.org/abs/${encodeURIComponent(linkPidSafe)}" target="_blank" rel="noopener noreferrer">${titleSafe}</a>`;
 
         const headerHTML = this.paper
             ? `
@@ -1625,9 +1884,32 @@ function _isSummaryErrorMarkdown(content) {
     const firstLine = (t.split(/\r?\n/, 1)[0] || '').trim();
     if (/^#\s*Error\b/i.test(firstLine)) return true;
     if (/^#\s*PDF Parsing Service Unavailable\b/i.test(firstLine)) return true;
-    // Guard against clearly broken caches (e.g., one-line preface).
-    if (t.length < 250 && !/##\s*TL;DR\b/i.test(t)) return true;
     return false;
+}
+
+function _getUploadParseNotice(paper) {
+    if (!paper || paper.kind !== 'upload') return '';
+    const ps =
+        paper.parse_status !== undefined && paper.parse_status !== null
+            ? String(paper.parse_status)
+            : '';
+    if (!ps || ps === 'ok') return '';
+
+    const rawErr =
+        paper.parse_error !== undefined && paper.parse_error !== null
+            ? String(paper.parse_error)
+            : '';
+    const err = rawErr.replace(/\s+/g, ' ').trim();
+    const errShort = err.length > 200 ? err.slice(0, 200) + '...' : err;
+
+    if (ps === 'queued') return 'PDF parsing is queued. Please wait...';
+    if (ps === 'running') return 'Parsing PDF... Please wait.';
+    if (ps === 'failed') {
+        return errShort
+            ? `PDF parse failed: ${errShort}`
+            : 'PDF parse failed. Please retry parsing.';
+    }
+    return errShort || 'Parse PDF first before generating summary.';
 }
 
 function _summaryErrorMarkdownToMessage(content) {
@@ -1689,6 +1971,7 @@ async function _fetchSummaryStatusCached(app, pid, model, options = {}) {
             status: info && info.status ? String(info.status) : '',
             last_error: info && info.last_error ? String(info.last_error) : '',
             task_id: info && info.task_id ? String(info.task_id) : '',
+            resolved_model: info && info.resolved_model ? String(info.resolved_model) : '',
             ts: now || 0,
         };
         if (!app.summaryStatusCacheByModel) {
@@ -1751,6 +2034,12 @@ function _scheduleModelSwitchStatusRefresh(app, pid, model, options = {}) {
 
                 const st = String(statusInfo.status || '').trim();
                 if (st === 'ok') {
+                    const resolvedStatusModel = String(statusInfo.resolved_model || '').trim();
+                    if (resolvedStatusModel && resolvedStatusModel !== targetModel) {
+                        app.setModelAlias(targetModel, resolvedStatusModel);
+                    } else {
+                        app.clearModelAlias(targetModel);
+                    }
                     const key = modelCacheKey(targetModel);
                     if (
                         key &&
@@ -1758,6 +2047,14 @@ function _scheduleModelSwitchStatusRefresh(app, pid, model, options = {}) {
                         !app.availableSummaries.includes(key)
                     ) {
                         app.availableSummaries = [...app.availableSummaries, key];
+                    }
+                    const resolvedKey = modelCacheKey(resolvedStatusModel);
+                    if (
+                        resolvedKey &&
+                        Array.isArray(app.availableSummaries) &&
+                        !app.availableSummaries.includes(resolvedKey)
+                    ) {
+                        app.availableSummaries = [...app.availableSummaries, resolvedKey];
                     }
                     // Load the cached summary content now that we know it exists.
                     app.setState({ loading: true, error: null });
@@ -1782,10 +2079,14 @@ function _scheduleModelSwitchStatusRefresh(app, pid, model, options = {}) {
                     return;
                 }
                 if (st === 'failed' || st === 'canceled' || st === 'not_found') {
+                    app.clearModelAlias(targetModel);
                     const lastErr =
                         statusInfo && statusInfo.last_error ? String(statusInfo.last_error) : '';
                     let notice = 'No cached summary for this model. Click Generate to create one.';
-                    if (st === 'failed') {
+                    const uploadNotice = _getUploadParseNotice(app.paper);
+                    if (uploadNotice) {
+                        notice = uploadNotice;
+                    } else if (st === 'failed') {
                         notice = lastErr
                             ? `Summary generation failed: ${lastErr}`
                             : 'Summary generation failed. Click Generate to retry.';
@@ -1853,6 +2154,7 @@ summaryApp.toggleReadingList = function () {
         this.setState({ readingListPending: true });
         csrfFetch('/api/readinglist/remove', {
             method: 'POST',
+            keepalive: true,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pid: pidValue }),
         })
@@ -1881,6 +2183,7 @@ summaryApp.toggleReadingList = function () {
         this.setState({ readingListPending: true });
         csrfFetch('/api/readinglist/add', {
             method: 'POST',
+            keepalive: true,
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pid: pidValue }),
         })
@@ -1921,8 +2224,6 @@ summaryApp.retry = function () {
 
 summaryApp.handleModelChange = function (event) {
     const value = event && event.target ? event.target.value : '';
-    this.clearAutoRetry();
-    this.autoRetryCount = 0;
     const model = String(value || '').trim();
     const modelKey = modelCacheKey(model);
     const hasAvailable =
@@ -2016,8 +2317,10 @@ summaryApp.handleModelChange = function (event) {
         } else if (generating) {
             this.scheduleAutoRetry(this.pid, { model: model, cache_only: true });
             _scheduleModelSwitchStatusRefresh(this, this.pid, model, { delayMs: 1200 });
+            this.scheduleStatusWatch(this.pid, { model: model, immediate: false });
         } else {
             _scheduleModelSwitchStatusRefresh(this, this.pid, model, { delayMs: 900 });
+            this.scheduleStatusWatch(this.pid, { model: model, immediate: false });
         }
     }
 };
@@ -2071,39 +2374,18 @@ summaryApp.requestClearModel = async function () {
 
 summaryApp.confirmClearModel = async function () {
     const currentModel = this.getCurrentModel();
-    this.clearAutoRetry();
+    this.clearAutoRetry(currentModel);
+    this.resetAutoRetry(currentModel);
+    this.clearStatusWatch();
     this.setState({ clearing: 'model', notice: '', error: null });
 
     try {
         await clearModelSummary(this.pid, currentModel);
         // Cancel local in-flight UI state.
         if (currentModel) {
-            this.inflightModels[currentModel] = false;
-            this.taskIdsByModel[currentModel] = '';
-            this.queueRankByModel[currentModel] = 0;
-            this.queueTotalByModel[currentModel] = 0;
-            try {
-                delete this.summaryCacheByModel[currentModel];
-            } catch (e) {}
-            try {
-                delete this.summaryStatusCacheByModel[currentModel];
-            } catch (e) {}
-            try {
-                if (this._summaryStatusPromisesByModel) {
-                    delete this._summaryStatusPromisesByModel[currentModel];
-                }
-            } catch (e) {}
+            this.clearModelAndAliasState(currentModel, { removeAvailability: true });
         }
         this.pendingGenerationModel = '';
-
-        // Remove the cleared model from availableSummaries
-        const clearedKey = modelCacheKey(currentModel);
-        if (clearedKey) {
-            this.availableSummaries = this.availableSummaries.filter(k => k !== clearedKey);
-        }
-        if (currentModel && this.pendingRegenerations) {
-            delete this.pendingRegenerations[currentModel];
-        }
 
         this.setState({
             clearing: null,
@@ -2230,8 +2512,9 @@ summaryApp.queueSummary = async function (pid, options = {}) {
         options.force_regenerate !== undefined
             ? Boolean(options.force_regenerate)
             : Boolean(options.force);
-    this.clearAutoRetry();
-    this.autoRetryCount = 0;
+    this.clearAutoRetry(targetModel);
+    this.resetAutoRetry(targetModel);
+    this.clearStatusWatch();
     this.pendingGenerationModel = targetModel || '';
     if (targetModel) {
         this.inflightModels[targetModel] = true;
@@ -2351,6 +2634,8 @@ summaryApp.requestClearAll = async function () {
 
 summaryApp.confirmClearAll = async function () {
     this.clearAutoRetry();
+    this.autoRetryCountsByModel = Object.create(null);
+    this.clearStatusWatch();
     this.setState({ clearing: 'all', notice: '', error: null });
 
     try {
@@ -2368,6 +2653,8 @@ summaryApp.confirmClearAll = async function () {
         this.summaryCacheByModel = Object.create(null);
         this.summaryStatusCacheByModel = Object.create(null);
         this._summaryStatusPromisesByModel = Object.create(null);
+        this.resolvedModelByRequested = Object.create(null);
+        this.requestedModelsByResolved = Object.create(null);
         if (this._modelSwitchStatusTimer) {
             clearTimeout(this._modelSwitchStatusTimer);
         }
@@ -2614,10 +2901,14 @@ summaryApp.exportMarkdownZip = async function () {
         zip.file('summary.md', markdown);
 
         // Create meta.json with essential metadata only
-        // Note: For arXiv papers, URLs use raw pid (without version), which automatically points to latest version.
         const isUploadedPaper = this.paper && this.paper.kind === 'upload';
+        const exportPid = String(
+            (this.paper && (this.paper.versioned_id || this.paper.id)) || pid || ''
+        );
+        const rawPid = String((this.paper && (this.paper.raw_id || this.paper.id)) || pid || '');
         const metaJson = {
-            id: pid,
+            id: exportPid,
+            raw_id: rawPid,
             kind: isUploadedPaper ? 'upload' : 'arxiv',
             title: this.paper.title || '',
             published: this.paper.time || '',
@@ -2626,8 +2917,8 @@ summaryApp.exportMarkdownZip = async function () {
                       pdf: `${window.location.origin}/api/uploaded_papers/pdf/${encodeURIComponent(pid)}`,
                   }
                 : {
-                      arxiv: `https://arxiv.org/abs/${pid}`,
-                      pdf: `https://arxiv.org/pdf/${pid}.pdf`,
+                      arxiv: `https://arxiv.org/abs/${exportPid}`,
+                      pdf: `https://arxiv.org/pdf/${exportPid}.pdf`,
                   },
             summary: {
                 model: meta.llm_model || this.selectedModel || '',
@@ -2653,7 +2944,7 @@ summaryApp.exportMarkdownZip = async function () {
             .replace(/[<>:"/\\|?*]/g, '')
             .substring(0, 40)
             .trim();
-        const filename = `${pid}_${safeTitle}.zip`;
+        const filename = `${exportPid}_${safeTitle}.zip`;
 
         // Download
         const downloadUrl = URL.createObjectURL(blob);
@@ -2818,9 +3109,10 @@ summaryApp.loadSummary = async function (pid, options = {}) {
             const chosenModel = options.model || this.getCurrentModel() || this.defaultModel || '';
             const force = Boolean(options.force_regenerate);
             const cacheOnly = options.cache_only !== undefined ? Boolean(options.cache_only) : true;
-            this.clearAutoRetry();
 
             const chosenModelStr = String(chosenModel || '').trim();
+            this.clearAutoRetry(chosenModelStr);
+            this.clearStatusWatch();
             if (!chosenModelStr) {
                 this.setState({
                     loading: false,
@@ -2936,26 +3228,8 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                 // (e.g., canceled, unavailable services). Treat these as errors, not cached summaries,
                 // otherwise the UI will incorrectly mark the model as having a summary (✓).
                 if (_isSummaryErrorMarkdown(content)) {
-                    const reqKey = chosenModelStr ? modelCacheKey(chosenModelStr) : '';
-                    if (
-                        reqKey &&
-                        Array.isArray(this.availableSummaries) &&
-                        this.availableSummaries.includes(reqKey)
-                    ) {
-                        this.availableSummaries = this.availableSummaries.filter(k => k !== reqKey);
-                    }
-                    // Drop in-memory cache for this model to avoid switching back to the same error content.
-                    try {
-                        if (chosenModelStr && this.summaryCacheByModel) {
-                            delete this.summaryCacheByModel[chosenModelStr];
-                        }
-                    } catch (e) {}
-                    // Clear any stale in-flight flags for this model.
                     if (chosenModelStr) {
-                        this.inflightModels[chosenModelStr] = false;
-                        this.taskIdsByModel[chosenModelStr] = '';
-                        this.queueRankByModel[chosenModelStr] = 0;
-                        this.queueTotalByModel[chosenModelStr] = 0;
+                        this.clearModelAndAliasState(chosenModelStr, { removeAvailability: true });
                     }
                     if (
                         this.pendingGenerationModel &&
@@ -2985,9 +3259,20 @@ summaryApp.loadSummary = async function (pid, options = {}) {
 
                 // Check if fallback occurred using shared utility
                 const fallback = checkSummaryFallback(meta, chosenModelStr);
-                const selectedModel = fallback.occurred
+                const actualModel = fallback.occurred
                     ? fallback.actualModel
                     : this.selectedModel || chosenModel || '';
+                const actualModelStr = String(actualModel || '').trim();
+                const selectedModel = this.selectedModel || chosenModel || actualModel || '';
+                const selectedModelStr = String(selectedModel || '').trim();
+
+                if (chosenModelStr) {
+                    if (fallback.occurred && actualModelStr && actualModelStr !== chosenModelStr) {
+                        this.setModelAlias(chosenModelStr, actualModelStr);
+                    } else {
+                        this.clearModelAlias(chosenModelStr);
+                    }
+                }
 
                 // If we requested a forced regeneration and the cache still returns the same content,
                 // keep polling instead of stopping at the stale cached version.
@@ -3026,26 +3311,34 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                     delete this.pendingRegenerations[chosenModelStr];
                 }
 
-                this.autoRetryCount = 0;
+                this.resetAutoRetry(chosenModelStr);
                 this.pendingGenerationModel = '';
                 if (chosenModelStr) {
                     this.inflightModels[chosenModelStr] = false;
                 }
 
                 // Update availableSummaries to include the newly generated model
-                const newModelKey = modelCacheKey(selectedModel);
-                if (newModelKey && !this.availableSummaries.includes(newModelKey)) {
-                    this.availableSummaries = [...this.availableSummaries, newModelKey];
+                const availableKeysToAdd = [
+                    modelCacheKey(selectedModelStr),
+                    modelCacheKey(actualModelStr),
+                ].filter(Boolean);
+                availableKeysToAdd.forEach(key => {
+                    if (!this.availableSummaries.includes(key)) {
+                        this.availableSummaries = [...this.availableSummaries, key];
+                    }
+                });
+
+                if (actualModelStr) {
+                    this.summaryCacheByModel[actualModelStr] = { content: content, meta: meta };
                 }
 
                 // Cache the summary in-memory for fast model switching.
-                const selectedModelStr = String(selectedModel || '').trim();
                 if (selectedModelStr) {
                     this.summaryCacheByModel[selectedModelStr] = { content: content, meta: meta };
                 }
                 // Also cache under the requested model when fallback occurred, so switching back
                 // doesn't force a network round-trip.
-                if (chosenModelStr && chosenModelStr !== selectedModelStr) {
+                if (chosenModelStr && chosenModelStr !== actualModelStr) {
                     this.summaryCacheByModel[chosenModelStr] = { content: content, meta: meta };
                 }
                 // Summary is ready; clear any queue/task tracking for both requested/actual model keys.
@@ -3057,7 +3350,7 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                     this.queueTotalByModel[mm] = 0;
                 };
                 _clearQueueTracking(chosenModelStr);
-                _clearQueueTracking(selectedModelStr);
+                _clearQueueTracking(actualModelStr);
 
                 this.setState({
                     loading: false,
@@ -3098,11 +3391,19 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                             _scheduleModelSwitchStatusRefresh(this, pid, statusModel, {
                                 delayMs: 900,
                             });
+                            this.scheduleStatusWatch(pid, {
+                                model: statusModel,
+                                immediate: false,
+                            });
                         } else if (stillInFlight && !cachedStatus) {
                             // If we already believe it's in-flight, don't block on a status call here.
                             // A debounced background refresh can correct stale inflight state if needed.
                             _scheduleModelSwitchStatusRefresh(this, pid, statusModel, {
                                 delayMs: 900,
+                            });
+                            this.scheduleStatusWatch(pid, {
+                                model: statusModel,
+                                immediate: false,
                             });
                         } else if (cachedStatus && cachedStatus.status) {
                             statusInfo = cachedStatus;
@@ -3188,30 +3489,16 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                             statusInfo && statusInfo.last_error
                                 ? String(statusInfo.last_error)
                                 : '';
+                        const uploadNotice = _getUploadParseNotice(this.paper);
                         // Defensive: if status says "ok" but /api/get_paper_summary is a cache miss,
                         // we likely have stale status/availability data. Clear it so the next switch
                         // doesn't keep assuming the cache exists.
                         if (st === 'ok' && statusModel) {
-                            const missedKey = modelCacheKey(statusModel);
-                            if (
-                                missedKey &&
-                                Array.isArray(this.availableSummaries) &&
-                                this.availableSummaries.includes(missedKey)
-                            ) {
-                                this.availableSummaries = this.availableSummaries.filter(
-                                    k => k !== missedKey
-                                );
-                            }
-                            try {
-                                delete this.summaryStatusCacheByModel[statusModel];
-                            } catch (e) {}
-                            try {
-                                if (this._summaryStatusPromisesByModel) {
-                                    delete this._summaryStatusPromisesByModel[statusModel];
-                                }
-                            } catch (e) {}
+                            this.clearModelAndAliasState(statusModel, { removeAvailability: true });
                         }
-                        if (st === 'failed') {
+                        if (uploadNotice) {
+                            notice = uploadNotice;
+                        } else if (st === 'failed') {
                             notice = lastErr
                                 ? `Summary generation failed: ${lastErr}`
                                 : 'Summary generation failed. Click Generate to retry.';
@@ -3233,6 +3520,7 @@ summaryApp.loadSummary = async function (pid, options = {}) {
                         meta: null,
                         contentModel: String(chosenModelStr || '').trim(),
                     });
+                    this.scheduleStatusWatch(pid, { model: statusModel, immediate: false });
                     return;
                 }
                 const friendlyMsg = handleApiError(error, 'Load Summary');

@@ -157,7 +157,13 @@ def build_hybrid_feature_vector(
         return None
 
 
-def compute_upload_features(pid: str, force: bool = False) -> dict | None:
+def compute_upload_features(
+    pid: str,
+    force: bool = False,
+    *,
+    global_features: dict | None = None,
+    global_feat_mtime: float | None = None,
+) -> dict | None:
     """Compute TF-IDF and embedding features for an uploaded paper.
 
     Args:
@@ -179,8 +185,8 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
 
     features_path = get_upload_features_path(pid)
 
-    global_features = None
-    global_feat_mtime = 0.0
+    current_global_features = global_features
+    current_global_feat_mtime = float(global_feat_mtime or 0.0)
 
     # Check if features already exist and are compatible with current global features
     if not force and features_path.exists():
@@ -189,23 +195,27 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
             if cached is not None:
                 # Best-effort mtime check: if global features are unavailable, keep cached.
                 try:
-                    logger.trace("[BLOCKING] compute_upload_features: loading global features for cache validation...")
-                    global_features = get_features_cached()
-                    global_feat_mtime = float(get_features_file_mtime() or 0.0)
+                    if current_global_features is None:
+                        logger.trace(
+                            "[BLOCKING] compute_upload_features: loading global features for cache validation..."
+                        )
+                        current_global_features = get_features_cached()
+                    if current_global_feat_mtime <= 0:
+                        current_global_feat_mtime = float(get_features_file_mtime() or 0.0)
                 except Exception:
-                    global_features = None
-                    global_feat_mtime = 0.0
+                    current_global_features = None
+                    current_global_feat_mtime = 0.0
 
                 cached_mtime = float(cached.get("global_features_mtime") or 0.0)
                 # If we cannot validate (missing mtimes), keep old behavior (best effort).
-                if cached_mtime <= 0 or global_feat_mtime <= 0:
+                if cached_mtime <= 0 or current_global_feat_mtime <= 0:
                     logger.trace(
                         f"[BLOCKING] compute_upload_features: using cached features (mtime unavailable) for {pid} "
                         f"in {time_module.time() - t_start:.2f}s"
                     )
                     return cached
 
-                if cached_mtime == global_feat_mtime:
+                if cached_mtime == current_global_feat_mtime:
                     logger.trace(
                         f"[BLOCKING] compute_upload_features: using cached features (mtime ok) for {pid} "
                         f"in {time_module.time() - t_start:.2f}s"
@@ -221,19 +231,21 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
         return None
 
     # Load global features (used for TF-IDF params + feature type).
-    if global_features is None:
+    if current_global_features is None:
         try:
             logger.trace("[BLOCKING] compute_upload_features: loading global features...")
-            global_features = get_features_cached()
+            current_global_features = get_features_cached()
+            if current_global_feat_mtime <= 0:
+                current_global_feat_mtime = float(get_features_file_mtime() or 0.0)
         except FileNotFoundError:
-            global_features = None
-    if not global_features:
+            current_global_features = None
+    if not current_global_features:
         logger.error("Global features not available")
         return None
 
     # Check required fields in global features
-    vocab = global_features.get("vocab")
-    idf = global_features.get("idf")
+    vocab = current_global_features.get("vocab")
+    idf = current_global_features.get("idf")
 
     if vocab is None or idf is None:
         logger.error("Vocab or IDF not found in global features")
@@ -241,15 +253,15 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
 
     # Compute TF-IDF vector using the same logic as global features
     t_tfidf = time_module.time()
-    tfidf_vec = compute_tfidf_vector(text, global_features)
+    tfidf_vec = compute_tfidf_vector(text, current_global_features)
     logger.trace(f"[BLOCKING] compute_upload_features: TF-IDF computed in {time_module.time() - t_tfidf:.2f}s")
     if tfidf_vec is None:
         logger.warning(f"Failed to compute TF-IDF for {pid}, will try embedding only")
 
     # Compute embedding vector if available
     embedding_vec = None
-    if global_features.get("feature_type") == "hybrid_sparse_dense":
-        x_embeddings = global_features.get("x_embeddings")
+    if current_global_features.get("feature_type") == "hybrid_sparse_dense":
+        x_embeddings = current_global_features.get("x_embeddings")
         if x_embeddings is not None:
             embed_dim = x_embeddings.shape[1]
             embed_text = get_upload_text_for_embedding(pid)
@@ -269,7 +281,7 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
         return None
 
     # Build upload feature vector in the *same feature space* as global_features['x'].
-    upload_x = build_hybrid_feature_vector(tfidf_vec, embedding_vec, global_features)
+    upload_x = build_hybrid_feature_vector(tfidf_vec, embedding_vec, current_global_features)
 
     # Save features
     result = {
@@ -282,8 +294,8 @@ def compute_upload_features(pid: str, force: bool = False) -> dict | None:
         "x": upload_x,
         "x_tfidf": tfidf_vec,
         "x_embeddings": embedding_vec.reshape(1, -1) if embedding_vec is not None else None,
-        "feature_type": global_features.get("feature_type") or "unknown",
-        "global_features_mtime": global_feat_mtime,
+        "feature_type": current_global_features.get("feature_type") or "unknown",
+        "global_features_mtime": current_global_feat_mtime,
     }
 
     try:
@@ -500,24 +512,32 @@ def find_similar_papers(
     t_start = time_module.time()
     logger.trace(f"[BLOCKING] find_similar_papers: starting for pid={pid}, limit={limit}")
 
-    from backend.services.data_service import get_features_cached
+    from backend.services.data_service import (
+        get_features_cached,
+        get_features_file_mtime,
+    )
 
     try:
-        # Compute or load features for uploaded paper
-        logger.trace(f"[BLOCKING] find_similar_papers: computing upload features...")
-        upload_features = compute_upload_features(pid)
-        logger.trace(f"[BLOCKING] find_similar_papers: upload features computed in {time_module.time() - t_start:.2f}s")
-        if not upload_features:
-            logger.error(f"Failed to get features for {pid}")
-            return []
-
-        # Load global features
+        # Load global features once and reuse them for upload feature computation.
         logger.trace(f"[BLOCKING] find_similar_papers: loading global features...")
         t_global = time_module.time()
         global_features = get_features_cached()
+        global_feat_mtime = float(get_features_file_mtime() or 0.0)
         logger.trace(f"[BLOCKING] find_similar_papers: global features loaded in {time_module.time() - t_global:.2f}s")
         if not global_features:
             logger.error("Global features not available")
+            return []
+
+        # Compute or load features for uploaded paper
+        logger.trace(f"[BLOCKING] find_similar_papers: computing upload features...")
+        upload_features = compute_upload_features(
+            pid,
+            global_features=global_features,
+            global_feat_mtime=global_feat_mtime,
+        )
+        logger.trace(f"[BLOCKING] find_similar_papers: upload features computed in {time_module.time() - t_start:.2f}s")
+        if not upload_features:
+            logger.error(f"Failed to get features for {pid}")
             return []
 
         pids_all = global_features.get("pids", [])
@@ -582,7 +602,20 @@ def find_similar_papers(
                     scores += (1 - tfidf_weight) * emb_scores
 
         # Get top results
-        top_indices = np.argsort(scores)[::-1][:limit]
+        if limit is not None:
+            try:
+                top_k = min(max(int(limit), 0), len(scores))
+            except Exception:
+                top_k = len(scores)
+        else:
+            top_k = len(scores)
+        if top_k <= 0:
+            return []
+        if top_k < len(scores):
+            top_indices = np.argpartition(-scores, top_k - 1)[:top_k]
+            top_indices = top_indices[np.argsort(-scores[top_indices])]
+        else:
+            top_indices = np.argsort(-scores)
 
         # Build result list
         results = []
@@ -601,13 +634,29 @@ def find_similar_papers(
             papers_data = {}
         except Exception:
             papers_data = {}
-        try:
-            metas_data = data_service.get_metas()
-        except Exception:
-            metas_data = {}
+        meta_fallback_pids = [
+            pid
+            for pid in top_pids
+            if not isinstance(papers_data.get(pid), dict)
+            or not (papers_data.get(pid) or {}).get("title")
+            or not (papers_data.get(pid) or {}).get("authors")
+            or not (papers_data.get(pid) or {}).get("summary")
+            or not (papers_data.get(pid) or {}).get("_time_str")
+        ]
+        if meta_fallback_pids:
+            try:
+                from aslite.repositories import MetaRepository
 
-        # Import TL;DR extraction for enriched results
-        from backend.services.summary_service import extract_tldr_from_summary
+                metas_data = MetaRepository.get_by_ids(meta_fallback_pids)
+            except Exception:
+                metas_data = {}
+
+        from backend.services.summary_service import (
+            extract_tldr_from_summary,
+            get_summary_render_snapshots,
+        )
+
+        summary_snapshots = get_summary_render_snapshots(top_pids) if top_pids else {}
 
         for idx in top_indices:
             if scores[idx] <= 0:
@@ -617,12 +666,13 @@ def find_similar_papers(
             paper = papers_data.get(paper_pid, {}) or {}
             meta = metas_data.get(paper_pid, {}) if isinstance(metas_data, dict) else {}
 
-            # Get TL;DR if available
-            tldr = ""
-            try:
-                tldr = extract_tldr_from_summary(paper_pid) or ""
-            except Exception:
-                pass
+            snapshot = summary_snapshots.get(paper_pid) or {}
+            tldr = str(snapshot.get("tldr") or "")
+            if not tldr:
+                try:
+                    tldr = extract_tldr_from_summary(paper_pid) or ""
+                except Exception:
+                    tldr = ""
 
             # Get abstract from paper data
             abstract = paper.get("summary") or meta.get("summary") or ""

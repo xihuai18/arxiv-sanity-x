@@ -20,6 +20,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import openai
 from loguru import logger
@@ -194,6 +195,9 @@ class PaperSummarizer:
     # Note: This only works within a single process. For multi-process safety,
     # consider using file-based locks or distributed locks
     _mineru_lock = threading.Lock()
+    _provider_preflight_cache_lock = threading.Lock()
+    _provider_preflight_cache_ttl_s = 60.0
+    _provider_preflight_cache: dict[tuple[str, str, str], tuple[float, bool]] = {}
 
     def __init__(self):
         self.data_dir = Path(_data_dir())
@@ -278,6 +282,8 @@ class PaperSummarizer:
         markers = [
             "timeout",
             "timed out",
+            "a timeout occurred",
+            "524",
             "rate limit",
             "429",
             "overloaded",
@@ -287,6 +293,7 @@ class PaperSummarizer:
             "502",
             "503",
             "504",
+            "cloudflare",
             "connection",
             "connection reset",
             "connect",
@@ -318,6 +325,143 @@ class PaperSummarizer:
     def _build_summary_result(content: str, meta: dict | None = None) -> dict:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
+
+    @staticmethod
+    def _summarize_llm_error(exc: Exception | str | None) -> str:
+        raw = str(exc or "").strip()
+        if not raw:
+            return "unknown error"
+
+        lowered = raw.lower()
+        if "<!doctype html" in lowered or "<html" in lowered:
+            title_match = re.search(r"<title>([^<]+)</title>", raw, re.IGNORECASE)
+            title = title_match.group(1).strip() if title_match else "HTML error page"
+            if "524" in lowered or "a timeout occurred" in lowered or "cloudflare" in lowered:
+                return f"provider timeout ({title})"
+            return f"provider returned HTML error page ({title})"
+
+        compact = re.sub(r"\s+", " ", raw)
+        if len(compact) > 240:
+            compact = compact[:237].rstrip() + "..."
+        return compact
+
+    @classmethod
+    def _describe_llm_error_origin(cls, exc: Exception | str | None, api_base: str | None = None) -> str:
+        raw = str(exc or "")
+        lowered = raw.lower()
+        try:
+            host = (urlparse(str(api_base or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        host_display = host or "provider"
+
+        if "524" in lowered or "a timeout occurred" in lowered or "cloudflare" in lowered:
+            return f"upstream timeout at {host_display} via Cloudflare"
+
+        if any(
+            marker in lowered
+            for marker in (
+                "connection error",
+                "connection reset",
+                "connection aborted",
+                "connection refused",
+                "server disconnected",
+                "dns",
+                "ssl",
+                "tls",
+                "network is unreachable",
+                "no route to host",
+            )
+        ):
+            return f"network/connectivity issue before full response from {host_display}"
+
+        if any(marker in lowered for marker in ("timeout", "timed out")):
+            return f"request timeout while waiting for {host_display}"
+
+        return f"transient provider error from {host_display}"
+
+    @staticmethod
+    def _describe_empty_llm_response(
+        response,
+        *,
+        response_api: str,
+        finish_reason: str | None,
+        usage,
+    ) -> str:
+        parts = [f"api={response_api}"]
+        if finish_reason:
+            key = "status" if response_api == "responses" else "finish_reason"
+            parts.append(f"{key}={finish_reason}")
+
+        usage_total = None
+        if isinstance(usage, dict):
+            usage_total = usage.get("total_tokens")
+        else:
+            try:
+                usage_total = getattr(usage, "total_tokens", None)
+            except Exception:
+                usage_total = None
+        if usage_total is not None:
+            parts.append(f"usage_total={usage_total}")
+
+        if response_api == "responses":
+            output_types: list[str] = []
+            outputs = None
+            response_dump = None
+            try:
+                response_dump = response.model_dump()  # type: ignore[attr-defined]
+            except Exception:
+                response_dump = None
+            try:
+                outputs = getattr(response, "output", None)
+            except Exception:
+                outputs = None
+            if outputs is None and isinstance(response_dump, dict):
+                outputs = response_dump.get("output")
+            if isinstance(outputs, list):
+                for item in outputs[:4]:
+                    if not isinstance(item, dict):
+                        item_dump = None
+                        try:
+                            item_dump = item.model_dump()  # type: ignore[attr-defined]
+                        except Exception:
+                            item_dump = None
+                        item = item_dump if isinstance(item_dump, dict) else None
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "?")
+                    content_types: list[str] = []
+                    contents = item.get("content") or []
+                    if isinstance(contents, list):
+                        for part in contents[:4]:
+                            if not isinstance(part, dict):
+                                part_dump = None
+                                try:
+                                    part_dump = part.model_dump()  # type: ignore[attr-defined]
+                                except Exception:
+                                    part_dump = None
+                                part = part_dump if isinstance(part_dump, dict) else None
+                            if isinstance(part, dict):
+                                content_types.append(str(part.get("type") or "?"))
+                    if content_types:
+                        output_types.append(f"{item_type}({','.join(content_types)})")
+                    else:
+                        output_types.append(item_type)
+            if output_types:
+                parts.append(f"output_types={';'.join(output_types)}")
+            elif isinstance(response_dump, dict):
+                dump_keys = sorted(str(k) for k in response_dump.keys())
+                if dump_keys:
+                    parts.append(f"response_keys={','.join(dump_keys[:8])}")
+        else:
+            try:
+                choice_count = len(getattr(response, "choices", None) or [])
+            except Exception:
+                choice_count = None
+            if choice_count is not None:
+                parts.append(f"choices={choice_count}")
+
+        return " ".join(parts)
 
     @staticmethod
     def _extract_responses_completed_payload(raw_text: str | None) -> dict | None:
@@ -375,6 +519,15 @@ class PaperSummarizer:
         else:
             completed = None
 
+        response_dump = None
+        if response is not None and not isinstance(response, str):
+            try:
+                response_dump = response.model_dump()  # type: ignore[attr-defined]
+            except Exception:
+                response_dump = None
+        if not isinstance(response_dump, dict):
+            response_dump = None
+
         output_text = None
         status = None
         usage = None
@@ -393,6 +546,18 @@ class PaperSummarizer:
             except Exception:
                 usage = None
 
+            if response_dump is not None:
+                if not output_text:
+                    maybe_output_text = response_dump.get("output_text")
+                    if isinstance(maybe_output_text, str) and maybe_output_text.strip():
+                        output_text = maybe_output_text.strip()
+                if not status:
+                    maybe_status = response_dump.get("status")
+                    if isinstance(maybe_status, str) and maybe_status.strip():
+                        status = maybe_status.strip()
+                if usage is None and response_dump.get("usage") is not None:
+                    usage = response_dump.get("usage")
+
             if completed is None:
                 err = None
                 try:
@@ -404,6 +569,12 @@ class PaperSummarizer:
                     raw_err = getattr(err, "message", None) if err is not None else None
                 except Exception:
                     raw_err = None
+                if raw_err is None and response_dump is not None:
+                    dump_error = response_dump.get("error")
+                    if isinstance(dump_error, dict):
+                        maybe_message = dump_error.get("message")
+                        if isinstance(maybe_message, str) and maybe_message.strip():
+                            raw_err = maybe_message
                 completed = cls._extract_responses_completed_payload(raw_err)
 
         if completed and isinstance(completed, dict):
@@ -478,17 +649,146 @@ class PaperSummarizer:
             return resolved
         return value
 
+    @staticmethod
+    def _detect_route_provider(api_base: str | None) -> str:
+        try:
+            host = (urlparse(str(api_base or "")).netloc or "").lower()
+        except Exception:
+            host = ""
+        if host.endswith("right.codes") or "right.codes" in host:
+            return "rightcode"
+        return ""
+
+    @staticmethod
+    def _candidate_route_prefixes(api_base: str | None) -> list[str]:
+        try:
+            parsed = urlparse(str(api_base or ""))
+            parts = [part for part in parsed.path.split("/") if part]
+        except Exception:
+            parts = []
+        if not parts:
+            return []
+        if re.fullmatch(r"v\d+(?:\.\d+)?", parts[-1], re.IGNORECASE):
+            parts = parts[:-1]
+        if not parts:
+            return []
+
+        prefixes: list[str] = []
+        full_prefix = "/" + "/".join(parts)
+        top_prefix = "/" + parts[0]
+        for prefix in (full_prefix, top_prefix):
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+        return prefixes
+
+    @staticmethod
+    def _build_rightcode_account_summary_url(api_base: str | None) -> str:
+        try:
+            parsed = urlparse(str(api_base or "").strip())
+        except Exception:
+            return ""
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}/account/summary"
+
+    @staticmethod
+    def _load_remote_json(url: str, *, headers: dict[str, str], timeout_s: float) -> dict | None:
+        request_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "curl/8.5.0",
+        }
+        request_headers.update(headers or {})
+        resp = _request_with_retry(
+            "GET",
+            url,
+            timeout=timeout_s,
+            retries=1,
+            headers=request_headers,
+            allow_redirects=True,
+        )
+        try:
+            resp.raise_for_status()
+            payload = resp.json()
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+        return payload if isinstance(payload, dict) else None
+
     @classmethod
-    def _resolve_direct_responses_route(cls, model_name: str | None) -> dict | None:
-        """Resolve a direct upstream route from `config/llm.yml` for Responses API calls."""
+    def _check_rightcode_route_available(cls, api_base: str | None, api_key: str | None) -> bool:
+        summary_url = cls._build_rightcode_account_summary_url(api_base)
+        if not summary_url:
+            return True
+
+        cache_key = ("rightcode", summary_url, str(api_key or ""))
+        now = time.time()
+        with cls._provider_preflight_cache_lock:
+            cached = cls._provider_preflight_cache.get(cache_key)
+            if cached and (now - cached[0]) < cls._provider_preflight_cache_ttl_s:
+                return bool(cached[1])
+
+        available = True
+        try:
+            payload = cls._load_remote_json(
+                summary_url,
+                headers={"Authorization": f"Bearer {str(api_key or '').strip()}"},
+                timeout_s=min(float(_llm_timeout()), 10.0),
+            )
+            if isinstance(payload, dict):
+                prefixes = set(cls._candidate_route_prefixes(api_base))
+                subscriptions = payload.get("subscriptions") or []
+                applicable_remaining_quota = 0.0
+                if isinstance(subscriptions, list):
+                    for sub in subscriptions:
+                        if not isinstance(sub, dict):
+                            continue
+                        try:
+                            remaining = float(sub.get("remaining_quota") or 0.0)
+                        except Exception:
+                            remaining = 0.0
+                        if remaining <= 0.0:
+                            continue
+
+                        available_prefixes = {
+                            str(prefix).strip()
+                            for prefix in (sub.get("available_prefixes") or [])
+                            if str(prefix).strip()
+                        }
+                        if not prefixes or not available_prefixes or prefixes & available_prefixes:
+                            applicable_remaining_quota += remaining
+
+                available = applicable_remaining_quota > 0.0
+        except (TimeoutError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning(f"Rightcode balance precheck failed for {summary_url}: {exc}")
+            available = True
+        except Exception as exc:
+            logger.warning(f"Unexpected Rightcode balance precheck failure for {summary_url}: {exc}")
+            available = True
+
+        with cls._provider_preflight_cache_lock:
+            cls._provider_preflight_cache[cache_key] = (now, available)
+        return available
+
+    @classmethod
+    def _check_direct_route_availability(cls, *, api_base: str | None, api_key: str | None) -> bool:
+        provider = cls._detect_route_provider(api_base)
+        if provider == "rightcode":
+            return cls._check_rightcode_route_available(api_base, api_key)
+        return True
+
+    @classmethod
+    def _resolve_direct_responses_routes(cls, model_name: str | None) -> list[dict]:
+        """Resolve direct upstream routes from `config/llm.yml` for Responses API calls."""
 
         if not cls._should_use_responses_api(model_name):
-            return None
+            return []
 
         try:
             import yaml
         except Exception:
-            return None
+            return []
 
         try:
             from config.llm_model_order import default_llm_yml_path
@@ -497,16 +797,17 @@ class PaperSummarizer:
             text = cfg_path.read_text(encoding="utf-8", errors="ignore")
             cfg = yaml.safe_load(text)
         except Exception:
-            return None
+            return []
 
         if not isinstance(cfg, dict):
-            return None
+            return []
 
         model_list = cfg.get("model_list") or []
         if not isinstance(model_list, list):
-            return None
+            return []
 
         target_name = str(model_name or "").strip()
+        routes: list[dict] = []
         for item in model_list:
             if not isinstance(item, dict):
                 continue
@@ -531,17 +832,60 @@ class PaperSummarizer:
                 max_output_tokens = None
 
             if not base_url or not api_key:
-                return None
+                continue
 
-            return {
-                "base_url": base_url,
-                "api_key": api_key,
-                "model": upstream_model or target_name,
-                "extra_body": dict(extra_body or {}),
-                "max_output_tokens": max_output_tokens,
-            }
+            if not cls._check_direct_route_availability(api_base=base_url, api_key=api_key):
+                logger.info(
+                    f"Skipping direct Responses route for model={target_name} due to provider availability precheck: {base_url}"
+                )
+                continue
 
-        return None
+            routes.append(
+                {
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "model": upstream_model or target_name,
+                    "extra_body": dict(extra_body or {}),
+                    "max_output_tokens": max_output_tokens,
+                }
+            )
+
+        return routes
+
+    @classmethod
+    def _resolve_direct_responses_route(cls, model_name: str | None) -> dict | None:
+        """Resolve the first available direct upstream route for Responses API calls."""
+
+        routes = cls._resolve_direct_responses_routes(model_name)
+        return routes[0] if routes else None
+
+    @classmethod
+    def _mark_direct_route_unavailable(cls, *, api_base: str | None, api_key: str | None) -> None:
+        provider = cls._detect_route_provider(api_base)
+        if provider != "rightcode":
+            return
+        summary_url = cls._build_rightcode_account_summary_url(api_base)
+        if not summary_url:
+            return
+        cache_key = (provider, summary_url, str(api_key or ""))
+        with cls._provider_preflight_cache_lock:
+            cls._provider_preflight_cache[cache_key] = (time.time(), False)
+
+    @classmethod
+    def _should_retry_with_alternate_direct_route(cls, *, api_base: str | None, exc: Exception) -> bool:
+        provider = cls._detect_route_provider(api_base)
+        if provider == "rightcode":
+            msg = str(exc or "").lower()
+            markers = [
+                "无可用套餐",
+                "不允许使用余额",
+                "insufficient balance",
+                "no available package",
+                "subscription",
+                "quota exceeded",
+            ]
+            return any(marker in msg for marker in markers)
+        return False
 
     def _create_chat_completion_no_tools(self, *, model: str, prompt_for_call: str):
         """Create a chat completion while discouraging tool calls across proxies."""
@@ -615,7 +959,8 @@ class PaperSummarizer:
         """
         try:
             raw_pid = self._strip_version_suffix(pid)
-            pdf_url = f"https://arxiv.org/pdf/{raw_pid}"
+            source_pid = self._resolve_source_pid(pid)
+            pdf_url = f"https://arxiv.org/pdf/{source_pid}"
             pdf_path = self.pdfs_dir / f"{raw_pid}.pdf"
             cached_version = None
 
@@ -657,7 +1002,7 @@ class PaperSummarizer:
                 return pdf_path, cached_version
 
             # Use atomic file write with temporary file
-            logger.trace(f"Downloading paper {raw_pid} ...")
+            logger.trace(f"Downloading paper {source_pid} -> {raw_pid}.pdf ...")
             resp = _request_with_retry(
                 "GET",
                 pdf_url,
@@ -752,6 +1097,8 @@ class PaperSummarizer:
         pid = (pid or "").strip()
         if not pid:
             return "", None
+        if _is_upload_style_pid(pid):
+            return pid, None
         match = cls._PID_VERSION_RE.match(pid)
         if not match:
             return pid, None
@@ -763,9 +1110,29 @@ class PaperSummarizer:
         return raw_pid, version
 
     def _get_latest_version_from_meta(self, pid: str) -> int | None:
+        meta = self._get_meta_for_pid(pid)
+        if not isinstance(meta, dict):
+            return None
+        version = meta.get("_effective_version")
+        if version is None:
+            version = meta.get("_version")
+        if version is None:
+            return None
+        try:
+            return int(version)
+        except Exception:
+            return None
+
+    def _get_meta_for_pid(self, pid: str) -> dict | None:
         raw_pid, explicit_version = self._split_pid_version(pid)
         if explicit_version:
-            return explicit_version
+            return {
+                "_id": raw_pid,
+                "_idv": pid,
+                "_version": explicit_version,
+                "_effective_idv": pid,
+                "_effective_version": explicit_version,
+            }
         try:
             from aslite.repositories import MetaRepository
         except Exception as e:
@@ -776,17 +1143,46 @@ class PaperSummarizer:
             meta = MetaRepository.get_by_id(raw_pid)
         except Exception as e:
             logger.trace(f"Failed to read metas for {raw_pid}: {e}")
-            return None
+            meta = None
 
-        if not isinstance(meta, dict):
-            return None
-        version = meta.get("_version")
-        if version is None:
-            return None
+        if isinstance(meta, dict) and any(
+            meta.get(key) is not None for key in ("_effective_idv", "_idv", "_effective_version", "_version")
+        ):
+            return meta
+
         try:
-            return int(version)
+            from aslite.repositories import PaperRepository
         except Exception:
-            return None
+            return meta if isinstance(meta, dict) else None
+
+        try:
+            paper = PaperRepository.get_by_id(raw_pid)
+        except Exception as e:
+            logger.trace(f"Failed to read paper for {raw_pid}: {e}")
+            return meta if isinstance(meta, dict) else None
+
+        return paper if isinstance(paper, dict) else (meta if isinstance(meta, dict) else None)
+
+    def _resolve_source_pid(self, pid: str) -> str:
+        raw_pid, explicit_version = self._split_pid_version(pid)
+        if explicit_version:
+            return pid
+
+        meta = self._get_meta_for_pid(raw_pid)
+        if isinstance(meta, dict):
+            for key in ("_effective_idv", "_idv"):
+                source_pid = str(meta.get(key) or "").strip()
+                if source_pid:
+                    return source_pid
+            version = meta.get("_effective_version")
+            if version is None:
+                version = meta.get("_version")
+            if version is not None:
+                try:
+                    return f"{raw_pid}v{int(version)}"
+                except Exception:
+                    pass
+        return raw_pid
 
     def _resolve_cache_pid(self, pid: str) -> str:
         """Resolve PID to cache key format.
@@ -1209,6 +1605,7 @@ class PaperSummarizer:
         """
         # Always use raw PID for storage - arXiv returns latest version automatically
         cache_pid = self._resolve_cache_pid(pid)
+        source_pid = self._resolve_source_pid(pid)
 
         # Check cache first
         cached = self._read_html_markdown_cache(cache_pid)
@@ -1217,7 +1614,7 @@ class PaperSummarizer:
             return cached, meta.get("source"), cache_pid
 
         for source in self._parse_html_sources():
-            html, url = self._fetch_html_from_source(cache_pid, source)
+            html, url = self._fetch_html_from_source(source_pid, source)
             if not html:
                 continue
             markdown = self._html_to_markdown(html, cache_pid, url)
@@ -2518,6 +2915,7 @@ Please output strictly according to the following structure:
                         summary_meta["prompt"] = prompt_for_call
 
                     response = None
+                    error_api_base = _llm_base_url()
                     for llm_try in range(2):
                         try:
                             if self._should_use_responses_api(modelid):
@@ -2525,51 +2923,104 @@ Please output strictly according to the following structure:
                                 responses_client = self.client
                                 responses_model = modelid
                                 responses_extra_body = {}
+                                error_api_base = _llm_base_url()
                                 # Some OpenAI-compatible gateways expose `/chat/completions`
                                 # but do not correctly normalize `/responses` SSE payloads.
-                                # When `config/llm.yml` contains a concrete upstream route for
-                                # the selected alias, prefer calling that upstream directly.
-                                direct_route = self._resolve_direct_responses_route(modelid)
-                                if direct_route:
+                                # When `config/llm.yml` contains concrete upstream routes for
+                                # the selected alias, prefer calling those upstreams directly.
+                                direct_routes = self._resolve_direct_responses_routes(modelid)
+                                direct_attempted = False
+                                for route_idx, direct_route in enumerate(direct_routes):
+                                    direct_attempted = True
+                                    error_api_base = direct_route.get("base_url")
                                     responses_client = openai.OpenAI(
                                         api_key=direct_route["api_key"],
                                         base_url=direct_route["base_url"],
                                     )
                                     responses_model = direct_route["model"]
-                                    responses_extra_body = direct_route["extra_body"]
+                                    responses_extra_body = dict(direct_route["extra_body"] or {})
                                     if direct_route.get("max_output_tokens"):
                                         responses_extra_body.setdefault(
                                             "max_output_tokens",
                                             direct_route["max_output_tokens"],
                                         )
-                                try:
-                                    response = responses_client.responses.create(
-                                        model=responses_model,
-                                        instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
-                                        input=[
-                                            {
-                                                "role": "user",
-                                                "content": prompt_for_call,
-                                            }
-                                        ],
-                                        temperature=0.3,
-                                        top_p=0.95,
-                                        timeout=_llm_timeout(),
-                                        **responses_extra_body,
-                                    )
-                                except Exception as responses_exc:
-                                    if not self._should_fallback_to_chat_completions_for_responses_error(responses_exc):
-                                        raise
-                                    logger.warning(
-                                        f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
-                                    )
-                                    response_api = "chat_completions"
-                                    response = self._create_chat_completion_no_tools(
-                                        model=modelid,
-                                        prompt_for_call=prompt_for_call,
-                                    )
+                                    try:
+                                        response = responses_client.responses.create(
+                                            model=responses_model,
+                                            instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
+                                            input=[
+                                                {
+                                                    "role": "user",
+                                                    "content": prompt_for_call,
+                                                }
+                                            ],
+                                            temperature=0.3,
+                                            top_p=0.95,
+                                            timeout=_llm_timeout(),
+                                            **responses_extra_body,
+                                        )
+                                        break
+                                    except Exception as responses_exc:
+                                        if route_idx < len(
+                                            direct_routes
+                                        ) - 1 and self._should_retry_with_alternate_direct_route(
+                                            api_base=direct_route.get("base_url"),
+                                            exc=responses_exc,
+                                        ):
+                                            self._mark_direct_route_unavailable(
+                                                api_base=direct_route.get("base_url"),
+                                                api_key=direct_route.get("api_key"),
+                                            )
+                                            logger.warning(
+                                                f"Direct Responses route rejected model={modelid} via {direct_route.get('base_url')}, trying alternate route: {responses_exc}"
+                                            )
+                                            continue
+                                        if not self._should_fallback_to_chat_completions_for_responses_error(
+                                            responses_exc
+                                        ):
+                                            raise
+                                        logger.warning(
+                                            f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
+                                        )
+                                        response_api = "chat_completions"
+                                        response = self._create_chat_completion_no_tools(
+                                            model=modelid,
+                                            prompt_for_call=prompt_for_call,
+                                        )
+                                        break
+                                if not direct_attempted:
+                                    error_api_base = _llm_base_url()
+                                    try:
+                                        response = responses_client.responses.create(
+                                            model=responses_model,
+                                            instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
+                                            input=[
+                                                {
+                                                    "role": "user",
+                                                    "content": prompt_for_call,
+                                                }
+                                            ],
+                                            temperature=0.3,
+                                            top_p=0.95,
+                                            timeout=_llm_timeout(),
+                                            **responses_extra_body,
+                                        )
+                                    except Exception as responses_exc:
+                                        if not self._should_fallback_to_chat_completions_for_responses_error(
+                                            responses_exc
+                                        ):
+                                            raise
+                                        logger.warning(
+                                            f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
+                                        )
+                                        response_api = "chat_completions"
+                                        response = self._create_chat_completion_no_tools(
+                                            model=modelid,
+                                            prompt_for_call=prompt_for_call,
+                                        )
                             else:
                                 response_api = "chat_completions"
+                                error_api_base = _llm_base_url()
                                 response = self._create_chat_completion_no_tools(
                                     model=modelid,
                                     prompt_for_call=prompt_for_call,
@@ -2577,7 +3028,11 @@ Please output strictly according to the following structure:
                             break
                         except Exception as e:
                             if llm_try < 1 and self._is_transient_llm_error(e):
-                                logger.warning(f"LLM transient error for model={modelid}, retrying once: {e}")
+                                err_text = self._summarize_llm_error(e)
+                                err_origin = self._describe_llm_error_origin(e, api_base=error_api_base)
+                                logger.warning(
+                                    f"LLM transient error for model={modelid}, retrying once [{err_origin}]: {err_text}"
+                                )
                                 _sleep_backoff(llm_try, base_s=1.0, cap_s=4.0)
                                 continue
                             raise
@@ -2672,10 +3127,28 @@ Please output strictly according to the following structure:
                     # Record which model succeeded and any prior failed attempts.
                     summary_meta["llm_model"] = modelid
                     if attempts:
-                        summary_meta["llm_fallback_attempts"] = attempts
+                        summary_meta["llm_fallback_attempts"] = [
+                            *attempts,
+                            {
+                                "model": modelid,
+                                "error": None,
+                                "fallback": idx > 0,
+                                "finish_reason": (str(last_finish_reason) if last_finish_reason is not None else None),
+                                "tool_call_count": int(last_tool_call_count or 0),
+                                "success": True,
+                            },
+                        ]
 
                     if not summary:
-                        logger.trace("LLM returned empty content")
+                        logger.warning(
+                            "LLM returned empty content: "
+                            + self._describe_empty_llm_response(
+                                response,
+                                response_api=response_api,
+                                finish_reason=finish_reason,
+                                usage=usage,
+                            )
+                        )
                         return self._build_summary_result("# Error\n\nLLM returned empty content", summary_meta)
 
                     # Log reasoning content if available
@@ -2705,11 +3178,12 @@ Please output strictly according to the following structure:
 
             except Exception as e:
                 last_exc = e
+                err_text = self._summarize_llm_error(e)
                 should_fallback = self._should_fallback_llm_error(e)
                 attempts.append(
                     {
                         "model": modelid,
-                        "error": str(e),
+                        "error": err_text,
                         "fallback": should_fallback,
                         "finish_reason": str(last_finish_reason) if last_finish_reason is not None else None,
                         "tool_call_count": int(last_tool_call_count or 0),
@@ -2717,12 +3191,12 @@ Please output strictly according to the following structure:
                 )
 
                 if not should_fallback:
-                    logger.trace(f"LLM summary failed (no-fallback): {e}")
+                    logger.trace(f"LLM summary failed (no-fallback): {err_text}")
                     break
 
                 logger.warning(
                     f"LLM summary failed for model={modelid}, trying fallback "
-                    f"({idx + 1}/{len(model_candidates)}): {e}"
+                    f"({idx + 1}/{len(model_candidates)}): {err_text}"
                 )
                 continue
 
@@ -2733,7 +3207,7 @@ Please output strictly according to the following structure:
             "llm_candidates": model_candidates,
             "llm_fallback_attempts": attempts,
         }
-        err_text = str(last_exc) if last_exc is not None else "unknown error"
+        err_text = self._summarize_llm_error(last_exc)
         logger.trace(f"LLM summary failed (all attempts): {err_text}")
         logger.info(f"Summary failed: pid={pid} models={model_candidates} error={err_text}")
         return self._build_summary_result(f"# Error\n\nSummary generation failed: {err_text}", summary_meta)
@@ -3150,6 +3624,10 @@ def generate_paper_summary(pid: str, source: str | None = None, model: str | Non
 _PID_VERSION_RE = re.compile(r"^(?P<raw>.+)v(?P<ver>\d+)$")
 
 
+def _is_upload_style_pid(pid: str) -> bool:
+    return bool(pid and pid.startswith("up_"))
+
+
 def split_pid_version(pid: str) -> tuple[str, int | None]:
     """
     Split paper ID into raw ID and version number.
@@ -3163,6 +3641,8 @@ def split_pid_version(pid: str) -> tuple[str, int | None]:
     pid = (pid or "").strip()
     if not pid:
         return "", None
+    if _is_upload_style_pid(pid):
+        return pid, None
     match = _PID_VERSION_RE.match(pid)
     if not match:
         return pid, None
@@ -3179,7 +3659,7 @@ def looks_like_valid_cached_summary_markdown(text: str) -> bool:
     if not isinstance(text, str):
         return False
     t = (text or "").strip()
-    if len(t) < 250:
+    if len(t) < 40:
         return False
     lines = t.splitlines()
     first = (lines[0] if lines else "").strip()
@@ -3190,10 +3670,14 @@ def looks_like_valid_cached_summary_markdown(text: str) -> bool:
     # Prefer the standardized format marker.
     if re.search(r"^\s*##\s*TL;DR\s*$", t, flags=re.IGNORECASE | re.MULTILINE):
         return True
-    # Backward compatible: accept longer markdown with multiple headings.
-    if len(t) >= 800:
-        headings = re.findall(r"^\s*#{1,6}\s+\S", t, flags=re.MULTILINE)
-        return len(headings) >= 2
+    headings = re.findall(r"^\s*#{1,6}\s+\S", t, flags=re.MULTILINE)
+    if len(headings) >= 2:
+        return True
+    paragraphs = [block.strip() for block in re.split(r"\n\s*\n", t) if block.strip()]
+    if len(paragraphs) >= 2 and len(t) >= 60:
+        return True
+    if first.startswith("#") and len(t) >= 60:
+        return True
     return False
 
 
@@ -3248,13 +3732,17 @@ def normalize_to_versioned_pid(pid: str, meta: dict | None = None, base_dir: Pat
 
     # Strategy 2: Get version from metadata
     if isinstance(meta, dict):
-        idv = meta.get("_idv")
-        if isinstance(idv, str) and idv.strip():
+        for key in ("_effective_idv", "_idv"):
+            idv = meta.get(key)
+            if not isinstance(idv, str) or not idv.strip():
+                continue
             # Validate it has version
             _, v = split_pid_version(idv.strip())
             if v:
                 return idv.strip()
-        version = meta.get("_version")
+        version = meta.get("_effective_version")
+        if version is None:
+            version = meta.get("_version")
         if version is not None:
             try:
                 return f"{raw_pid}v{int(version)}"
@@ -3449,6 +3937,21 @@ def normalize_summary_result(result) -> tuple[str, dict]:
         content = result if isinstance(result, str) else str(result or "")
         meta = {}
     return content, meta
+
+
+def is_error_summary_content(summary_content: str | None) -> bool:
+    """Detect internal error markdown without misclassifying normal titles."""
+
+    text = str(summary_content or "").strip()
+    if not text:
+        return True
+    return bool(
+        re.match(
+            r"^#\s*(?:Error|PDF Parsing Service Unavailable)\s*(?:\n|$)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def calculate_chinese_ratio(text: str) -> float:

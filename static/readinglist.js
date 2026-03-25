@@ -33,6 +33,7 @@
     const unmarkSummaryPending = CommonUtils.unmarkSummaryPending;
     const canTriggerSummary = CommonUtils.canTriggerSummary;
     const formatSummaryStatus = CommonUtils.formatSummaryStatus;
+    const hasMathContent = CommonUtils.hasMathContent;
     const isSummaryModelMatch =
         CommonUtils.isSummaryModelMatch ||
         function () {
@@ -42,6 +43,40 @@
 
     const readinglistDropdowns = new Map();
     const readinglistSummaryUI = new Map();
+    const pageRefs = {
+        rlContainer: null,
+        rlEmptyState: null,
+        uploadedContainer: null,
+        uploadedEmptyState: null,
+    };
+
+    function getReadingListContainer() {
+        if (!pageRefs.rlContainer) {
+            pageRefs.rlContainer = document.getElementById('rl-papers');
+        }
+        return pageRefs.rlContainer;
+    }
+
+    function getReadingListEmptyState() {
+        if (!pageRefs.rlEmptyState) {
+            pageRefs.rlEmptyState = document.getElementById('rl-empty-state');
+        }
+        return pageRefs.rlEmptyState;
+    }
+
+    function getUploadedContainer() {
+        if (!pageRefs.uploadedContainer) {
+            pageRefs.uploadedContainer = document.getElementById('uploaded-papers');
+        }
+        return pageRefs.uploadedContainer;
+    }
+
+    function getUploadedEmptyState() {
+        if (!pageRefs.uploadedEmptyState) {
+            pageRefs.uploadedEmptyState = document.getElementById('uploaded-empty-state');
+        }
+        return pageRefs.uploadedEmptyState;
+    }
 
     function notify(message, type) {
         if (typeof showToast === 'function') {
@@ -108,6 +143,12 @@
         return fetchUserState().then(applyUserState);
     }
 
+    const dateFormatter = new Intl.DateTimeFormat();
+    const timeFormatter = new Intl.DateTimeFormat([], {
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+
     function updateSummaryStatusFromEvent(pid, status, error, event) {
         const targets = [];
         const readingUi = readinglistSummaryUI.get(pid);
@@ -164,15 +205,19 @@
         if (!ui || !ui.card || !tldr) return;
 
         const card = ui.card;
-        const existingDetails = card.querySelector('.rel_abs_details');
-        const existingAbs = card.querySelector('.rel_abs');
+        const existingDetails = ui.abstractDetailsEl || null;
+        const existingAbs = ui.abstractEl || null;
         const existingAbsHtml = existingAbs ? existingAbs.innerHTML : '';
 
         // Check if TL;DR already exists
-        let tldrDiv = card.querySelector('.rel_tldr');
+        let tldrDiv = ui.tldrEl || null;
         if (tldrDiv) {
             // Update existing TL;DR
-            const tldrText = tldrDiv.querySelector('.tldr_text');
+            let tldrText = ui.tldrTextEl || null;
+            if (!tldrText) {
+                tldrText = tldrDiv.querySelector('.tldr_text');
+                if (tldrText) ui.tldrTextEl = tldrText;
+            }
             if (tldrText) {
                 tldrText.innerHTML = renderTldrMarkdown(tldr);
                 triggerMathJax(tldrDiv);
@@ -189,9 +234,11 @@
             tldrText.innerHTML = renderTldrMarkdown(tldr);
             tldrDiv.appendChild(tldrLabel);
             tldrDiv.appendChild(tldrText);
+            ui.tldrEl = tldrDiv;
+            ui.tldrTextEl = tldrText;
 
             // Insert before tags section
-            const utagsWrap = card.querySelector('.rel_utags');
+            const utagsWrap = ui.utagsWrap || null;
             if (utagsWrap) {
                 utagsWrap.insertAdjacentElement('beforebegin', tldrDiv);
             } else {
@@ -208,7 +255,7 @@
             ui.paperData && ui.paperData.summary && String(ui.paperData.summary).trim()
         );
         if (hasAbstractHtml || hasAbstractText) {
-            const utagsWrap = card.querySelector('.rel_utags');
+            const utagsWrap = ui.utagsWrap || null;
             let details = existingDetails;
             if (!details) {
                 details = document.createElement('details');
@@ -219,7 +266,12 @@
                 details.appendChild(summaryEl);
                 details.dataset.mathjaxBound = '1';
                 details.addEventListener('toggle', function () {
-                    if (details.open) triggerMathJax(details);
+                    if (
+                        details.open &&
+                        hasMathContent((ui.paperData && ui.paperData.summary) || '')
+                    ) {
+                        triggerMathJax(details);
+                    }
                 });
 
                 if (tldrDiv) {
@@ -229,23 +281,40 @@
                 } else {
                     card.appendChild(details);
                 }
+                ui.abstractDetailsEl = details;
             } else if (!details.dataset.mathjaxBound) {
                 details.dataset.mathjaxBound = '1';
                 details.addEventListener('toggle', function () {
-                    if (details.open) triggerMathJax(details);
+                    if (
+                        details.open &&
+                        hasMathContent((ui.paperData && ui.paperData.summary) || '')
+                    ) {
+                        triggerMathJax(details);
+                    }
                 });
             }
 
-            let absDiv = details.querySelector('.rel_abs');
+            let absDiv = ui.abstractEl || null;
             if (!absDiv) {
-                absDiv = document.createElement('div');
-                absDiv.className = 'rel_abs';
-                details.appendChild(absDiv);
+                const existingInDetails = details.querySelector('.rel_abs');
+                if (existingInDetails) {
+                    absDiv = existingInDetails;
+                } else {
+                    absDiv = document.createElement('div');
+                    absDiv.className = 'rel_abs';
+                    details.appendChild(absDiv);
+                }
+                ui.abstractEl = absDiv;
             }
-            if (existingAbs && !details.contains(existingAbs)) {
+            if (existingAbs && existingAbs !== absDiv && !details.contains(existingAbs)) {
                 absDiv.innerHTML = existingAbsHtml;
                 existingAbs.remove();
-            } else if (!existingAbsHtml && hasAbstractText) {
+                ui.abstractEl = absDiv;
+            }
+            if (absDiv && absDiv.parentElement !== details) {
+                details.appendChild(absDiv);
+            }
+            if (!existingAbsHtml && hasAbstractText) {
                 absDiv.innerHTML = renderAbstractMarkdown(ui.paperData.summary);
             } else if (existingAbsHtml) {
                 absDiv.innerHTML = existingAbsHtml;
@@ -264,7 +333,7 @@
             const safePid = escapeCssAttrValue(event.pid);
             const existing = document.querySelector(`.rl-paper-card[data-pid="${safePid}"]`);
             if (!existing) {
-                const container = document.getElementById('rl-papers');
+                const container = getReadingListContainer();
                 if (!container) return;
                 fetch('/api/readinglist/paper?pid=' + encodeURIComponent(event.pid))
                     .then(resp => resp.json())
@@ -374,14 +443,8 @@
 
     function openRemoveConfirm(pid, element) {
         if (!element) return;
-        const card = element.closest('.rl-paper-card');
-        const paperTitle = card
-            ? (
-                  (card.querySelector('.rel_title a') &&
-                      card.querySelector('.rel_title a').textContent) ||
-                  ''
-              ).trim()
-            : '';
+        const ui = readinglistSummaryUI.get(pid);
+        const paperTitle = ui && ui.titleLink ? String(ui.titleLink.textContent || '').trim() : '';
         const desc = paperTitle
             ? `Remove “${paperTitle}” from your reading list?`
             : 'Remove this paper from your reading list?';
@@ -406,7 +469,9 @@
 
     function performRemoveFromReadingList(pid, element) {
         const card = element ? element.closest('.rl-paper-card') : null;
-        const removeBtn = card ? card.querySelector('.rl-remove-btn') : null;
+        const ui = readinglistSummaryUI.get(pid);
+        const removeBtn =
+            (ui && ui.removeBtn) || (card ? card.querySelector('.rl-remove-btn') : null);
         if (removeBtn) {
             removeBtn.classList.add('disabled');
             removeBtn.setAttribute('aria-disabled', 'true');
@@ -463,23 +528,19 @@
     }
 
     function updateEmptyState() {
-        const container = document.getElementById('rl-papers');
-        const emptyState = document.getElementById('rl-empty-state');
-        const cards = container ? container.querySelectorAll('.rl-paper-card') : [];
+        const container = getReadingListContainer();
+        const emptyState = getReadingListEmptyState();
+        const hasCards = Boolean(container && container.querySelector('.rl-paper-card'));
 
         if (emptyState) {
-            emptyState.style.display = cards.length === 0 ? 'block' : 'none';
+            emptyState.style.display = hasCards ? 'none' : 'block';
         }
     }
 
     function formatDate(timestamp) {
         if (!timestamp) return '';
         const date = new Date(timestamp * 1000);
-        return (
-            date.toLocaleDateString() +
-            ' ' +
-            date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        );
+        return dateFormatter.format(date) + ' ' + timeFormatter.format(date);
     }
 
     function renderTldrMarkdown(text) {
@@ -722,6 +783,7 @@
 
     function createReadingListCard(p, container, options = {}) {
         if (!container || !p) return;
+        const linkPid = p.versioned_id || p.id;
 
         const card = document.createElement('div');
         card.className = 'rel_paper rl-paper-card';
@@ -753,14 +815,13 @@
         // Title
         const titleDiv = document.createElement('div');
         titleDiv.className = 'rel_title';
-        titleDiv.appendChild(
-            createLinkElement(
-                'http://arxiv.org/abs/' + encodeURIComponent(p.id),
-                null,
-                p.title || p.id,
-                '_blank'
-            )
+        const titleLink = createLinkElement(
+            'https://arxiv.org/abs/' + encodeURIComponent(linkPid),
+            null,
+            p.title || p.id,
+            '_blank'
         );
+        titleDiv.appendChild(titleLink);
         card.appendChild(titleDiv);
 
         // Authors (unified truncation)
@@ -817,7 +878,9 @@
                 details.appendChild(summaryEl);
                 details.appendChild(absDiv);
                 details.addEventListener('toggle', function () {
-                    if (details.open) triggerMathJax(details);
+                    if (details.open && hasMathContent(p.summary || '')) {
+                        triggerMathJax(details);
+                    }
                 });
                 card.appendChild(details);
             }
@@ -827,7 +890,9 @@
             absDiv.className = 'rel_abs';
             absDiv.innerHTML = renderAbstractMarkdown(p.summary);
             card.appendChild(absDiv);
-            triggerMathJax(absDiv);
+            if (hasMathContent(p.summary || '')) {
+                triggerMathJax(absDiv);
+            }
         }
 
         card.appendChild(buildAddedTimeLine(p.added_time));
@@ -863,7 +928,7 @@
         similarWrap.className = 'rel_more';
         similarWrap.appendChild(
             createLinkElement(
-                '/?rank=pid&pid=' + encodeURIComponent(p.id),
+                '/?rank=pid&pid=' + encodeURIComponent(linkPid),
                 null,
                 'Similar',
                 '_blank'
@@ -873,20 +938,30 @@
         const inspectWrap = document.createElement('div');
         inspectWrap.className = 'rel_inspect';
         inspectWrap.appendChild(
-            createLinkElement('/inspect?pid=' + encodeURIComponent(p.id), null, 'Inspect', '_blank')
+            createLinkElement(
+                '/inspect?pid=' + encodeURIComponent(linkPid),
+                null,
+                'Inspect',
+                '_blank'
+            )
         );
 
         const summaryWrap = document.createElement('div');
         summaryWrap.className = 'rel_summary';
         summaryWrap.appendChild(
-            createLinkElement('/summary?pid=' + encodeURIComponent(p.id), null, 'Summary', '_blank')
+            createLinkElement(
+                '/summary?pid=' + encodeURIComponent(linkPid),
+                null,
+                'Summary',
+                '_blank'
+            )
         );
 
         const alphaWrap = document.createElement('div');
         alphaWrap.className = 'rel_alphaxiv';
         alphaWrap.appendChild(
             createLinkElement(
-                'https://www.alphaxiv.org/overview/' + encodeURIComponent(p.id),
+                'https://www.alphaxiv.org/overview/' + encodeURIComponent(linkPid),
                 null,
                 'alphaXiv',
                 '_blank'
@@ -897,7 +972,7 @@
         coolWrap.className = 'rel_cool';
         coolWrap.appendChild(
             createLinkElement(
-                'https://papers.cool/arxiv/' + encodeURIComponent(p.id),
+                'https://papers.cool/arxiv/' + encodeURIComponent(linkPid),
                 null,
                 'Cool',
                 '_blank'
@@ -999,6 +1074,9 @@
             state: summaryState,
             syncTriggerState,
             card: card,
+            titleLink: titleLink,
+            removeBtn: removeBtn,
+            paperData: p,
         });
 
         primaryActions.appendChild(triggerWrap);
@@ -1230,7 +1308,7 @@
                 ui.authorsEl.textContent = event.authors;
             } else if (!ui.authorsEl && event.authors && ui.card) {
                 // Create authors element if it doesn't exist
-                const titleDiv = ui.card.querySelector('.rel_title');
+                const titleDiv = ui.titleDiv;
                 if (titleDiv) {
                     const authorsEl = document.createElement('div');
                     authorsEl.className = 'rel_authors';
@@ -1242,17 +1320,20 @@
 
             // Update abstract display (only if no TL;DR)
             if (event.abstract && ui.card) {
-                const tldrDiv = ui.card.querySelector('.rel_tldr');
+                const tldrDiv = ui.tldrEl || null;
                 if (!tldrDiv) {
-                    let absDiv = ui.card.querySelector('.rel_abs');
+                    let absDiv = ui.abstractEl || null;
                     if (!absDiv) {
                         // Create abstract element if it doesn't exist
                         absDiv = document.createElement('div');
                         absDiv.className = 'rel_abs';
-                        const utagsWrap = ui.card.querySelector('.rel_utags');
+                        const utagsWrap = ui.utagsWrap || null;
                         if (utagsWrap) {
                             utagsWrap.insertAdjacentElement('beforebegin', absDiv);
+                        } else {
+                            ui.card.appendChild(absDiv);
                         }
+                        ui.abstractEl = absDiv;
                     }
                     absDiv.innerHTML = renderAbstractMarkdown(event.abstract);
                     triggerMathJax(absDiv);
@@ -1325,12 +1406,12 @@
     }
 
     function updateUploadedEmptyState() {
-        const container = document.getElementById('uploaded-papers');
-        const emptyState = document.getElementById('uploaded-empty-state');
-        const cards = container ? container.querySelectorAll('.rl-paper-card') : [];
+        const container = getUploadedContainer();
+        const emptyState = getUploadedEmptyState();
+        const hasCards = Boolean(container && container.querySelector('.rl-paper-card'));
 
         if (emptyState) {
-            emptyState.style.display = cards.length === 0 ? 'block' : 'none';
+            emptyState.style.display = hasCards ? 'none' : 'block';
         }
     }
 
@@ -1361,7 +1442,7 @@
     }
 
     function renderUploadedPapers() {
-        const container = document.getElementById('uploaded-papers');
+        const container = getUploadedContainer();
         if (!container) return;
         const nextById = new Map();
         (uploadedPapers || []).forEach(p => {
@@ -1482,8 +1563,9 @@
         card.appendChild(titleDiv);
 
         // Authors
+        let authorsEl = null;
         if (p.authors) {
-            const authorsEl = createTextElement('div', 'rel_authors', p.authors);
+            authorsEl = createTextElement('div', 'rel_authors', p.authors);
             card.appendChild(authorsEl);
         }
 
@@ -1502,50 +1584,57 @@
         // Uploaded time
         if (p.created_time) {
             const uploadedTimeLine = buildAddedTimeLine(p.created_time);
-            uploadedTimeLine.querySelector('.rl-meta-label').textContent = 'Uploaded at:';
+            const uploadedTimeLabel = uploadedTimeLine.querySelector('.rl-meta-label');
+            if (uploadedTimeLabel) {
+                uploadedTimeLabel.textContent = 'Uploaded at:';
+            }
             card.appendChild(uploadedTimeLine);
         }
 
         // TL;DR section (prioritize over abstract if available)
         const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
+        let tldrDiv = null;
+        let tldrTextEl = null;
+        let abstractDetailsEl = null;
+        let abstractEl = null;
         if (hasTldr) {
-            const tldrDiv = document.createElement('div');
+            tldrDiv = document.createElement('div');
             tldrDiv.className = 'rel_tldr';
             const tldrLabel = document.createElement('div');
             tldrLabel.className = 'tldr_label';
             tldrLabel.textContent = '💡 TL;DR';
-            const tldrText = document.createElement('div');
-            tldrText.className = 'tldr_text';
-            tldrText.innerHTML = renderTldrMarkdown(p.tldr);
+            tldrTextEl = document.createElement('div');
+            tldrTextEl.className = 'tldr_text';
+            tldrTextEl.innerHTML = renderTldrMarkdown(p.tldr);
             tldrDiv.appendChild(tldrLabel);
-            tldrDiv.appendChild(tldrText);
+            tldrDiv.appendChild(tldrTextEl);
             card.appendChild(tldrDiv);
             triggerMathJax(tldrDiv);
 
             // Abstract: collapsed by default when TL;DR exists
             if (p.summary) {
-                const details = document.createElement('details');
-                details.className = 'rel_abs_details';
+                abstractDetailsEl = document.createElement('details');
+                abstractDetailsEl.className = 'rel_abs_details';
                 const summaryEl = document.createElement('summary');
                 summaryEl.className = 'rel_abs_summary';
                 summaryEl.textContent = 'Abstract';
-                const absDiv = document.createElement('div');
-                absDiv.className = 'rel_abs';
-                absDiv.innerHTML = renderAbstractMarkdown(p.summary);
-                details.appendChild(summaryEl);
-                details.appendChild(absDiv);
-                details.addEventListener('toggle', function () {
-                    if (details.open) triggerMathJax(details);
+                abstractEl = document.createElement('div');
+                abstractEl.className = 'rel_abs';
+                abstractEl.innerHTML = renderAbstractMarkdown(p.summary);
+                abstractDetailsEl.appendChild(summaryEl);
+                abstractDetailsEl.appendChild(abstractEl);
+                abstractDetailsEl.addEventListener('toggle', function () {
+                    if (abstractDetailsEl.open) triggerMathJax(abstractDetailsEl);
                 });
-                card.appendChild(details);
+                card.appendChild(abstractDetailsEl);
             }
         } else if (p.summary) {
             // Fallback to abstract if no TL;DR
-            const absDiv = document.createElement('div');
-            absDiv.className = 'rel_abs';
-            absDiv.innerHTML = renderAbstractMarkdown(p.summary);
-            card.appendChild(absDiv);
-            triggerMathJax(absDiv);
+            abstractEl = document.createElement('div');
+            abstractEl.className = 'rel_abs';
+            abstractEl.innerHTML = renderAbstractMarkdown(p.summary);
+            card.appendChild(abstractEl);
+            triggerMathJax(abstractEl);
         }
 
         // Tag dropdown for uploaded papers (same 3-state behavior)
@@ -1574,6 +1663,7 @@
         // Similar and Inspect require both parse and metadata extraction
         const metaExtracted = p.meta_extracted_ok === true;
         const featureDisabled = p.parse_status !== 'ok' || !metaExtracted;
+        const summaryDisabled = p.parse_status !== 'ok';
 
         // Similar button for uploaded papers
         const similarWrap = document.createElement('div');
@@ -1638,12 +1728,10 @@
                 e.stopPropagation();
             }
         });
-        if (featureDisabled) {
+        if (summaryDisabled) {
             summaryLink.classList.add('disabled-link');
             summaryLink.title =
-                p.parse_status !== 'ok'
-                    ? 'Parse PDF first to view summary'
-                    : 'Extract metadata first to view summary';
+                p.parse_status !== 'ok' ? 'Parse PDF first to view summary' : 'View summary';
         } else {
             summaryLink.title = 'View summary';
         }
@@ -1667,7 +1755,7 @@
             summaryState.queueRank,
             summaryState.queueTotal
         );
-        card.insertBefore(statusBadge, card.querySelector('.rl-original-filename'));
+        card.insertBefore(statusBadge, filenameDiv);
 
         // Track parse status for dependency management
         let currentParseStatus = p.parse_status;
@@ -1901,16 +1989,13 @@
         actions.appendChild(primaryActions);
         card.appendChild(actions);
 
-        // Store UI references for SSE event handling
-        // Find authorsEl if it exists
-        const authorsEl = card.querySelector('.rel_authors');
-
         uploadedSummaryUI.set(p.id, {
             badge: statusBadge,
             state: summaryState,
             syncTriggerState,
             updateParseStatus,
             card: card,
+            titleDiv: titleDiv,
             parseStatusBadge: parseStatusBadge,
             parseBtn: parseBtn,
             extractBtn: extractBtn,
@@ -1919,6 +2004,13 @@
             summaryLink: summaryLink,
             titleLink: titleLink,
             authorsEl: authorsEl,
+            filenameDiv: filenameDiv,
+            utagsWrap: utagsWrap,
+            tldrEl: tldrDiv,
+            tldrTextEl: tldrTextEl,
+            abstractDetailsEl: abstractDetailsEl,
+            abstractEl: abstractEl,
+            removeBtn: deleteBtn,
             paperData: p,
         });
 
@@ -2284,7 +2376,7 @@
     }
 
     document.addEventListener('DOMContentLoaded', function () {
-        const container = document.getElementById('rl-papers');
+        const container = getReadingListContainer();
         if (!container || !papers) {
             setupUserEventStream();
             setupUploadUI();

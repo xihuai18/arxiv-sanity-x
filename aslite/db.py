@@ -572,6 +572,18 @@ def get_metas_db(flag="r", autocommit=True):
     )
 
 
+def get_paper_tombstones_db(flag="r", autocommit=True):
+    """Get paper tombstones database for withdrawn-only public removals."""
+    return _safe_open_db(
+        PAPERS_DB_FILE,
+        "paper_tombstones",
+        flag,
+        autocommit,
+        compressed=False,
+        allow_create_on_read=False,
+    )
+
+
 def get_tags_db(flag="r", autocommit=True):
     return _safe_open_db(
         DICT_DB_FILE,
@@ -791,6 +803,21 @@ def update_metas_time_index(pid_time_pairs: list[tuple[str, float]]):
         conn.executemany(
             "INSERT OR REPLACE INTO metas_time_index (pid, _time) VALUES (?, ?)",
             pid_time_pairs,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_metas_time_index(pids: list[str]):
+    """Delete rows from metas_time_index for removed public papers."""
+    if not pids:
+        return
+    conn = _get_metas_time_index_conn(flag="c")
+    try:
+        conn.executemany(
+            "DELETE FROM metas_time_index WHERE pid = ?",
+            [(pid,) for pid in pids],
         )
         conn.commit()
     finally:

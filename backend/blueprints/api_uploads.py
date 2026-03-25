@@ -55,6 +55,18 @@ def _api_success(**data):
     return jsonify(resp)
 
 
+def _read_json_object():
+    """Read a JSON object request body or return a JSON error response."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return None, _api_error("No JSON data provided", 400)
+    if not isinstance(data, dict):
+        return None, _api_error("Request body must be a JSON object", 400)
+    if not data:
+        return None, _api_error("No JSON data provided", 400)
+    return data, None
+
+
 @bp.route("/upload_pdf", methods=["POST"])
 def api_upload_pdf():
     """Upload a PDF file.
@@ -224,15 +236,22 @@ def api_uploaded_papers_list():
 
 @bp.route("/uploaded_papers/update_meta", methods=["POST"])
 def api_uploaded_papers_update_meta():
-    """Update metadata for an uploaded paper."""
+    """Update metadata for an uploaded paper.
+
+    Returns:
+        - 200 on success
+        - 400 for invalid pid / invalid metadata input
+        - 404 if not found or not owner
+        - 409 if the upload is being deleted
+    """
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -258,6 +277,8 @@ def api_uploaded_papers_update_meta():
     except UploadServiceError as e:
         if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
+        if e.code == "deleting":
+            return _api_error("Paper is being deleted", 409)
         if e.code == "invalid_meta":
             return _api_error(e.detail, 400)
         return _api_error("Failed to update metadata. Please try again.", 500)
@@ -279,9 +300,9 @@ def api_uploaded_papers_delete():
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -318,18 +339,20 @@ def api_uploaded_papers_retry_parse():
 
     Returns:
         - 200 with parse_status="queued" if newly enqueued
-        - 200 with parse_status="already_in_progress" if already queued/running (idempotent)
+        - 200 with parse_status="already_in_progress" if the currently tracked task is still queued/running
+        - stale tracked tasks may be repaired and replaced with a new task id
         - 400 if not in failed state
         - 404 if not found or not owner
+        - 409 if the upload is being deleted / already parsed
     """
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -347,6 +370,8 @@ def api_uploaded_papers_retry_parse():
     except UploadServiceError as e:
         if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
+        if e.code == "deleting":
+            return _api_error("Paper is being deleted", 409)
         if e.code == "not_failed":
             return _api_error("Paper is not in failed state, cannot retry", 400)
         if e.code == "invalid_pid":
@@ -370,19 +395,19 @@ def api_uploaded_papers_parse():
 
     Returns:
         - 200 with parse_status="queued" if newly enqueued
-        - 200 with parse_status="already_in_progress" if already queued/running (idempotent)
+        - 200 with parse_status="already_in_progress" if the currently tracked task is still queued/running
         - 400 if invalid input
         - 404 if not found or not owner
-        - 409 if already parsed successfully
+        - 409 if already parsed successfully / being deleted
     """
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -400,6 +425,8 @@ def api_uploaded_papers_parse():
     except UploadServiceError as e:
         if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)  # Don't leak existence
+        if e.code == "deleting":
+            return _api_error("Paper is being deleted", 409)
         if e.code == "already_parsed":
             return _api_error("Paper already parsed successfully", 409)
         if e.code == "invalid_pid":
@@ -421,9 +448,10 @@ def api_uploaded_papers_process():
 
     Returns:
         - 200 with parse_status="queued" if newly enqueued
-        - 200 with parse_status="already_in_progress" if already queued/running (idempotent)
-        - 400 if invalid input / already parsed
+        - 200 with parse_status="already_in_progress" if the currently tracked task is still queued/running
+        - 400 if invalid input
         - 404 if not found or not owner
+        - 409 if already parsed successfully / being deleted
         - 500 on DB/enqueue errors
     """
     if g.user is None:
@@ -431,9 +459,9 @@ def api_uploaded_papers_process():
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -451,6 +479,8 @@ def api_uploaded_papers_process():
     except UploadServiceError as e:
         if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
+        if e.code == "deleting":
+            return _api_error("Paper is being deleted", 409)
         if e.code == "already_parsed":
             return _api_error("Paper already parsed successfully", 409)
         if e.code == "invalid_pid":
@@ -468,15 +498,22 @@ def api_uploaded_papers_process():
 
 @bp.route("/uploaded_papers/extract_info", methods=["POST"])
 def api_uploaded_papers_extract_info():
-    """Trigger metadata extraction for an uploaded paper."""
+    """Trigger metadata extraction for an uploaded paper.
+
+    Returns:
+        - 200 with a task_id if extraction was newly enqueued or an active extract task already exists
+        - 400 if the upload is not parsed yet / metadata is already extracted / pid is invalid
+        - 404 if not found or not owner
+        - 409 if the upload is being deleted
+    """
     if g.user is None:
         return _api_error("Not logged in", 401)
 
     csrf_protect()
 
-    data = request.get_json(silent=True)
-    if not data:
-        return _api_error("No JSON data provided", 400)
+    data, err = _read_json_object()
+    if err:
+        return err
 
     pid = data.get("pid", "").strip()
     if not pid or not validate_upload_pid(pid):
@@ -494,6 +531,8 @@ def api_uploaded_papers_extract_info():
     except UploadServiceError as e:
         if e.code in {"not_found", "not_owner"}:
             return _api_error("Paper not found", 404)
+        if e.code == "deleting":
+            return _api_error("Paper is being deleted", 409)
         if e.code == "not_parsed":
             return _api_error("Paper not parsed yet", 400)
         if e.code == "already_extracted":

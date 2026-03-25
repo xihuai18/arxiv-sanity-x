@@ -27,6 +27,8 @@ arxiv-sanity-X typically runs as **multiple processes**:
 
 For local development, `bin/run_services.py` can start a full stack in one terminal.
 
+Operationally, `tasks.py` is the async orchestration center for summary generation, upload parse/process/extract work, stale-task repair, and task-status visibility. If you deploy changes to `tasks.py` or async task semantics, restart the Huey consumer so worker code and web code stay in sync.
+
 ## Start Services
 
 - Web (recommended): `./bin/up.sh`
@@ -54,6 +56,8 @@ For local development, `bin/run_services.py` can start a full stack in one termi
 - `bin/up.sh` builds static assets via `npm run build:static` (best-effort) before starting Gunicorn.
 - `bin/up.sh` sets `ARXIV_SANITY_PROCESS_ROLE=web` (fail-fast DB settings).
 - `bin/huey_consumer.py` sets `ARXIV_SANITY_PROCESS_ROLE=worker` (more tolerant DB settings) and supports a memory cap via `ARXIV_SANITY_HUEY_MAX_MEMORY_MB`.
+- `python bin/run_services.py` now handles external `SIGTERM` by running the same cleanup path as Ctrl+C, so child Gunicorn / Huey process groups are torn down instead of being left behind as orphaned processes.
+- If `55555` or another web port still reports `address already in use` after stopping the launcher, confirm whether an older Gunicorn was started outside the current launcher session before assuming the latest launch failed.
 
 ## Observability
 
@@ -86,6 +90,27 @@ For local development, `bin/run_services.py` can start a full stack in one termi
     - `stage` is a coarse-grained progress marker (e.g. acquiring lock / LLM request / writing cache)
     - Some queued tasks may also return `queue_rank` / `queue_total`
 
+### Operational Cleanup Helpers
+
+- Lock cleanup: `python -m scripts cleanup_locks`
+- Task-record cleanup: `python -m scripts cleanup_tasks`
+
+Notes:
+
+- Start with dry-run / filtered cleanup whenever possible, then add `--force` only after checking what will be removed.
+- `cleanup_tasks` is an operator tool, not a replacement for runtime stale repair inside `tasks.py`; if queued/running states keep coming back, investigate worker health, queue lag, and task ownership first.
+
+### Upload Task Behavior
+
+- Upload mutation APIs now return `409` with `Paper is being deleted` when the target upload record is already marked `deleting`
+- This applies to `POST /api/uploaded_papers/update_meta`, `POST /api/uploaded_papers/retry_parse`, `POST /api/uploaded_papers/parse`, `POST /api/uploaded_papers/process`, and `POST /api/uploaded_papers/extract_info`
+- Upload task polling via `GET /api/task_status/<task_id>` may now expose upload-specific repair/cancel outcomes:
+    - `failed` with `error=stale_running_repaired`
+    - `canceled` with `error=superseded_upload_task`
+- Deleting an upload now best-effort cancels linked upload parse/process/extract tasks and any linked summary task before the delete flow removes files and DB records
+- Upload stale detection uses `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL`; set it higher than your expected upload queue backlog plus worst-case MinerU/LLM processing time
+- During incident review, repeated `stale_running_repaired` or `superseded_upload_task` statuses usually indicate queue lag, worker starvation, or a replaced upload task pointer rather than a frontend bug
+
 ### Server-Sent Events (SSE)
 
 - Stream: `GET /api/user_stream` (browser login required)
@@ -93,6 +118,13 @@ For local development, `bin/run_services.py` can start a full stack in one termi
 - SSE IPC is SQLite-backed and designed to work across multiple Gunicorn workers.
 - If SSE is enabled, prefer `gevent` worker class (recommended and auto-selected by `bin/up.sh` when available).
     - Optional hard fail: `ARXIV_SANITY_SSE_STRICT_WORKER_CLASS=true`
+
+### Static Asset Manifest Behavior
+
+- HTML templates resolve hashed assets through `static/dist/manifest.json`.
+- Long-lived web workers now invalidate the in-memory manifest cache by file content, not only by filesystem `mtime`.
+- This avoids a stale-hash window when `npm run build:static` rewrites `manifest.json` within the same timestamp granularity.
+- If fresh builds still do not show up in HTML responses, first verify which process currently owns the web port; stale responses usually mean an older Gunicorn is still serving traffic.
 
 ### Logs
 
@@ -152,9 +184,16 @@ Notes:
 
 ## Daemon Schedule
 
-The scheduler in `tools/daemon.py` runs cron-style jobs in `settings.daemon.timezone`:
+The scheduler in `tools/daemon.py` runs cron-style jobs in `settings.daemon.timezone` (set with `ARXIV_SANITY_DAEMON_TIMEZONE`, default `Asia/Shanghai`):
 
 - `fetch_compute`: Mon–Fri 08:00 / 12:00 / 16:00 / 20:00
 - `send_email`: Mon–Fri 18:00
 - `backup_user_data`: Daily 20:00 (requires a git repo under `backup_repo_dir` + git remote/credentials)
 - `cleanup_task_records`: Daily 03:00 (keeps task-status DB bounded)
+
+### Email Run Semantics
+
+- `tools/daemon.py` computes the weekday / holiday-aware `time_delta` in `settings.daemon.timezone` and passes it to `tools/send_emails.py`; running `python -m tools send_emails` directly still follows the explicit CLI `--time-delta` you provide.
+- Users with registered email addresses can now receive recommendation runs from positive-tag inputs, combined tags, or keyword-only inputs.
+- Any per-user recommendation failure or per-recipient SMTP failure makes `tools/send_emails.py` exit non-zero.
+- `tools/daemon.py` now warns on every non-zero mailer exit, so scheduler logs should treat that as a real delivery problem rather than a harmless partial success.

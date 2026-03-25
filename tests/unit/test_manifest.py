@@ -31,7 +31,13 @@ class TestManifestUtils:
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "manifest.json")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"main.css": "main-ABCDEF1234.css", "common_utils.js": "common_utils-XYZ98765.js"}, f)
+                json.dump(
+                    {
+                        "main.css": "main-ABCDEF1234.css",
+                        "common_utils.js": "common_utils-XYZ98765.js",
+                    },
+                    f,
+                )
 
             # The resolver validates that mapped files exist on disk (guards against stale manifests).
             # Create placeholder files to simulate a real dist/ directory.
@@ -72,6 +78,30 @@ class TestManifestUtils:
             with mock.patch.object(manifest, "_get_manifest_path", return_value=path):
                 assert manifest.static_url("dist/main.css") == "dist/main-REAL999.css"
                 assert manifest.static_url("dist/main.css") != "dist/main-STALE123.css"
+
+    def test_static_url_reloads_when_manifest_content_changes_same_mtime(self):
+        """Test that manifest content changes are detected even when mtime is unchanged."""
+        from backend.utils import manifest
+
+        manifest.clear_manifest_cache()
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "manifest.json")
+            fixed_ts = 1_700_000_000
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"main.css": "main-AAA111.css"}, f)
+            open(os.path.join(td, "main-AAA111.css"), "a", encoding="utf-8").close()
+            os.utime(path, (fixed_ts, fixed_ts))
+
+            with mock.patch.object(manifest, "_get_manifest_path", return_value=path):
+                assert manifest.static_url("dist/main.css") == "dist/main-AAA111.css"
+
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"main.css": "main-BBB222.css"}, f)
+                open(os.path.join(td, "main-BBB222.css"), "a", encoding="utf-8").close()
+                os.utime(path, (fixed_ts, fixed_ts))
+
+                assert manifest.static_url("dist/main.css") == "dist/main-BBB222.css"
 
     def test_clear_manifest_cache(self):
         """Test that clear_manifest_cache clears the cache."""

@@ -9,7 +9,7 @@ import os
 from loguru import logger
 
 _MANIFEST_PATH: str | None = None
-_MANIFEST_MTIME: float = 0.0
+_MANIFEST_RAW: str | None = None
 _MANIFEST_CACHE: dict[str, str] = {}
 _DIST_DIR_MTIME: float = 0.0
 _FALLBACK_CACHE: dict[str, str] = {}
@@ -26,29 +26,30 @@ def _get_manifest_path() -> str:
 
 
 def _load_manifest() -> dict[str, str]:
-    """Load the manifest.json file, with caching based on mtime."""
-    global _MANIFEST_MTIME, _MANIFEST_CACHE
+    """Load the manifest.json file, with caching based on file content."""
+    global _MANIFEST_RAW, _MANIFEST_CACHE
 
     manifest_path = _get_manifest_path()
 
     if not os.path.isfile(manifest_path):
         # Fallback: no manifest, return empty dict (use original filenames)
-        # Clear cached manifest so a newly-created file will be reloaded even if mtime resolution is coarse.
-        _MANIFEST_MTIME = 0.0
+        # Clear cached manifest so a newly-created file will be reloaded even if
+        # the filesystem timestamp resolution is coarse.
+        _MANIFEST_RAW = None
         _MANIFEST_CACHE = {}
         logger.debug(f"Manifest file not found at {manifest_path}, using fallback resolution")
         return {}
 
     try:
-        current_mtime = os.path.getmtime(manifest_path)
-        if current_mtime != _MANIFEST_MTIME:
-            with open(manifest_path, encoding="utf-8") as f:
-                _MANIFEST_CACHE = json.load(f)
-            _MANIFEST_MTIME = current_mtime
+        with open(manifest_path, encoding="utf-8") as f:
+            raw = f.read()
+        if _MANIFEST_RAW is None or raw != _MANIFEST_RAW:
+            _MANIFEST_CACHE = json.loads(raw) if raw.strip() else {}
+            _MANIFEST_RAW = raw
             logger.debug(f"Loaded manifest.json with {len(_MANIFEST_CACHE)} entries")
     except Exception as exc:
         logger.warning(f"Failed to load manifest.json: {exc}")
-        return {}
+        return _MANIFEST_CACHE or {}
 
     return _MANIFEST_CACHE
 
@@ -180,8 +181,8 @@ def static_url(filename: str) -> str:
 
 def clear_manifest_cache() -> None:
     """Clear the manifest cache (useful for testing or hot-reload)."""
-    global _MANIFEST_MTIME, _MANIFEST_CACHE, _DIST_DIR_MTIME, _FALLBACK_CACHE
-    _MANIFEST_MTIME = 0.0
+    global _MANIFEST_RAW, _MANIFEST_CACHE, _DIST_DIR_MTIME, _FALLBACK_CACHE
+    _MANIFEST_RAW = None
     _MANIFEST_CACHE = {}
     _DIST_DIR_MTIME = 0.0
     _FALLBACK_CACHE = {}

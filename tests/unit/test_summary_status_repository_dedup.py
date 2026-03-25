@@ -21,6 +21,9 @@ class _DummyDB(dict):
         self.write_count += 1
         return super().__setitem__(key, value)
 
+    def get_many(self, keys):
+        return {key: self.get(key) for key in keys if key in self}
+
     @contextmanager
     def transaction(self, mode: str = "IMMEDIATE"):
         yield self
@@ -117,7 +120,11 @@ def test_set_task_status_backfills_missing_updated_time_even_on_noop_update():
     db = _DummyDB()
 
     # Preload an "old" record without updated_time (avoid counting as a write).
-    dict.__setitem__(db, "task::t1", {"status": "queued", "pid": "p1", "model": "m1", "user": "u1", "priority": 10})
+    dict.__setitem__(
+        db,
+        "task::t1",
+        {"status": "queued", "pid": "p1", "model": "m1", "user": "u1", "priority": 10},
+    )
 
     def _get_db(flag="r", autocommit=True):
         return db
@@ -130,3 +137,22 @@ def test_set_task_status_backfills_missing_updated_time_even_on_noop_update():
         assert db.write_count == 1
         out = db.get("task::t1") or {}
         assert out.get("updated_time") == 456.0
+
+
+def test_get_status_many_returns_pid_keyed_rows():
+    db = _DummyDB()
+    dict.__setitem__(db, "p1::m1", {"status": "ok"})
+    dict.__setitem__(db, "p2::m1", {"status": "queued"})
+
+    def _get_db(flag="r", autocommit=True):
+        return db
+
+    with patch("aslite.repositories.get_summary_status_db", _get_db):
+        from aslite.repositories import SummaryStatusRepository
+
+        result = SummaryStatusRepository.get_status_many(["p1", "p2", "p3"], "m1")
+
+    assert result == {
+        "p1": {"status": "ok"},
+        "p2": {"status": "queued"},
+    }

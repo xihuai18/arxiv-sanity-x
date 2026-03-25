@@ -56,7 +56,7 @@ def login():
               description: Username to login as
     responses:
       200:
-        description: Login successful
+        description: Login successful (JSON requests return JSON; form requests redirect)
       400:
         description: Invalid username
     """
@@ -96,7 +96,7 @@ def register_email():
               format: email
     responses:
       200:
-        description: Email registered
+        description: Email registered (JSON requests return JSON; form requests redirect)
       400:
         description: Invalid email
       401:

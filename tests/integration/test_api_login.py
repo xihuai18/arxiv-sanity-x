@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 class TestLoginApi:
     """Tests for login API."""
@@ -44,6 +46,30 @@ class TestLoginApi:
         )
         # Should handle empty username gracefully
         assert resp.status_code in [200, 302, 400]
+
+    def test_login_accepts_json_body(self, client, csrf_token):
+        resp = client.post(
+            "/login",
+            json={"username": "jsonuser"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is True
+        assert payload.get("user") == "jsonuser"
+
+    @pytest.mark.parametrize("body", ["123", '"abc"', "true", "[1, 2]"])
+    def test_login_non_object_json_returns_400(self, client, csrf_token, body):
+        resp = client.post(
+            "/login",
+            data=body,
+            content_type="application/json",
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Request body must be a JSON object"
 
 
 class TestLogoutApi:
@@ -88,3 +114,75 @@ class TestRegisterEmailApi:
         payload = resp.get_json(silent=True) or {}
         assert payload.get("success") is False
         assert payload.get("error") == "Not logged in"
+
+    def test_register_email_accepts_json_body(self, logged_in_client, csrf_token):
+        resp = logged_in_client.post(
+            "/register_email",
+            json={"email": "json@example.com"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is True
+        assert "json@example.com" in (payload.get("emails") or [])
+
+    def test_register_email_invalid_json_with_existing_email_returns_400(self, logged_in_client, csrf_token):
+        from aslite.repositories import UserRepository
+
+        UserRepository.set_emails("test_user", ["old@example.com"])
+
+        resp = logged_in_client.post(
+            "/register_email",
+            json={"email": "not-an-email"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert UserRepository.get_emails("test_user") == ["old@example.com"]
+
+    def test_register_email_json_missing_field_returns_400(self, logged_in_client, csrf_token):
+        resp = logged_in_client.post(
+            "/register_email",
+            json={},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("error") == "email is required"
+
+    def test_register_email_malformed_json_returns_400(self, logged_in_client, csrf_token):
+        resp = logged_in_client.post(
+            "/register_email",
+            data="{",
+            content_type="application/json",
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("error") == "email is required"
+
+    def test_register_email_json_rejects_non_string_value(self, logged_in_client, csrf_token):
+        from aslite.repositories import UserRepository
+
+        UserRepository.set_emails("test_user", ["old@example.com"])
+
+        resp = logged_in_client.post(
+            "/register_email",
+            json={"email": ["bad@example.com"]},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("error") == "email must be a string"
+        assert UserRepository.get_emails("test_user") == ["old@example.com"]
+
+    def test_register_email_json_null_returns_400(self, logged_in_client, csrf_token):
+        resp = logged_in_client.post(
+            "/register_email",
+            json={"email": None},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 400
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("error") == "email must be a string"

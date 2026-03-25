@@ -6,6 +6,7 @@ import logging
 import random
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 
@@ -16,6 +17,18 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 _ARXIV_RETRY_MAX_TRIES = 3
+_WITHDRAWN_BODY_MARKERS = (
+    "this paper has been withdrawn",
+    "this article has been withdrawn",
+    "the paper has been withdrawn",
+    "the article has been withdrawn",
+    "withdrawn by the author",
+    "withdrawn by the authors",
+    "this paper has been retracted",
+    "this article has been retracted",
+    "retracted by the author",
+    "retracted by the authors",
+)
 
 
 def _sleep_backoff(attempt: int, base_s: float = 1.0, cap_s: float = 10.0) -> None:
@@ -38,10 +51,16 @@ def get_response(search_query, start_index=0, max_r=100):
     )
     # add_url = 'search_query=%s&sortBy=submittedDate&start=%d&max_results=100' % (search_query, start_index)
     search_query = base_url + add_url
-    logger.debug(f"arxiv url {search_query}")
-    logger.debug(f"Searching arxiv for {search_query}")
+    return _open_arxiv_api_url(search_query)
+
+
+def _open_arxiv_api_url(url: str) -> bytes:
+    """Open an arXiv API URL with bounded retries."""
+
+    logger.debug(f"arxiv url {url}")
+    logger.debug(f"Searching arxiv for {url}")
     req = urllib.request.Request(
-        search_query,
+        url,
         headers={
             "User-Agent": "arxiv-sanity-x (+https://github.com/karpathy/arxiv-sanity-lite)",
         },
@@ -49,16 +68,16 @@ def get_response(search_query, start_index=0, max_r=100):
     last_exc: Exception | None = None
     for attempt in range(_ARXIV_RETRY_MAX_TRIES):
         try:
-            with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as url:
-                response = url.read()
-                if getattr(url, "status", 200) != 200:
+            with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as resp:
+                response = resp.read()
+                if getattr(resp, "status", 200) != 200:
                     logger.error("arxiv did not return status 200 response")
                 return response
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
             last_exc = e
             if attempt >= _ARXIV_RETRY_MAX_TRIES - 1:
                 break
-            logger.warning(f"arxiv API request failed (attempt {attempt+1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
+            logger.warning(f"arxiv API request failed (attempt {attempt + 1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
             _sleep_backoff(attempt)
 
     if last_exc is not None:
@@ -67,6 +86,17 @@ def get_response(search_query, start_index=0, max_r=100):
 
     # Unreachable: kept to satisfy type checkers.
     return b""
+
+
+def get_entries_by_ids(ids: list[str]) -> list[dict]:
+    """Fetch one or more specific arXiv IDs via the public API."""
+
+    normalized_ids = [str(pid or "").strip() for pid in ids if str(pid or "").strip()]
+    if not normalized_ids:
+        return []
+    query = urllib.parse.urlencode({"id_list": ",".join(normalized_ids)})
+    response = _open_arxiv_api_url(f"https://export.arxiv.org/api/query?{query}")
+    return parse_response(response)
 
 
 def encode_feedparser_dict(d):
@@ -133,6 +163,62 @@ def parse_response(response):
         out.append(j)
 
     return out
+
+
+def _normalize_marker_text(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def is_withdrawn_entry(entry: dict | None) -> bool:
+    """Best-effort withdrawn/retracted detection from arXiv API comments."""
+
+    if not isinstance(entry, dict):
+        return False
+
+    comment = _normalize_marker_text(entry.get("arxiv_comment") or entry.get("comment"))
+    return bool(comment and any(marker in comment for marker in _WITHDRAWN_BODY_MARKERS))
+
+
+def resolve_latest_nonwithdrawn_version(
+    latest_entry: dict | None,
+    *,
+    entries_getter=None,
+    batch_size: int = 20,
+) -> dict | None:
+    """Return the latest non-withdrawn version for a paper, or None if none exists."""
+
+    if not isinstance(latest_entry, dict):
+        return None
+    if not is_withdrawn_entry(latest_entry):
+        return latest_entry
+
+    raw_pid = str(latest_entry.get("_id") or "").strip()
+    try:
+        latest_version = int(latest_entry.get("_version") or 0)
+    except Exception:
+        latest_version = 0
+    if not raw_pid or latest_version <= 1:
+        return None
+
+    candidate_ids = [f"{raw_pid}v{version}" for version in range(latest_version - 1, 0, -1)]
+    getter = entries_getter or get_entries_by_ids
+    entries_by_idv: dict[str, dict] = {}
+
+    chunk_size = max(1, int(batch_size or 1))
+    for start in range(0, len(candidate_ids), chunk_size):
+        chunk = candidate_ids[start : start + chunk_size]
+        for entry in getter(chunk) or []:
+            if not isinstance(entry, dict):
+                continue
+            idv = str(entry.get("_idv") or "").strip()
+            if idv:
+                entries_by_idv[idv] = entry
+
+    for candidate_id in candidate_ids:
+        candidate = entries_by_idv.get(candidate_id)
+        if candidate and not is_withdrawn_entry(candidate):
+            return candidate
+    return None
 
 
 def filter_latest_version(idvs):

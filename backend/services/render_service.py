@@ -70,6 +70,7 @@ def render_pid(
     pid: str,
     pid_to_utags: dict[str, list[str]] | None = None,
     pid_to_ntags: dict[str, list[str]] | None = None,
+    summary_snapshot: dict[str, Any] | None = None,
     paper: dict[str, Any] | None = None,
     get_paper_fn=None,
     get_tags_fn=None,
@@ -80,13 +81,38 @@ def render_pid(
 ) -> dict[str, Any]:
     """Render a single paper for the UI."""
     thumb_url = get_thumb_url(pid)
-    tldr = extract_tldr_from_summary(pid) if include_tldr else ""
+
+    preloaded_status = str((summary_snapshot or {}).get("status") or "")
+    preloaded_error = (summary_snapshot or {}).get("last_error")
+    preloaded_tldr = str((summary_snapshot or {}).get("tldr") or "")
+
+    summary_status, summary_last_error = "", ""
+    if include_summary_status:
+        if summary_snapshot is not None:
+            summary_status, summary_last_error = preloaded_status, preloaded_error
+        else:
+            summary_status, summary_last_error = get_summary_status(pid)
+
+    if include_tldr:
+        if summary_snapshot is not None:
+            if include_summary_status:
+                tldr = preloaded_tldr if summary_status == "ok" else ""
+            else:
+                tldr = preloaded_tldr
+        elif include_summary_status:
+            tldr = extract_tldr_from_summary(pid) if summary_status == "ok" else ""
+        else:
+            tldr = extract_tldr_from_summary(pid)
+    else:
+        tldr = ""
 
     d = paper if paper is not None else (get_paper_fn(pid) if get_paper_fn else None)
     if d is None:
         return dict(
             weight=0.0,
             id=pid,
+            raw_id=pid,
+            versioned_id=pid,
             title="(missing paper)",
             time="",
             authors="",
@@ -116,13 +142,13 @@ def render_pid(
     else:
         ntags = []
 
-    summary_status, summary_last_error = "", ""
-    if include_summary_status:
-        summary_status, summary_last_error = get_summary_status(pid)
-
+    raw_id = d.get("_id") or pid
+    versioned_id = d.get("_effective_idv") or d.get("_idv") or raw_id
     return dict(
         weight=0.0,
-        id=d["_id"],
+        id=raw_id,
+        raw_id=raw_id,
+        versioned_id=versioned_id,
         title=d["title"],
         time=d["_time_str"],
         authors=", ".join(a["name"] for a in d["authors"]),
@@ -166,7 +192,19 @@ def build_paper_text_fields(p: dict) -> dict:
     }
 
 
-def serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: list = None):
+def build_paper_title_fields(p: dict) -> dict:
+    """Build only the title normalization fields used by title scans."""
+    from .search_service import normalize_text, normalize_text_loose
+
+    title = p.get("title") or ""
+    return {
+        "title_lower": title.lower(),
+        "title_norm": normalize_text(title),
+        "title_norm_loose": normalize_text_loose(title),
+    }
+
+
+def serve_paper_image(pid: str, filename: str, base_dir: Path, search_subdirs: list[str] | None = None):
     """
     Common logic for serving paper images from cache directories.
 

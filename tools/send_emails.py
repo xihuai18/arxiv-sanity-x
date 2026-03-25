@@ -12,10 +12,13 @@ to manually register with sendgrid yourself, get an API key and put it in the fi
 import argparse
 import html
 import os
+import smtplib
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from email.header import Header
+from email.mime.text import MIMEText
 from multiprocessing import cpu_count
 
 import requests
@@ -1107,24 +1110,85 @@ def render_recommendations(
 def send_email(to_email, html):
     if args.dry_run:
         logger.debug(html)
-    else:
-        import smtplib
-        from email.header import Header
-        from email.mime.text import MIMEText
+        return
 
-        from config import settings
+    # construct the email
+    message = MIMEText(html, "html", "utf-8")
+    subject = tnow_str + " Arxiv Sanity X recommendations"
+    message["Subject"] = str(Header(subject, "utf-8"))
+    message["From"] = settings.email.from_email
+    message["To"] = to_email
 
-        # construct the email
-        message = MIMEText(html, "html", "utf-8")
-        subject = tnow_str + " Arxiv Sanity X recommendations"
-        message["Subject"] = Header(subject, "utf-8")
+    mail = None
+    try:
+        smtp_port = int(settings.email.smtp_port or 0)
+        if smtp_port == 465:
+            mail = smtplib.SMTP_SSL(settings.email.smtp_server, smtp_port)
+        else:
+            mail = smtplib.SMTP(settings.email.smtp_server, smtp_port)
+            try:
+                mail.ehlo()
+            except Exception:
+                pass
+            try:
+                if bool(getattr(mail, "has_extn", lambda _n: False)("starttls")):
+                    mail.starttls()
+                    mail.ehlo()
+            except smtplib.SMTPException:
+                raise
+            except Exception:
+                pass
 
-        try:
-            mail = smtplib.SMTP_SSL(settings.email.smtp_server, settings.email.smtp_port)
-            mail.login(settings.email.username, settings.email.password)
-            mail.sendmail(settings.email.from_email, [to_email], message.as_string())
-        except smtplib.SMTPException as e:
-            logger.error(e)
+        username = str(settings.email.username or "").strip()
+        password = str(settings.email.password or "")
+        if username or password:
+            mail.login(username, password)
+        mail.sendmail(settings.email.from_email, [to_email], message.as_string())
+    except Exception as e:
+        logger.error(f"Failed to send email to {to_email}: {e}")
+        raise
+    finally:
+        if mail is not None:
+            try:
+                mail.quit()
+            except Exception:
+                pass
+
+
+def _iter_recommendation_users(
+    tags: dict,
+    ctags: dict,
+    keywords: dict,
+    emails_by_user: dict,
+    requested_user: str = "",
+) -> list[str]:
+    users = set(tags.keys()) | set(ctags.keys()) | set(keywords.keys()) | set(emails_by_user.keys())
+    requested_user = str(requested_user or "").strip()
+    if requested_user:
+        return [requested_user] if requested_user in users else []
+    return sorted(users)
+
+
+def _count_positive_examples(utags: dict) -> int:
+    try:
+        return len(set().union(*utags.values())) if utags else 0
+    except TypeError:
+        return 0
+
+
+def _should_send_recommendations(
+    utags: dict,
+    ukeywords: dict,
+    u_ctag,
+    *,
+    min_papers: int,
+) -> bool:
+    num_papers_tagged = _count_positive_examples(utags)
+    if num_papers_tagged >= int(min_papers):
+        return True
+    if ukeywords:
+        return True
+    return bool(u_ctag)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1273,31 +1337,30 @@ def main(argv: list[str] | None = None) -> int:
 
     # iterate all users, create recommendations, send emails
     num_sent = 0
-    if args.user:
-        if args.user not in tags:
-            logger.error(f"user {args.user} not found in tags db")
-            return 1
-        tags = {args.user: tags[args.user]}
+    failed_emails = 0
+    failed_users = 0
+    users = _iter_recommendation_users(tags, ctags, keywords, emails_by_user, args.user)
+    if args.user and not users:
+        logger.error(f"user {args.user} not found in recommendation inputs")
+        return 1
 
-    for user, utags in tags.items():
+    for user in users:
+        utags = tags.get(user, {})
+        u_ctag = sorted(ctags.get(user, set()))
+        ukeywords = keywords.get(user, {})
+
         # verify that we have at least one email for this user
         user_emails = emails_by_user.get(user, [])
         logger.debug(f"processing user {user} emails {user_emails}")
         if not user_emails:
             logger.debug(f"skipping user {user}, no emails")
             continue
-        if args.user and user != args.user:
-            logger.debug(f"skipping user {user}, not {args.user}")
-            continue
 
-        # verify that we have at least one positive example...
-        try:
-            num_papers_tagged = len(set().union(*utags.values())) if utags else 0
-        except TypeError:
-            # Defensive: if utags.values() is empty.
-            num_papers_tagged = 0
-        if num_papers_tagged < args.min_papers:
-            logger.debug("skipping user %s, only has %d papers tagged" % (user, num_papers_tagged))
+        if not _should_send_recommendations(utags, ukeywords, u_ctag, min_papers=args.min_papers):
+            logger.debug(
+                "skipping user %s, only has %d papers tagged and no keyword/ctag inputs"
+                % (user, _count_positive_examples(utags))
+            )
             continue
 
         # calculate the recommendations
@@ -1306,13 +1369,10 @@ def main(argv: list[str] | None = None) -> int:
             pids_set = set().union(*pids.values()) if pids.values() else set()
             logger.debug(f"From tags, found {len(pids_set)} papers for {user} within {args.time_delta} days")
 
-            u_ctag = ctags.get(user, set())
             cpids, cscores = calculate_ctag_recommendation(u_ctag, utags, user=user, time_delta=args.time_delta)
 
             cpids_set = set().union(*cpids.values()) if cpids.values() else set()
             logger.debug(f"From ctags, found {len(cpids_set)} papers for {user} within {args.time_delta} days")
-
-            ukeywords = keywords.get(user, {})
 
             kpids, kscores = search_keywords_recommendations(user, ukeywords, args.time_delta)
             kpids_set = set().union(*kpids.values()) if kpids.values() else set()
@@ -1353,20 +1413,28 @@ def main(argv: list[str] | None = None) -> int:
             for to_email in user_emails:
                 logger.debug(f"sending email to {to_email}...")
                 n_send_try = 0
+                sent_ok = False
                 while n_send_try < 3:
                     try:
                         send_email(to_email, email_html)
+                        sent_ok = True
                         break
                     except Exception as e:
                         logger.warning(f"Failed to send email attempt {n_send_try + 1} to {to_email}: {e}")
                         n_send_try += 1
-                if not args.dry_run:
+                if sent_ok and not args.dry_run:
                     num_sent += 1
+                if not sent_ok:
+                    failed_emails += 1
         except Exception as e:
-            logger.error(f"meeting errors {str(e)} in processing user {user}")
+            failed_users += 1
+            logger.error(f"Failed to process recommendations for user {user}: {e}")
 
     logger.success("done.")
     logger.success("sent %d emails" % (num_sent,))
+    if failed_users or failed_emails:
+        logger.warning(f"email run completed with failures: users={failed_users}, emails={failed_emails}")
+        return 1
     return 0
 
 

@@ -18,12 +18,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
@@ -57,6 +59,247 @@ class ServiceSpec:
     cmd: list[str]
     cwd: Path
     health_url: str | None = None
+
+
+_TASK_TERMINAL_STATUSES = ("ok", "failed", "canceled")
+_TASK_ACTIVE_STATUSES = ("queued", "running")
+_TASK_CATEGORY_ORDER = {
+    "summary": 0,
+    "upload_process": 1,
+    "upload_parse": 2,
+    "upload_extract": 3,
+}
+
+
+@dataclass
+class _AggregatedLogState:
+    count: int = 0
+    total_ms: float = 0.0
+    last_report_at: float = 0.0
+    last_message: str = ""
+    statuses: dict[str, int] | None = None
+
+
+_LOG_STATE_LOCK = threading.Lock()
+_LOG_STATE: dict[tuple[str, str], _AggregatedLogState] = {}
+_LOGURU_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[^|]*\|\s*(?P<level>[A-Z]+)\s*\|\s*(?P<message>.*)$")
+_GIN_RE = re.compile(
+    r'^\[GIN\]\s+[^|]+\|\s*(?P<status>\d{3})\s*\|\s*(?P<duration>[^|]+)\|\s*(?P<client>[^|]+)\|\s*(?P<method>[A-Z]+)\s+"(?P<path>[^"]+)"$'
+)
+_MISFIRE_RE = re.compile(r'^Run time of job "(?P<job>.+?)\s+\(trigger:.*?\)" was missed by (?P<delay>.+)$')
+_SUMMARY_COUNT_THRESHOLD = 20
+_SUMMARY_TIME_THRESHOLD_S = 60.0
+_MISFIRE_SUMMARY_COUNT_THRESHOLD = 3
+_MISFIRE_SUMMARY_TIME_THRESHOLD_S = 10 * 60.0
+_USE_RAW_LOG_STREAM = False
+
+
+def _launcher_sigterm_handler(_signum, _frame):
+    raise SystemExit(0)
+
+
+def _print_launcher_line(prefix: str, message: str) -> None:
+    sys.stdout.write(f"[{prefix}] {message}\n")
+    sys.stdout.flush()
+
+
+def _normalize_level(level: str | None) -> str:
+    level_upper = (level or "INFO").strip().upper()
+    if level_upper in {"WARNING", "WARN"}:
+        return "Warning"
+    if level_upper in {"ERROR", "CRITICAL", "FATAL"}:
+        return "Error"
+    return "Info"
+
+
+def _sanitize_message(message: str) -> str:
+    return " ".join((message or "").strip().split())
+
+
+def _parse_duration_to_ms(raw: str) -> float | None:
+    text = (raw or "").strip()
+    m = re.match(r"^(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<unit>ns|µs|us|ms|s)$", text)
+    if not m:
+        return None
+    value = float(m.group("value"))
+    unit = m.group("unit")
+    if unit == "ns":
+        return value / 1_000_000.0
+    if unit in {"µs", "us"}:
+        return value / 1000.0
+    if unit == "ms":
+        return value
+    if unit == "s":
+        return value * 1000.0
+    return None
+
+
+def _summarize_statuses(statuses: dict[str, int] | None) -> str:
+    if not statuses:
+        return ""
+    parts = [f"{code}x{count}" for code, count in sorted(statuses.items())]
+    return ", ".join(parts)
+
+
+def _update_aggregate(
+    key: tuple[str, str],
+    *,
+    count_increment: int = 1,
+    total_ms_increment: float = 0.0,
+    message: str = "",
+    statuses: dict[str, int] | None = None,
+) -> _AggregatedLogState:
+    with _LOG_STATE_LOCK:
+        state = _LOG_STATE.setdefault(key, _AggregatedLogState(last_report_at=time.time()))
+        state.count += count_increment
+        state.total_ms += total_ms_increment
+        if message:
+            state.last_message = message
+        if statuses:
+            if state.statuses is None:
+                state.statuses = {}
+            for code, value in statuses.items():
+                state.statuses[code] = state.statuses.get(code, 0) + value
+        snapshot = _AggregatedLogState(
+            count=state.count,
+            total_ms=state.total_ms,
+            last_report_at=state.last_report_at,
+            last_message=state.last_message,
+            statuses=dict(state.statuses) if state.statuses else None,
+        )
+    return snapshot
+
+
+def _should_report_summary(key: tuple[str, str], *, threshold_count: int, threshold_seconds: float) -> bool:
+    now = time.time()
+    with _LOG_STATE_LOCK:
+        state = _LOG_STATE.get(key)
+        if state is None:
+            return False
+        if state.count < threshold_count and now - state.last_report_at < threshold_seconds:
+            return False
+        state.last_report_at = now
+        return True
+
+
+def _flush_log_summaries(service: str | None = None) -> None:
+    with _LOG_STATE_LOCK:
+        items = list(_LOG_STATE.items())
+        if service is not None:
+            items = [item for item in items if item[0][0] == service]
+        for key, state in items:
+            state.last_report_at = time.time()
+            snapshot = _AggregatedLogState(
+                count=state.count,
+                total_ms=state.total_ms,
+                last_report_at=state.last_report_at,
+                last_message=state.last_message,
+                statuses=dict(state.statuses) if state.statuses else None,
+            )
+            kind = key[1]
+            if kind == "gin":
+                avg_ms = snapshot.total_ms / snapshot.count if snapshot.count else 0.0
+                statuses = _summarize_statuses(snapshot.statuses)
+                _print_launcher_line(
+                    key[0],
+                    f"HTTP summary: {snapshot.last_message}; requests={snapshot.count}; avg_latency={avg_ms:.2f} ms"
+                    + (f"; statuses={statuses}" if statuses else ""),
+                )
+            elif kind == "misfire":
+                _print_launcher_line(
+                    key[0],
+                    f"Scheduler summary: {snapshot.last_message}; missed_runs={snapshot.count}",
+                )
+
+
+def _emit_normalized_line(service: str, line: str) -> None:
+    text = _sanitize_message(line)
+    if not text:
+        return
+
+    gin_match = _GIN_RE.match(text)
+    if gin_match:
+        method = gin_match.group("method")
+        path = gin_match.group("path")
+        status = gin_match.group("status")
+        duration_ms = _parse_duration_to_ms(gin_match.group("duration")) or 0.0
+        key = (service, f"gin:{method}:{path}")
+        snapshot = _update_aggregate(
+            key,
+            total_ms_increment=duration_ms,
+            message=f"{method} {path}",
+            statuses={status: 1},
+        )
+        if _should_report_summary(
+            key,
+            threshold_count=_SUMMARY_COUNT_THRESHOLD,
+            threshold_seconds=_SUMMARY_TIME_THRESHOLD_S,
+        ):
+            avg_ms = snapshot.total_ms / snapshot.count if snapshot.count else 0.0
+            statuses = _summarize_statuses(snapshot.statuses)
+            _print_launcher_line(
+                service,
+                f"HTTP summary: {method} {path}; requests={snapshot.count}; avg_latency={avg_ms:.2f} ms"
+                + (f"; statuses={statuses}" if statuses else ""),
+            )
+        return
+
+    misfire_match = _MISFIRE_RE.match(text)
+    if misfire_match:
+        job = misfire_match.group("job")
+        delay = misfire_match.group("delay")
+        key = (service, f"misfire:{job}")
+        _update_aggregate(key, message=f"job={job}; last_delay={delay}")
+        if _should_report_summary(
+            key,
+            threshold_count=_MISFIRE_SUMMARY_COUNT_THRESHOLD,
+            threshold_seconds=_MISFIRE_SUMMARY_TIME_THRESHOLD_S,
+        ):
+            with _LOG_STATE_LOCK:
+                snapshot = _LOG_STATE.get(key)
+                count = snapshot.count if snapshot else 0
+                last_message = snapshot.last_message if snapshot else f"job={job}"
+            _print_launcher_line(service, f"Scheduler summary: {last_message}; missed_runs={count}")
+        return
+
+    loguru_match = _LOGURU_RE.match(text)
+    if loguru_match:
+        level = _normalize_level(loguru_match.group("level"))
+        text = _sanitize_message(loguru_match.group("message"))
+    else:
+        level = "Info"
+
+    nested_match = re.match(r"^\[(?P<source>[^\]]+)\]\s*(?P<body>.*)$", text)
+    if nested_match:
+        source = nested_match.group("source").strip().lower()
+        body = _sanitize_message(nested_match.group("body"))
+        if body.lower().startswith("warning:"):
+            level = "Warning"
+            body = _sanitize_message(body.split(":", 1)[1])
+        elif body.lower().startswith("error:"):
+            level = "Error"
+            body = _sanitize_message(body.split(":", 1)[1])
+        elif body.lower().startswith("info:"):
+            level = "Info"
+            body = _sanitize_message(body.split(":", 1)[1])
+        source_label = {
+            "build": "Build",
+            "gunicorn": "Gunicorn",
+            "pipeline": "Pipeline",
+            "preload": "Preload",
+            "huey_wrapper": "Huey",
+        }.get(source, source.replace("_", " ").title())
+        _print_launcher_line(service, f"{level}: {source_label} - {body}")
+        return
+
+    _print_launcher_line(service, f"{level}: {text}")
+
+
+def _emit_raw_line(service: str, line: str) -> None:
+    text = line.rstrip("\n")
+    if not text:
+        return
+    _print_launcher_line(service, text)
 
 
 def _http_ok(url: str, timeout_s: float = 1.0) -> bool:
@@ -456,6 +699,175 @@ def _check_mineru_api(api_key: str | None, verbose: bool = False) -> bool:
         return True  # Don't block startup for network issues
 
 
+def _task_category_from_model(model: str | None) -> str:
+    normalized = str(model or "").strip().lower()
+    if normalized in {"upload_process", "upload_parse", "upload_extract"}:
+        return normalized
+    return "summary"
+
+
+def _sort_task_categories(categories: list[str] | set[str]) -> list[str]:
+    return sorted(categories, key=lambda item: (_TASK_CATEGORY_ORDER.get(item, 99), item))
+
+
+def _compact_duration_label(seconds: float) -> str:
+    try:
+        total = max(0, int(round(float(seconds))))
+    except Exception:
+        total = 0
+    if total < 60:
+        return f"{total}s"
+    if total % 60 == 0:
+        return f"{total // 60}m"
+    return f"{total}s"
+
+
+def _summarize_task_infos(
+    task_infos: list[dict],
+    *,
+    window_start: float,
+) -> tuple[dict[str, dict[str, int]], dict[str, dict[str, int]]]:
+    terminal_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    active_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for info in task_infos:
+        if not isinstance(info, dict):
+            continue
+        status = str(info.get("status") or "").strip().lower()
+        if not status:
+            continue
+        category = _task_category_from_model(info.get("model"))
+
+        if status in _TASK_ACTIVE_STATUSES:
+            active_counts[category][status] += 1
+            continue
+
+        if status not in _TASK_TERMINAL_STATUSES:
+            continue
+
+        try:
+            updated_time = float(info.get("updated_time") or 0.0)
+        except Exception:
+            updated_time = 0.0
+        if updated_time > float(window_start):
+            terminal_counts[category][status] += 1
+
+    return (
+        {category: dict(counts) for category, counts in terminal_counts.items()},
+        {category: dict(counts) for category, counts in active_counts.items()},
+    )
+
+
+def _format_task_summary_lines(
+    terminal_counts: dict[str, dict[str, int]],
+    active_counts: dict[str, dict[str, int]],
+    *,
+    interval_s: float,
+) -> list[str]:
+    lines: list[str] = []
+
+    terminal_categories = _sort_task_categories(set(terminal_counts.keys()))
+    if terminal_categories:
+        terminal_parts: list[str] = []
+        for category in terminal_categories:
+            counts = terminal_counts.get(category) or {}
+            status_parts: list[str] = []
+            ok = int(counts.get("ok") or 0)
+            failed = int(counts.get("failed") or 0)
+            canceled = int(counts.get("canceled") or 0)
+            if ok:
+                status_parts.append(f"ok={ok}")
+            if failed:
+                status_parts.append(f"fail={failed}")
+            if canceled:
+                status_parts.append(f"cancel={canceled}")
+            if status_parts:
+                terminal_parts.append(f"{category} {' '.join(status_parts)}")
+        if terminal_parts:
+            lines.append(f"[huey] past {_compact_duration_label(interval_s)}: {' | '.join(terminal_parts)}")
+
+    active_categories = _sort_task_categories(set(active_counts.keys()))
+    if active_categories:
+        active_parts: list[str] = []
+        for category in active_categories:
+            counts = active_counts.get(category) or {}
+            status_parts: list[str] = []
+            queued = int(counts.get("queued") or 0)
+            running = int(counts.get("running") or 0)
+            if queued:
+                status_parts.append(f"queued={queued}")
+            if running:
+                status_parts.append(f"running={running}")
+            if status_parts:
+                active_parts.append(f"{category} {' '.join(status_parts)}")
+        if active_parts:
+            lines.append(f"[huey] active: {' | '.join(active_parts)}")
+
+    return lines
+
+
+def _read_task_infos() -> list[dict]:
+    from aslite.repositories import SummaryStatusRepository, safe_closing
+
+    infos: list[dict] = []
+    with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        for _key, info in items:
+            if isinstance(info, dict):
+                infos.append(info)
+    return infos
+
+
+def _task_summary_loop(*, repo_root: Path, interval_s: float, stop_event: threading.Event, verbose: bool) -> None:
+    if interval_s <= 0:
+        return
+
+    import_failure_logged = False
+    window_start = time.time()
+
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    while not stop_event.wait(interval_s):
+        now = time.time()
+        advance_window = False
+        try:
+            task_infos = _read_task_infos()
+            terminal_counts, active_counts = _summarize_task_infos(task_infos, window_start=window_start)
+            for line in _format_task_summary_lines(terminal_counts, active_counts, interval_s=now - window_start):
+                print(line, flush=True)
+            import_failure_logged = False
+            advance_window = True
+        except Exception as e:
+            if verbose and not import_failure_logged:
+                print(f"[launcher] Task summary reporter unavailable: {e}", flush=True)
+                import_failure_logged = True
+        finally:
+            if advance_window:
+                window_start = now
+
+
+def _build_huey_command(
+    *,
+    python_executable: str,
+    consumer_script: Path,
+    workers: int,
+    worker_type: str,
+    show_task_logs: bool,
+) -> list[str]:
+    cmd = [
+        python_executable,
+        str(consumer_script),
+        "tasks.huey",
+        "-w",
+        str(workers),
+        "-k",
+        worker_type,
+    ]
+    if not show_task_logs:
+        cmd.append("-q")
+    return cmd
+
+
 def _stream_lines(prefix: str, pipe):
     """Stream subprocess output into our terminal.
 
@@ -488,7 +900,7 @@ def _stream_lines(prefix: str, pipe):
                 if use_r:
                     part = buffer[:idx_r]
                     buffer = buffer[idx_r + 1 :]
-                    sys.stdout.write(f"\r[{prefix}] {part}")
+                    sys.stdout.write(f"\r[{prefix}] {_sanitize_message(part)}")
                     sys.stdout.flush()
                     in_place = True
                 else:
@@ -497,18 +909,25 @@ def _stream_lines(prefix: str, pipe):
                     if in_place:
                         sys.stdout.write("\n")
                         in_place = False
-                    sys.stdout.write(f"[{prefix}] {part}\n")
-                    sys.stdout.flush()
+                    if _USE_RAW_LOG_STREAM:
+                        _emit_raw_line(prefix, part)
+                    else:
+                        _emit_normalized_line(prefix, part)
 
         # Flush any remaining buffered output.
         if buffer:
             if in_place:
-                sys.stdout.write(f"\r[{prefix}] {buffer}")
+                sys.stdout.write(f"\r[{prefix}] {_sanitize_message(buffer)}")
+                sys.stdout.flush()
             else:
-                sys.stdout.write(f"[{prefix}] {buffer}")
-            sys.stdout.flush()
+                if _USE_RAW_LOG_STREAM:
+                    _emit_raw_line(prefix, buffer)
+                else:
+                    _emit_normalized_line(prefix, buffer)
 
     finally:
+        if not _USE_RAW_LOG_STREAM:
+            _flush_log_summaries(prefix)
         try:
             pipe.close()
         except Exception:
@@ -597,8 +1016,19 @@ def _configure_web_readiness_env(*, no_embed: bool, no_mineru: bool) -> None:
 
 
 def main() -> int:
+    global _USE_RAW_LOG_STREAM
+
     parser = argparse.ArgumentParser(description="Run arxiv-sanity-X services in one terminal.")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose launcher logs.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose launcher logs and restore raw Huey task logs.",
+    )
+    parser.add_argument(
+        "--verbose-raw-logs",
+        action="store_true",
+        help="Pass child process logs through without launcher summarization.",
+    )
     parser.add_argument("--no-embed", action="store_true", help="Do not start Ollama embedding service.")
     parser.add_argument("--no-mineru", action="store_true", help="Do not start minerU service.")
     parser.add_argument("--no-litellm", action="store_true", help="Do not start LiteLLM gateway.")
@@ -635,6 +1065,12 @@ def main() -> int:
         help="Health-check wait timeout seconds.",
     )
     parser.add_argument(
+        "--task-summary-interval",
+        type=float,
+        default=180.0,
+        help="Seconds between aggregated Huey task summaries (default: 180). Use 0 to disable.",
+    )
+    parser.add_argument(
         "--fetch-compute",
         type=int,
         nargs="?",
@@ -650,12 +1086,21 @@ def main() -> int:
     )
     args = parser.parse_args()
     user_disabled_mineru = bool(args.no_mineru)
+    _USE_RAW_LOG_STREAM = bool(args.verbose_raw_logs)
 
     if settings is None:
         print("[launcher] Failed to import config.settings", file=sys.stderr)
         return 2
 
+    previous_sigterm_handler = None
+    try:
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _launcher_sigterm_handler)
+    except Exception:
+        previous_sigterm_handler = None
+
     verbose = args.verbose or settings.log_level.upper() in ("DEBUG", "INFO")
+    show_huey_task_logs = bool(args.verbose or args.verbose_raw_logs)
 
     # Get project root (parent of bin/ directory)
     repo_root = Path(__file__).resolve().parent.parent
@@ -802,15 +1247,13 @@ def main() -> int:
         services.append(
             ServiceSpec(
                 name="huey",
-                cmd=[
-                    sys.executable,
-                    str(huey_consumer_script),
-                    "tasks.huey",
-                    "-w",
-                    str(huey_workers),
-                    "-k",
-                    huey_worker_type,
-                ],
+                cmd=_build_huey_command(
+                    python_executable=sys.executable,
+                    consumer_script=huey_consumer_script,
+                    workers=huey_workers,
+                    worker_type=huey_worker_type,
+                    show_task_logs=show_huey_task_logs,
+                ),
                 cwd=repo_root,
             )
         )
@@ -838,6 +1281,29 @@ def main() -> int:
     if verbose:
         for spec in services:
             print(f"[launcher] - {spec.name}: {' '.join(spec.cmd)}", flush=True)
+
+    task_summary_stop = threading.Event()
+    enable_task_summary = (
+        not args.no_huey and not args.verbose_raw_logs and float(args.task_summary_interval or 0.0) > 0
+    )
+    if enable_task_summary:
+        if not show_huey_task_logs:
+            print(
+                "[launcher] Huey task logs are condensed; periodic task summaries are enabled "
+                f"every {_compact_duration_label(float(args.task_summary_interval))}.",
+                flush=True,
+            )
+        threading.Thread(
+            target=_task_summary_loop,
+            kwargs={
+                "repo_root": repo_root,
+                "interval_s": float(args.task_summary_interval),
+                "stop_event": task_summary_stop,
+                "verbose": verbose,
+            },
+            name="launcher-task-summary",
+            daemon=True,
+        ).start()
 
     try:
         for spec in services:
@@ -897,6 +1363,13 @@ def main() -> int:
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else 1
     finally:
+        task_summary_stop.set()
+        _flush_log_summaries()
+        if previous_sigterm_handler is not None:
+            try:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
+            except Exception:
+                pass
         for spec, proc in reversed(procs):
             _stop_process(proc, spec.name)
 

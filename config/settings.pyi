@@ -99,6 +99,7 @@ class HueySettings(BaseSettings):
     summary_priority_low: int
     summary_repair_on_start: bool
     summary_repair_ttl: int
+    upload_repair_ttl: int
     summary_repair_requeue: bool
     summary_repair_enable: bool
     summary_repair_interval: int

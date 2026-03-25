@@ -49,9 +49,11 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 ## Docs
 
 - Entry point: [docs/INDEX.md](docs/INDEX.md)
+- Repo maintenance manuals: [.opencode/skills/README.md](.opencode/skills/README.md)
 - Operations: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 - Security: [docs/SECURITY.md](docs/SECURITY.md)
 - Development: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- Test guide: [tests/README.md](tests/README.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Security policy: [SECURITY.md](SECURITY.md)
 
@@ -77,14 +79,14 @@ arxiv-sanity-X is a personal research workbench for tracking arXiv papers. It co
 
 - **Framework**: Flask with Blueprint-based modular architecture
 - **Database**: SQLite with custom KV store (WAL mode, compression support)
-- **Task Queue**: Huey (SQLite backend) for async summary generation
+- **Task Queue**: Huey (SQLite backend) for async summary/upload orchestration
 - **Configuration**: pydantic-settings for type-safe config management
 - **Real-time**: Server-Sent Events (SSE) for live updates
 
 ### Frontend
 
 - **Templates**: Jinja2 with responsive HTML/CSS
-- **JavaScript**: Vanilla JS with esbuild bundling
+- **JavaScript**: Hybrid page runtime with IIFE/global scripts, page-specific React surfaces, and vanilla DOM flows
 - **Rendering**: MathJax for LaTeX, markdown-it for Markdown
 - **Build**: esbuild with content-hash caching
 
@@ -106,7 +108,7 @@ arxiv-sanity-X is a personal research workbench for tracking arXiv papers. It co
 ```
 arxiv-sanity-x/
 ├── serve.py              # Flask entry point
-├── tasks.py              # Huey task definitions
+├── tasks.py              # Huey task definitions & orchestration center
 │
 ├── backend/              # Flask application
 │   ├── app.py            # App factory & initialization
@@ -185,6 +187,7 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - Enter a username to log in (no password required, suitable for personal/intranet use)
 - If you plan to expose the site publicly, put it behind authentication/VPN and set a stable `ARXIV_SANITY_SECRET_KEY` (recommended; `secret_key.txt` is a local fallback and must not be committed)
 - (Optional) Register notification emails on the Profile page. Multiple addresses are supported (comma/whitespace/newline separated). Submit an empty value to clear.
+- JSON callers to `POST /login` and `POST /register_email` receive JSON success/error payloads; browser form posts keep the existing redirect UX.
 
 ### 2) Browse and Search Papers
 
@@ -215,6 +218,7 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - If you type a search query, the UI and backend keep ranking in query-compatible modes (`search` or `time`)
 - Advanced fields such as **Tags**, **PIDs**, **Logic**, and **SVM C** only apply when **Rank by** is `tags` or `pid`
 - Tag inputs in advanced filters support inline suggestions and keyboard selection
+- For `POST /api/keyword_search`, omitting `time_delta` keeps the full indexed corpus in play; use `time_delta <= 0` to disable time filtering explicitly in scripted calls.
 
 ### 3) Tagging System and Personalized Recommendations
 
@@ -245,7 +249,16 @@ This section covers how to use the arxiv-sanity-X website. Most workflows start 
 - Useful for batch summarization or read-later queuing
 - The reading list page mirrors the main paper-card actions, including Similar / Inspect / Summary links and private upload actions
 
-### 6) Other Features
+### 6) Private PDF Uploads
+
+- Uploaded PDFs are private and owner-scoped; non-owners still see `404` for upload resources and mutation APIs
+- If an upload is already being deleted, mutation APIs such as `POST /api/uploaded_papers/update_meta`, `POST /api/uploaded_papers/retry_parse`, `POST /api/uploaded_papers/parse`, `POST /api/uploaded_papers/process`, and `POST /api/uploaded_papers/extract_info` now return `409` with `"Paper is being deleted"`
+- `parse` / `process` / `retry_parse` treat only the currently tracked task as active; stale tracked tasks can be repaired and replaced with a new `task_id`
+- Upload task polling via `GET /api/task_status/<task_id>` may now surface `failed` with `stale_running_repaired` or `canceled` with `superseded_upload_task`
+- Deleting an upload best-effort cancels in-flight upload parse/process/extract work and any linked summary task before file/DB cleanup continues
+- If your deployment has long upload queue delays, tune `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL` so valid upload tasks are not repaired too aggressively
+
+### 7) Other Features
 
 - **Stats page**: View paper statistics, daily addition charts
 - **About page**: View system info, supported arXiv categories
@@ -298,8 +311,8 @@ To use `data-repo/` backup with the daemon:
 - **MinerU errors**:
     - API backend: check `ARXIV_SANITY_MINERU_API_KEY`
     - local backend: check `ARXIV_SANITY_MINERU_BACKEND` and that the service is reachable on `ARXIV_SANITY_MINERU_PORT`
-- **Stuck jobs after crash (locks)**: run [scripts/cleanup_locks.py](scripts/cleanup_locks.py) or tune `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`.
-- **Stuck/ghost summary tasks (Huey)**: dry-run `python scripts/cleanup_tasks.py`, then rerun with `--force` (optionally `--flush-huey` to clear the entire queue). Use with care.
+- **Stuck jobs after crash (locks)**: run `python -m scripts cleanup_locks` or tune `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`.
+- **Stuck/ghost summary tasks (Huey)**: dry-run `python -m scripts cleanup_tasks`, then rerun with `--force` (optionally `--flush-huey` to clear the entire queue). Use with care.
 - **Cannot load features.p due to NumPy mismatch**: regenerate features by rerunning [tools/compute.py](tools/compute.py) under the current environment.
 - **Gunicorn WORKER TIMEOUT / SIGKILL**: if logs show `WORKER TIMEOUT`, increase Gunicorn timeout (e.g. `ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"`), and avoid too many worker processes when caches are enabled. `bin/up.sh` auto-selects `gevent` for SSE and adds generous timeouts by default.
 - **Gevent MonkeyPatchWarning (ssl/urllib3)**: this typically happens with `--preload`. If you still see it, try `ARXIV_SANITY_GUNICORN_PRELOAD=false` or force `ARXIV_SANITY_GUNICORN_WORKER_CLASS=gthread`.
@@ -950,11 +963,16 @@ python -m tools compute --use_embeddings --embed_model nomic-embed-text
 python -m tools daemon
 ```
 
-Schedule (Asia/Shanghai timezone):
+Built-in daemon schedule uses `ARXIV_SANITY_DAEMON_TIMEZONE` (default `Asia/Shanghai`):
 
 - **Fetch+Compute**: Weekdays 8:00, 12:00, 16:00, 20:00
 - **Send Emails**: Weekdays 18:00
 - **Backup**: Daily 20:00
+
+Notes:
+
+- `tools/send_emails.py` now treats keyword-only or combined-tag-only users with registered email addresses as eligible recipients.
+- Any per-user recommendation failure or per-recipient SMTP failure makes `tools/send_emails.py` exit non-zero, and the daemon logs that as a warning.
 
 **Manual Cron:**
 
@@ -1013,12 +1031,12 @@ Note: `GET /health` is non-strict and may return `200` with `loading` or `degrad
 
 | Endpoint                   | Description                                                          |
 | -------------------------- | -------------------------------------------------------------------- |
-| `POST /api/keyword_search` | Keyword search (JSON)                                                |
+| `POST /api/keyword_search` | Keyword search (JSON; returns `pids`, `scores`, `total_count`)       |
 | `POST /api/tag_search`     | Single tag search (auth required)                                    |
 | `POST /api/tags_search`    | Multi-tag search (auth required)                                     |
 | `GET /cache_status`        | Cache status page (requires `ARXIV_SANITY_ENABLE_CACHE_STATUS=true`) |
 
-Note: `tools/send_emails.py` may call tag-search endpoints without a browser session using `ARXIV_SANITY_RECO_API_KEY` and the `X-ARXIV-SANITY-API-KEY` header (or `Authorization: Bearer ...`), together with `{"user": "<username>"}` in the JSON body.
+Note: `tools/send_emails.py` may call tag-search endpoints without a browser session using `ARXIV_SANITY_RECO_API_KEY` and the `X-ARXIV-SANITY-API-KEY` header (or `Authorization: Bearer ...`), together with `{"user": "<username>"}` in the JSON body. For `POST /api/keyword_search`, omitting `time_delta` does not default to recent-only filtering; use `time_delta <= 0` to disable the time filter explicitly.
 
 ### Paper Summarization (`api_summary.py`)
 
@@ -1082,6 +1100,8 @@ Note: for the task owner, `GET /api/task_status/<task_id>` also includes additio
 | `POST /login`          | User login                     |
 | `GET/POST /logout`     | User logout                    |
 | `POST /register_email` | Register notification email(s) |
+
+Note: `GET /api/user_state` includes the current `user`. `POST /login` and `POST /register_email` keep form-post redirect behavior for browser pages, but JSON requests return JSON payloads and enforce stricter type validation.
 
 ### Real-time Updates (`api_sse.py`)
 

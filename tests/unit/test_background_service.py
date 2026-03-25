@@ -44,7 +44,12 @@ class TestWarmupMlCache:
     @patch("backend.services.data_service.get_features_cached")
     @patch("backend.services.background.logger")
     def test_warmup_ml_cache_success(
-        self, mock_logger, mock_get_features_cached, mock_get_paper_embeddings, mock_get_semantic_model, mock_is_loaded
+        self,
+        mock_logger,
+        mock_get_features_cached,
+        mock_get_paper_embeddings,
+        mock_get_semantic_model,
+        mock_is_loaded,
     ):
         """Test successful ML cache warmup."""
         from backend.services.background import _warmup_ml_cache
@@ -186,3 +191,68 @@ class TestEnsureBackgroundServicesStarted:
         finally:
             background._BACKGROUND_STARTED = original_started
             background._SCHEDULER = original_scheduler
+
+
+class TestSchedulerHelpers:
+    """Tests for APScheduler log control helpers."""
+
+    def test_scheduler_misfire_grace_time_is_bounded(self):
+        """Small intervals should tolerate brief delays without noisy misfire logs."""
+        from backend.services.background import _scheduler_misfire_grace_time
+
+        assert _scheduler_misfire_grace_time(5) == 60
+        assert _scheduler_misfire_grace_time(300) == 300
+        assert _scheduler_misfire_grace_time(7200) == 1800
+
+    @patch("backend.services.background.logger")
+    def test_record_scheduler_job_event_logs_periodic_summary(self, mock_logger):
+        """Periodic summary should replace per-run scheduler noise."""
+        from backend.services import background
+
+        original_labels = dict(background._SCHEDULER_JOB_LABELS)
+        original_stats = dict(background._SCHEDULER_JOB_STATS)
+        original_every_runs = background._SCHEDULER_SUMMARY_EVERY_RUNS
+        original_every_seconds = background._SCHEDULER_SUMMARY_EVERY_SECONDS
+
+        try:
+            background._SCHEDULER_JOB_LABELS.clear()
+            background._SCHEDULER_JOB_LABELS["repair"] = "repair_stale_summary_tasks"
+            background._SCHEDULER_JOB_STATS.clear()
+            background._SCHEDULER_SUMMARY_EVERY_RUNS = 2
+            background._SCHEDULER_SUMMARY_EVERY_SECONDS = 10**9
+
+            background._record_scheduler_job_event("repair", "runs", result=3)
+            background._record_scheduler_job_event("repair", "runs", result=0)
+
+            info_messages = [call.args[0] for call in mock_logger.info.call_args_list]
+            assert any("repaired 3 stale item(s)" in msg for msg in info_messages)
+            assert any("Scheduler job summary:" in msg for msg in info_messages)
+            assert any("ran 2 time(s)" in msg for msg in info_messages)
+            assert any("cumulative_result=3" in msg for msg in info_messages)
+        finally:
+            background._SCHEDULER_JOB_LABELS.clear()
+            background._SCHEDULER_JOB_LABELS.update(original_labels)
+            background._SCHEDULER_JOB_STATS.clear()
+            background._SCHEDULER_JOB_STATS.update(original_stats)
+            background._SCHEDULER_SUMMARY_EVERY_RUNS = original_every_runs
+            background._SCHEDULER_SUMMARY_EVERY_SECONDS = original_every_seconds
+
+    @patch("backend.services.background._record_scheduler_job_event")
+    def test_on_scheduler_event_routes_execution_results(self, mock_record):
+        """APScheduler events should be normalized into compact counters."""
+        from backend.services import background
+
+        class _Event:
+            def __init__(self, code, job_id, retval=None):
+                self.code = code
+                self.job_id = job_id
+                self.retval = retval
+
+        background._on_scheduler_event(_Event(background.EVENT_JOB_EXECUTED, "repair", retval=4))
+        background._on_scheduler_event(_Event(background.EVENT_JOB_MISSED, "repair"))
+        background._on_scheduler_event(_Event(background.EVENT_JOB_ERROR, "repair"))
+
+        assert mock_record.call_args_list[0].args == ("repair", "runs")
+        assert mock_record.call_args_list[0].kwargs == {"result": 4}
+        assert mock_record.call_args_list[1].args == ("repair", "missed")
+        assert mock_record.call_args_list[2].args == ("repair", "errors")

@@ -34,6 +34,7 @@ def test_parse_api_request_calls_csrf_and_normalizes_pid(app):
         )
 
     assert error is None
+    assert data is not None
     assert called["count"] == 1
     assert data["_raw_pid"] == "2301.00001"
 
@@ -48,6 +49,18 @@ def test_parse_api_request_rejects_missing_json(app):
     assert error is not None
     assert error[1] == 400
     assert error[0].get_json()["error"] == "No JSON data provided"
+
+
+def test_parse_api_request_rejects_non_object_json(app):
+    """Scalar JSON bodies should be rejected before field access."""
+    with app.test_request_context(data="123", content_type="application/json"):
+        g.user = "test_user"
+        data, error = parse_api_request()
+
+    assert data is None
+    assert error is not None
+    assert error[1] == 400
+    assert error[0].get_json()["error"] == "Request body must be a JSON object"
 
 
 def test_parse_api_request_requires_pid_field(app):

@@ -5,6 +5,8 @@ Tests helper functions in send_emails.py without actually sending emails.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -202,3 +204,111 @@ class TestConfigureThreadEnvVars:
         assert os.environ.get("OPENBLAS_NUM_THREADS") == "4"
         assert os.environ.get("MKL_NUM_THREADS") == "4"
         assert os.environ.get("NUMEXPR_NUM_THREADS") == "4"
+
+
+def test_main_supports_keyword_only_user(monkeypatch):
+    import tools.send_emails as se
+
+    monkeypatch.setattr(se.TagRepository, "get_all_tags", lambda: {})
+    monkeypatch.setattr(se.CombinedTagRepository, "get_all_combined_tags", lambda: {})
+    monkeypatch.setattr(se.KeywordRepository, "get_all_keywords", lambda: {"alice": {"llm": ["p1"]}})
+    monkeypatch.setattr(
+        se.UserRepository,
+        "get_all_email_lists",
+        lambda: {"alice": ["alice@example.com"]},
+    )
+    monkeypatch.setattr(se, "calculate_recommendation", lambda *_a, **_k: ({}, {}))
+    monkeypatch.setattr(se, "calculate_ctag_recommendation", lambda *_a, **_k: ({}, {}))
+    monkeypatch.setattr(
+        se,
+        "search_keywords_recommendations",
+        lambda *_a, **_k: ({"llm": ["2401.00001"]}, {"llm": [1.0]}),
+    )
+    monkeypatch.setattr(se, "render_recommendations", lambda *_a, **_k: "<p>ok</p>")
+
+    sent = []
+    monkeypatch.setattr(se, "send_email", lambda to_email, _html: sent.append(to_email))
+
+    rc = se.main(["--user", "alice"])
+
+    assert rc == 0
+    assert sent == ["alice@example.com"]
+
+
+def test_main_returns_nonzero_when_email_send_fails(monkeypatch):
+    import tools.send_emails as se
+
+    monkeypatch.setattr(se.TagRepository, "get_all_tags", lambda: {"alice": {"tag": {"p1"}}})
+    monkeypatch.setattr(se.CombinedTagRepository, "get_all_combined_tags", lambda: {})
+    monkeypatch.setattr(se.KeywordRepository, "get_all_keywords", lambda: {})
+    monkeypatch.setattr(
+        se.UserRepository,
+        "get_all_email_lists",
+        lambda: {"alice": ["alice@example.com"]},
+    )
+    monkeypatch.setattr(
+        se,
+        "calculate_recommendation",
+        lambda *_a, **_k: ({"tag": ["2401.00001"]}, {"tag": [1.0]}),
+    )
+    monkeypatch.setattr(se, "calculate_ctag_recommendation", lambda *_a, **_k: ({}, {}))
+    monkeypatch.setattr(se, "search_keywords_recommendations", lambda *_a, **_k: ({}, {}))
+    monkeypatch.setattr(se, "render_recommendations", lambda *_a, **_k: "<p>ok</p>")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("smtp down")
+
+    monkeypatch.setattr(se, "send_email", _boom)
+
+    rc = se.main(["--user", "alice"])
+
+    assert rc == 1
+
+
+def test_send_email_uses_starttls_for_non_ssl_ports(monkeypatch):
+    import tools.send_emails as se
+
+    calls = []
+
+    class _FakeSMTP:
+        def __init__(self, host, port):
+            calls.append(("smtp", host, port))
+
+        def ehlo(self):
+            calls.append(("ehlo",))
+
+        def has_extn(self, name):
+            return name == "starttls"
+
+        def starttls(self):
+            calls.append(("starttls",))
+
+        def login(self, username, password):
+            calls.append(("login", username, password))
+
+        def sendmail(self, from_email, recipients, _msg):
+            calls.append(("sendmail", from_email, tuple(recipients)))
+
+        def quit(self):
+            calls.append(("quit",))
+
+    monkeypatch.setattr(se.smtplib, "SMTP", _FakeSMTP)
+    monkeypatch.setattr(
+        se.smtplib,
+        "SMTP_SSL",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not use SMTP_SSL")),
+    )
+    monkeypatch.setattr(se, "args", SimpleNamespace(dry_run=False))
+    monkeypatch.setattr(se, "tnow_str", "Mar 14")
+    monkeypatch.setattr(se.settings.email, "smtp_server", "smtp.example.com", raising=False)
+    monkeypatch.setattr(se.settings.email, "smtp_port", 587, raising=False)
+    monkeypatch.setattr(se.settings.email, "username", "alice", raising=False)
+    monkeypatch.setattr(se.settings.email, "password", "secret", raising=False)
+    monkeypatch.setattr(se.settings.email, "from_email", "from@example.com", raising=False)
+
+    se.send_email("to@example.com", "<p>ok</p>")
+
+    assert ("smtp", "smtp.example.com", 587) in calls
+    assert ("starttls",) in calls
+    assert ("login", "alice", "secret") in calls
+    assert ("sendmail", "from@example.com", ("to@example.com",)) in calls

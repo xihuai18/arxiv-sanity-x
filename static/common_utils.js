@@ -239,7 +239,10 @@ function debugLog(category, message, data) {
         const buildHref =
             typeof opts.buildHref === 'function'
                 ? opts.buildHref
-                : paper => `/summary?pid=${encodeURIComponent(String((paper && paper.id) || ''))}`;
+                : paper => {
+                      const pid = String((paper && (paper.versioned_id || paper.id)) || '');
+                      return `/summary?pid=${encodeURIComponent(pid)}`;
+                  };
 
         const existingModal = document.getElementById(modalId);
         if (existingModal) {
@@ -261,7 +264,7 @@ function debugLog(category, message, data) {
 
         function buildPaperItem(paper, index) {
             const titleSafe = escapeHtml(
-                (paper && paper.title) || (paper && paper.id) || 'Untitled'
+                (paper && paper.title) || (paper && (paper.versioned_id || paper.id)) || 'Untitled'
             );
             const authorsSafe = escapeHtml((paper && paper.authors) || '');
             const timeSafe = escapeHtml((paper && paper.time) || '');
@@ -1040,6 +1043,9 @@ function debugLog(category, message, data) {
         };
 
         const connectAsLeaderIfNeeded = () => {
+            // If a backoff reconnect is already scheduled, let it handle the next attempt
+            // instead of allowing the leader monitor to bypass exponential backoff.
+            if (eventSourceReconnectTimer) return;
             // If another tab is the leader, don't connect; rely on broadcast + polling.
             if (!tryClaimUserEventLeadership()) {
                 if (eventSource) {
@@ -1446,6 +1452,19 @@ function debugLog(category, message, data) {
 
     let abstractMarkdownIt = null;
 
+    function applyAbstractMathPlugin(md) {
+        if (!md || typeof md.use !== 'function') return md;
+        try {
+            const Tldr = typeof window !== 'undefined' ? window.ArxivSanityTldr : null;
+            if (Tldr && typeof Tldr.mathPlugin === 'function') {
+                md.use(Tldr.mathPlugin);
+            }
+        } catch (e) {
+            // ignore
+        }
+        return md;
+    }
+
     function getAbstractMarkdownIt() {
         if (abstractMarkdownIt) return abstractMarkdownIt;
 
@@ -1455,7 +1474,7 @@ function debugLog(category, message, data) {
                 typeof window !== 'undefined' ? window.ArxivSanityMarkdownRenderer : null;
             if (Renderer && typeof Renderer.createMarkdownIt === 'function') {
                 const md = Renderer.createMarkdownIt({
-                    html: false,
+                    html: true,
                     breaks: true,
                     linkify: true,
                     typographer: false,
@@ -1469,6 +1488,7 @@ function debugLog(category, message, data) {
                             baseValidator: isSafeUrl,
                         });
                     }
+                    applyAbstractMathPlugin(md);
                     abstractMarkdownIt = md;
                     return abstractMarkdownIt;
                 }
@@ -1481,7 +1501,7 @@ function debugLog(category, message, data) {
         try {
             if (typeof window !== 'undefined' && typeof window.markdownit === 'function') {
                 const md = window.markdownit({
-                    html: false,
+                    html: true,
                     breaks: true,
                     linkify: true,
                     typographer: false,
@@ -1496,6 +1516,7 @@ function debugLog(category, message, data) {
                         baseValidator: isSafeUrl,
                     });
                 }
+                applyAbstractMathPlugin(md);
                 abstractMarkdownIt = md;
                 return abstractMarkdownIt;
             }
@@ -1510,8 +1531,8 @@ function debugLog(category, message, data) {
      * Render abstract markdown to HTML.
      *
      * Strategy:
-     * 1) Prefer the shared TL;DR renderer (adds math parsing and safe escaping) when available.
-     * 2) Otherwise, use a local markdown-it instance (html disabled + safe link validator).
+     * 1) Use a dedicated abstract markdown-it instance with safe links and math support.
+     * 2) Keep inline HTML emphasis from arXiv metadata (for example <strong>...</strong>).
      * 3) Fallback to escaped plain text.
      *
      * @param {string} text - Abstract text (may include markdown and LaTeX)
@@ -1533,15 +1554,6 @@ function debugLog(category, message, data) {
             }
         } catch (e) {
             // ignore
-        }
-
-        // Prefer TL;DR renderer if present (consistent markdown + math handling)
-        if (
-            typeof window !== 'undefined' &&
-            window.ArxivSanityTldr &&
-            typeof window.ArxivSanityTldr.render === 'function'
-        ) {
-            return window.ArxivSanityTldr.render(s);
         }
 
         const md = getAbstractMarkdownIt();

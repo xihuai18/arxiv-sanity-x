@@ -166,6 +166,7 @@ class TestGetSummaryStatus:
         # Create mock paths
         cache_file = MagicMock()
         cache_file.exists.return_value = True
+        cache_file.stat.return_value.st_size = 128
         cache_file.read_text.return_value = "# Title\n\n## TL;DR\n\nhello\n\n## Body\n\nworld"
         meta_file = MagicMock()
         lock_file = MagicMock()
@@ -196,6 +197,20 @@ class TestGetSummaryStatus:
                     status, error = get_summary_status("2301.00001", "gpt-4")
                     assert status == "ok"
                     assert error is None
+
+    def test_cached_summary_validator_accepts_short_structured_markdown(self):
+        from tools.paper_summarizer import looks_like_valid_cached_summary_markdown
+
+        text = "# Title\n\nA short but valid summary paragraph.\n\nSecond short paragraph."
+
+        assert looks_like_valid_cached_summary_markdown(text) is True
+
+    def test_cached_summary_validator_still_rejects_error_markdown(self):
+        from tools.paper_summarizer import looks_like_valid_cached_summary_markdown
+
+        text = "# Error\n\nSomething broke."
+
+        assert looks_like_valid_cached_summary_markdown(text) is False
 
     def test_get_summary_status_ok_with_resolved_model_cache(self, monkeypatch, tmp_path):
         """DB status=ok should remain ok when resolved_model cache is valid."""
@@ -312,6 +327,88 @@ class TestExtractTldrFromSummary:
         result = extract_tldr_from_summary("2301.00001")
         assert result == "Cached TLDR"
         mock_cache.get.assert_called_once_with("2301.00001")
+
+
+class TestGetSummaryRenderSnapshots:
+    def test_get_summary_render_snapshots_reads_valid_cache_once_and_extracts_tldr(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from backend.services import summary_service as ss
+
+        cache_file = MagicMock()
+        cache_file.exists.return_value = True
+        cache_file.stat.return_value.st_size = 128
+        cache_file.read_text.return_value = "# Title\n\n## TL;DR\n\nhello\n\n## Body\n\nworld"
+        meta_file = MagicMock()
+        legacy_cache = MagicMock()
+        legacy_cache.exists.return_value = False
+        legacy_meta = MagicMock()
+
+        monkeypatch.setattr(
+            ss,
+            "summary_cache_paths",
+            lambda _pid, _model: (
+                cache_file,
+                meta_file,
+                MagicMock(),
+                legacy_cache,
+                legacy_meta,
+                MagicMock(),
+            ),
+        )
+        monkeypatch.setattr(ss, "_default_llm_name", lambda: "gpt-4")
+        monkeypatch.setattr(ss, "_summary_markdown_source", lambda: "mineru")
+        monkeypatch.setattr(ss, "read_summary_meta", lambda _meta: {"source": "mineru"})
+        monkeypatch.setattr(ss, "summary_source_matches", lambda _meta, _source: True)
+        monkeypatch.setattr(ss, "has_active_summary_lock", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(ss.SummaryStatusRepository, "get_status", lambda *_args, **_kwargs: None)
+
+        snapshots = ss.get_summary_render_snapshots(["2301.00001"], "gpt-4")
+
+        assert snapshots["2301.00001"]["status"] == "ok"
+        assert snapshots["2301.00001"]["tldr"] == "hello"
+        assert cache_file.read_text.call_count == 1
+
+    def test_get_summary_render_snapshots_prefetches_status_rows(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from backend.services import summary_service as ss
+
+        calls = {"many": 0}
+
+        def _paths(_pid, _model):
+            missing = MagicMock()
+            missing.exists.return_value = False
+            return (
+                missing,
+                MagicMock(),
+                MagicMock(),
+                missing,
+                MagicMock(),
+                MagicMock(),
+            )
+
+        monkeypatch.setattr(ss, "summary_cache_paths", _paths)
+        monkeypatch.setattr(ss, "_default_llm_name", lambda: "gpt-4")
+        monkeypatch.setattr(ss, "has_active_summary_lock", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(ss, "_repair_stale_summary_state", lambda _pid, _model, info: info)
+
+        def _fake_get_status_many(pids, model=None):
+            calls["many"] += 1
+            return {pid: {"status": "queued", "last_error": None} for pid in pids}
+
+        monkeypatch.setattr(ss.SummaryStatusRepository, "get_status_many", _fake_get_status_many)
+        monkeypatch.setattr(
+            ss.SummaryStatusRepository,
+            "get_status",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("single get_status should not be used")),
+        )
+
+        snapshots = ss.get_summary_render_snapshots(["p1", "p2"], "gpt-4")
+
+        assert calls["many"] == 1
+        assert snapshots["p1"]["status"] == "queued"
+        assert snapshots["p2"]["status"] == "queued"
 
 
 class TestBuildSnapshotData:

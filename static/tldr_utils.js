@@ -293,6 +293,7 @@
 
     global[NS] = {
         getRenderer: getRenderer,
+        mathPlugin: markdownItMathPlugin,
         render: render,
         triggerMathJax: triggerMathJax,
     };

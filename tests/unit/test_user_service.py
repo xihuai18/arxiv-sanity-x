@@ -52,6 +52,37 @@ class TestBuildUserTagList:
 
         assert callable(build_user_tag_list)
 
+    def test_build_pid_tag_reverse_index_filters_candidates(self):
+        from backend.services.user_service import build_pid_tag_reverse_index
+
+        pid_to_tags = build_pid_tag_reverse_index(
+            {
+                "alpha": {"p1", "p2"},
+                "beta": ["p2", "p3"],
+                "": {"p1"},
+            },
+            candidate_pids={"p2", "p3", "p4"},
+        )
+
+        assert pid_to_tags == {
+            "p2": ["alpha", "beta"],
+            "p3": ["beta"],
+            "p4": [],
+        }
+
+    def test_build_pid_tag_reverse_index_respects_empty_candidate_set(self):
+        from backend.services.user_service import build_pid_tag_reverse_index
+
+        pid_to_tags = build_pid_tag_reverse_index(
+            {
+                "alpha": {"p1", "p2"},
+                "beta": ["p2", "p3"],
+            },
+            candidate_pids=set(),
+        )
+
+        assert pid_to_tags == {}
+
 
 class TestBuildUserKeyList:
     """Tests for build_user_key_list function."""

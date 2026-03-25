@@ -34,6 +34,26 @@ class TestParseApiRequest:
         assert status == 400
         assert resp.get_json()["error"] == "No JSON data provided"
 
+    def test_non_object_json_returns_400(self, app):
+        from flask import g
+
+        from backend.services.api_helpers import parse_api_request
+
+        with app.test_request_context(
+            "/api/test",
+            method="POST",
+            data='"hello"',
+            content_type="application/json",
+        ):
+            g.user = "u"
+            data, err = parse_api_request(require_login=False, require_csrf=False)
+
+        assert data is None
+        assert err is not None
+        resp, status = err
+        assert status == 400
+        assert resp.get_json()["error"] == "Request body must be a JSON object"
+
     def test_require_csrf_calls_hook(self, app):
         from flask import g
 

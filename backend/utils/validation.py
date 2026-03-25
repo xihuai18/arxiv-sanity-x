@@ -70,8 +70,9 @@ def csrf_protect() -> None:
     if not token:
         token = (request.form.get("csrf_token") or "").strip()
     if not token and request.is_json:
-        data = request.get_json(silent=True) or {}
-        token = (data.get("csrf_token") or "").strip()
+        data = request.get_json(silent=True)
+        if isinstance(data, dict):
+            token = (data.get("csrf_token") or "").strip()
 
     if not token or token != tok:
         _csrf_error("CSRF token missing/invalid")
@@ -99,7 +100,11 @@ def parse_api_request(
     if require_csrf:
         csrf_protect()
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if data is None:
+        return None, api_error("No JSON data provided", 400)
+    if not isinstance(data, dict):
+        return None, api_error("Request body must be a JSON object", 400)
     if not data:
         return None, api_error("No JSON data provided", 400)
 

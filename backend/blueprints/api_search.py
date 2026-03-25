@@ -52,10 +52,16 @@ def api_keyword_search():
           properties:
             success:
               type: boolean
-            papers:
+            pids:
               type: array
-            has_more:
-              type: boolean
+              items:
+                type: string
+            scores:
+              type: array
+              items:
+                type: number
+            total_count:
+              type: integer
     """
     return legacy.api_keyword_search()
 

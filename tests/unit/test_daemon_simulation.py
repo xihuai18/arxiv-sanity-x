@@ -36,17 +36,17 @@ def test_fetch_compute_runs_compute_and_optional_embeddings(monkeypatch):
     monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
 
     # Keep test deterministic.
-    monkeypatch.setattr(d, "ENABLE_SUMMARY", False)
+    monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
 
     # Case 1: embeddings enabled -> compute should include --use_embeddings.
-    monkeypatch.setattr(d, "ENABLE_EMBEDDINGS", True)
+    monkeypatch.setattr(d.settings.daemon, "enable_embeddings", True, raising=False)
     calls.clear()
     d.fetch_compute()
     compute_cmd = next(cmd for name, cmd in calls if name == "compute")
     assert "--use_embeddings" in compute_cmd
 
     # Case 2: embeddings disabled -> compute should NOT include --use_embeddings.
-    monkeypatch.setattr(d, "ENABLE_EMBEDDINGS", False)
+    monkeypatch.setattr(d.settings.daemon, "enable_embeddings", False, raising=False)
     calls.clear()
     d.fetch_compute()
     compute_cmd = next(cmd for name, cmd in calls if name == "compute")
@@ -64,12 +64,12 @@ def test_gen_summary_respects_enable_summary(monkeypatch):
 
     monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
 
-    monkeypatch.setattr(d, "ENABLE_SUMMARY", False)
+    monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
     ok = d.gen_summary()
     assert ok is True
     assert calls == []
 
-    monkeypatch.setattr(d, "ENABLE_SUMMARY", True)
+    monkeypatch.setattr(d.settings.daemon, "enable_summary", True, raising=False)
     ok = d.gen_summary()
     assert ok is True
     assert calls == ["generate_summary"]

@@ -27,7 +27,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(description="Simulate tools.daemon job execution once (no scheduler).")
     p.add_argument("--fetch-ok", action="store_true", help="Simulate fetch step succeeds.")
-    p.add_argument("--no-fetch-ok", action="store_true", help="Simulate fetch step fails (default if neither set).")
+    p.add_argument(
+        "--no-fetch-ok",
+        action="store_true",
+        help="Simulate fetch step fails (default if neither set).",
+    )
     p.add_argument(
         "--no-embeddings",
         action="store_true",
@@ -59,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Patch module knobs for this run.
     d._run_cmd = fake_run_cmd  # type: ignore[assignment]
-    d.ENABLE_EMBEDDINGS = not args.no_embeddings
-    d.ENABLE_SUMMARY = not args.no_summary
+    d.settings.daemon.enable_embeddings = not args.no_embeddings
+    d.settings.daemon.enable_summary = not args.no_summary
 
     # If neither flag is set, default to fetch failing (to show skip path).
     if not args.fetch_ok and not args.no_fetch_ok:
@@ -69,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "[simulate] config: "
         f"fetch_ok={args.fetch_ok and not args.no_fetch_ok} "
-        f"enable_embeddings={d.ENABLE_EMBEDDINGS} "
-        f"enable_summary={d.ENABLE_SUMMARY}"
+        f"enable_embeddings={d.settings.daemon.enable_embeddings} "
+        f"enable_summary={d.settings.daemon.enable_summary}"
     )
 
     # Run one "tick".

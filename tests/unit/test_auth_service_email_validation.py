@@ -41,3 +41,33 @@ def test_register_user_email_accepts_multiple_emails(app):
                     "test_user",
                     ["foo@bar.com", "another@example.com", "third@example.org"],
                 )
+
+
+def test_validate_user_email_input_rejects_invalid_value():
+    from backend.services.auth_service import validate_user_email_input
+
+    emails, is_valid = validate_user_email_input("not-an-email")
+
+    assert emails == ["not-an-email"]
+    assert is_valid is False
+
+
+def test_validate_user_email_input_accepts_empty_string_for_clear():
+    from backend.services.auth_service import validate_user_email_input
+
+    emails, is_valid = validate_user_email_input("")
+
+    assert emails == []
+    assert is_valid is True
+
+
+def test_validate_user_email_input_rejects_non_string_value():
+    from backend.services.auth_service import validate_user_email_input
+
+    emails, is_valid = validate_user_email_input(None)
+    assert emails == []
+    assert is_valid is False
+
+    emails, is_valid = validate_user_email_input(123)  # type: ignore[arg-type]
+    assert emails == []
+    assert is_valid is False

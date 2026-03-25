@@ -9,7 +9,8 @@ This module handles all tag-related operations including:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from flask import g
 from loguru import logger
@@ -77,7 +78,10 @@ def add_paper_to_tag(pid: str, tag: str) -> str:
     try:
         TagRepository.add_paper_to_tag_and_remove_neg(g.user, pid, tag)
         logger.debug(f"added paper {pid} to tag {tag} for user {g.user}")
-        emit_user_event(g.user, {"type": "user_state_changed", "reason": "add", "tag": tag, "pid": pid})
+        emit_user_event(
+            g.user,
+            {"type": "user_state_changed", "reason": "add", "tag": tag, "pid": pid},
+        )
         return "ok"
     except Exception as e:
         logger.error(f"Failed to add paper {pid} to tag {tag}: {e}")
@@ -103,7 +107,10 @@ def remove_paper_from_tag(pid: str, tag: str) -> str:
     try:
         result = TagRepository.remove_paper_from_tag_verbose(g.user, pid, tag)
         if result == "ok":
-            emit_user_event(g.user, {"type": "user_state_changed", "reason": "sub", "tag": tag, "pid": pid})
+            emit_user_event(
+                g.user,
+                {"type": "user_state_changed", "reason": "sub", "tag": tag, "pid": pid},
+            )
             return f"ok removed pid {pid} from tag {tag}"
         return result
     except Exception as e:
@@ -325,7 +332,15 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
     CombinedTagRepository.rename_combined_tag(g.user, old_ctag, new_ctag)
 
     logger.debug(f"renamed ctag {old_ctag} to {new_ctag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "rename_ctag", "from": old_ctag, "to": new_ctag})
+    emit_user_event(
+        g.user,
+        {
+            "type": "user_state_changed",
+            "reason": "rename_ctag",
+            "from": old_ctag,
+            "to": new_ctag,
+        },
+    )
     return "ok"
 
 
@@ -355,7 +370,13 @@ def set_tag_feedback(pid: str, tag: str, label: int) -> None:
     TagRepository.set_tag_label(g.user, pid, tag, label)
     emit_user_event(
         g.user,
-        {"type": "user_state_changed", "reason": "tag_feedback", "pid": pid, "tag": tag, "label": label},
+        {
+            "type": "user_state_changed",
+            "reason": "tag_feedback",
+            "pid": pid,
+            "tag": tag,
+            "label": label,
+        },
     )
 
 
@@ -439,6 +460,15 @@ def get_tag_members(
             "kind": "upload",
         }
 
+    def _build_meta_search_paper(meta: dict) -> dict:
+        return {
+            "title": meta.get("title") or "",
+            "authors": meta.get("authors") or [],
+            "_time": float(meta.get("_time") or 0.0),
+            "_time_str": meta.get("_time_str") or "",
+            "kind": "paper",
+        }
+
     # Sort by time desc (fixed order)
     def _sort_time(pid: str) -> float:
         if pid in upload_time:
@@ -450,7 +480,21 @@ def get_tag_members(
     # If search query, filter and need paper details
     pid_to_paper = {}
     if search:
-        pid_to_paper = get_papers_bulk_fn(all_pids) if get_papers_bulk_fn and all_pids else {}
+        search_text = search.lower()
+        missing_pids = []
+        for pid in all_pids:
+            if pid in upload_records:
+                pid_to_paper[pid] = _build_upload_paper(upload_records[pid], pid)
+                continue
+            meta = mdb.get(pid)
+            if isinstance(meta, dict):
+                pid_to_paper[pid] = _build_meta_search_paper(meta)
+            else:
+                missing_pids.append(pid)
+        if missing_pids and get_papers_bulk_fn:
+            fetched = get_papers_bulk_fn(missing_pids)
+            if isinstance(fetched, dict):
+                pid_to_paper.update(fetched)
         if upload_records:
             for pid, record in upload_records.items():
                 pid_to_paper[pid] = _build_upload_paper(record, pid)
@@ -458,7 +502,7 @@ def get_tag_members(
         for pid, lab in pairs:
             p = pid_to_paper.get(pid)
             if not p:
-                if search in pid.lower():
+                if search_text in pid.lower():
                     filtered.append((pid, lab))
                 continue
             title = (p.get("title") or "").lower()
@@ -470,7 +514,7 @@ def get_tag_members(
                     authors = " ".join(str(a) for a in authors_val if a).lower()
             else:
                 authors = str(authors_val).lower()
-            if search in pid.lower() or search in title or search in authors:
+            if search_text in pid.lower() or search_text in title or search_text in authors:
                 filtered.append((pid, lab))
         pairs = filtered
 
@@ -487,12 +531,26 @@ def get_tag_members(
             for pid, record in upload_records.items():
                 if pid in pids:
                     pid_to_paper[pid] = _build_upload_paper(record, pid)
+    else:
+        missing_page_pids = [pid for pid in pids if pid not in pid_to_paper]
+        if missing_page_pids and get_papers_bulk_fn:
+            fetched = get_papers_bulk_fn(missing_page_pids)
+            if isinstance(fetched, dict):
+                pid_to_paper.update(fetched)
 
     items = []
     for pid, lab in page_pairs:
         p = pid_to_paper.get(pid)
         if not p:
-            items.append({"pid": pid, "title": "(missing paper)", "time": "", "authors": "", "label": lab})
+            items.append(
+                {
+                    "pid": pid,
+                    "title": "(missing paper)",
+                    "time": "",
+                    "authors": "",
+                    "label": lab,
+                }
+            )
             continue
         authors_val = p.get("authors") or []
         if isinstance(authors_val, list):
@@ -542,5 +600,15 @@ def resolve_paper_titles(
     for pid in pids:
         p = pid_to_paper.get(pid)
         title = (p.get("title") if isinstance(p, dict) else "") or ""
-        items.append({"pid": pid, "title": title, "exists": bool(title)})
+        versioned_id = ""
+        if isinstance(p, dict):
+            versioned_id = (p.get("_effective_idv") or p.get("_idv") or "") or ""
+        items.append(
+            {
+                "pid": pid,
+                "versioned_id": versioned_id,
+                "title": title,
+                "exists": bool(title),
+            }
+        )
     return items

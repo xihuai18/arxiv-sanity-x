@@ -45,6 +45,10 @@ class HueySettings(SettingsGroup):
     summary_priority_low: int = Field(default=10, description="Low priority summary task")
     summary_repair_on_start: bool = Field(default=True, description="Repair stuck tasks on startup")
     summary_repair_ttl: int = Field(default=3600, description="Repair task TTL (seconds)")
+    upload_repair_ttl: int = Field(
+        default=21600,
+        description="Repair TTL for upload parse/extract tasks (seconds)",
+    )
     summary_repair_requeue: bool = Field(default=False, description="Requeue on repair")
     summary_repair_enable: bool = Field(default=True, description="Enable periodic repair")
     summary_repair_interval: int = Field(default=900, description="Repair check interval (seconds)")

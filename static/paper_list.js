@@ -9,6 +9,7 @@ var renderTldrMarkdown = CommonUtils.renderTldrMarkdown;
 var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
 var formatAuthorsText = CommonUtils.formatAuthorsText;
 var triggerMathJax = CommonUtils.triggerMathJax;
+var hasMathContent = CommonUtils.hasMathContent;
 var buildTagUrl = CommonUtils.buildTagUrl;
 var buildKeywordUrl = CommonUtils.buildKeywordUrl;
 var registerDropdown = CommonUtils.registerDropdown;
@@ -250,6 +251,22 @@ function fetchUserStateAndApply() {
     return CommonUtils.fetchUserState().then(applyUserState);
 }
 
+const paperById = new Map();
+
+function rebuildPaperLookup() {
+    paperById.clear();
+    if (!Array.isArray(papers)) return;
+    papers.forEach(paper => {
+        if (!paper || !paper.id) return;
+        paperById.set(paper.id, paper);
+    });
+}
+
+function getPaperById(pid) {
+    if (!pid) return null;
+    return paperById.get(pid) || null;
+}
+
 function parseMutationResponse(response) {
     return response.json().catch(() => ({
         success: false,
@@ -261,24 +278,53 @@ function parseMutationResponse(response) {
 
 function updatePaperSummaryStatus(pid, status, error, queueRank, queueTotal, taskId) {
     if (!pid || !Array.isArray(papers)) return;
-    const p = papers.find(item => item && item.id === pid);
+    const p = getPaperById(pid);
     if (!p) return;
-    p.summary_status = status || '';
-    p.summary_last_error = error || '';
-    if (taskId !== undefined) {
-        p.summary_task_id = taskId ? String(taskId) : '';
+    let changed = false;
+    const nextStatus = status || '';
+    const nextError = error || '';
+    if ((p.summary_status || '') !== nextStatus) {
+        p.summary_status = nextStatus;
+        changed = true;
     }
-    if (status && status !== 'queued' && status !== 'running') {
+    if ((p.summary_last_error || '') !== nextError) {
+        p.summary_last_error = nextError;
+        changed = true;
+    }
+    if (taskId !== undefined) {
+        const nextTaskId = taskId ? String(taskId) : '';
+        if ((p.summary_task_id || '') !== nextTaskId) {
+            p.summary_task_id = nextTaskId;
+            changed = true;
+        }
+    }
+    if (
+        nextStatus &&
+        nextStatus !== 'queued' &&
+        nextStatus !== 'running' &&
+        (p.summary_task_id || '') !== ''
+    ) {
         p.summary_task_id = '';
+        changed = true;
     }
     if (queueRank !== undefined) {
-        p.summary_queue_rank = queueRank || 0;
-        p.summary_queue_total = queueTotal || 0;
+        const nextQueueRank = queueRank || 0;
+        const nextQueueTotal = queueTotal || 0;
+        if ((p.summary_queue_rank || 0) !== nextQueueRank) {
+            p.summary_queue_rank = nextQueueRank;
+            changed = true;
+        }
+        if ((p.summary_queue_total || 0) !== nextQueueTotal) {
+            p.summary_queue_total = nextQueueTotal;
+            changed = true;
+        }
     }
-    renderPaperList();
+    if (changed) {
+        schedulePaperListRender();
+    }
 
     // If a summary just became available, refresh TL;DR for this card (best-effort).
-    if (status === 'ok') {
+    if (nextStatus === 'ok') {
         maybeRefreshPaperTldr(pid);
     }
 }
@@ -291,14 +337,17 @@ const TLDR_REFRESH_COOLDOWN_MS = 60000;
 
 function updatePaperTldr(pid, tldr) {
     if (!pid || !Array.isArray(papers)) return;
-    const p = papers.find(item => item && item.id === pid);
+    const p = getPaperById(pid);
     if (!p) return;
-    p.tldr = String(tldr || '');
-    renderPaperList();
-    try {
-        // Scoped to the list container to avoid full-document scans.
-        triggerMathJax(document.getElementById('paperList'));
-    } catch (e) {}
+    const nextTldr = String(tldr || '');
+    if (String(p.tldr || '') === nextTldr) return;
+    p.tldr = nextTldr;
+    schedulePaperListRender(() => {
+        try {
+            // Scoped to the list container to avoid full-document scans.
+            triggerMathJax(document.getElementById('paperList'));
+        } catch (e) {}
+    });
 }
 
 function fetchPaperTldr(pid) {
@@ -327,7 +376,7 @@ function _scheduleTldrRetry(pid, attempts) {
 
 function refreshPaperTldr(pid) {
     if (!pid || !Array.isArray(papers)) return;
-    const p = papers.find(item => item && item.id === pid);
+    const p = getPaperById(pid);
     if (!p) return;
 
     const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
@@ -403,7 +452,7 @@ function refreshPaperTldr(pid) {
 
 function maybeRefreshPaperTldr(pid) {
     if (!pid || !Array.isArray(papers)) return;
-    const p = papers.find(item => item && item.id === pid);
+    const p = getPaperById(pid);
     if (!p) return;
 
     const hasTldr = Boolean(p.tldr && String(p.tldr).trim());
@@ -486,7 +535,7 @@ function updatePaperTagsForDelete(tagName) {
 
 function applyTagFeedbackToPaper(pid, tagName, label) {
     if (!pid || !tagName || !Array.isArray(papers)) return;
-    const p = papers.find(item => item && item.id === pid);
+    const p = getPaperById(pid);
     if (!p) return;
     const pos = new Set(p.utags || []);
     const neg = new Set(p.ntags || []);
@@ -579,13 +628,13 @@ function clonePaperProp(paper) {
 
 const Paper = props => {
     const p = props.paper;
-    const lst = props.tags;
-    const tlst = lst.map(jtag => jtag.name);
+    const availableTagNames = props.availableTagNames || [];
     const ulst = p.utags;
+    const linkPid = p.versioned_id || p.id;
 
-    const similar_url = '/?rank=pid&pid=' + encodeURIComponent(p.id);
-    const inspect_url = '/inspect?pid=' + encodeURIComponent(p.id);
-    const summary_url = '/summary?pid=' + encodeURIComponent(p.id);
+    const similar_url = '/?rank=pid&pid=' + encodeURIComponent(linkPid);
+    const inspect_url = '/inspect?pid=' + encodeURIComponent(linkPid);
+    const summary_url = '/summary?pid=' + encodeURIComponent(linkPid);
     const thumb_img =
         p.thumb_url === '' ? null : (
             <div class="rel_img">
@@ -601,7 +650,7 @@ const Paper = props => {
                 <MultiSelectDropdown
                     selectedTags={ulst}
                     negativeTags={props.negativeTags}
-                    availableTags={tlst}
+                    availableTags={availableTagNames}
                     isOpen={props.dropdownOpen}
                     onToggle={props.onToggleDropdown}
                     onTagCycle={props.onTagCycle}
@@ -635,7 +684,7 @@ const Paper = props => {
             class="rel_abs_details"
             onToggle={e => {
                 try {
-                    if (e && e.target && e.target.open) {
+                    if (e && e.target && e.target.open && hasMathContent(p.summary || '')) {
                         triggerMathJax(e.target);
                     }
                 } catch (err) {}
@@ -742,7 +791,11 @@ const Paper = props => {
             </div>
             {readinglist_btn}
             <div class="rel_title">
-                <a href={'http://arxiv.org/abs/' + p.id} target="_blank" rel="noopener noreferrer">
+                <a
+                    href={'https://arxiv.org/abs/' + encodeURIComponent(linkPid)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
                     {p.title}
                 </a>
             </div>
@@ -778,7 +831,9 @@ const Paper = props => {
                 <div class="paper-actions-group paper-actions-group-secondary">
                     <div class="rel_alphaxiv">
                         <a
-                            href={'https://www.alphaxiv.org/overview/' + p.id}
+                            href={
+                                'https://www.alphaxiv.org/overview/' + encodeURIComponent(linkPid)
+                            }
                             target="_blank"
                             rel="noopener noreferrer"
                         >
@@ -787,7 +842,7 @@ const Paper = props => {
                     </div>
                     <div class="rel_cool">
                         <a
-                            href={'https://papers.cool/arxiv/' + p.id}
+                            href={'https://papers.cool/arxiv/' + encodeURIComponent(linkPid)}
                             target="_blank"
                             rel="noopener noreferrer"
                         >
@@ -803,11 +858,13 @@ const Paper = props => {
 const PaperList = props => {
     const lst = props.papers;
     const filtered_tags = props.tags.filter(tag => tag.name !== 'all');
+    const availableTagNames = filtered_tags.map(tag => tag.name);
     const plst = lst.map((jpaper, ix) => (
         <PaperComponent
             key={jpaper && jpaper.id ? jpaper.id : ix}
             paper={clonePaperProp(jpaper)}
             tags={filtered_tags}
+            availableTagNames={availableTagNames}
             inReadingList={isInReadingList(jpaper && jpaper.id)}
         />
     ));
@@ -1021,6 +1078,7 @@ class PaperComponent extends React.Component {
         this.state = {
             paper: paper,
             tags: props.tags,
+            availableTagNames: props.availableTagNames || [],
             dropdownOpen: false,
             newTagValue: '',
             searchValue: '',
@@ -1070,16 +1128,14 @@ class PaperComponent extends React.Component {
                 this.setState({ dropdownOpen: false });
             },
         });
-        // Trigger MathJax rendering for TL;DR / abstract content.
-        // Scoped to the list container to avoid full-document scans.
-        if (this.state.paper.tldr || this.state.paper.summary) {
-            triggerMathJax(document.getElementById('paperList'));
-        }
     }
 
     componentDidUpdate(prevProps, prevState) {
         if (prevProps.tags !== this.props.tags) {
-            this.setState({ tags: this.props.tags });
+            this.setState({
+                tags: this.props.tags,
+                availableTagNames: this.props.availableTagNames || [],
+            });
         }
         const prevPaper = prevProps.paper || {};
         const nextPaperProp = this.props.paper || {};
@@ -1435,22 +1491,30 @@ class PaperComponent extends React.Component {
                             console.warn('Failed to update readinglist cache (add):', e);
                         }
                         const taskId = data.task_id ? String(data.task_id) : '';
+                        const responseStatus = String(data.summary_status || '').trim();
+                        const nextStatus =
+                            responseStatus || (taskId ? 'queued' : this.state.summaryStatus || '');
                         this.setStateIfMounted({
-                            summaryStatus: 'queued',
+                            summaryStatus: nextStatus,
                             summaryLastError: '',
-                            summaryTaskId: taskId,
+                            summaryTaskId:
+                                nextStatus === 'queued' || nextStatus === 'running' ? taskId : '',
                         });
-                        if (taskId) {
+                        if (taskId && (nextStatus === 'queued' || nextStatus === 'running')) {
                             this.startQueueRankPolling();
                         }
-                        markSummaryPending(paper.id);
+                        if (nextStatus === 'queued' || nextStatus === 'running') {
+                            markSummaryPending(paper.id);
+                        } else {
+                            unmarkSummaryPending(paper.id);
+                        }
                         updatePaperSummaryStatus(
                             paper.id,
-                            'queued',
+                            nextStatus,
                             '',
                             undefined,
                             undefined,
-                            taskId
+                            nextStatus === 'queued' || nextStatus === 'running' ? taskId : ''
                         );
                         notifyUser('Added to reading list', 'success');
                     } else {
@@ -1560,6 +1624,7 @@ class PaperComponent extends React.Component {
             <Paper
                 paper={this.state.paper}
                 tags={this.state.tags}
+                availableTagNames={this.state.availableTagNames}
                 negativeTags={this.state.paper.ntags || []}
                 dropdownOpen={this.state.dropdownOpen}
                 onToggleDropdown={this.handleToggleDropdown}
@@ -2005,13 +2070,21 @@ const TagList = props => {
                                     </button>
                                     <div class="tag-manage-main">
                                         <div class="tag-manage-title">
-                                            <a
-                                                href={'/summary?pid=' + encodeURIComponent(it.pid)}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                            >
-                                                {it.title || it.pid}
-                                            </a>
+                                            {(() => {
+                                                const managePid = it.versioned_id || it.pid;
+                                                return (
+                                                    <a
+                                                        href={
+                                                            '/summary?pid=' +
+                                                            encodeURIComponent(managePid)
+                                                        }
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                    >
+                                                        {it.title || it.pid}
+                                                    </a>
+                                                );
+                                            })()}
                                         </div>
                                         <div class="tag-manage-meta">
                                             <span class="tag-manage-time">{it.time || ''}</span>
@@ -3956,10 +4029,59 @@ const tagwrap_elt = document.getElementById('tagwrap');
 const keywrap_elt = document.getElementById('keywrap');
 const tagcombwrap_elt = document.getElementById('tagcombwrap');
 
-function renderPaperList() {
+let paperListRenderScheduled = false;
+let afterPaperListRenderCallbacks = [];
+
+function renderPaperListNow() {
+    rebuildPaperLookup();
     if (paperListRoot) {
         ReactDOM.render(<PaperList papers={papers} tags={tags} />, paperListRoot);
     }
+}
+
+function flushPaperListRender() {
+    paperListRenderScheduled = false;
+    renderPaperListNow();
+    const callbacks = afterPaperListRenderCallbacks.slice();
+    afterPaperListRenderCallbacks = [];
+    callbacks.forEach(callback => {
+        try {
+            callback();
+        } catch (e) {
+            console.warn('paper_list post-render callback failed', e);
+        }
+    });
+}
+
+function schedulePaperListRender(afterRender) {
+    if (typeof afterRender === 'function') {
+        afterPaperListRenderCallbacks.push(afterRender);
+    }
+    if (paperListRenderScheduled) {
+        return;
+    }
+    paperListRenderScheduled = true;
+
+    const canUseRaf =
+        typeof window !== 'undefined' &&
+        typeof window.requestAnimationFrame === 'function' &&
+        !(typeof document !== 'undefined' && document.visibilityState === 'hidden');
+
+    if (canUseRaf) {
+        window.requestAnimationFrame(flushPaperListRender);
+        return;
+    }
+
+    if (typeof queueMicrotask === 'function') {
+        queueMicrotask(flushPaperListRender);
+        return;
+    }
+
+    Promise.resolve().then(flushPaperListRender);
+}
+
+function renderPaperList() {
+    renderPaperListNow();
 }
 
 function renderTagList() {
@@ -3986,6 +4108,14 @@ function renderCombinedTagList() {
 // Fetch reading list first, then render all components
 fetchReadingList().then(() => {
     renderPaperList();
+    try {
+        if (
+            Array.isArray(papers) &&
+            papers.some(p => p && (hasMathContent(p.tldr || '') || hasMathContent(p.summary || '')))
+        ) {
+            triggerMathJax(document.getElementById('paperList'));
+        }
+    } catch (e) {}
 
     // render tags into #tagwrap, if it exists
     renderTagList();

@@ -18,6 +18,7 @@ class TestUserStateApi:
 
         data = resp.get_json(silent=True) or {}
         assert data.get("success") is True
+        assert data.get("user") == "test_user"
         assert "tags" in data
         assert "keys" in data
         assert "combined_tags" in data

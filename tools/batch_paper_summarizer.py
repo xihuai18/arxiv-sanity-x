@@ -11,6 +11,7 @@ Features:
 
 import argparse
 import os
+import re
 import sys
 import threading
 import time
@@ -34,6 +35,7 @@ from tools.paper_summarizer import (
     acquire_summary_lock,
     atomic_write_json,
     atomic_write_text,
+    is_error_summary_content,
     normalize_summary_result,
     normalize_summary_source,
     read_summary_meta,
@@ -201,6 +203,51 @@ class BatchProcessor:
         # Failure details record - record specific information for each failed paper
         self.failure_details = {}
         self.failure_lock = threading.Lock()
+
+    @staticmethod
+    def _compact_failure_message(message: str | None) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return "unknown error"
+        text = re.sub(r"^#\s*Error\s*(?:\n+|$)", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s+", " ", text)
+        if len(text) > 240:
+            text = text[:237].rstrip() + "..."
+        return text
+
+    def _extract_summary_failure_detail(self, summary_content: str, summary_meta: dict | None = None) -> str:
+        detail = self._compact_failure_message(summary_content)
+        attempts = summary_meta.get("llm_fallback_attempts") if isinstance(summary_meta, dict) else None
+        if not isinstance(attempts, list) or not attempts:
+            return detail
+
+        last_attempt = attempts[-1] if isinstance(attempts[-1], dict) else {}
+        attempt_model = str(last_attempt.get("model") or "").strip()
+        attempt_error = self._compact_failure_message(last_attempt.get("error"))
+        if attempt_model and attempt_error and attempt_error not in detail:
+            return f"{detail} [last model={attempt_model}: {attempt_error}]"
+        if attempt_model and attempt_model not in detail:
+            return f"{detail} [last model={attempt_model}]"
+        return detail
+
+    def _progress_postfix(
+        self,
+        *,
+        round_success: int,
+        round_failed: int,
+        pid: str,
+        message: str,
+        success: bool,
+    ) -> str:
+        with self.stats_lock:
+            generated = int(self.stats.get("success") or 0)
+
+        prefix = f"✓{round_success} new{generated} ✗{round_failed}"
+        if success and message == "Cached":
+            return f"{prefix} | {pid} (Cached)"
+        if success:
+            return f"{prefix} | {pid}"
+        return f"{prefix} | ✗ {pid}"
 
     def _record_failure_detail(self, pid: str, reason: str, message: str, exception: Exception = None):
         """
@@ -482,7 +529,7 @@ class BatchProcessor:
             summary_source = normalize_summary_source(source)
 
             # Only cache successful summaries (not error messages)
-            if not summary_content.startswith("# Error"):
+            if not is_error_summary_content(summary_content):
                 atomic_write_text(cache_file, summary_content)
                 meta = {}
                 if isinstance(summary_meta, dict):
@@ -571,11 +618,17 @@ class BatchProcessor:
                 end_time = time.time()
 
                 # Check if summary generation was successful
-                if summary_content.startswith("# Error"):
-                    logger.error(f"Summary generation failed: {pid}")
+                if is_error_summary_content(summary_content):
+                    failure_detail = self._extract_summary_failure_detail(summary_content, summary_meta)
+                    logger.error(f"Summary generation failed: {pid} - {failure_detail}")
+                    self._record_failure_detail(
+                        pid,
+                        "llm_failed",
+                        failure_detail,
+                    )
                     with self.stats_lock:
                         self.stats["failed"] += 1
-                    return pid, False, summary_content
+                    return pid, False, failure_detail
 
                 # Cache summary
                 cache_success, _ = self.cache_summary(
@@ -600,10 +653,12 @@ class BatchProcessor:
                     release_summary_lock(lock_fd, lock_file)
 
         except Exception as e:
-            logger.error(f"Error occurred while processing paper {pid}: {e}")
+            error_detail = self._compact_failure_message(PaperSummarizer._summarize_llm_error(e))
+            logger.error(f"Error occurred while processing paper {pid}: {error_detail}")
+            self._record_failure_detail(pid, "other_error", error_detail, e)
             with self.stats_lock:
                 self.stats["failed"] += 1
-            return pid, False, str(e)
+            return pid, False, error_detail
 
     def format_time_str(self, timestamp: float) -> str:
         """Format timestamp"""
@@ -731,13 +786,26 @@ class BatchProcessor:
                         # Update counters and progress bar
                         if success:
                             round_success += 1
-                            if message == "Cached":
-                                pbar.set_postfix_str(f"✓{round_success} ✗{round_failed} | {result_pid} (Cached)")
-                            else:
-                                pbar.set_postfix_str(f"✓{round_success} ✗{round_failed} | {result_pid}")
+                            pbar.set_postfix_str(
+                                self._progress_postfix(
+                                    round_success=round_success,
+                                    round_failed=round_failed,
+                                    pid=result_pid,
+                                    message=message,
+                                    success=True,
+                                )
+                            )
                         else:
                             round_failed += 1
-                            pbar.set_postfix_str(f"✓{round_success} ✗{round_failed} | ✗ {result_pid}")
+                            pbar.set_postfix_str(
+                                self._progress_postfix(
+                                    round_success=round_success,
+                                    round_failed=round_failed,
+                                    pid=result_pid,
+                                    message=message,
+                                    success=False,
+                                )
+                            )
 
                         pbar.update(1)
 
@@ -745,7 +813,7 @@ class BatchProcessor:
                             # Processing failed, check if retry is needed
                             if retry_count < max_retries:
                                 logger.warning(
-                                    f"Processing failed, will retry ({retry_count + 1}/{max_retries}): {result_pid}"
+                                    f"Processing failed, will retry ({retry_count + 1}/{max_retries}): {result_pid} - {message}"
                                 )
                                 processing_queue.append((pid, meta, retry_count + 1))
                             else:
@@ -756,7 +824,15 @@ class BatchProcessor:
                         logger.error(f"Task execution exception {pid}: {e}")
                         # Update counters and progress bar
                         round_failed += 1
-                        pbar.set_postfix_str(f"✓{round_success} ✗{round_failed} | ✗ {pid} (Exception)")
+                        pbar.set_postfix_str(
+                            self._progress_postfix(
+                                round_success=round_success,
+                                round_failed=round_failed,
+                                pid=f"{pid} (Exception)",
+                                message="Exception",
+                                success=False,
+                            )
+                        )
                         pbar.update(1)
 
                         # Exceptions also need retry
@@ -804,6 +880,22 @@ class BatchProcessor:
         if self.stats["total"] > 0:
             success_rate = (self.stats["success"] / self.stats["total"]) * 100
             logger.success(f"Success rate: {success_rate:.1f}%")
+
+        if self.stats["failed"] > 0:
+            logger.warning("Failure reasons:")
+            for reason, count in self.stats["failure_reasons"].items():
+                if count > 0:
+                    logger.warning(f"  - {reason}: {count}")
+
+            if self.failure_details:
+                logger.warning("Recent failure details:")
+                recent_failures = sorted(
+                    self.failure_details.items(),
+                    key=lambda item: float(item[1].get("timestamp") or 0.0),
+                    reverse=True,
+                )[:10]
+                for pid, detail in recent_failures:
+                    logger.warning(f"  - {pid}: {detail.get('reason')} - {detail.get('message')}")
 
         logger.success(f"Summaries saved to: {self.cache_dir}")
         logger.success("=" * 60)

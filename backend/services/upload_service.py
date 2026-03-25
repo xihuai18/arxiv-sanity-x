@@ -13,6 +13,8 @@ import json
 import re
 import shutil
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -26,6 +28,7 @@ from aslite.repositories import (
     SummaryStatusRepository,
     TagRepository,
     UploadedPaperRepository,
+    safe_closing,
 )
 from backend.utils.upload_utils import (
     compute_bytes_sha256,
@@ -37,6 +40,8 @@ from backend.utils.upload_utils import (
 )
 from config import settings
 
+from .user_service import build_pid_tag_reverse_index as _build_pid_tag_reverse_index
+
 
 def _data_dir() -> str:
     return str(settings.data_dir)
@@ -44,6 +49,12 @@ def _data_dir() -> str:
 
 def _summary_dir() -> str:
     return str(settings.summary_dir)
+
+
+def _get_uploaded_papers_db(**kwargs):
+    from aslite.db import get_uploaded_papers_db
+
+    return get_uploaded_papers_db(**kwargs)
 
 
 # SSE enabled flag - check if we're in a web context
@@ -116,6 +127,11 @@ UPLOAD_TASK_MODEL_PROCESS = "upload_process"
 UPLOAD_TASK_MODEL_PARSE = "upload_parse"
 UPLOAD_TASK_MODEL_EXTRACT = "upload_extract"
 
+_UPLOAD_TASK_SNAPSHOT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "upload_task_snapshot",
+    default=None,
+)
+
 
 def _extract_huey_task_id(task: Any = None, enqueue_result: Any = None) -> str:
     """Best-effort extract Huey task id from task/result objects."""
@@ -166,17 +182,565 @@ def register_upload_task_enqueue(
 
 def _get_active_upload_task_id(record: dict[str, Any], record_field: str) -> str:
     """Return active queued/running task id from upload record, if any."""
-    task_id = str(record.get(record_field) or "").strip()
-    if not task_id:
-        return ""
-    try:
-        info = SummaryStatusRepository.get_task_status(task_id) or {}
-    except Exception:
-        return ""
-    status = str(info.get("status") or "").strip().lower()
-    if status in {"queued", "running"}:
+    task_state, task_id, _info = _classify_or_recover_upload_task(record, record_field)
+    if task_state == "active":
         return task_id
     return ""
+
+
+def _upload_task_repair_ttl() -> int:
+    try:
+        return max(0, int(settings.huey.upload_repair_ttl or 0))
+    except Exception:
+        return 0
+
+
+def _upload_task_pointer_grace_seconds() -> int:
+    """Grace window for recently queued upload records without stable task metadata.
+
+    This avoids falsely repairing records during the short interval between:
+    - setting `parse_status=queued`
+    - persisting the concrete Huey task id / task status record
+    """
+    return 15
+
+
+def _get_upload_record_task_models(record_field: str) -> set[str]:
+    if record_field == "extract_task_id":
+        return {UPLOAD_TASK_MODEL_EXTRACT}
+    if record_field == "parse_task_id":
+        return {UPLOAD_TASK_MODEL_PARSE, UPLOAD_TASK_MODEL_PROCESS}
+    return set()
+
+
+def _get_upload_record_field_for_task_model(task_model: str) -> str | None:
+    normalized_task_model = str(task_model or "").strip()
+    if normalized_task_model in {UPLOAD_TASK_MODEL_PROCESS, UPLOAD_TASK_MODEL_PARSE}:
+        return "parse_task_id"
+    if normalized_task_model == UPLOAD_TASK_MODEL_EXTRACT:
+        return "extract_task_id"
+    return None
+
+
+def _build_upload_task_snapshot(user: str, records_by_pid: dict[str, dict[str, Any]] | None) -> dict[str, Any]:
+    normalized_user = str(user or "").strip()
+    candidate_pids = {str(pid or "").strip() for pid in (records_by_pid or {}).keys() if str(pid or "").strip()}
+    snapshot: dict[str, Any] = {
+        "complete": False,
+        "task_by_id": {},
+        "active_by_record_field": {},
+    }
+    if not normalized_user or not candidate_pids:
+        snapshot["complete"] = True
+        return snapshot
+
+    task_by_id: dict[str, dict[str, Any]] = {}
+    active_candidates: dict[tuple[str, str, str], tuple[float, str, dict[str, Any]]] = {}
+
+    try:
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                pid = str(info.get("pid") or "").strip()
+                task_user = str(info.get("user") or "").strip()
+                if pid not in candidate_pids or task_user != normalized_user:
+                    continue
+
+                task_id = str(key).replace("task::", "")
+                if not task_id:
+                    continue
+
+                task_by_id[task_id] = info
+
+                record_field = _get_upload_record_field_for_task_model(info.get("model") or "")
+                task_status = str(info.get("status") or "").strip().lower()
+                if not record_field or task_status not in {"queued", "running"}:
+                    continue
+
+                try:
+                    updated_time = float(info.get("updated_time") or 0.0)
+                except Exception:
+                    updated_time = 0.0
+
+                active_key = (pid, task_user, record_field)
+                candidate = (updated_time, task_id, info)
+                existing = active_candidates.get(active_key)
+                if existing is None or (updated_time, task_id) > (
+                    existing[0],
+                    existing[1],
+                ):
+                    active_candidates[active_key] = candidate
+    except Exception as e:
+        logger.debug(f"Failed to build upload task snapshot for {normalized_user}: {e}")
+        return snapshot
+
+    snapshot["complete"] = True
+    snapshot["task_by_id"] = task_by_id
+    snapshot["active_by_record_field"] = {
+        key: (task_id, info) for key, (_updated_time, task_id, info) in active_candidates.items()
+    }
+    return snapshot
+
+
+def _get_upload_task_snapshot() -> dict[str, Any] | None:
+    snapshot = _UPLOAD_TASK_SNAPSHOT.get()
+    return snapshot if isinstance(snapshot, dict) else None
+
+
+@contextmanager
+def _use_upload_task_snapshot(snapshot: dict[str, Any] | None):
+    token = _UPLOAD_TASK_SNAPSHOT.set(snapshot if isinstance(snapshot, dict) else None)
+    try:
+        yield
+    finally:
+        _UPLOAD_TASK_SNAPSHOT.reset(token)
+
+
+def _upload_task_pointer_is_within_grace(record: dict[str, Any]) -> bool:
+    grace_seconds = _upload_task_pointer_grace_seconds()
+    if grace_seconds <= 0:
+        return False
+
+    reference_ts = 0.0
+    for field in ("updated_time", "created_time"):
+        try:
+            reference_ts = max(reference_ts, float(record.get(field) or 0.0))
+        except Exception:
+            continue
+
+    if reference_ts <= 0:
+        return True
+    return (time.time() - reference_ts) < grace_seconds
+
+
+def _find_active_upload_task_for_record(
+    pid: str,
+    user: str,
+    record_field: str,
+) -> tuple[str, dict[str, Any] | None]:
+    """Best-effort recover the active task id for an upload record field."""
+    normalized_pid = str(pid or "").strip()
+    normalized_user = str(user or "").strip()
+    task_models = _get_upload_record_task_models(record_field)
+    if not normalized_pid or not normalized_user or not task_models:
+        return "", None
+
+    snapshot = _get_upload_task_snapshot()
+    if snapshot is not None:
+        active_by_record_field = snapshot.get("active_by_record_field") or {}
+        candidate = active_by_record_field.get((normalized_pid, normalized_user, record_field))
+        if isinstance(candidate, tuple) and len(candidate) == 2:
+            task_id, info = candidate
+            return str(task_id or ""), info if isinstance(info, dict) else None
+        if snapshot.get("complete"):
+            return "", None
+
+    candidates: list[tuple[float, str, dict[str, Any]]] = []
+    try:
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                if info.get("pid") != normalized_pid or info.get("user") != normalized_user:
+                    continue
+                task_model = str(info.get("model") or "").strip()
+                if task_model not in task_models:
+                    continue
+                task_status = str(info.get("status") or "").strip().lower()
+                if task_status not in {"queued", "running"}:
+                    continue
+                task_id = str(key).replace("task::", "")
+                if not task_id:
+                    continue
+                try:
+                    updated_time = float(info.get("updated_time") or 0.0)
+                except Exception:
+                    updated_time = 0.0
+                candidates.append((updated_time, task_id, info))
+    except Exception as e:
+        logger.debug(f"Failed to scan active upload tasks for {normalized_pid}:{record_field}: {e}")
+        return "", None
+
+    if not candidates:
+        return "", None
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    _updated_time, task_id, info = candidates[0]
+    return task_id, info
+
+
+def _classify_or_recover_upload_task(
+    record: dict[str, Any], record_field: str
+) -> tuple[str, str, dict[str, Any] | None]:
+    """Classify task pointer state, with upload-specific recovery for races/orphans."""
+    current_task_id = str(record.get(record_field) or "").strip()
+    task_state, task_id, task_info = _classify_upload_task(current_task_id)
+    if task_state == "active":
+        return task_state, task_id, task_info
+
+    pid = str(record.get("pid") or "").strip()
+    owner = str(record.get("owner") or "").strip()
+    recovered_task_id, recovered_task_info = _find_active_upload_task_for_record(pid, owner, record_field)
+    if recovered_task_id:
+        if recovered_task_id != current_task_id and pid:
+            try:
+                UploadedPaperRepository.update(pid, {record_field: recovered_task_id})
+            except Exception as e:
+                logger.debug(f"Failed to recover upload task pointer for {pid}:{record_field}: {e}")
+            record[record_field] = recovered_task_id
+        return "active", recovered_task_id, recovered_task_info
+
+    if task_state == "missing" and _upload_task_pointer_is_within_grace(record):
+        return "pending_registration", current_task_id, task_info
+
+    return task_state, task_id, task_info
+
+
+def _ensure_upload_record_active(
+    pid: str,
+    user: str,
+    *,
+    record_field: str | None = None,
+    task_id: str | None = None,
+    allowed_parse_statuses: set[str] | None = None,
+) -> dict[str, Any]:
+    """Ensure upload record still exists, is owned, and task pointer is still current."""
+    record = _get_owned_upload_record(pid, user)
+
+    if record_field:
+        expected_task_id = str(task_id or "").strip()
+        current_task_id = str(record.get(record_field) or "").strip()
+        if expected_task_id and current_task_id != expected_task_id:
+            raise UploadServiceError("superseded_task", "Task is no longer current")
+
+    if allowed_parse_statuses:
+        current_status = str(record.get("parse_status") or "").strip().lower()
+        normalized_allowed = {status.lower() for status in allowed_parse_statuses}
+        if current_status not in normalized_allowed:
+            raise UploadServiceError("superseded_task", "Task is no longer runnable")
+
+    return record
+
+
+def _is_upload_record_current(
+    pid: str,
+    user: str,
+    *,
+    record_field: str | None = None,
+    task_id: str | None = None,
+    allowed_parse_statuses: set[str] | None = None,
+) -> bool:
+    """Best-effort check whether the upload record still matches the running task."""
+    try:
+        _ensure_upload_record_active(
+            pid,
+            user,
+            record_field=record_field,
+            task_id=task_id,
+            allowed_parse_statuses=allowed_parse_statuses,
+        )
+        return True
+    except UploadServiceError:
+        return False
+
+
+def _update_upload_record_if_current(
+    pid: str,
+    user: str,
+    *,
+    updates: dict[str, Any],
+    record_field: str | None = None,
+    task_id: str | None = None,
+    allowed_parse_statuses: set[str] | None = None,
+) -> bool:
+    """Atomically update an upload record only if the running task is still current."""
+    if not isinstance(updates, dict) or not updates:
+        return _is_upload_record_current(
+            pid,
+            user,
+            record_field=record_field,
+            task_id=task_id,
+            allowed_parse_statuses=allowed_parse_statuses,
+        )
+
+    expected_task_id = str(task_id or "").strip()
+    allowed_statuses = {status.lower() for status in (allowed_parse_statuses or set())}
+
+    if not expected_task_id:
+        try:
+            _ensure_upload_record_active(
+                pid,
+                user,
+                allowed_parse_statuses=allowed_parse_statuses,
+            )
+        except UploadServiceError:
+            return False
+        try:
+            return bool(UploadedPaperRepository.update(pid, updates))
+        except Exception as e:
+            logger.warning(f"Failed fallback upload record update for {pid}: {e}")
+            return False
+
+    try:
+        with _get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+            with updb.transaction(mode="IMMEDIATE"):
+                record = updb.get(pid)
+                if not isinstance(record, dict):
+                    return False
+                if record.get("owner") != user:
+                    return False
+                if record.get("deleting") is True:
+                    return False
+                if record_field:
+                    current_task_id = str(record.get(record_field) or "").strip()
+                    if expected_task_id and current_task_id != expected_task_id:
+                        return False
+                if allowed_statuses:
+                    current_status = str(record.get("parse_status") or "").strip().lower()
+                    if current_status not in allowed_statuses:
+                        return False
+
+                next_record = dict(record)
+                next_record.update(updates)
+                next_record["updated_time"] = time.time()
+                updb[pid] = next_record
+                return True
+    except Exception as e:
+        logger.warning(f"Failed guarded upload record update for {pid}: {e}")
+        return False
+
+
+def _emit_upload_event_if_current(
+    pid: str,
+    user: str,
+    payload: dict[str, Any],
+    *,
+    record_field: str | None = None,
+    task_id: str | None = None,
+    allowed_parse_statuses: set[str] | None = None,
+) -> bool:
+    """Emit an upload SSE event only while the task still owns the record."""
+    if not _is_upload_record_current(
+        pid,
+        user,
+        record_field=record_field,
+        task_id=task_id,
+        allowed_parse_statuses=allowed_parse_statuses,
+    ):
+        return False
+    _emit_upload_event(user, payload)
+    return True
+
+
+def _classify_upload_task(task_id: Any) -> tuple[str, str, dict[str, Any] | None]:
+    """Classify an upload task pointer as active/stale/terminal/missing."""
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return "missing", "", None
+
+    snapshot = _get_upload_task_snapshot()
+    if snapshot is not None:
+        info = (snapshot.get("task_by_id") or {}).get(normalized_task_id)
+    else:
+        info = None
+
+    try:
+        if info is None:
+            info = SummaryStatusRepository.get_task_status(normalized_task_id)
+    except Exception:
+        return "missing", normalized_task_id, None
+
+    if not isinstance(info, dict):
+        return "missing", normalized_task_id, None
+
+    status = str(info.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return "terminal", normalized_task_id, info
+
+    ttl = _upload_task_repair_ttl()
+    if ttl > 0:
+        try:
+            updated_time = float(info.get("updated_time") or 0)
+        except Exception:
+            updated_time = 0.0
+        if updated_time > 0 and (time.time() - updated_time) >= ttl:
+            return "stale", normalized_task_id, info
+
+    return "active", normalized_task_id, info
+
+
+def _repair_upload_task_status(
+    task_id: str,
+    *,
+    pid: str,
+    user: str,
+    info: dict[str, Any] | None = None,
+    sync_record: bool = True,
+) -> None:
+    """Best-effort mark a stale upload task as failed so it does not stay stuck."""
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return
+
+    task_info = info if isinstance(info, dict) else SummaryStatusRepository.get_task_status(normalized_task_id) or {}
+    status = str(task_info.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return
+
+    task_model = str(task_info.get("model") or "").strip() or UPLOAD_TASK_MODEL_PARSE
+    try:
+        SummaryStatusRepository.set_task_status(
+            normalized_task_id,
+            "failed",
+            "stale_running_repaired",
+            pid=pid,
+            model=task_model,
+            user=user,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to repair stale upload task {normalized_task_id} for {pid}: {e}")
+
+    record_field = None
+    record_updates: dict[str, Any] = {}
+    if task_model in {UPLOAD_TASK_MODEL_PROCESS, UPLOAD_TASK_MODEL_PARSE}:
+        record_field = "parse_task_id"
+        record_updates.update(
+            {
+                "parse_status": "failed",
+                "parse_error": "stale_running_repaired",
+            }
+        )
+    elif task_model == UPLOAD_TASK_MODEL_EXTRACT:
+        record_field = "extract_task_id"
+
+    if sync_record and record_field:
+        record_updates[record_field] = None
+        try:
+            UploadedPaperRepository.update(pid, record_updates)
+        except Exception as e:
+            logger.warning(f"Failed to update upload record while repairing stale task {normalized_task_id}: {e}")
+
+
+def _get_owned_upload_record(pid: str, user: str, *, allow_deleting: bool = False) -> dict[str, Any]:
+    """Return an upload record owned by user or raise UploadServiceError."""
+    if not validate_upload_pid(pid):
+        logger.error(f"Invalid upload PID format: {pid}")
+        raise UploadServiceError("invalid_pid", "Invalid paper ID")
+
+    record = UploadedPaperRepository.get(pid)
+    if not isinstance(record, dict):
+        raise UploadServiceError("not_found", "Paper not found")
+
+    if record.get("owner") != user:
+        raise UploadServiceError("not_owner", "Paper not found")
+
+    if not allow_deleting and record.get("deleting") is True:
+        raise UploadServiceError("deleting", "Paper is being deleted")
+
+    return record
+
+
+def _cancel_active_upload_tasks(pid: str, user: str, *, reason: str) -> dict[str, Any]:
+    """Best-effort cancel queued/running upload parse/process/extract tasks."""
+    task_models = {
+        UPLOAD_TASK_MODEL_PROCESS,
+        UPLOAD_TASK_MODEL_PARSE,
+        UPLOAD_TASK_MODEL_EXTRACT,
+    }
+    tasks_by_id: dict[str, dict[str, Any]] = {}
+
+    try:
+        record = UploadedPaperRepository.get(pid) or {}
+    except Exception:
+        record = {}
+
+    for field in ("parse_task_id", "extract_task_id"):
+        task_id = str(record.get(field) or "").strip()
+        if not task_id:
+            continue
+        try:
+            info = SummaryStatusRepository.get_task_status(task_id) or {}
+        except Exception:
+            info = {}
+        if isinstance(info, dict):
+            tasks_by_id[task_id] = info
+
+    try:
+        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+            for key, info in items:
+                if not isinstance(info, dict):
+                    continue
+                if info.get("pid") != pid:
+                    continue
+                task_model = str(info.get("model") or "").strip()
+                if task_model not in task_models:
+                    continue
+                task_id = str(key).replace("task::", "")
+                if task_id:
+                    tasks_by_id[task_id] = info
+    except Exception as e:
+        logger.warning(f"Failed to scan upload tasks for {pid}: {e}")
+
+    canceled_task_ids: list[str] = []
+    revoked_task_ids: list[str] = []
+    cleared_parse = False
+    cleared_extract = False
+
+    for task_id, info in tasks_by_id.items():
+        status = str(info.get("status") or "").strip().lower()
+        task_model = str(info.get("model") or "").strip()
+        if status not in {"queued", "running"} or task_model not in task_models:
+            continue
+
+        try:
+            SummaryStatusRepository.set_task_status(
+                task_id,
+                "canceled",
+                reason,
+                pid=pid,
+                model=task_model,
+                user=user,
+                canceled_time=time.time(),
+            )
+            canceled_task_ids.append(task_id)
+        except Exception as e:
+            logger.warning(f"Failed to cancel upload task {task_id} for {pid}: {e}")
+
+        try:
+            _get_tasks_module()._revoke_task_by_id(task_id)
+            revoked_task_ids.append(task_id)
+        except Exception as e:
+            logger.debug(f"Failed to revoke upload task {task_id} for {pid}: {e}")
+
+        if task_model in {UPLOAD_TASK_MODEL_PROCESS, UPLOAD_TASK_MODEL_PARSE}:
+            cleared_parse = True
+        if task_model == UPLOAD_TASK_MODEL_EXTRACT:
+            cleared_extract = True
+
+    updates: dict[str, Any] = {}
+    if cleared_parse:
+        updates.update(
+            {
+                "parse_status": "failed",
+                "parse_error": "paper_deleted",
+                "parse_task_id": None,
+            }
+        )
+    if cleared_extract:
+        updates["extract_task_id"] = None
+    if updates:
+        try:
+            UploadedPaperRepository.update(pid, updates)
+        except Exception as e:
+            logger.warning(f"Failed to clear upload task pointers for {pid}: {e}")
+
+    return {
+        "canceled_task_ids": canceled_task_ids,
+        "parse_canceled": cleared_parse,
+        "extract_canceled": cleared_extract,
+        "revoked_task_ids": revoked_task_ids,
+    }
 
 
 def _infer_meta_extracted_ok(record: dict[str, Any], title: str, abstract: str, authors: list) -> bool:
@@ -258,6 +822,44 @@ def _normalize_upload_parse_status(pid: str, record: dict[str, Any]) -> tuple[st
 
     parse_status = str(parse_status_raw).strip() if parse_status_raw is not None else ""
     parse_error = str(parse_error_raw).strip()
+
+    if parse_status in {"queued", "running"}:
+        task_state, task_id, task_info = _classify_or_recover_upload_task(record, "parse_task_id")
+        if task_state == "active":
+            task_status = str((task_info or {}).get("status") or parse_status).strip().lower()
+            if task_status in {"queued", "running"}:
+                return task_status, parse_error
+            return parse_status, parse_error
+        if task_state == "pending_registration":
+            return parse_status, parse_error
+
+        owner = str(record.get("owner") or "").strip()
+        repaired_error = parse_error or "stale_running_repaired"
+        if task_state == "stale" and owner:
+            _repair_upload_task_status(task_id, pid=pid, user=owner, info=task_info)
+            try:
+                refreshed = UploadedPaperRepository.get(pid)
+            except Exception:
+                refreshed = None
+            if isinstance(refreshed, dict):
+                return (
+                    str(refreshed.get("parse_status") or "failed").strip() or "failed",
+                    str(refreshed.get("parse_error") or repaired_error).strip(),
+                )
+        else:
+            updates = {
+                "parse_status": "failed",
+                "parse_error": repaired_error,
+                "parse_task_id": None,
+            }
+            if owner:
+                try:
+                    UploadedPaperRepository.update(pid, updates)
+                except Exception as e:
+                    logger.warning(f"Failed to normalize stale parse status for {pid}: {e}")
+            return "failed", repaired_error
+
+        return "failed", repaired_error
 
     if parse_status:
         return parse_status, parse_error
@@ -801,7 +1403,13 @@ class UploadEnqueueResult:
     task_id: str
 
 
-def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
+def process_uploaded_pdf(
+    pid: str,
+    user: str,
+    model: str | None = None,
+    *,
+    current_task_id: str | None = None,
+):
     """Process an uploaded PDF: parse with MinerU and extract metadata.
 
     This is called by the Huey task.
@@ -813,28 +1421,29 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
     """
     t_start = time.time()
     logger.trace(f"[BLOCKING] process_uploaded_pdf: starting pid={pid}, user={user}")
-    # Validate PID format for security
-    if not validate_upload_pid(pid):
-        logger.error(f"Invalid upload PID format: {pid}")
-        return
-
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        logger.error(f"Uploaded paper {pid} not found")
-        return
-
-    if record.get("owner") != user:
-        logger.error(f"User {user} does not own uploaded paper {pid}")
-        return
-
-    # Update status to running
-    UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
-    _emit_upload_event(
-        user,
-        {"type": "upload_parse_status", "pid": pid, "status": "running", "error": ""},
-    )
-
     try:
+        tasks = _get_tasks_module()
+        task_id = str(current_task_id or "").strip()
+        _ensure_upload_record_active(
+            pid,
+            user,
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running"},
+        )
+
+        # Update status to running
+        UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
+        _emit_upload_event(
+            user,
+            {
+                "type": "upload_parse_status",
+                "pid": pid,
+                "status": "running",
+                "error": "",
+            },
+        )
+
         # Get PDF path
         pdf_path = get_upload_pdf_path(pid, _data_dir())
         if not pdf_path.exists():
@@ -845,6 +1454,13 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         t_parse = time.time()
         logger.trace(f"[BLOCKING] process_uploaded_pdf: starting MinerU parse pid={pid}, pdf={pdf_path}")
         md_path = summarizer.parse_pdf_with_mineru(pdf_path, cache_pid=pid, keep_pdf=True)
+        _ensure_upload_record_active(
+            pid,
+            user,
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running"},
+        )
         logger.trace(
             f"[BLOCKING] process_uploaded_pdf: MinerU parse completed in {time.time() - t_parse:.2f}s pid={pid}"
         )
@@ -861,13 +1477,18 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
         )
 
         # Update parse status first (parsing succeeded)
-        UploadedPaperRepository.update(
+        if not _update_upload_record_if_current(
             pid,
-            {
+            user,
+            updates={
                 "parse_status": "ok",
                 "parse_error": None,
             },
-        )
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running"},
+        ):
+            return
         _emit_upload_event(
             user,
             {"type": "upload_parse_status", "pid": pid, "status": "ok", "error": ""},
@@ -884,16 +1505,28 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
             logger.trace(
                 f"[BLOCKING] process_uploaded_pdf: metadata extraction completed in {time.time() - t_meta:.2f}s pid={pid}"
             )
+            _ensure_upload_record_active(
+                pid,
+                user,
+                record_field="parse_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok", "running"},
+            )
             # Check if we got meaningful data
             if meta_extracted.get("title") or meta_extracted.get("authors"):
                 meta_extracted_ok = True
-                UploadedPaperRepository.update(
+                if not _update_upload_record_if_current(
                     pid,
-                    {
+                    user,
+                    updates={
                         "meta_extracted": meta_extracted,
                         "meta_extracted_ok": True,
                     },
-                )
+                    record_field="parse_task_id",
+                    task_id=task_id,
+                    allowed_parse_statuses={"ok", "running"},
+                ):
+                    return
                 authors_list = meta_extracted.get("authors") or []
                 _emit_upload_event(
                     user,
@@ -909,42 +1542,114 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 )
             else:
                 logger.warning(f"Metadata extraction returned empty for {pid}")
-                _emit_upload_event(
+                _emit_upload_event_if_current(
+                    pid,
                     user,
                     {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+                    record_field="parse_task_id",
+                    task_id=task_id,
+                    allowed_parse_statuses={"ok", "running"},
                 )
         except Exception as e:
             logger.warning(f"Failed to extract metadata for {pid}: {e}")
-            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
+            _emit_upload_event_if_current(
+                pid,
+                user,
+                {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+                record_field="parse_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok", "running"},
+            )
 
         logger.info(f"Successfully processed uploaded paper {pid} (meta_ok={meta_extracted_ok})")
 
         # Trigger summary generation
+        if not _is_upload_record_current(
+            pid,
+            user,
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"ok", "running"},
+        ):
+            return
         try:
-            tasks = _get_tasks_module()
-
             t_enqueue = time.time()
-            task_id = tasks.enqueue_summary_task(pid, model=model, user=user)
+            summary_task_id = tasks.enqueue_summary_task(pid, model=model, user=user)
             logger.trace(
                 f"[BLOCKING] process_uploaded_pdf: enqueue_summary_task completed in {time.time() - t_enqueue:.2f}s pid={pid}"
             )
-            if task_id:
-                UploadedPaperRepository.update(pid, {"summary_task_id": task_id})
+            if summary_task_id and not _is_upload_record_current(
+                pid,
+                user,
+                record_field="parse_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok", "running"},
+            ):
+                try:
+                    tasks.cancel_paper_summary_tasks(pid, user=user, reason="Upload superseded during processing")
+                except Exception as cancel_exc:
+                    logger.debug(f"Failed to cancel late summary task for {pid}: {cancel_exc}")
+                return
+            if summary_task_id:
+                _update_upload_record_if_current(
+                    pid,
+                    user,
+                    updates={"summary_task_id": summary_task_id},
+                    record_field="parse_task_id",
+                    task_id=task_id,
+                    allowed_parse_statuses={"ok", "running"},
+                )
         except Exception as e:
             logger.warning(f"Failed to enqueue summary for {pid}: {e}")
+            err_msg = f"Failed to enqueue summary task: {e}"
+            if not _is_upload_record_current(
+                pid,
+                user,
+                record_field="parse_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok", "running"},
+            ):
+                return
+            try:
+                _update_upload_record_if_current(
+                    pid,
+                    user,
+                    updates={"summary_task_id": None},
+                    record_field="parse_task_id",
+                    task_id=task_id,
+                    allowed_parse_statuses={"ok", "running"},
+                )
+            except Exception:
+                pass
+            try:
+                tasks._update_summary_status_db(pid, model, "failed", err_msg, task_user=user)
+            except Exception as emit_exc:
+                logger.debug(f"Failed to persist upload summary enqueue failure for {pid}: {emit_exc}")
+            try:
+                tasks._update_readinglist_summary_status(user, pid, "failed", err_msg, model=model)
+            except Exception:
+                pass
 
         logger.trace(f"[BLOCKING] process_uploaded_pdf: completed in {time.time() - t_start:.2f}s pid={pid}")
+    except UploadServiceError:
+        logger.trace(f"[BLOCKING] process_uploaded_pdf: rejected after {time.time() - t_start:.2f}s pid={pid}")
+        raise
     except Exception as e:
         logger.error(f"Failed to process uploaded paper {pid}: {e}")
         parse_error = _redact_error_message(f"{type(e).__name__}: {e}") or type(e).__name__
-        UploadedPaperRepository.update(
+        _update_upload_record_if_current(
             pid,
-            {
+            user,
+            updates={
                 "parse_status": "failed",
                 "parse_error": parse_error,
             },
+            record_field="parse_task_id",
+            task_id=str(current_task_id or "").strip(),
+            allowed_parse_statuses={"queued", "running", "ok"},
         )
-        _emit_upload_event(
+        _emit_upload_event_if_current(
+            pid,
             user,
             {
                 "type": "upload_parse_status",
@@ -952,6 +1657,9 @@ def process_uploaded_pdf(pid: str, user: str, model: str | None = None):
                 "status": "failed",
                 "error": parse_error,
             },
+            record_field="parse_task_id",
+            task_id=str(current_task_id or "").strip(),
+            allowed_parse_statuses={"queued", "running", "ok", "failed"},
         )
         logger.trace(f"[BLOCKING] process_uploaded_pdf: failed after {time.time() - t_start:.2f}s pid={pid}")
         raise
@@ -967,7 +1675,7 @@ def get_uploaded_papers_list(user: str) -> list[dict[str, Any]]:
         List of paper items for frontend display
     """
     t_start = time.time()
-    from backend.services.summary_service import get_summary_status
+    from backend.services.summary_service import get_summary_render_snapshots
 
     papers = UploadedPaperRepository.get_by_owner(user)
     logger.trace(
@@ -980,63 +1688,81 @@ def get_uploaded_papers_list(user: str) -> list[dict[str, Any]]:
     user_neg_tags = NegativeTagRepository.get_user_neg_tags(user)
     logger.trace(f"[BLOCKING] get_uploaded_papers_list: loaded tag db in {time.time() - t_tags:.2f}s user={user}")
 
+    pid_set = {str(pid or "").strip() for pid in papers.keys() if str(pid or "").strip()}
+    pid_to_utags = _build_pid_tag_reverse_index(user_tags, candidate_pids=pid_set)
+    pid_to_ntags = _build_pid_tag_reverse_index(user_neg_tags, candidate_pids=pid_set)
+    task_snapshot = _build_upload_task_snapshot(user, papers)
+
+    upload_rows = []
+    parse_ok_pids: list[str] = []
+    with _use_upload_task_snapshot(task_snapshot):
+        for pid, data in papers.items():
+            meta = data.get("meta_extracted", {})
+            override = data.get("meta_override", {})
+
+            # Merge meta with overrides
+            title = override.get("title") or meta.get("title") or data.get("original_filename", pid)
+            authors_list = override.get("authors") or meta.get("authors") or []
+            # Do not expose year/time for uploaded papers.
+            abstract = override.get("abstract") or meta.get("abstract")
+
+            # Backward compatibility: older records may not have `meta_extracted_ok`.
+            # Infer it from available meta fields so frontend gating stays consistent with API behavior.
+            meta_extracted_ok = _infer_meta_extracted_ok(data, title, abstract, authors_list)
+
+            utags = pid_to_utags.get(pid, [])
+            ntags = pid_to_ntags.get(pid, [])
+
+            parse_status, parse_error = _normalize_upload_parse_status(pid, data)
+            parse_task_id = _get_active_upload_task_id(data, "parse_task_id")
+
+            extract_task_state, extract_task_id, extract_task_info = _classify_or_recover_upload_task(
+                data, "extract_task_id"
+            )
+            if extract_task_state == "stale":
+                _repair_upload_task_status(extract_task_id, pid=pid, user=user, info=extract_task_info)
+                extract_task_id = ""
+            elif extract_task_state != "active":
+                extract_task_id = ""
+
+            summary_task_id = _get_active_upload_task_id(data, "summary_task_id") if parse_status == "ok" else ""
+            if parse_status == "ok":
+                parse_ok_pids.append(pid)
+
+            upload_rows.append(
+                {
+                    "id": pid,
+                    "kind": "upload",
+                    "title": title,
+                    "authors": ", ".join(authors_list) if authors_list else "",
+                    "time": "",
+                    "summary": abstract,
+                    "utags": utags,
+                    "ntags": ntags,
+                    "parse_status": parse_status,
+                    "parse_error": parse_error,
+                    "meta_extracted_ok": meta_extracted_ok,
+                    "parse_task_id": parse_task_id,
+                    "extract_task_id": extract_task_id,
+                    "summary_task_id": summary_task_id,
+                    "created_time": data.get("created_time", 0),
+                    "original_filename": data.get("original_filename", ""),
+                }
+            )
+
+    summary_snapshots = get_summary_render_snapshots(parse_ok_pids) if parse_ok_pids else {}
+
     result = []
-    for pid, data in papers.items():
-        meta = data.get("meta_extracted", {})
-        override = data.get("meta_override", {})
-
-        # Merge meta with overrides
-        title = override.get("title") or meta.get("title") or data.get("original_filename", pid)
-        authors_list = override.get("authors") or meta.get("authors") or []
-        # Do not expose year/time for uploaded papers.
-        abstract = override.get("abstract") or meta.get("abstract")
-
-        # Backward compatibility: older records may not have `meta_extracted_ok`.
-        # Infer it from available meta fields so frontend gating stays consistent with API behavior.
-        meta_extracted_ok = _infer_meta_extracted_ok(data, title, abstract, authors_list)
-
-        # Get tags for this paper
-        utags = []
-        ntags = []
-        for tag, pids in user_tags.items():
-            if pid in pids:
-                utags.append(tag)
-        for tag, pids in user_neg_tags.items():
-            if pid in pids:
-                ntags.append(tag)
-
-        # Get summary status and TL;DR
-        summary_status, summary_last_error = get_summary_status(pid)
-        parse_status, parse_error = _normalize_upload_parse_status(pid, data)
-
-        # Extract TL;DR from summary if available
-        tldr = ""
-        if summary_status == "ok":
-            from backend.services.summary_service import extract_tldr_from_summary
-
-            tldr = extract_tldr_from_summary(pid) or ""
-
+    for row in upload_rows:
+        snapshot = summary_snapshots.get(row["id"]) or {}
+        summary_status = str(snapshot.get("status") or "")
+        summary_last_error = snapshot.get("last_error") or ""
         result.append(
             {
-                "id": pid,
-                "kind": "upload",
-                "title": title,
-                "authors": ", ".join(authors_list) if authors_list else "",
-                "time": "",
-                "summary": abstract,
-                "tldr": tldr,
-                "utags": utags,
-                "ntags": ntags,
-                "parse_status": parse_status,
-                "parse_error": parse_error,
-                "meta_extracted_ok": meta_extracted_ok,
-                "summary_status": summary_status or "",
-                "summary_last_error": summary_last_error or "",
-                "parse_task_id": data.get("parse_task_id") or "",
-                "extract_task_id": data.get("extract_task_id") or "",
-                "summary_task_id": data.get("summary_task_id") or "",
-                "created_time": data.get("created_time", 0),
-                "original_filename": data.get("original_filename", ""),
+                **row,
+                "tldr": str(snapshot.get("tldr") or "") if summary_status == "ok" else "",
+                "summary_status": summary_status,
+                "summary_last_error": summary_last_error,
             }
         )
 
@@ -1069,12 +1795,7 @@ def update_uploaded_paper_meta(
     Raises:
         UploadServiceError: if not found / not owner / invalid inputs.
     """
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        raise UploadServiceError("not_found", "Paper not found")
-
-    if record.get("owner") != user:
-        raise UploadServiceError("not_owner", "Paper not found")
+    record = _get_owned_upload_record(pid, user)
 
     # Validate inputs early.
     try:
@@ -1117,17 +1838,8 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
     Raises:
         UploadServiceError: for expected failures (not found, not owner, delete failed).
     """
-    # Validate PID format for security
-    if not validate_upload_pid(pid):
-        logger.error(f"Invalid upload PID format: {pid}")
-        raise UploadServiceError("invalid_pid", "Invalid paper ID")
-
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        raise UploadServiceError("not_found", "Paper not found")
-
-    if record.get("owner") != user:
-        raise UploadServiceError("not_owner", "Paper not found")
+    record = _get_owned_upload_record(pid, user, allow_deleting=True)
+    original_record = dict(record)
 
     sha256 = record.get("sha256")
 
@@ -1143,6 +1855,15 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
         tasks.cancel_paper_summary_tasks(pid, user=user, reason="Paper deleted")
     except Exception as e:
         logger.warning(f"Failed to cancel summary tasks for {pid}: {e}")
+
+    cancel_result: dict[str, Any] = {
+        "parse_canceled": False,
+        "extract_canceled": False,
+    }
+    try:
+        cancel_result = _cancel_active_upload_tasks(pid, user, reason="Paper deleted") or cancel_result
+    except Exception as e:
+        logger.warning(f"Failed to cancel upload tasks for {pid}: {e}")
 
     # Invalidate upload feature caches early (best effort).
     try:
@@ -1166,7 +1887,30 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
     if critical_errors:
         # Revert deleting marker so user can retry operations.
         try:
-            UploadedPaperRepository.update(pid, {"deleting": False})
+            rollback_updates: dict[str, Any] = {"deleting": False}
+            if "deleting_started_at" in original_record:
+                rollback_updates["deleting_started_at"] = original_record.get("deleting_started_at")
+            else:
+                rollback_updates["deleting_started_at"] = None
+
+            if cancel_result.get("parse_canceled"):
+                rollback_updates.update(
+                    {
+                        "parse_status": "failed",
+                        "parse_error": "delete_failed_after_cancel",
+                        "parse_task_id": None,
+                    }
+                )
+            else:
+                for key in ("parse_status", "parse_error", "parse_task_id"):
+                    rollback_updates[key] = original_record.get(key)
+
+            if cancel_result.get("extract_canceled"):
+                rollback_updates["extract_task_id"] = None
+            else:
+                rollback_updates["extract_task_id"] = original_record.get("extract_task_id")
+
+            UploadedPaperRepository.update(pid, rollback_updates)
         except Exception:
             pass
         raise UploadServiceError("file_delete_failed", "; ".join(critical_errors))
@@ -1257,24 +2001,34 @@ def delete_uploaded_paper(pid: str, user: str) -> None:
         from aslite.db import get_neg_tags_db, get_tags_db
 
         with get_tags_db(flag="c") as tdb:
-            tags = tdb.get(user, {})
+            tags = tdb.get(user, {}) or {}
+            if not isinstance(tags, dict):
+                tags = {}
             changed = False
             for tag in list(tags.keys()):
-                if pid in tags[tag]:
-                    tags[tag].discard(pid)
-                    if not tags[tag]:
+                tag_pids = tags.get(tag)
+                if not isinstance(tag_pids, set):
+                    continue
+                if pid in tag_pids:
+                    tag_pids.discard(pid)
+                    if not tag_pids:
                         del tags[tag]
                     changed = True
             if changed:
                 tdb[user] = tags
 
         with get_neg_tags_db(flag="c") as ntdb:
-            neg_tags = ntdb.get(user, {})
+            neg_tags = ntdb.get(user, {}) or {}
+            if not isinstance(neg_tags, dict):
+                neg_tags = {}
             changed = False
             for tag in list(neg_tags.keys()):
-                if pid in neg_tags[tag]:
-                    neg_tags[tag].discard(pid)
-                    if not neg_tags[tag]:
+                tag_pids = neg_tags.get(tag)
+                if not isinstance(tag_pids, set):
+                    continue
+                if pid in tag_pids:
+                    tag_pids.discard(pid)
+                    if not tag_pids:
                         del neg_tags[tag]
                     changed = True
             if changed:
@@ -1357,20 +2111,18 @@ def _prepare_upload_parse_enqueue(
     Raises:
         UploadServiceError: for expected failures (not found, not owner, etc.)
     """
-    if not validate_upload_pid(pid):
-        logger.error(f"Invalid upload PID format: {pid}")
-        raise UploadServiceError("invalid_pid", "Invalid paper ID")
-
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        raise UploadServiceError("not_found", "Paper not found")
-
-    if record.get("owner") != user:
-        raise UploadServiceError("not_owner", "Paper not found")
+    record = _get_owned_upload_record(pid, user)
 
     current_status = (record.get("parse_status") or "").strip()
     if current_status in ("queued", "running"):
-        return "already_in_progress", str(record.get("parse_task_id") or "")
+        task_state, task_id, task_info = _classify_or_recover_upload_task(record, "parse_task_id")
+        if task_state == "active":
+            return "already_in_progress", task_id
+        if task_state == "pending_registration":
+            return "already_in_progress", task_id
+        if task_state == "stale":
+            _repair_upload_task_status(task_id, pid=pid, user=user, info=task_info)
+        current_status = "failed"
 
     if require_failed and current_status != "failed":
         raise UploadServiceError("not_failed", "Paper is not in failed state")
@@ -1388,10 +2140,29 @@ def _prepare_upload_parse_enqueue(
                     raise UploadServiceError("not_found", "Paper not found")
                 if current_record.get("owner") != user:
                     raise UploadServiceError("not_owner", "Paper not found")
+                if current_record.get("deleting") is True:
+                    raise UploadServiceError("deleting", "Paper is being deleted")
 
                 actual_status = (current_record.get("parse_status") or "").strip()
                 if actual_status in ("queued", "running"):
-                    return "already_in_progress", str(current_record.get("parse_task_id") or "")
+                    task_state, task_id, task_info = _classify_or_recover_upload_task(current_record, "parse_task_id")
+                    if task_state == "active":
+                        return "already_in_progress", task_id
+                    if task_state == "pending_registration":
+                        return "already_in_progress", task_id
+                    if task_state == "stale":
+                        _repair_upload_task_status(
+                            task_id,
+                            pid=pid,
+                            user=user,
+                            info=task_info,
+                            sync_record=False,
+                        )
+                    if task_state != "active":
+                        current_record["parse_status"] = "failed"
+                        current_record["parse_error"] = "stale_running_repaired"
+                        current_record["parse_task_id"] = None
+                        actual_status = "failed"
 
                 if require_failed and actual_status != "failed":
                     raise UploadServiceError("not_failed", "Paper is not in failed state")
@@ -1401,8 +2172,8 @@ def _prepare_upload_parse_enqueue(
 
                 current_record["parse_status"] = "queued"
                 current_record["parse_error"] = None
-                if set_updated_time:
-                    current_record["updated_time"] = time.time()
+                current_record["parse_task_id"] = None
+                current_record["updated_time"] = time.time()
                 updb[pid] = current_record
     except UploadServiceError:
         raise
@@ -1544,56 +2315,90 @@ def trigger_extract_info(pid: str, user: str) -> str:
     Raises:
         UploadServiceError: for expected failures.
     """
-    if not validate_upload_pid(pid):
-        logger.error(f"Invalid upload PID format: {pid}")
-        raise UploadServiceError("invalid_pid", "Invalid paper ID")
+    record = _get_owned_upload_record(pid, user)
 
-    record = UploadedPaperRepository.get(pid)
-    if not record:
-        logger.warning(f"Record not found for {pid}")
-        raise UploadServiceError("not_found", "Paper not found")
-
-    if record.get("owner") != user:
-        logger.warning(f"User {user} does not own {pid}")
-        raise UploadServiceError("not_owner", "Paper not found")
-
-    # Only allow if already parsed successfully
     parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
     if parse_status != "ok":
         logger.warning(f"Paper {pid} not parsed yet (status: {parse_status})")
         raise UploadServiceError("not_parsed", "Paper not parsed yet")
 
-    # Only allow if not already extracted successfully
-    # Use explicit True check to allow re-extraction for old records without this field
     if record.get("meta_extracted_ok") is True:
         logger.warning(f"Paper {pid} already has extracted metadata")
         raise UploadServiceError("already_extracted", "Metadata already extracted")
 
-    existing_task_id = _get_active_upload_task_id(record, "extract_task_id")
-    if existing_task_id:
+    task_state, existing_task_id, task_info = _classify_upload_task(record.get("extract_task_id"))
+    if task_state == "active":
         logger.info(f"Extract metadata task already active for {pid}: {existing_task_id}")
         return existing_task_id
+    if task_state == "stale":
+        _repair_upload_task_status(existing_task_id, pid=pid, user=user, info=task_info)
 
     try:
         tasks = _get_tasks_module()
 
-        task = tasks.extract_info_task.s(pid, user)
-        enqueue_result = tasks.huey.enqueue(task)
-        task_id = register_upload_task_enqueue(
-            task_type="extract",
-            pid=pid,
-            user=user,
-            task=task,
-            enqueue_result=enqueue_result,
-        )
+        with _get_uploaded_papers_db(flag="c", autocommit=False) as updb:
+            with updb.transaction(mode="IMMEDIATE"):
+                record = updb.get(pid)
+                if not isinstance(record, dict):
+                    logger.warning(f"Record not found for {pid}")
+                    raise UploadServiceError("not_found", "Paper not found")
+
+                if record.get("owner") != user:
+                    logger.warning(f"User {user} does not own {pid}")
+                    raise UploadServiceError("not_owner", "Paper not found")
+                if record.get("deleting") is True:
+                    raise UploadServiceError("deleting", "Paper is being deleted")
+
+                parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+                if parse_status != "ok":
+                    logger.warning(f"Paper {pid} not parsed yet (status: {parse_status})")
+                    raise UploadServiceError("not_parsed", "Paper not parsed yet")
+
+                if record.get("meta_extracted_ok") is True:
+                    logger.warning(f"Paper {pid} already has extracted metadata")
+                    raise UploadServiceError("already_extracted", "Metadata already extracted")
+
+                task_state, existing_task_id, task_info = _classify_upload_task(record.get("extract_task_id"))
+                if task_state == "active":
+                    logger.info(f"Extract metadata task already active for {pid}: {existing_task_id}")
+                    return existing_task_id
+                if task_state == "stale":
+                    _repair_upload_task_status(
+                        existing_task_id,
+                        pid=pid,
+                        user=user,
+                        info=task_info,
+                        sync_record=False,
+                    )
+                    record["extract_task_id"] = None
+
+                task = tasks.extract_info_task.s(pid, user)
+                enqueue_result = tasks.huey.enqueue(task)
+                task_id = _extract_huey_task_id(task, enqueue_result)
+                if not task_id:
+                    raise UploadServiceError("enqueue_failed", "Failed to enqueue task")
+
+                record["extract_task_id"] = task_id
+                record["updated_time"] = time.time()
+                updb[pid] = record
+                SummaryStatusRepository.set_task_status(
+                    task_id,
+                    "queued",
+                    None,
+                    pid=pid,
+                    model=UPLOAD_TASK_MODEL_EXTRACT,
+                    user=user,
+                )
     except Exception as e:
+        if isinstance(e, UploadServiceError):
+            raise
         logger.error(f"Failed to enqueue extract info for {pid}: {e}")
         raise UploadServiceError("enqueue_failed", "Failed to enqueue task") from e
 
     return task_id
 
 
-def do_extract_metadata(pid: str, user: str) -> bool:
+def do_extract_metadata(pid: str, user: str, *, current_task_id: str | None = None) -> bool:
     """Actually perform metadata extraction (called by task).
 
     Args:
@@ -1617,6 +2422,18 @@ def do_extract_metadata(pid: str, user: str) -> bool:
     if parse_status != "ok":
         return False
 
+    task_id = str(current_task_id or "").strip()
+    try:
+        _ensure_upload_record_active(
+            pid,
+            user,
+            record_field="extract_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"ok"},
+        )
+    except UploadServiceError:
+        return False
+
     # Emit running status
     _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "running"})
 
@@ -1627,21 +2444,43 @@ def do_extract_metadata(pid: str, user: str) -> bool:
 
         if not md_path or not md_path.exists():
             logger.error(f"MinerU markdown not found for {pid}")
-            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
+            _emit_upload_event_if_current(
+                pid,
+                user,
+                {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+                record_field="extract_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok"},
+            )
             return False
 
         md_content = md_path.read_text(encoding="utf-8")
         front_matter = extract_front_matter(md_content)
         meta_extracted = extract_metadata_with_llm(front_matter)
+        try:
+            _ensure_upload_record_active(
+                pid,
+                user,
+                record_field="extract_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok"},
+            )
+        except UploadServiceError:
+            return False
 
         if meta_extracted.get("title") or meta_extracted.get("authors"):
-            UploadedPaperRepository.update(
+            if not _update_upload_record_if_current(
                 pid,
-                {
+                user,
+                updates={
                     "meta_extracted": meta_extracted,
                     "meta_extracted_ok": True,
                 },
-            )
+                record_field="extract_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok"},
+            ):
+                return False
             logger.info(f"Successfully extracted metadata for {pid}")
             # Emit success status with extracted metadata
             authors_list = meta_extracted.get("authors") or []
@@ -1660,16 +2499,30 @@ def do_extract_metadata(pid: str, user: str) -> bool:
             return True
         else:
             logger.warning(f"Metadata extraction returned empty for {pid}")
-            _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
+            _emit_upload_event_if_current(
+                pid,
+                user,
+                {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+                record_field="extract_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"ok"},
+            )
             return False
 
     except Exception as e:
         logger.error(f"Failed to extract metadata for {pid}: {e}")
-        _emit_upload_event(user, {"type": "upload_extract_status", "pid": pid, "status": "failed"})
+        _emit_upload_event_if_current(
+            pid,
+            user,
+            {"type": "upload_extract_status", "pid": pid, "status": "failed"},
+            record_field="extract_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"ok"},
+        )
         return False
 
 
-def do_parse_only(pid: str, user: str) -> bool:
+def do_parse_only(pid: str, user: str, *, current_task_id: str | None = None) -> bool:
     """Actually perform MinerU parsing only (called by task).
 
     Args:
@@ -1689,6 +2542,18 @@ def do_parse_only(pid: str, user: str) -> bool:
     if record.get("deleting") is True:
         return False
 
+    task_id = str(current_task_id or "").strip()
+    try:
+        _ensure_upload_record_active(
+            pid,
+            user,
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running"},
+        )
+    except UploadServiceError:
+        return False
+
     UploadedPaperRepository.update(pid, {"parse_status": "running", "parse_error": None})
     # Emit running status
     _emit_upload_event(
@@ -1703,17 +2568,32 @@ def do_parse_only(pid: str, user: str) -> bool:
 
         summarizer = paper_summarizer.PaperSummarizer()
         md_path = summarizer.parse_pdf_with_mineru(pdf_path, cache_pid=pid, keep_pdf=True)
+        try:
+            _ensure_upload_record_active(
+                pid,
+                user,
+                record_field="parse_task_id",
+                task_id=task_id,
+                allowed_parse_statuses={"queued", "running"},
+            )
+        except UploadServiceError:
+            return False
 
         if not md_path or not md_path.exists():
             raise RuntimeError("MinerU parsing returned empty content")
 
-        UploadedPaperRepository.update(
+        if not _update_upload_record_if_current(
             pid,
-            {
+            user,
+            updates={
                 "parse_status": "ok",
                 "parse_error": None,
             },
-        )
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running"},
+        ):
+            return False
         logger.info(f"Successfully parsed uploaded paper {pid}")
         # Emit success status
         _emit_upload_event(
@@ -1725,15 +2605,20 @@ def do_parse_only(pid: str, user: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to parse uploaded paper {pid}: {e}")
         parse_error = _redact_error_message(f"{type(e).__name__}: {e}") or type(e).__name__
-        UploadedPaperRepository.update(
+        _update_upload_record_if_current(
             pid,
-            {
+            user,
+            updates={
                 "parse_status": "failed",
                 "parse_error": parse_error,
             },
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running", "ok"},
         )
         # Emit failure status
-        _emit_upload_event(
+        _emit_upload_event_if_current(
+            pid,
             user,
             {
                 "type": "upload_parse_status",
@@ -1741,6 +2626,9 @@ def do_parse_only(pid: str, user: str) -> bool:
                 "status": "failed",
                 "error": parse_error,
             },
+            record_field="parse_task_id",
+            task_id=task_id,
+            allowed_parse_statuses={"queued", "running", "ok", "failed"},
         )
         return False
 

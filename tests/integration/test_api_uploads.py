@@ -8,6 +8,8 @@ from __future__ import annotations
 import io
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 class TestUploadPdfApi:
     """Tests for POST /api/upload_pdf endpoint."""
@@ -116,7 +118,12 @@ class TestUploadPdfApi:
                     "sha256": "dummy",
                     "parse_status": "failed",
                     "parse_error": "boom",
-                    "meta_extracted": {"title": "", "authors": [], "year": None, "abstract": None},
+                    "meta_extracted": {
+                        "title": "",
+                        "authors": [],
+                        "year": None,
+                        "abstract": None,
+                    },
                     "meta_extracted_ok": False,
                     "meta_override": {},
                     "summary_task_id": None,
@@ -136,7 +143,10 @@ class TestUploadPdfApi:
                     False,
                 )
 
-                with patch("tasks.huey") as huey_mock, patch("tasks.process_uploaded_pdf_task") as task_mock:
+                with (
+                    patch("tasks.huey") as huey_mock,
+                    patch("tasks.process_uploaded_pdf_task") as task_mock,
+                ):
                     huey_mock.enqueue = MagicMock()
                     task_mock.s = MagicMock(return_value="task")
 
@@ -189,7 +199,10 @@ class TestUploadPdfApi:
                 True,
             )
 
-            with patch("tasks.huey") as huey_mock, patch("tasks.process_uploaded_pdf_task") as task_mock:
+            with (
+                patch("tasks.huey") as huey_mock,
+                patch("tasks.process_uploaded_pdf_task") as task_mock,
+            ):
                 task_mock.s = MagicMock(return_value=DummyTask())
                 huey_mock.enqueue = MagicMock(return_value=DummyTask())
 
@@ -230,6 +243,69 @@ class TestUploadedPapersParseApi:
         assert payload.get("parse_status") == "queued"
         assert payload.get("task_id") == "task_parse_001"
 
+    def test_parse_deleting_paper_returns_409(self, logged_in_client, csrf_token):
+        with patch("backend.services.upload_service.trigger_parse_only") as parse_mock:
+            from backend.services.upload_service import UploadServiceError
+
+            parse_mock.side_effect = UploadServiceError("deleting", "Paper is being deleted")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/parse",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 409
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert "deleted" in payload.get("error", "").lower()
+
+
+class TestUploadedPapersProcessApi:
+    """Tests for POST /api/uploaded_papers/process endpoint."""
+
+    def test_process_deleting_paper_returns_409(self, logged_in_client, csrf_token):
+        with patch("backend.services.upload_service.trigger_process_uploaded_paper") as process_mock:
+            from backend.services.upload_service import UploadServiceError
+
+            process_mock.side_effect = UploadServiceError("deleting", "Paper is being deleted")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/process",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 409
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert "deleted" in payload.get("error", "").lower()
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/uploaded_papers/update_meta", '"oops"'),
+        ("/api/uploaded_papers/delete", "123"),
+        ("/api/uploaded_papers/retry_parse", '["x"]'),
+        ("/api/uploaded_papers/parse", "true"),
+        ("/api/uploaded_papers/process", '"pid"'),
+        ("/api/uploaded_papers/extract_info", "123"),
+    ],
+)
+def test_uploaded_paper_endpoints_reject_non_object_json(logged_in_client, csrf_token, path, body):
+    resp = logged_in_client.post(
+        path,
+        data=body,
+        content_type="application/json",
+        headers={"X-CSRF-Token": csrf_token},
+    )
+
+    assert resp.status_code == 400
+    payload = resp.get_json(silent=True) or {}
+    assert payload.get("success") is False
+    assert payload.get("error") == "Request body must be a JSON object"
+
 
 class TestUploadedPapersListApi:
     """Tests for GET /api/uploaded_papers/list endpoint."""
@@ -268,7 +344,10 @@ class TestUploadedPapersListApi:
             "summary_task_id": "task_summary_list_1",
         }
 
-        with patch("backend.services.upload_service.get_uploaded_papers_list", return_value=[mocked_item]):
+        with patch(
+            "backend.services.upload_service.get_uploaded_papers_list",
+            return_value=[mocked_item],
+        ):
             resp = logged_in_client.get("/api/uploaded_papers/list")
 
         assert resp.status_code == 200
@@ -328,6 +407,23 @@ class TestUploadedPapersUpdateMetaApi:
         )
         assert resp.status_code == 404
 
+    def test_update_meta_deleting_paper_returns_409(self, logged_in_client, csrf_token):
+        with patch("backend.services.upload_service.update_uploaded_paper_meta") as update_mock:
+            from backend.services.upload_service import UploadServiceError
+
+            update_mock.side_effect = UploadServiceError("deleting", "Paper is being deleted")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/update_meta",
+                json={"pid": "up_testpaper123", "title": "New Title"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 409
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert "deleted" in payload.get("error", "").lower()
+
 
 class TestUploadedPapersExtractInfoApi:
     """Tests for POST /api/uploaded_papers/extract_info endpoint."""
@@ -350,7 +446,12 @@ class TestUploadedPapersExtractInfoApi:
                     "sha256": "dummy",
                     "parse_status": "ok",
                     "parse_error": None,
-                    "meta_extracted": {"title": "", "authors": [], "year": None, "abstract": None},
+                    "meta_extracted": {
+                        "title": "",
+                        "authors": [],
+                        "year": None,
+                        "abstract": None,
+                    },
                     "meta_extracted_ok": False,
                     "meta_override": {},
                     "summary_task_id": None,
@@ -395,6 +496,23 @@ class TestUploadedPapersExtractInfoApi:
         payload = resp.get_json(silent=True) or {}
         assert payload.get("success") is True
         assert payload.get("task_id") == "task_extract_001"
+
+    def test_extract_info_deleting_paper_returns_409(self, logged_in_client, csrf_token):
+        with patch("backend.services.upload_service.trigger_extract_info") as extract_mock:
+            from backend.services.upload_service import UploadServiceError
+
+            extract_mock.side_effect = UploadServiceError("deleting", "Paper is being deleted")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/extract_info",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 409
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert "deleted" in payload.get("error", "").lower()
 
 
 class TestUploadedPapersDeleteApi:
@@ -492,6 +610,23 @@ class TestUploadedPapersRetryParseApi:
         assert payload.get("success") is True
         assert payload.get("parse_status") == "queued"
         assert payload.get("task_id") == "task_retry_001"
+
+    def test_retry_parse_deleting_paper_returns_409(self, logged_in_client, csrf_token):
+        with patch("backend.services.upload_service.retry_parse_uploaded_paper") as retry_mock:
+            from backend.services.upload_service import UploadServiceError
+
+            retry_mock.side_effect = UploadServiceError("deleting", "Paper is being deleted")
+
+            resp = logged_in_client.post(
+                "/api/uploaded_papers/retry_parse",
+                json={"pid": "up_testpaper123"},
+                headers={"X-CSRF-Token": csrf_token},
+            )
+
+        assert resp.status_code == 409
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert "deleted" in payload.get("error", "").lower()
 
 
 class TestUploadTaskStatusApi:

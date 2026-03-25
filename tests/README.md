@@ -2,6 +2,8 @@
 
 This directory contains tests for arxiv-sanity-X, organized by scope and runtime requirements.
 
+For maintenance dispatch and validation matrices, also see `.opencode/skills/arxiv-sanity-testing/SKILL.md`.
+
 ## Directory Structure
 
 ```
@@ -79,6 +81,22 @@ pytest tests/unit/test_cache.py -v
 pytest tests/integration/test_api_auth.py -v
 ```
 
+### Recommended Upload/Task Regression Set
+
+When changing upload routes, upload services, or upload Huey task behavior, run:
+
+```bash
+ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_upload_task_status_sse.py tests/unit/test_tasks_upload_deleting.py tests/integration/test_api_uploads.py -q
+```
+
+This set is the fastest regression net for:
+
+- deleting upload records returning `409`
+- stale upload task repair and re-enqueue
+- superseded upload workers canceling instead of executing outdated work
+- upload task status changes visible via `/api/task_status/<task_id>`
+- behavior gated by `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL`
+
 ### Run End-to-End Tests
 
 End-to-end tests require a running server:
@@ -96,6 +114,16 @@ python tests/e2e/test_api_e2e.py --host localhost --port 55555
 # Skip summary tests (faster)
 python tests/e2e/test_api_e2e.py --no-summary
 ```
+
+### Run Live Browser Summary Behavior Test
+
+When changing summary page SSE handling, fallback model refresh, or other browser-only state transitions, and a local server with visible paper data is already running:
+
+```bash
+pytest tests/live/test_summary_frontend_behavior.py -q
+```
+
+This test uses `playwright-cli` against the real summary page, auto-discovers a public pid from the homepage, and verifies that a `summary_status` event carrying `resolved_model` refreshes the currently selected fallback model view.
 
 ## Test Type Descriptions
 

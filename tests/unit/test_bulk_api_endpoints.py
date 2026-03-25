@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 
-def test_tag_feedback_bulk_partial_success(logged_in_client, auth_headers):
+def test_tag_feedback_bulk_partial_success(logged_in_client, auth_headers, monkeypatch):
+    import backend.legacy as legacy
+
+    monkeypatch.setattr(
+        legacy,
+        "paper_exists",
+        lambda pid: pid in {"2301.00001", "2301.00002", "2301.00003"},
+    )
+
     payload = {
         "items": [
             {"pid": "2301.00001", "tag": "t1", "label": 1},
@@ -27,7 +35,11 @@ def test_trigger_paper_summary_bulk_returns_results(client, auth_headers, monkey
     import backend.legacy as legacy
 
     monkeypatch.setattr(legacy, "get_summary_status", lambda pid, model: ("", None))
-    monkeypatch.setattr(legacy, "_trigger_summary_async", lambda user, pid, model, priority, force_refresh: "task123")
+    monkeypatch.setattr(
+        legacy,
+        "_trigger_summary_async",
+        lambda user, pid, model, priority, force_refresh: "task123",
+    )
 
     payload = {"items": [{"pid": "2301.00001", "model": "m1"}]}
     resp = client.post("/api/trigger_paper_summary_bulk", headers=auth_headers, json=payload)

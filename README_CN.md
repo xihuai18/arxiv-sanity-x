@@ -49,9 +49,11 @@
 ## Docs
 
 - 入口：[docs/INDEX.md](docs/INDEX.md)
+- 仓库维护手册：[.opencode/skills/README.md](.opencode/skills/README.md)
 - 运维：[docs/OPERATIONS.md](docs/OPERATIONS.md)
 - 安全：[docs/SECURITY.md](docs/SECURITY.md)
 - 开发：[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- 测试指南：[tests/README.md](tests/README.md)
 - 贡献指南：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全策略：[SECURITY.md](SECURITY.md)
 
@@ -76,14 +78,14 @@ arxiv-sanity-X 是一个面向个人科研/工程阅读流的 arXiv 工作台：
 
 - **框架**：Flask，基于 Blueprint 的模块化架构
 - **数据库**：SQLite，自定义 KV 存储（WAL 模式，支持压缩）
-- **任务队列**：Huey（SQLite 后端），用于异步摘要生成
+- **任务队列**：Huey（SQLite 后端），用于异步摘要 / 上传编排
 - **配置管理**：pydantic-settings，类型安全的配置管理
 - **实时通信**：Server-Sent Events (SSE) 实时推送
 
 ### 前端
 
 - **模板引擎**：Jinja2，响应式 HTML/CSS
-- **JavaScript**：原生 JS，esbuild 打包
+- **JavaScript**：混合页面运行时：IIFE/global scripts + 局部 React 页面 + 原生 DOM 交互
 - **渲染**：MathJax 渲染 LaTeX，markdown-it 渲染 Markdown
 - **构建**：esbuild，支持内容哈希缓存
 
@@ -105,7 +107,7 @@ arxiv-sanity-X 是一个面向个人科研/工程阅读流的 arXiv 工作台：
 ```
 arxiv-sanity-x/
 ├── serve.py              # Flask 入口
-├── tasks.py              # Huey 任务定义
+├── tasks.py              # Huey 任务定义与编排中心
 │
 ├── backend/              # Flask 应用
 │   ├── app.py            # 应用工厂 & 初始化
@@ -184,6 +186,7 @@ arxiv-sanity-x/
 - 输入用户名登录（无密码，适合个人/内网使用）
 - 若要公网部署，建议放在统一认证/VPN 后面，并设置稳定会话密钥（`ARXIV_SANITY_SECRET_KEY` 或 `secret_key.txt`）
 - （可选）在 Profile 页面登记通知邮箱：支持多个邮箱（逗号/空白/换行分隔），提交空值可清空。
+- 对 `POST /login` 和 `POST /register_email` 的 JSON 调用会返回 JSON 成功/失败结果；浏览器 form 提交仍保持原来的跳转体验。
 
 ### 2）浏览与检索论文
 
@@ -214,6 +217,7 @@ arxiv-sanity-x/
 - 输入搜索词后，前后端都会把排序限制在支持查询的模式（`search` 或 `time`）
 - **Tags**、**PIDs**、**Logic**、**SVM C** 这类高级筛选，只有在 **Rank by** 为 `tags` 或 `pid` 时才真正生效
 - 高级筛选里的标签输入支持联想建议，也支持键盘选择
+- 对 `POST /api/keyword_search` 来说，不传 `time_delta` 会保留全量索引候选；脚本调用若想显式关闭时间过滤，请传 `time_delta <= 0`。
 
 ### 3）标签系统与个性化推荐
 
@@ -244,7 +248,16 @@ arxiv-sanity-x/
 - 可用于批量总结或稍后阅读
 - 阅读列表页会复用首页的主要操作入口，包括 Similar / Inspect / Summary 以及私有上传论文相关操作
 
-### 6）其他功能
+### 6）私有 PDF 上传
+
+- 上传论文是私有资源，按 owner 隔离；非 owner 访问上传资源或修改接口时仍然看到 `404`
+- 如果上传记录已经进入删除中，`POST /api/uploaded_papers/update_meta`、`POST /api/uploaded_papers/retry_parse`、`POST /api/uploaded_papers/parse`、`POST /api/uploaded_papers/process`、`POST /api/uploaded_papers/extract_info` 会统一返回 `409`，错误信息为 `"Paper is being deleted"`
+- `parse` / `process` / `retry_parse` 只把当前记录指向的任务视为活跃任务；若旧任务已 stale，会先修复旧状态，再返回新的 `task_id`
+- 轮询 `GET /api/task_status/<task_id>` 时，上传任务现在可能出现 `failed/stale_running_repaired` 或 `canceled/superseded_upload_task`
+- 删除上传时会 best-effort 取消正在进行的 upload parse/process/extract 任务，以及关联的 summary 任务，再继续删文件和数据库记录
+- 如果部署里 upload 队列积压较长，请调大 `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL`，避免仍然有效的上传任务被过早修复
+
+### 7）其他功能
 
 - **Stats 页面**：查看论文统计、每日新增图表
 - **About 页面**：查看系统信息、支持的 arXiv 分类
@@ -297,8 +310,8 @@ arxiv-sanity-x/
 - **MinerU 报错**：
     - API 后端：检查 `ARXIV_SANITY_MINERU_API_KEY`
     - 本地后端：检查 `ARXIV_SANITY_MINERU_BACKEND`，以及服务是否能在 `ARXIV_SANITY_MINERU_PORT` 访问
-- **崩溃后卡住（锁文件）**：运行 [scripts/cleanup_locks.py](scripts/cleanup_locks.py)，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
-- **总结任务“卡死/幽灵任务”（Huey）**：先 dry-run `python scripts/cleanup_tasks.py`，确认无误后加 `--force`；必要时用 `--flush-huey` 清空队列（谨慎）。
+- **崩溃后卡住（锁文件）**：运行 `python -m scripts cleanup_locks`，或调整 `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` / `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`。
+- **总结任务“卡死/幽灵任务”（Huey）**：先 dry-run `python -m scripts cleanup_tasks`，确认无误后加 `--force`；必要时用 `--flush-huey` 清空队列（谨慎）。
 - **features.p 读取失败（NumPy 版本不匹配）**：在当前环境重新运行 [tools/compute.py](tools/compute.py) 生成特征文件。
 - **Gunicorn 报 `WORKER TIMEOUT` / `SIGKILL`**：若日志里先出现 `WORKER TIMEOUT`，通常是 gunicorn 默认超时太短或冷启动/初始化阻塞。可通过 `ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"` 提高超时；并避免在开启大缓存时配置过多 worker。`bin/up.sh` 在 SSE 场景会优先选择 `gevent` 并自动设置较长超时。
 - **gevent 的 MonkeyPatchWarning（ssl/urllib3）**：常见于 `--preload` 场景；若仍出现，可尝试 `ARXIV_SANITY_GUNICORN_PRELOAD=false` 或强制 `ARXIV_SANITY_GUNICORN_WORKER_CLASS=gthread`。
@@ -974,11 +987,16 @@ python -m tools compute --use_embeddings --embed_model nomic-embed-text
 python -m tools daemon
 ```
 
-调度计划（Asia/Shanghai 时区）：
+内置 daemon 的调度时区由 `ARXIV_SANITY_DAEMON_TIMEZONE` 决定（默认 `Asia/Shanghai`）：
 
 - **获取+计算**：工作日 8:00、12:00、16:00、20:00
 - **发送邮件**：工作日 18:00
 - **备份**：每日 20:00
+
+说明：
+
+- `tools/send_emails.py` 现在会把“只有 keyword / combined tag，但已经登记邮箱”的用户也纳入推荐发送候选。
+- 只要某个用户的推荐流程失败，或某个收件人的 SMTP 发送失败，`tools/send_emails.py` 就会返回非 0；daemon 会把它记为 warning。
 
 **手动 Cron：**
 
@@ -1035,14 +1053,14 @@ python -m tools daemon
 
 **JSON API：**
 
-| 端点                       | 说明                                                     |
-| -------------------------- | -------------------------------------------------------- |
-| `POST /api/keyword_search` | 关键词搜索（JSON）                                       |
-| `POST /api/tag_search`     | 单标签搜索（需登录）                                     |
-| `POST /api/tags_search`    | 多标签搜索（需登录）                                     |
-| `GET /cache_status`        | 缓存状态页（需 `ARXIV_SANITY_ENABLE_CACHE_STATUS=true`） |
+| 端点                       | 说明                                                       |
+| -------------------------- | ---------------------------------------------------------- |
+| `POST /api/keyword_search` | 关键词搜索（JSON，返回 `pids` / `scores` / `total_count`） |
+| `POST /api/tag_search`     | 单标签搜索（需登录）                                       |
+| `POST /api/tags_search`    | 多标签搜索（需登录）                                       |
+| `GET /cache_status`        | 缓存状态页（需 `ARXIV_SANITY_ENABLE_CACHE_STATUS=true`）   |
 
-说明：`tools/send_emails.py` 等脚本可配置 `ARXIV_SANITY_RECO_API_KEY`，并用 `X-ARXIV-SANITY-API-KEY` 头（或 `Authorization: Bearer ...`）在无浏览器会话时调用标签搜索接口；同时需要在 JSON 里提供 `{"user": "<username>"}`。
+说明：`tools/send_emails.py` 等脚本可配置 `ARXIV_SANITY_RECO_API_KEY`，并用 `X-ARXIV-SANITY-API-KEY` 头（或 `Authorization: Bearer ...`）在无浏览器会话时调用标签搜索接口；同时需要在 JSON 里提供 `{"user": "<username>"}`。对 `POST /api/keyword_search` 来说，不传 `time_delta` 不会再默认只搜最近论文；如要显式禁用时间过滤，请传 `time_delta <= 0`。
 
 ### 论文总结（`api_summary.py`）
 
@@ -1106,6 +1124,8 @@ python -m tools daemon
 | `POST /login`          | 用户登录                 |
 | `GET/POST /logout`     | 用户登出                 |
 | `POST /register_email` | 登记通知邮箱（支持多个） |
+
+说明：`GET /api/user_state` 会返回当前 `user`。`POST /login` 与 `POST /register_email` 对浏览器 form 仍保持跳转语义，但对 JSON 请求会返回 JSON 结构，并且做更严格的类型校验。
 
 ### 实时推送（`api_sse.py`）
 

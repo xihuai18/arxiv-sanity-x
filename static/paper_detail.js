@@ -5,9 +5,13 @@ var CommonUtils = window.ArxivSanityCommon;
 var renderAbstractMarkdown = CommonUtils.renderAbstractMarkdown;
 var renderTldrMarkdown = CommonUtils.renderTldrMarkdown;
 var triggerMathJax = CommonUtils.triggerMathJax;
+var hasMathContent = CommonUtils.hasMathContent;
 
 const PaperLite = props => {
     const p = props.paper;
+    const linkPid = p.versioned_id || p.id;
+    const summaryHasMath = hasMathContent && hasMathContent(p.summary || '');
+    const tldrHasMath = hasMathContent && hasMathContent(p.tldr || '');
 
     const formatAuthorsText = (authorsText, options = {}) => {
         if (
@@ -22,10 +26,10 @@ const PaperLite = props => {
 
     // Trigger MathJax after component mounts
     React.useEffect(() => {
-        if (p.summary || p.tldr) {
+        if (summaryHasMath || tldrHasMath) {
             triggerMathJax(document.getElementById('wrap'));
         }
-    }, [p.summary, p.tldr]);
+    }, [summaryHasMath, tldrHasMath]);
 
     const has_tldr = Boolean(p.tldr && String(p.tldr).trim());
 
@@ -44,7 +48,7 @@ const PaperLite = props => {
             class="rel_abs_details"
             onToggle={e => {
                 try {
-                    if (e && e.target && e.target.open) {
+                    if (e && e.target && e.target.open && summaryHasMath) {
                         triggerMathJax(e.target);
                     }
                 } catch (err) {}
@@ -66,7 +70,7 @@ const PaperLite = props => {
     return (
         <div class="rel_paper">
             <div class="rel_title">
-                <a href={'http://arxiv.org/abs/' + p.id}>{p.title}</a>
+                <a href={'https://arxiv.org/abs/' + encodeURIComponent(linkPid)}>{p.title}</a>
             </div>
             <div class="rel_authors" title={p.authors || ''}>
                 {formatAuthorsText(p.authors, { maxAuthors: 10, head: 5, tail: 3 })}

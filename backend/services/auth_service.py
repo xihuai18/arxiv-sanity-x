@@ -23,6 +23,31 @@ if TYPE_CHECKING:
     pass
 
 
+_PROPER_EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", re.IGNORECASE)
+
+
+def _parse_emails(text: str) -> list[str]:
+    parts = [p.strip() for p in re.split(r"[,\s;]+", text or "") if p.strip()]
+    out: list[str] = []
+    seen = set()
+    for part in parts:
+        e = part.lower()
+        if e in seen:
+            continue
+        seen.add(e)
+        out.append(e)
+    return out
+
+
+def validate_user_email_input(email: str | None) -> tuple[list[str], bool]:
+    if email is None or not isinstance(email, str):
+        return [], False
+    raw = email.strip()
+    emails = _parse_emails(raw)
+    is_valid = raw == "" or (emails and all(_PROPER_EMAIL_RE.match(e) for e in emails))
+    return emails, bool(is_valid)
+
+
 def login_user(username: str) -> str:
     """Log in a user.
 
@@ -77,25 +102,9 @@ def register_user_email(email: str) -> str:
     """
     raw = (email or "").strip()
 
-    def _parse_emails(text: str) -> list[str]:
-        parts = [p.strip() for p in re.split(r"[,\s;]+", text or "") if p.strip()]
-        out: list[str] = []
-        seen = set()
-        for part in parts:
-            e = part.lower()
-            if e in seen:
-                continue
-            seen.add(e)
-            out.append(e)
-        return out
-
     if g.user:
-        emails = _parse_emails(raw)
-
-        # Do some basic input validation.
-        # Keep validation lightweight but accept modern long TLDs (up to 63 chars).
-        proper_email_re = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", re.IGNORECASE)
-        if raw == "" or (emails and all(proper_email_re.match(e) for e in emails)):
+        emails, is_valid = validate_user_email_input(raw)
+        if is_valid:
             UserRepository.set_emails(g.user, emails)
             if emails:
                 logger.debug(f"User {g.user} registered emails: {emails}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from heapq import nlargest
 from random import shuffle
 from threading import Lock
 from typing import Any
@@ -41,6 +42,8 @@ TFIDF_TOKEN_PATTERN = r"(?u)\b[a-zA-Z][a-zA-Z0-9_\-]*[a-zA-Z0-9]\b|\b[a-zA-Z]\b|
 TFIDF_STOP_WORDS = "english"
 _QUERY_SEP_RE = re.compile(r"[,;\uFF0C\u3001\uFF1B\uFF1A:/\\|\(\)\[\]{}]+")
 _BOOLEAN_TOKENS = {"and", "or", "not"}
+_LOOSE_DASH_RE = re.compile(r"[\-\u2010\u2011\u2012\u2013\u2014]")
+_LOOSE_PUNCT_RE = re.compile(r"[\:\;\,\.!\?\(\)\[\]\{\}\/\\\|\"\'\`\~\+\=\*\#\$\%\^\&\@]")
 _ARXIV_ID_RE = re.compile(
     r"(?:(?:arxiv:)?)(?P<id>(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7}))(?:v(?P<v>\d+))?",
     re.IGNORECASE,
@@ -69,8 +72,8 @@ def normalize_text_loose(text: str) -> str:
     s = (text or "").lower().strip()
     if not s:
         return ""
-    s = re.sub(r"[\-\u2010\u2011\u2012\u2013\u2014]", " ", s)
-    s = re.sub(r"[\:\;\,\.!\?\(\)\[\]\{\}\/\\\|\"\'\`\~\+\=\*\#\$\%\^\&\@]", " ", s)
+    s = _LOOSE_DASH_RE.sub(" ", s)
+    s = _LOOSE_PUNCT_RE.sub(" ", s)
     s = " ".join(s.split())
     return s
 
@@ -202,6 +205,25 @@ def parse_search_query(q: str) -> dict:
     ]
     parsed["neg_terms_norm"] = [t for t in normalize_text(" ".join(parsed["neg_terms"])).split() if t]
     parsed["phrases_norm"] = [normalize_text(p) for p in parsed["phrases"] if p.strip()]
+    parsed["raw_loose_norm"] = normalize_text_loose(raw)
+    parsed["mentioned_ids"] = extract_arxiv_ids(raw)
+    parsed["exact_id_terms"] = list(dict.fromkeys(parsed["mentioned_ids"] + list(parsed["filters"].get("id") or [])))
+    parsed["has_any_field_filters"] = any(
+        len(parsed["filters"].get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat", "id")
+    )
+    parsed["has_text_field_filters"] = any(
+        len(parsed["filters"].get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat")
+    )
+    parsed["title_terms"] = list(parsed["filters_terms"].get("ti") or [])
+    parsed["author_terms"] = list(parsed["filters_terms"].get("au") or [])
+    parsed["abs_terms"] = list(parsed["filters_terms"].get("abs") or [])
+    parsed["cat_terms"] = list(parsed["filters_terms"].get("cat") or [])
+    if not parsed["has_text_field_filters"]:
+        parsed["title_terms"].extend(parsed["terms_norm"])
+        parsed["author_terms"].extend(parsed["terms_norm"])
+        parsed["abs_terms"].extend(parsed["terms_norm"])
+        parsed["cat_terms"].extend(parsed["terms_norm"])
+    parsed["general_phrase"] = " ".join(parsed["terms_norm"]) if parsed["terms_norm"] else ""
     return parsed
 
 
@@ -210,6 +232,49 @@ def apply_limit(pids: list[str], scores: list[float], limit: int | None) -> tupl
     if limit is not None and len(pids) > limit:
         return pids[:limit], scores[:limit]
     return pids, scores
+
+
+def filter_public_results(
+    pids: list[str],
+    scores: list[float],
+    *,
+    get_papers_bulk_fn=None,
+) -> tuple[list[str], list[float]]:
+    """Drop stale/deleted paper IDs while preserving ranking order."""
+
+    if not pids:
+        return [], []
+    if get_papers_bulk_fn is None:
+        from backend.services.data_service import get_papers_bulk
+
+        get_papers_bulk_fn = get_papers_bulk
+    try:
+        visible = get_papers_bulk_fn(list(pids)) or {}
+    except Exception:
+        visible = {}
+    if not visible:
+        try:
+            from aslite.repositories import PaperTombstoneRepository
+
+            tombstones = PaperTombstoneRepository.get_by_ids(list(pids)) or {}
+        except Exception:
+            tombstones = {}
+        if tombstones:
+            keep_pids = []
+            keep_scores = []
+            for pid, score in zip(pids, scores):
+                if pid not in tombstones:
+                    keep_pids.append(pid)
+                    keep_scores.append(score)
+            return keep_pids, keep_scores
+        return list(pids), list(scores)
+    keep_pids = []
+    keep_scores = []
+    for pid, score in zip(pids, scores):
+        if pid in visible:
+            keep_pids.append(pid)
+            keep_scores.append(score)
+    return keep_pids, keep_scores
 
 
 def random_rank(pids_all: list[str], limit: int | None = None) -> tuple[list[str], list[float]]:
@@ -266,6 +331,8 @@ def filter_by_time(
     except Exception:
         logger.warning(f"Invalid time_filter '{time_filter}', skipping")
         return pids, list(range(len(pids)))
+    if deltat <= 0:
+        return pids, list(range(len(pids)))
 
     tagged_set = user_tagged_pids or set()
     valid_indices = []
@@ -305,6 +372,7 @@ def title_candidate_scan(
     get_pids_fn,
     get_papers_bulk_fn,
     paper_text_fields_fn,
+    title_text_fields_fn=None,
     max_candidates: int = 500,
     max_scan: int = 120000,
     time_budget_s: float = 0.6,
@@ -315,7 +383,7 @@ def title_candidate_scan(
     due to tokenization/vocab/min_df effects.
     """
     q_norm = (parsed.get("norm") or "").strip()
-    q_loose = normalize_text_loose(parsed.get("raw") or "")
+    q_loose = (parsed.get("raw_loose_norm") or "").strip()
     if not q_norm and not q_loose:
         return []
 
@@ -332,6 +400,7 @@ def title_candidate_scan(
 
     scan_n = min(len(all_pids), int(max_scan))
     chunk = 2000
+    fields_fn = title_text_fields_fn or paper_text_fields_fn
     for i in range(0, scan_n, chunk):
         if time.time() - start > time_budget_s:
             break
@@ -341,7 +410,7 @@ def title_candidate_scan(
             p = pid_to_paper.get(pid)
             if p is None:
                 continue
-            fields = paper_text_fields_fn(p)
+            fields = fields_fn(p)
             title_loose = fields.get("title_norm_loose") or ""
             title_norm = fields.get("title_norm") or ""
             if not title_loose and not title_norm:
@@ -376,6 +445,7 @@ def compute_paper_score_parsed(
     *,
     paper_text_fields_fn,
     get_metas_fn,
+    metas: dict[str, Any] | None = None,
     now_ts: float | None = None,
 ) -> float:
     """Paper-oriented lexical scoring with optional field filters."""
@@ -388,7 +458,7 @@ def compute_paper_score_parsed(
     # If the user input looks like a full title, strongly boost exact/substring title matches.
     q_raw_lower = (parsed.get("raw_lower") or "").strip()
     q_norm_full = (parsed.get("norm") or "").strip()
-    q_loose_full = normalize_text_loose(parsed.get("raw") or "")
+    q_loose_full = (parsed.get("raw_loose_norm") or "").strip()
     if q_norm_full and len(q_norm_full) >= 18:
         if q_norm_full == fields["title_norm"] or (
             q_loose_full and q_loose_full == (fields.get("title_norm_loose") or "")
@@ -407,7 +477,7 @@ def compute_paper_score_parsed(
         score = 0.0
 
     # Exact ID fast path
-    for want in extract_arxiv_ids(parsed.get("raw", "")) + (parsed.get("filters") or {}).get("id", []):
+    for want in parsed.get("exact_id_terms") or []:
         want_l = want.strip().lower()
         if not want_l:
             continue
@@ -435,15 +505,12 @@ def compute_paper_score_parsed(
     f_phrases = parsed.get("filters_phrases_norm") or {}
     general = parsed.get("terms_norm") or []
     phrases = parsed.get("phrases_norm") or []
+    has_field_filters = bool(parsed.get("has_text_field_filters"))
 
-    has_field_filters = any(
-        len((parsed.get("filters", {}) or {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat")
-    )
-
-    title_terms = (f_terms.get("ti") or []) + ([] if has_field_filters else general)
-    author_terms = (f_terms.get("au") or []) + ([] if has_field_filters else general)
-    abs_terms = (f_terms.get("abs") or []) + ([] if has_field_filters else general)
-    cat_terms = (f_terms.get("cat") or []) + ([] if has_field_filters else general)
+    title_terms = parsed.get("title_terms") or []
+    author_terms = parsed.get("author_terms") or []
+    abs_terms = parsed.get("abs_terms") or []
+    cat_terms = parsed.get("cat_terms") or []
 
     # Enforce explicit field filters
     if f_phrases.get("ti"):
@@ -505,7 +572,7 @@ def compute_paper_score_parsed(
 
     # Implicit phrase boost
     if not phrases and general and len(general) >= 2 and not has_field_filters:
-        general_phrase = " ".join(general)
+        general_phrase = parsed.get("general_phrase") or ""
         if general_phrase and general_phrase in fields["title_norm"]:
             score += 45.0
         elif general_phrase and general_phrase in fields["summary_norm"]:
@@ -541,8 +608,8 @@ def compute_paper_score_parsed(
 
     # Tiny recency tie-breaker
     try:
-        metas = get_metas_fn() if get_metas_fn else {}
-        meta = metas.get(pid)
+        meta_map = metas if metas is not None else (get_metas_fn() if get_metas_fn else {})
+        meta = meta_map.get(pid) if isinstance(meta_map, dict) else None
         if meta and meta.get("_time"):
             now = float(now_ts) if now_ts is not None else time.time()
             age_days = max(0.0, (now - float(meta["_time"])) / 86400.0)
@@ -591,6 +658,10 @@ def lexical_rank_over_pids(
     pid_to_paper = get_papers_bulk_fn(pids)
     pairs: list[tuple[float, str]] = []
     now = time.time()
+    try:
+        metas = get_metas_fn() if get_metas_fn else {}
+    except Exception:
+        metas = {}
     for pid in pids:
         p = pid_to_paper.get(pid)
         if p is None:
@@ -601,6 +672,7 @@ def lexical_rank_over_pids(
             pid,
             paper_text_fields_fn=paper_text_fields_fn,
             get_metas_fn=get_metas_fn,
+            metas=metas,
             now_ts=now,
         )
         if s > 0:
@@ -642,6 +714,10 @@ def lexical_rank_fullscan(
 
     heap: list[tuple[float, str]] = []
     now = time.time()
+    try:
+        metas = get_metas_fn() if get_metas_fn else {}
+    except Exception:
+        metas = {}
     papers_cache = None
     if get_papers_fn is not None:
         try:
@@ -659,6 +735,7 @@ def lexical_rank_fullscan(
                 pid,
                 paper_text_fields_fn=paper_text_fields_fn,
                 get_metas_fn=get_metas_fn,
+                metas=metas,
                 now_ts=now,
             )
             if s <= 0:
@@ -683,6 +760,7 @@ def lexical_rank_fullscan(
                     pid,
                     paper_text_fields_fn=paper_text_fields_fn,
                     get_metas_fn=get_metas_fn,
+                    metas=metas,
                     now_ts=now,
                 )
                 if s <= 0:
@@ -883,7 +961,7 @@ def svm_rank(
 
     from sklearn import svm as sklearn_svm
 
-    from aslite.db import DICT_DB_FILE, FEATURES_FILE
+    from aslite.db import DICT_DB_FILE, FEATURES_FILE, PAPERS_DB_FILE
     from config import settings
 
     SVM_C = settings.svm.c
@@ -931,16 +1009,36 @@ def svm_rank(
         except Exception:
             neg_tags_db = {}
 
+    selected_tag_tokens_raw = []
+    selected_tags_for_signal = []
+    selected_tags_for_training = []
+    if tags:
+        if tags == "all":
+            selected_tags_for_signal = list(tags_db.keys())
+            selected_tags_for_training = list(tags_db.keys())
+        else:
+            selected_tag_tokens_raw = [t.strip() for t in tags.split(",")]
+            selected_tags_for_signal = list(dict.fromkeys(selected_tag_tokens_raw))
+            selected_tags_for_training = [t for t in selected_tag_tokens_raw if t]
+
+    seed_pid_tokens = []
+    seed_pids = []
+    if s_pids:
+        seed_pid_tokens = [pid.strip() for pid in s_pids.split(",")]
+        seed_pids = [pid for pid in seed_pid_tokens if pid]
+
     # Fast path: cache (extend key when upload training samples are involved)
     cache_key = None
     try:
-        dict_mtime = os.path.getmtime(DICT_DB_FILE) if os.path.exists(DICT_DB_FILE) else 0.0
+        from backend.services.data_service import _sqlite_effective_mtime
+
+        dict_mtime = float(_sqlite_effective_mtime(DICT_DB_FILE) or 0.0)
         feat_mtime = os.path.getmtime(FEATURES_FILE) if os.path.exists(FEATURES_FILE) else 0.0
+        papers_mtime = float(_sqlite_effective_mtime(PAPERS_DB_FILE) or 0.0)
 
         upload_pids_in_signal = set()
         if tags:
-            tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
-            for tag in tags_filter_to:
+            for tag in selected_tags_for_signal:
                 for pid in tags_db.get(tag, set()) or ():
                     if isinstance(pid, str) and pid.startswith("up_"):
                         upload_pids_in_signal.add(pid)
@@ -948,7 +1046,7 @@ def svm_rank(
                     if isinstance(pid, str) and pid.startswith("up_"):
                         upload_pids_in_signal.add(pid)
         if s_pids:
-            for pid in map(str.strip, s_pids.split(",")):
+            for pid in seed_pid_tokens:
                 if pid.startswith("up_"):
                     upload_pids_in_signal.add(pid)
 
@@ -998,6 +1096,7 @@ def svm_rank(
                 int(limit) if limit is not None else None,
                 dict_mtime,
                 feat_mtime,
+                papers_mtime,
                 upload_fingerprint,
             )
             cached = SVM_RANK_CACHE.get(cache_key)
@@ -1013,18 +1112,53 @@ def svm_rank(
     logger.trace(f"[BLOCKING] svm_rank: features loaded in {time.time() - s_time:.2f}s")
     x, pids = features["x"], features["pids"]
 
-    # Collect all user-tagged paper IDs for smart time filtering
-    user_tagged_pids = set()
-    if tags:
-        tags_filter_to = tags_db.keys() if tags == "all" else set(map(str.strip, tags.split(",")))
-        for tag in tags_filter_to:
-            if tag in tags_db:
-                user_tagged_pids.update(tags_db[tag])
-            if tag in neg_tags_db:
-                user_tagged_pids.update(neg_tags_db[tag])
+    user_tagged_pids = set(seed_pid_tokens)
+    pos_weights = {}
+    neg_weights = {}
+    upload_pids = set()
 
-    if s_pids:
-        user_tagged_pids.update(map(str.strip, s_pids.split(",")))
+    if tags:
+        if logic == "and":
+            required_tags = [tag for tag in selected_tags_for_training if tag in tags_db]
+            tag_counts = {}
+            for tag in selected_tags_for_training:
+                for pid in tags_db.get(tag, set()) or ():
+                    tag_counts[pid] = tag_counts.get(pid, 0) + 1
+                    user_tagged_pids.add(pid)
+                for pid in neg_tags_db.get(tag, set()) or ():
+                    neg_weights[pid] = max(neg_weights.get(pid, 0.0), 1.0)
+                    user_tagged_pids.add(pid)
+                    if isinstance(pid, str) and pid.startswith("up_"):
+                        upload_pids.add(pid)
+            required_count = len(required_tags)
+            for pid, count in tag_counts.items():
+                if required_count and count < required_count:
+                    continue
+                pos_weights[pid] = max(pos_weights.get(pid, 0.0), float(count))
+                if isinstance(pid, str) and pid.startswith("up_"):
+                    upload_pids.add(pid)
+        else:
+            for tag in selected_tags_for_training:
+                for pid in tags_db.get(tag, set()) or ():
+                    pos_weights[pid] = max(pos_weights.get(pid, 0.0), 1.0)
+                    user_tagged_pids.add(pid)
+                    if isinstance(pid, str) and pid.startswith("up_"):
+                        upload_pids.add(pid)
+                for pid in neg_tags_db.get(tag, set()) or ():
+                    neg_weights[pid] = max(neg_weights.get(pid, 0.0), 1.0)
+                    user_tagged_pids.add(pid)
+                    if isinstance(pid, str) and pid.startswith("up_"):
+                        upload_pids.add(pid)
+
+    if seed_pids:
+        seed_weight = 1.0
+        if logic == "and" and selected_tags_for_training:
+            seed_weight = float(len(selected_tags_for_training))
+        for pid in seed_pids:
+            pos_weights[pid] = max(pos_weights.get(pid, 0.0), seed_weight)
+            user_tagged_pids.add(pid)
+            if isinstance(pid, str) and pid.startswith("up_"):
+                upload_pids.add(pid)
 
     # Apply smart time filtering: keep tagged papers and papers within time window
     if time_filter:
@@ -1038,75 +1172,46 @@ def svm_rank(
         )
 
     n, _d = x.shape
-
-    # Construct the positive/negative sets (avoid building pid->idx for all papers)
-    pos_weights = {}
-    neg_weights = {}
-    tags_filter_to = []
-
-    if tags:
-        tags_filter_to = list(tags_db.keys()) if tags == "all" else [t.strip() for t in tags.split(",") if t.strip()]
-        if logic == "and":
-            tag_counts = {}
-            for tag in tags_filter_to:
-                if tag not in tags_db:
-                    continue
-                for pid in tags_db[tag]:
-                    tag_counts[pid] = tag_counts.get(pid, 0) + 1
-            for pid, count in tag_counts.items():
-                pos_weights[pid] = max(pos_weights.get(pid, 0.0), float(count))
-        else:
-            for tag in tags_filter_to:
-                if tag not in tags_db:
-                    continue
-                for pid in tags_db[tag]:
-                    pos_weights[pid] = max(pos_weights.get(pid, 0.0), 1.0)
-
-        # Collect explicit negative samples for these tags
-        for tag in tags_filter_to:
-            if tag not in neg_tags_db:
-                continue
-            for pid in neg_tags_db[tag]:
-                neg_weights[pid] = max(neg_weights.get(pid, 0.0), 1.0)
-
-    if s_pids:
-        pid_list = [p.strip() for p in s_pids.split(",") if p.strip()]
-        seed_weight = 1.0
-        if logic == "and" and tags_filter_to:
-            seed_weight = float(len(tags_filter_to))
-        for pid in pid_list:
-            pos_weights[pid] = max(pos_weights.get(pid, 0.0), seed_weight)
+    pid_to_index = features.get("pid_to_index") if not time_filter else None
+    can_use_direct_pid_index = isinstance(pid_to_index, dict)
 
     y = np.zeros(n, dtype=np.int8)
     sample_weight = np.ones(n, dtype=np.float32)
     found = 0
-    if pos_weights:
-        for i, pid in enumerate(pids):
-            w = pos_weights.get(pid)
-            if w:
-                y[i] = 1
-                sample_weight[i] = float(w)
-                found += 1
     neg_found = 0
-    if neg_weights:
-        for i, pid in enumerate(pids):
-            if y[i] == 1:
-                continue
-            w = neg_weights.get(pid)
-            if w:
-                sample_weight[i] = max(sample_weight[i], float(SVM_NEG_WEIGHT))
+    if pos_weights or neg_weights:
+        if can_use_direct_pid_index:
+            for pid, pos_weight in pos_weights.items():
+                idx = pid_to_index.get(pid)
+                if idx is None or idx < 0 or idx >= n:
+                    continue
+                y[idx] = 1
+                sample_weight[idx] = float(pos_weight)
+                found += 1
+
+            for pid, neg_weight in neg_weights.items():
+                idx = pid_to_index.get(pid)
+                if idx is None or idx < 0 or idx >= n or y[idx] == 1:
+                    continue
+                sample_weight[idx] = max(sample_weight[idx], float(SVM_NEG_WEIGHT))
                 neg_found += 1
+        else:
+            for i, pid in enumerate(pids):
+                pos_weight = pos_weights.get(pid)
+                if pos_weight:
+                    y[i] = 1
+                    sample_weight[i] = float(pos_weight)
+                    found += 1
+                    continue
+
+                neg_weight = neg_weights.get(pid)
+                if neg_weight:
+                    sample_weight[i] = max(sample_weight[i], float(SVM_NEG_WEIGHT))
+                    neg_found += 1
     logger.trace(f"Found {found} positive and {neg_found} negative papers in current feature slice")
     e_time = time.time()
 
     logger.trace(f"feature loading/caching for {e_time - s_time:.5f}s")
-
-    # Collect upload training samples (used for training only; candidates remain arXiv pids)
-    upload_pids = set()
-    if pos_weights:
-        upload_pids.update([pid for pid in pos_weights.keys() if isinstance(pid, str) and pid.startswith("up_")])
-    if neg_weights:
-        upload_pids.update([pid for pid in neg_weights.keys() if isinstance(pid, str) and pid.startswith("up_")])
 
     upload_rows = []
     upload_y = []
@@ -1266,9 +1371,12 @@ def svm_rank(
 
     pids_out = [pids[int(ix)] for ix in top_ix]
     scores_out = [100 * float(s[int(ix)]) for ix in top_ix]
+    pids_out, scores_out = filter_public_results(pids_out, scores_out)
 
     # get the words that score most positively and most negatively for the svm
-    ivocab = {v: k for k, v in features["vocab"].items()}  # index to word mapping
+    ivocab = features.get("ivocab")
+    if not isinstance(ivocab, dict):
+        ivocab = {v: k for k, v in features["vocab"].items()}  # index to word mapping
     weights = clf.coef_[0] if getattr(clf.coef_, "ndim", 1) > 1 else clf.coef_
 
     # Only analyze TF-IDF part weights (vocab size), ignore embedding dimensions
@@ -1453,15 +1561,20 @@ def search_rank(
 
         get_metas_fn = get_metas
     if paper_exists_fn is None:
+        from backend.services.data_service import paper_exists as data_paper_exists
 
         def paper_exists_fn(pid):
-            metas = get_metas_fn()
-            return pid in metas
+            return data_paper_exists(pid)
 
+    title_text_fields_fn = paper_text_fields_fn
     if paper_text_fields_fn is None:
-        from backend.services.render_service import build_paper_text_fields
+        from backend.services.render_service import (
+            build_paper_text_fields,
+            build_paper_title_fields,
+        )
 
         paper_text_fields_fn = build_paper_text_fields
+        title_text_fields_fn = build_paper_title_fields
 
     if not q:
         return [], []
@@ -1469,20 +1582,27 @@ def search_rank(
     parsed = parse_search_query(q)
 
     # If the query contains an explicit arXiv id, return it first (if present).
-    mentioned_ids = extract_arxiv_ids(parsed.get("raw", ""))
+    mentioned_ids = parsed.get("mentioned_ids") or []
     if mentioned_ids:
+        direct_pids = []
+        direct_scores = []
         for mid in mentioned_ids:
             raw_pid, _ = split_pid_version(mid)
             if paper_exists_fn(raw_pid):
                 pid = raw_pid
                 if mid != raw_pid and paper_exists_fn(mid):
                     pid = mid
-                return [pid], [2000.0]
+                direct_pids.append(pid)
+                direct_scores.append(2000.0)
+        if direct_pids:
+            return filter_public_results(
+                direct_pids,
+                direct_scores,
+                get_papers_bulk_fn=get_papers_bulk_fn,
+            )
 
     # Fielded queries or phrases typically need lexical scoring
-    has_field_filters = any(
-        len(parsed.get("filters", {}).get(k, []) or []) > 0 for k in ("ti", "au", "abs", "cat", "id")
-    )
+    has_field_filters = bool(parsed.get("has_any_field_filters"))
     has_phrases = bool(parsed.get("phrases"))
     is_title_like = is_title_like_query(parsed)
 
@@ -1495,13 +1615,18 @@ def search_rank(
 
     cache_key = None
     try:
-        from backend.services.data_service import get_features_file_mtime
+        from aslite.db import PAPERS_DB_FILE
+        from backend.services.data_service import (
+            _sqlite_effective_mtime,
+            get_features_file_mtime,
+        )
 
         cache_key = (
             "kw_merged",
             q.lower(),
             int(limit) if limit is not None else None,
             float(get_features_file_mtime() or 0.0),
+            float(_sqlite_effective_mtime(PAPERS_DB_FILE) or 0.0),
         )
         cached = SEARCH_RANK_CACHE.get(cache_key)
         if cached is not None:
@@ -1587,6 +1712,7 @@ def search_rank(
             get_pids_fn=get_pids_fn,
             get_papers_bulk_fn=get_papers_bulk_fn,
             paper_text_fields_fn=paper_text_fields_fn,
+            title_text_fields_fn=title_text_fields_fn,
             max_candidates=400,
         )
     elif needs_fullscan_fallback and bool(getattr(settings.search, "disable_fullscan", False)):
@@ -1595,6 +1721,7 @@ def search_rank(
             get_pids_fn=get_pids_fn,
             get_papers_bulk_fn=get_papers_bulk_fn,
             paper_text_fields_fn=paper_text_fields_fn,
+            title_text_fields_fn=title_text_fields_fn,
             max_candidates=250,
             max_scan=60000,
             time_budget_s=0.35,
@@ -1637,9 +1764,29 @@ def search_rank(
             s += w_lex / (rrf_k + lr)
         combined_scores[pid] = s
 
-    merged = sorted(all_ids, key=lambda pid: combined_scores.get(pid, 0.0), reverse=True)
-    pids = merged
-    scores = [combined_scores[pid] * 100.0 for pid in pids]
+    if limit is not None:
+        try:
+            top_k = min(max(int(limit), 0), len(all_ids))
+        except Exception:
+            top_k = len(all_ids)
+    else:
+        top_k = len(all_ids)
+    if top_k <= 0:
+        pids, scores = [], []
+    else:
+        merged = (
+            nlargest(top_k, all_ids, key=lambda pid: combined_scores.get(pid, 0.0))
+            if top_k < len(all_ids)
+            else sorted(all_ids, key=lambda pid: combined_scores.get(pid, 0.0), reverse=True)
+        )
+        pids = merged
+        scores = [combined_scores[pid] * 100.0 for pid in pids]
+        pids, scores = filter_public_results(pids, scores, get_papers_bulk_fn=get_papers_bulk_fn)
+        if len(pids) < top_k and top_k < len(all_ids):
+            merged = sorted(all_ids, key=lambda pid: combined_scores.get(pid, 0.0), reverse=True)
+            pids = merged
+            scores = [combined_scores[pid] * 100.0 for pid in pids]
+            pids, scores = filter_public_results(pids, scores, get_papers_bulk_fn=get_papers_bulk_fn)
 
     pids, scores = apply_limit(pids, scores, limit)
 
@@ -1690,7 +1837,11 @@ def hybrid_search_rank(
         semantic_search_fn = semantic_search_rank
 
     try:
-        from backend.services.data_service import get_features_file_mtime
+        from aslite.db import PAPERS_DB_FILE
+        from backend.services.data_service import (
+            _sqlite_effective_mtime,
+            get_features_file_mtime,
+        )
         from backend.services.semantic_service import get_cached_embeddings_mtime
 
         cache_key = (
@@ -1699,6 +1850,7 @@ def hybrid_search_rank(
             int(limit) if limit is not None else None,
             float(semantic_weight),
             float(get_features_file_mtime() or 0.0),
+            float(_sqlite_effective_mtime(PAPERS_DB_FILE) or 0.0),
             float(get_cached_embeddings_mtime() or 0.0),
         )
         cached = SEARCH_RANK_CACHE.get(cache_key)
@@ -1750,9 +1902,19 @@ def hybrid_search_rank(
         final = kw_rrf + sem_rrf
         combined_scores[pid] = final
 
-    sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
-    if limit:
-        sorted_results = sorted_results[: int(limit)]
+    if limit is not None:
+        try:
+            top_k = min(max(int(limit), 0), len(combined_scores))
+        except Exception:
+            top_k = len(combined_scores)
+    else:
+        top_k = len(combined_scores)
+    if top_k <= 0:
+        sorted_results = []
+    elif top_k < len(combined_scores):
+        sorted_results = nlargest(top_k, combined_scores.items(), key=lambda x: x[1])
+    else:
+        sorted_results = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)
 
     pids = [pid for pid, _ in sorted_results]
     scores = [combined_scores[pid] * 100.0 for pid in pids]

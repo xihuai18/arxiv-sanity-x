@@ -59,16 +59,30 @@ class TestCreateUploadedPaperRollback:
 
                 with (
                     patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo,
-                    patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash"),
-                    patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTROLLBACK"),
-                    patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"),
-                    patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir),
-                    patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path),
+                    patch(
+                        "backend.services.upload_service.compute_bytes_sha256",
+                        return_value="fakehash",
+                    ),
+                    patch(
+                        "backend.services.upload_service.generate_upload_pid",
+                        return_value="up_TESTROLLBACK",
+                    ),
+                    patch(
+                        "backend.services.upload_service.sanitize_filename",
+                        return_value="test.pdf",
+                    ),
+                    patch(
+                        "backend.services.upload_service.get_upload_dir",
+                        return_value=upload_dir,
+                    ),
+                    patch(
+                        "backend.services.upload_service.get_upload_pdf_path",
+                        return_value=pdf_path,
+                    ),
                     patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb),
                     patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx),
                     patch("builtins.open", side_effect=failing_open),
                 ):
-
                     mock_repo.get_by_sha256.return_value = None
                     mock_repo.sha256_mapping_key.return_value = "sha256::rollback_test_user::fakehash"
 
@@ -96,16 +110,30 @@ class TestCreateUploadedPaperRollback:
 
                 with (
                     patch("backend.services.upload_service.UploadedPaperRepository") as mock_repo,
-                    patch("backend.services.upload_service.compute_bytes_sha256", return_value="fakehash2"),
-                    patch("backend.services.upload_service.generate_upload_pid", return_value="up_TESTCLEAN"),
-                    patch("backend.services.upload_service.sanitize_filename", return_value="test.pdf"),
-                    patch("backend.services.upload_service.get_upload_dir", return_value=upload_dir),
-                    patch("backend.services.upload_service.get_upload_pdf_path", return_value=pdf_path),
+                    patch(
+                        "backend.services.upload_service.compute_bytes_sha256",
+                        return_value="fakehash2",
+                    ),
+                    patch(
+                        "backend.services.upload_service.generate_upload_pid",
+                        return_value="up_TESTCLEAN",
+                    ),
+                    patch(
+                        "backend.services.upload_service.sanitize_filename",
+                        return_value="test.pdf",
+                    ),
+                    patch(
+                        "backend.services.upload_service.get_upload_dir",
+                        return_value=upload_dir,
+                    ),
+                    patch(
+                        "backend.services.upload_service.get_upload_pdf_path",
+                        return_value=pdf_path,
+                    ),
                     patch("aslite.db.get_uploaded_papers_db", return_value=mock_updb),
                     patch("aslite.db.get_uploaded_papers_index_db", return_value=mock_idx),
                     patch.object(Path, "replace", side_effect=OSError("Permission denied")),
                 ):
-
                     mock_repo.get_by_sha256.return_value = None
                     mock_repo.sha256_mapping_key.return_value = "sha256::cleanup_test_user::fakehash2"
 
@@ -115,3 +143,66 @@ class TestCreateUploadedPaperRollback:
                     # Exception propagated means DB transaction was not committed.
                     # Cleanup of DB records should have been attempted.
                     mock_repo.delete.assert_called()
+
+
+def test_delete_uploaded_paper_restores_status_when_file_delete_fails(monkeypatch, tmp_path):
+    from backend.services import upload_service
+
+    pid = "up_TESTDELETEFAIL"
+    user = "alice"
+    record = {
+        "pid": pid,
+        "owner": user,
+        "sha256": "abc",
+        "parse_status": "running",
+        "parse_error": None,
+        "parse_task_id": "task_parse_old",
+        "extract_task_id": "task_extract_old",
+    }
+    updates = []
+
+    upload_dir = tmp_path / "uploads" / pid
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / "paper.pdf").write_bytes(b"%PDF")
+
+    monkeypatch.setattr(upload_service, "_data_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        upload_service,
+        "_get_owned_upload_record",
+        lambda _pid, _user, allow_deleting=False: dict(record),
+    )
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "update",
+        lambda _pid, patch: updates.append(dict(patch)) or record.update(patch) or True,
+    )
+    monkeypatch.setattr(
+        upload_service,
+        "_cancel_active_upload_tasks",
+        lambda *_a, **_k: {"parse_canceled": True, "extract_canceled": True},
+    )
+    monkeypatch.setattr(upload_service, "_invalidate_upload_features", lambda *_a, **_k: None)
+
+    class DummyTasks:
+        @staticmethod
+        def cancel_paper_summary_tasks(*_a, **_k):
+            return None
+
+    monkeypatch.setattr(upload_service, "_get_tasks_module", lambda: DummyTasks())
+    monkeypatch.setattr(
+        upload_service.shutil,
+        "rmtree",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk busy")),
+    )
+
+    with pytest.raises(upload_service.UploadServiceError) as exc_info:
+        upload_service.delete_uploaded_paper(pid, user)
+
+    assert exc_info.value.code == "file_delete_failed"
+    assert updates[0]["deleting"] is True
+    rollback = updates[-1]
+    assert rollback["deleting"] is False
+    assert rollback["parse_status"] == "failed"
+    assert rollback["parse_error"] == "delete_failed_after_cancel"
+    assert rollback["parse_task_id"] is None
+    assert rollback["extract_task_id"] is None

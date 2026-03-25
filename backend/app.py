@@ -6,9 +6,11 @@ import logging
 import mimetypes
 import os
 import sys
+from typing import cast
 
-from flask import Flask, render_template, request
+from flask import Flask, Response, render_template, request
 from loguru import logger
+from werkzeug.exceptions import HTTPException
 
 from config import settings
 
@@ -120,8 +122,14 @@ def create_app() -> Flask:
         except ImportError:
             logger.warning("flasgger not installed, Swagger UI disabled")
 
+    def _wants_api_error_payload() -> bool:
+        path = (request.path or "").strip()
+        return path.startswith("/api/")
+
     @app.errorhandler(404)
     def _handle_404(_err):
+        if _wants_api_error_payload():
+            return {"success": False, "error": "Not Found"}, 404
         try:
             return (
                 render_template(
@@ -137,6 +145,8 @@ def create_app() -> Flask:
 
     @app.errorhandler(500)
     def _handle_500(_err):
+        if _wants_api_error_payload():
+            return {"success": False, "error": "Server error"}, 500
         try:
             return (
                 render_template(
@@ -149,6 +159,15 @@ def create_app() -> Flask:
             )
         except Exception:
             return "Internal Server Error", 500
+
+    @app.errorhandler(HTTPException)
+    def _handle_http_exception(err: HTTPException):
+        if _wants_api_error_payload():
+            response = cast(Response, err.get_response())
+            response.set_data(app.json.dumps({"success": False, "error": err.name}))
+            response.content_type = "application/json"
+            return response
+        return err
 
     @app.after_request
     def add_security_headers(resp):

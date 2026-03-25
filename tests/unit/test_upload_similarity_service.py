@@ -286,7 +286,7 @@ class TestFindSimilarPapers:
         monkeypatch.setattr(
             upload_similarity_service,
             "compute_upload_features",
-            lambda pid, force=False: mock_upload_features,
+            lambda pid, force=False, **_kwargs: mock_upload_features,
         )
 
         # Mock global features
@@ -339,6 +339,118 @@ class TestFindSimilarPapers:
         # Scores should be sorted descending
         scores = [r["score"] for r in result]
         assert scores == sorted(scores, reverse=True)
+
+    def test_find_similar_papers_loads_global_features_once(self, monkeypatch):
+        from backend.services import data_service, upload_similarity_service
+
+        mock_upload_features = {
+            "pid": "up_test",
+            "x": sp.csr_matrix(np.array([[0.5, 0.3, 0.0, 0.2]], dtype=np.float32)),
+            "feature_type": "hybrid_sparse_dense",
+            "global_features_mtime": 10.0,
+        }
+        calls = {"features": 0}
+
+        def _get_features_cached():
+            calls["features"] += 1
+            return {
+                "pids": ["paper1", "paper2"],
+                "x": sp.csr_matrix(
+                    np.array(
+                        [
+                            [0.6, 0.2, 0.1, 0.1],
+                            [0.1, 0.8, 0.0, 0.1],
+                        ],
+                        dtype=np.float32,
+                    )
+                ),
+                "x_tfidf": sp.csr_matrix(
+                    np.array(
+                        [
+                            [0.6, 0.2, 0.1, 0.1],
+                            [0.1, 0.8, 0.0, 0.1],
+                        ],
+                        dtype=np.float32,
+                    )
+                ),
+                "x_embeddings": np.array(
+                    [
+                        [0.2, 0.3, 0.4, 0.1],
+                        [0.1, 0.1, 0.1, 0.7],
+                    ],
+                    dtype=np.float32,
+                ),
+                "feature_type": "hybrid_sparse_dense",
+            }
+
+        monkeypatch.setattr(data_service, "get_features_cached", _get_features_cached)
+        monkeypatch.setattr(data_service, "get_features_file_mtime", lambda: 10.0)
+        monkeypatch.setattr(
+            upload_similarity_service,
+            "compute_upload_features",
+            lambda pid, force=False, **kwargs: mock_upload_features,
+        )
+        monkeypatch.setattr(
+            "aslite.repositories.MetaRepository.get_by_ids",
+            lambda pids: {pid: {"title": pid, "authors": []} for pid in pids},
+        )
+        monkeypatch.setattr(
+            "backend.services.data_service.get_papers_bulk",
+            lambda pids: {pid: {"title": pid, "authors": [], "summary": ""} for pid in pids},
+        )
+        monkeypatch.setattr(
+            "backend.services.summary_service.get_summary_render_snapshots",
+            lambda pids: {pid: {"tldr": ""} for pid in pids},
+        )
+
+        result = upload_similarity_service.find_similar_papers("up_test", limit=2)
+
+        assert len(result) == 2
+        assert calls["features"] == 1
+
+    def test_find_similar_papers_falls_back_to_legacy_tldr_probe(self, monkeypatch):
+        from backend.services import data_service, upload_similarity_service
+
+        mock_upload_features = {
+            "pid": "up_test",
+            "x": sp.csr_matrix(np.array([[0.5, 0.3, 0.0, 0.2]], dtype=np.float32)),
+            "feature_type": "hybrid_sparse_dense",
+            "global_features_mtime": 10.0,
+        }
+
+        monkeypatch.setattr(
+            data_service,
+            "get_features_cached",
+            lambda: {
+                "pids": ["paper1"],
+                "x": sp.csr_matrix(np.array([[0.6, 0.2, 0.1, 0.1]], dtype=np.float32)),
+                "x_tfidf": sp.csr_matrix(np.array([[0.6, 0.2, 0.1, 0.1]], dtype=np.float32)),
+                "x_embeddings": np.array([[0.2, 0.3, 0.4, 0.1]], dtype=np.float32),
+                "feature_type": "hybrid_sparse_dense",
+            },
+        )
+        monkeypatch.setattr(data_service, "get_features_file_mtime", lambda: 10.0)
+        monkeypatch.setattr(
+            upload_similarity_service,
+            "compute_upload_features",
+            lambda pid, force=False, **kwargs: mock_upload_features,
+        )
+        monkeypatch.setattr(
+            "backend.services.data_service.get_papers_bulk",
+            lambda pids: {pid: {"title": pid, "authors": [], "summary": "", "_time_str": ""} for pid in pids},
+        )
+        monkeypatch.setattr(
+            "backend.services.summary_service.get_summary_render_snapshots",
+            lambda pids: {pid: {"tldr": "", "status": ""} for pid in pids},
+        )
+        monkeypatch.setattr(
+            "backend.services.summary_service.extract_tldr_from_summary",
+            lambda pid: f"legacy {pid}",
+        )
+
+        result = upload_similarity_service.find_similar_papers("up_test", limit=1)
+
+        assert result[0]["tldr"] == "legacy paper1"
 
 
 class TestComputeUploadFeatures:

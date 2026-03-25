@@ -3,6 +3,7 @@
 ## Environment
 
 - Recommended: `conda activate sanity`
+- For non-trivial repo maintenance, read the matching `.opencode/skills/` manual first, then use `docs/INDEX.md` and `tests/README.md` as the focused support docs.
 
 ## Install
 
@@ -39,6 +40,46 @@ Isolation tip (avoid touching real `data/`):
 
 - `ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit tests/integration -q`
 
+### Upload Task Regressions
+
+When changing `backend/services/upload_service.py`, `backend/blueprints/api_uploads.py`, or the upload Huey tasks in `tasks.py`, run this targeted set in addition to the default unit/integration suite:
+
+- `ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_upload_task_status_sse.py tests/unit/test_tasks_upload_deleting.py tests/integration/test_api_uploads.py -q`
+
+This set covers:
+
+- deleting upload records returning `409` from upload mutation APIs
+- stale upload task repair and re-enqueue behavior
+- superseded upload workers self-canceling instead of running outdated work
+- upload task status / task id contract changes exposed through `/api/task_status/<task_id>`
+- the dedicated upload stale TTL setting `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL`
+
+### Task Orchestration Regressions
+
+When changing `tasks.py`, async task visibility, cancel/supersede semantics, or worker-side progress/state repair logic, run this set in addition to the default unit/integration suite:
+
+- `ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_tasks_summary_force_refresh.py tests/unit/test_summary_cancellation.py tests/unit/test_tasks_summary_status_events.py tests/unit/test_upload_task_status_sse.py tests/unit/test_tasks_upload_deleting.py tests/integration/test_api_summary.py tests/integration/test_api_uploads.py tests/integration/test_api_sse.py -q`
+
+This set is the fastest regression net for:
+
+- cooperative cancellation and generation epoch behavior
+- force-refresh enqueue semantics and resolved-model cache purging
+- upload task pointer repair / `pending_registration` windows / stale task cleanup
+- owner-scoped task visibility exposed through `/api/task_status/<task_id>` and list overlays
+- summary/upload SSE payloads that frontend polling or realtime consumers depend on
+
+### Launcher / Static Manifest Regressions
+
+When changing `bin/run_services.py`, `backend/utils/manifest.py`, Gunicorn launch behavior, or hashed static asset resolution, run this set in addition to the default unit/integration suite:
+
+- `pytest tests/unit/test_manifest.py tests/unit/test_manifest_fallback.py tests/unit/test_run_services.py -q`
+
+This set is the fastest regression net for:
+
+- `run_services.py` handling external `SIGTERM` cleanly so child Gunicorn / Huey processes do not linger
+- hashed asset resolution continuing to track fresh `static/dist/manifest.json` content even if filesystem `mtime` granularity is coarse
+- fallback lookup still resolving hashed files when the manifest is missing or stale
+
 ## Running Locally
 
 - Full stack (recommended): `python bin/run_services.py`
@@ -48,6 +89,12 @@ Isolation tip (avoid touching real `data/`):
     - Gunicorn: `bash bin/up.sh`
 - Huey consumer (required for async jobs): `python bin/huey_consumer.py tasks.huey -w 4 -k thread`
 - Scheduler daemon (optional, not auto-started by web): `python -m tools daemon`
+- If you changed `tasks.py` or async summary/upload behavior, restart the Huey consumer so the worker code matches the web process.
+
+Notes:
+
+- `python bin/run_services.py` now treats external `SIGTERM` the same way as Ctrl+C: the launcher exits through its normal cleanup path and stops child process groups instead of leaving orphaned Gunicorn / Huey processes behind.
+- If a port such as `55555` still looks busy after you stop the launcher, suspect an older web process that was started outside the current launcher session rather than the latest `run_services.py` process.
 
 ## Frontend Build
 
@@ -59,6 +106,8 @@ Notes:
 
 - `./bin/up.sh` runs the static build automatically on startup.
 - Build output is written to `static/dist/` (gitignored) and referenced via `static/dist/manifest.json`.
+- Long-lived web processes now reload hashed asset mappings when `static/dist/manifest.json` content changes, even if the file timestamp does not move to a new second.
+- If the browser still receives old hashed asset URLs after a fresh build, verify which process owns the web port first; stale HTML is more often caused by an older Gunicorn still serving requests than by browser cache.
 
 ## Frontend/UI Verification
 
@@ -106,7 +155,10 @@ If you maintain a private fork and publish an open source mirror, use:
 
 - `scripts/sync_to_opensource.sh`
 
-See `docs/OPEN_SOURCE.md` for the checklist and safety notes.
+Notes:
+
+- The current sync helper is repo-local, not a portable mirror utility: its target path is hardcoded inside `scripts/sync_to_opensource.sh`.
+- Review `docs/OPEN_SOURCE.md` and the script's exclude / scrub list before using `--purge-excluded`, because it now cleans more local-only artifacts from the target mirror.
 
 ## Pre-commit (Optional)
 

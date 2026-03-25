@@ -299,6 +299,90 @@ def test_trigger_extract_info_reuses_existing_active_task(monkeypatch):
     assert task_id == "task_extract_existing"
 
 
+def test_trigger_extract_info_persists_task_id_before_returning(monkeypatch):
+    from backend.services import upload_service
+
+    class _FakeTx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeDb:
+        def __init__(self):
+            self.record = {
+                "pid": "up_extracttask2",
+                "owner": "alice",
+                "parse_status": "ok",
+                "meta_extracted_ok": False,
+                "extract_task_id": "",
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def transaction(self, mode=None):
+            assert mode == "IMMEDIATE"
+            return _FakeTx()
+
+        def get(self, pid):
+            assert pid == "up_extracttask2"
+            return dict(self.record)
+
+        def __setitem__(self, pid, value):
+            assert pid == "up_extracttask2"
+            self.record = dict(value)
+
+    fake_db = _FakeDb()
+
+    class _Task:
+        id = "task_extract_new"
+
+    class _Huey:
+        def enqueue(self, task):
+            assert task.id == "task_extract_new"
+            return task
+
+    class _Tasks:
+        huey = _Huey()
+
+        class extract_info_task:
+            @staticmethod
+            def s(pid, user):
+                assert pid == "up_extracttask2"
+                assert user == "alice"
+                return _Task()
+
+    status_calls = []
+
+    monkeypatch.setattr(upload_service, "validate_upload_pid", lambda _pid: True)
+    monkeypatch.setattr(upload_service.UploadedPaperRepository, "get", lambda _pid: dict(fake_db.record))
+    monkeypatch.setattr(upload_service, "_get_tasks_module", lambda: _Tasks())
+    monkeypatch.setattr(upload_service, "_get_active_upload_task_id", lambda _record, _field: "")
+    monkeypatch.setattr(
+        upload_service,
+        "_normalize_upload_parse_status",
+        lambda _pid, _record: ("ok", ""),
+    )
+    monkeypatch.setattr(upload_service, "_get_uploaded_papers_db", lambda **_k: fake_db)
+    monkeypatch.setattr(
+        upload_service.SummaryStatusRepository,
+        "set_task_status",
+        lambda task_id, status, error=None, **extra: status_calls.append((task_id, status, error, extra)),
+    )
+
+    task_id = upload_service.trigger_extract_info("up_extracttask2", "alice")
+
+    assert task_id == "task_extract_new"
+    assert fake_db.record["extract_task_id"] == "task_extract_new"
+    assert status_calls[0][0] == "task_extract_new"
+    assert status_calls[0][1] == "queued"
+
+
 def test_do_extract_metadata_respects_normalized_parse_status(monkeypatch, tmp_path):
     from backend.services import upload_service
 
@@ -313,7 +397,7 @@ def test_do_extract_metadata_respects_normalized_parse_status(monkeypatch, tmp_p
         lambda _pid: {
             "pid": _pid,
             "owner": "alice",
-            "parse_status": "",
+            "parse_status": "ok",
             "meta_extracted_ok": False,
         },
     )
@@ -332,7 +416,7 @@ def test_do_extract_metadata_respects_normalized_parse_status(monkeypatch, tmp_p
     monkeypatch.setattr(
         upload_service.UploadedPaperRepository,
         "update",
-        lambda _pid, payload: updates.append(payload),
+        lambda _pid, payload: updates.append(payload) or True,
     )
 
     class DummySummarizer:
@@ -375,8 +459,327 @@ def test_get_uploaded_papers_list_uses_normalized_parse_status(monkeypatch):
 
     from backend.services import summary_service
 
-    monkeypatch.setattr(summary_service, "get_summary_status", lambda _pid: ("", ""))
+    monkeypatch.setattr(summary_service, "get_summary_render_snapshots", lambda _pids: {})
 
     items = upload_service.get_uploaded_papers_list("alice")
 
     assert items[0]["parse_status"] == "ok"
+
+
+def test_get_uploaded_papers_list_hides_stale_task_ids(monkeypatch):
+    from backend.services import summary_service, upload_service
+
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "get_by_owner",
+        lambda _user: {
+            "up_listtasks001": {
+                "original_filename": "paper.pdf",
+                "parse_status": "running",
+                "parse_error": "",
+                "parse_task_id": "task_parse_active",
+                "extract_task_id": "task_extract_stale",
+                "summary_task_id": "task_summary_terminal",
+                "meta_extracted": {},
+                "meta_override": {},
+            }
+        },
+    )
+    monkeypatch.setattr(upload_service.TagRepository, "get_user_tags", lambda _user: {})
+    monkeypatch.setattr(upload_service.NegativeTagRepository, "get_user_neg_tags", lambda _user: {})
+    monkeypatch.setattr(
+        upload_service,
+        "_normalize_upload_parse_status",
+        lambda _pid, _record: ("running", ""),
+    )
+    monkeypatch.setattr(summary_service, "get_summary_render_snapshots", lambda _pids: {})
+
+    repairs = []
+
+    def _fake_classify(task_id):
+        task_id = str(task_id or "")
+        if task_id == "task_parse_active":
+            return (
+                "active",
+                task_id,
+                {
+                    "status": "running",
+                    "model": upload_service.UPLOAD_TASK_MODEL_PROCESS,
+                },
+            )
+        if task_id == "task_extract_stale":
+            return (
+                "stale",
+                task_id,
+                {
+                    "status": "running",
+                    "model": upload_service.UPLOAD_TASK_MODEL_EXTRACT,
+                },
+            )
+        if task_id == "task_summary_terminal":
+            return ("terminal", task_id, {"status": "failed", "model": "gpt-5.4"})
+        return ("missing", task_id, None)
+
+    monkeypatch.setattr(upload_service, "_classify_upload_task", _fake_classify)
+    monkeypatch.setattr(
+        upload_service,
+        "_repair_upload_task_status",
+        lambda task_id, **kwargs: repairs.append((task_id, kwargs["pid"], kwargs["user"])),
+    )
+
+    items = upload_service.get_uploaded_papers_list("alice")
+
+    assert items[0]["parse_task_id"] == "task_parse_active"
+    assert items[0]["extract_task_id"] == ""
+    assert items[0]["summary_task_id"] == ""
+    assert repairs == [("task_extract_stale", "up_listtasks001", "alice")]
+
+
+def test_get_uploaded_papers_list_recovers_missing_parse_task_pointer(monkeypatch):
+    from backend.services import summary_service, upload_service
+
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "get_by_owner",
+        lambda _user: {
+            "up_listtasks002": {
+                "pid": "up_listtasks002",
+                "owner": "alice",
+                "original_filename": "paper.pdf",
+                "parse_status": "queued",
+                "parse_error": "",
+                "parse_task_id": None,
+                "meta_extracted": {},
+                "meta_override": {},
+                "updated_time": 50.0,
+            }
+        },
+    )
+    monkeypatch.setattr(upload_service.TagRepository, "get_user_tags", lambda _user: {})
+    monkeypatch.setattr(upload_service.NegativeTagRepository, "get_user_neg_tags", lambda _user: {})
+    monkeypatch.setattr(summary_service, "get_summary_render_snapshots", lambda _pids: {})
+    monkeypatch.setattr(upload_service.time, "time", lambda: 80.0)
+    monkeypatch.setattr(
+        upload_service,
+        "_classify_upload_task",
+        lambda _task_id: ("missing", "", None),
+    )
+    monkeypatch.setattr(
+        upload_service,
+        "_find_active_upload_task_for_record",
+        lambda _pid, _user, record_field: (
+            (
+                "task_parse_recovered",
+                {
+                    "status": "queued",
+                    "model": upload_service.UPLOAD_TASK_MODEL_PROCESS,
+                    "updated_time": 79.0,
+                },
+            )
+            if record_field == "parse_task_id"
+            else ("", None)
+        ),
+    )
+
+    updates = []
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "update",
+        lambda _pid, patch: updates.append(dict(patch)) or True,
+    )
+
+    items = upload_service.get_uploaded_papers_list("alice")
+
+    assert items[0]["parse_status"] == "queued"
+    assert items[0]["parse_task_id"] == "task_parse_recovered"
+    assert updates == [{"parse_task_id": "task_parse_recovered"}]
+
+
+def test_get_uploaded_papers_list_clears_summary_state_while_parse_pending(monkeypatch):
+    from backend.services import summary_service, upload_service
+
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "get_by_owner",
+        lambda _user: {
+            "up_listsummary001": {
+                "original_filename": "paper.pdf",
+                "parse_status": "queued",
+                "parse_error": "",
+                "parse_task_id": "task_parse_active",
+                "summary_task_id": "task_summary_active",
+                "meta_extracted": {},
+                "meta_override": {},
+            }
+        },
+    )
+    monkeypatch.setattr(upload_service.TagRepository, "get_user_tags", lambda _user: {})
+    monkeypatch.setattr(upload_service.NegativeTagRepository, "get_user_neg_tags", lambda _user: {})
+    monkeypatch.setattr(
+        upload_service,
+        "_normalize_upload_parse_status",
+        lambda _pid, _record: ("queued", ""),
+    )
+    monkeypatch.setattr(summary_service, "get_summary_render_snapshots", lambda _pids: {})
+    monkeypatch.setattr(
+        upload_service,
+        "_classify_upload_task",
+        lambda task_id: (
+            "active",
+            str(task_id or ""),
+            {"status": "running", "model": upload_service.UPLOAD_TASK_MODEL_PROCESS},
+        ),
+    )
+
+    items = upload_service.get_uploaded_papers_list("alice")
+
+    assert items[0]["parse_status"] == "queued"
+    assert items[0]["summary_status"] == ""
+    assert items[0]["summary_last_error"] == ""
+    assert items[0]["summary_task_id"] == ""
+
+
+def test_get_uploaded_papers_list_reuses_task_snapshot_and_tag_reverse_index(
+    monkeypatch,
+):
+    from backend.services import upload_service
+
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "get_by_owner",
+        lambda _user: {
+            "up_batch001": {
+                "pid": "up_batch001",
+                "owner": "alice",
+                "original_filename": "one.pdf",
+                "parse_status": "queued",
+                "parse_error": "",
+                "parse_task_id": "task_batch_parse_1",
+                "meta_extracted": {},
+                "meta_override": {},
+                "created_time": 10,
+            },
+            "up_batch002": {
+                "pid": "up_batch002",
+                "owner": "alice",
+                "original_filename": "two.pdf",
+                "parse_status": "queued",
+                "parse_error": "",
+                "parse_task_id": "task_batch_parse_2",
+                "meta_extracted": {},
+                "meta_override": {},
+                "created_time": 20,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        upload_service.TagRepository,
+        "get_user_tags",
+        lambda _user: {
+            "alpha": {"up_batch001", "up_batch002"},
+            "beta": {"up_batch002"},
+        },
+    )
+    monkeypatch.setattr(
+        upload_service.NegativeTagRepository,
+        "get_user_neg_tags",
+        lambda _user: {"neg": {"up_batch001"}},
+    )
+
+    scan_calls = {"count": 0}
+    fallback_calls = {"count": 0}
+
+    def _fake_items_with_prefix(prefix):
+        assert prefix == "task::"
+        scan_calls["count"] += 1
+        return [
+            (
+                "task::task_batch_parse_1",
+                {
+                    "pid": "up_batch001",
+                    "user": "alice",
+                    "model": upload_service.UPLOAD_TASK_MODEL_PARSE,
+                    "status": "queued",
+                    "updated_time": 100.0,
+                },
+            ),
+            (
+                "task::task_batch_parse_2",
+                {
+                    "pid": "up_batch002",
+                    "user": "alice",
+                    "model": upload_service.UPLOAD_TASK_MODEL_PROCESS,
+                    "status": "running",
+                    "updated_time": 101.0,
+                },
+            ),
+        ]
+
+    monkeypatch.setattr(
+        upload_service.SummaryStatusRepository,
+        "get_items_with_prefix",
+        _fake_items_with_prefix,
+    )
+
+    def _fake_get_task_status(_task_id):
+        fallback_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(upload_service.SummaryStatusRepository, "get_task_status", _fake_get_task_status)
+
+    items = upload_service.get_uploaded_papers_list("alice")
+
+    assert scan_calls["count"] == 1
+    assert fallback_calls["count"] == 0
+    assert [item["id"] for item in items] == ["up_batch002", "up_batch001"]
+    assert items[0]["utags"] == ["alpha", "beta"]
+    assert items[0]["ntags"] == []
+    assert items[1]["utags"] == ["alpha"]
+    assert items[1]["ntags"] == ["neg"]
+    assert items[0]["parse_task_id"] == "task_batch_parse_2"
+    assert items[1]["parse_task_id"] == "task_batch_parse_1"
+
+
+def test_get_uploaded_papers_list_uses_summary_snapshots_for_parse_ok(monkeypatch):
+    from backend.services import summary_service, upload_service
+
+    monkeypatch.setattr(
+        upload_service.UploadedPaperRepository,
+        "get_by_owner",
+        lambda _user: {
+            "up_summary001": {
+                "pid": "up_summary001",
+                "owner": "alice",
+                "original_filename": "paper.pdf",
+                "parse_status": "ok",
+                "parse_error": "",
+                "summary_task_id": "task_summary_active",
+                "meta_extracted": {},
+                "meta_override": {},
+            }
+        },
+    )
+    monkeypatch.setattr(upload_service.TagRepository, "get_user_tags", lambda _user: {})
+    monkeypatch.setattr(upload_service.NegativeTagRepository, "get_user_neg_tags", lambda _user: {})
+    monkeypatch.setattr(
+        upload_service,
+        "_normalize_upload_parse_status",
+        lambda _pid, _record: ("ok", ""),
+    )
+    monkeypatch.setattr(
+        summary_service,
+        "get_summary_render_snapshots",
+        lambda pids: {pid: {"status": "ok", "last_error": None, "tldr": "Snapshot TLDR"} for pid in pids},
+    )
+    monkeypatch.setattr(
+        upload_service,
+        "_classify_upload_task",
+        lambda task_id: ("active", str(task_id or ""), {"status": "running"}),
+    )
+
+    items = upload_service.get_uploaded_papers_list("alice")
+
+    assert items[0]["summary_status"] == "ok"
+    assert items[0]["summary_last_error"] == ""
+    assert items[0]["tldr"] == "Snapshot TLDR"
+    assert items[0]["summary_task_id"] == "task_summary_active"

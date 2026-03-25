@@ -150,13 +150,37 @@ class TestPageRoutes:
 
     def test_inspect_page_with_pid(self, client):
         """Test that inspect page with pid parameter returns 200."""
-        resp = client.get("/inspect?pid=2301.00001")
+        resp = client.get("/inspect?pid=2301.00001", follow_redirects=True)
         assert resp.status_code == 200
 
     def test_summary_page_with_pid(self, client):
         """Test that summary page with pid parameter returns 200."""
-        resp = client.get("/summary?pid=2301.00001")
+        resp = client.get("/summary?pid=2301.00001", follow_redirects=True)
         assert resp.status_code == 200
+
+    def test_summary_page_redirects_to_canonical_version(self, client, monkeypatch):
+        from backend import legacy
+
+        monkeypatch.setattr(legacy.os.path, "exists", lambda _path: True)
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2")
+
+        resp = client.get("/summary?pid=2301.00001")
+
+        assert resp.status_code == 302
+        assert resp.headers.get("Location", "").endswith("/summary?pid=2301.00001v2")
+
+    def test_inspect_page_redirects_to_canonical_version(self, client, monkeypatch):
+        from backend import legacy
+
+        monkeypatch.setattr(legacy.os.path, "exists", lambda _path: True)
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2")
+
+        resp = client.get("/inspect?pid=2301.00001")
+
+        assert resp.status_code == 302
+        assert resp.headers.get("Location", "").endswith("/inspect?pid=2301.00001v2")
 
     def test_summary_page_upload_pid_anonymous_no_leak(self, client):
         """Anonymous users should not learn whether an uploaded PID exists."""
@@ -223,3 +247,49 @@ class TestCacheStatusEndpoint:
         assert "features" in payload
         assert "papers_and_metas" in payload
         assert "backend_services" in payload
+
+
+class TestApiErrorResponses:
+    """Tests for JSON error payloads on API routes."""
+
+    def test_missing_non_api_route_returns_html_even_with_json_accept(self, client):
+        resp = client.get(
+            "/does_not_exist",
+            headers={"Accept": "application/json"},
+        )
+        assert resp.status_code == 404
+        assert resp.mimetype == "text/html"
+
+    def test_missing_api_route_returns_json_404(self, client):
+        resp = client.get("/api/does_not_exist")
+        assert resp.status_code == 404
+        assert resp.mimetype == "application/json"
+
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Not Found"
+
+    def test_method_not_allowed_api_route_preserves_allow_header(self, client):
+        resp = client.get("/api/upload_pdf")
+        assert resp.status_code == 405
+        assert resp.mimetype == "application/json"
+        assert "POST" in (resp.headers.get("Allow") or "")
+
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Method Not Allowed"
+
+    def test_api_route_returns_json_500_payload(self, client, app, monkeypatch):
+        monkeypatch.setitem(app.config, "PROPAGATE_EXCEPTIONS", False)
+        monkeypatch.setattr(
+            "backend.blueprints.api_search.legacy.api_keyword_search",
+            lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post("/api/keyword_search", json={"keyword": "test"})
+        assert resp.status_code == 500
+        assert resp.mimetype == "application/json"
+
+        payload = resp.get_json(silent=True) or {}
+        assert payload.get("success") is False
+        assert payload.get("error") == "Server error"

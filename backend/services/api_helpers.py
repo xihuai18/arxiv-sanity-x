@@ -41,7 +41,11 @@ def parse_api_request(
     if require_csrf and csrf_protect_fn:
         csrf_protect_fn()
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if data is None:
+        return None, api_error("No JSON data provided", 400)
+    if not isinstance(data, dict):
+        return None, api_error("Request body must be a JSON object", 400)
     if not data:
         return None, api_error("No JSON data provided", 400)
 

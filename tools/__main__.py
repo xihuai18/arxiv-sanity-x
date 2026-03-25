@@ -20,6 +20,7 @@ _COMMANDS: dict[str, str] = {
     "send_emails": "tools.send_emails",
     "daemon": "tools.daemon",
     "rebuild_time_index": "tools.rebuild_time_index",
+    "repair_paper_history": "tools.repair_paper_history",
 }
 
 

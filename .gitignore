@@ -60,19 +60,19 @@ static/dist/
 static/test_mathjax.html
 
 
-# Claude
-.claude/
-
 # Local files
 designs/
 .skills/
 
 
-# Droids
-.factory/
-
 tmp/
 
 .playwright-cli/
 
-.opencode/
+.opencode/*
+!.opencode/skills/
+!.opencode/skills/**
+.opencode/skills/**/__pycache__/
+.opencode/skills/**/*.pyc
+.opencode/skills/**/.DS_Store
+.opencode/skills/**/.env*.local

@@ -78,7 +78,9 @@ class TestSummaryStatusApi:
 
         monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
         monkeypatch.setattr(
-            legacy, "get_summary_status", lambda _pid, _model=None: ("failed", "secret failure details")
+            legacy,
+            "get_summary_status",
+            lambda _pid, _model=None: ("failed", "secret failure details"),
         )
         monkeypatch.setattr(
             legacy.SummaryStatusRepository,
@@ -129,7 +131,14 @@ class TestSummaryStatusApi:
         monkeypatch.setattr(
             legacy,
             "summary_cache_paths",
-            lambda _pid, _model: (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock),
+            lambda _pid, _model: (
+                cache_file,
+                meta_file,
+                lock_file,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            ),
         )
 
         resp = client.post(
@@ -164,7 +173,14 @@ class TestSummaryStatusApi:
         monkeypatch.setattr(
             legacy,
             "summary_cache_paths",
-            lambda _pid, _model: (cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock),
+            lambda _pid, _model: (
+                cache_file,
+                meta_file,
+                lock_file,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            ),
         )
 
         class _FakeDB:
@@ -213,7 +229,14 @@ class TestSummaryStatusApi:
             legacy_cache = tmp_path / f"{_pid}.md"
             legacy_meta = tmp_path / f"{_pid}.meta.json"
             legacy_lock = tmp_path / f".{_pid}.lock"
-            return model_cache, model_meta, model_lock, legacy_cache, legacy_meta, legacy_lock
+            return (
+                model_cache,
+                model_meta,
+                model_lock,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            )
 
         monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
         monkeypatch.setattr(legacy, "summary_cache_paths", _paths)
@@ -226,7 +249,14 @@ class TestSummaryStatusApi:
                 return False
 
             def get_many(self, keys):
-                return {k: {"status": "ok", "last_error": None, "resolved_model": resolved_model} for k in keys}
+                return {
+                    k: {
+                        "status": "ok",
+                        "last_error": None,
+                        "resolved_model": resolved_model,
+                    }
+                    for k in keys
+                }
 
         monkeypatch.setattr(legacy, "get_summary_status_db", lambda *args, **kwargs: _FakeDB())
 
@@ -240,6 +270,97 @@ class TestSummaryStatusApi:
         assert data.get("success") is True
         info = (data.get("statuses") or {}).get(pid) or {}
         assert info.get("status") == "ok"
+        assert info.get("resolved_model") == resolved_model
+
+    def test_summary_status_upload_pending_is_not_reported_as_not_found(
+        self, logged_in_client, csrf_token, monkeypatch
+    ):
+        from backend import legacy
+
+        monkeypatch.setattr(
+            legacy.MetaRepository,
+            "get_by_ids",
+            staticmethod(lambda _pids: {}),
+        )
+
+        monkeypatch.setattr(
+            "aslite.repositories.UploadedPaperRepository.get_by_owner_for_pids",
+            lambda _owner, _pids: {
+                "up_pending001": {
+                    "owner": "test_user",
+                    "parse_status": "queued",
+                    "parse_error": "",
+                }
+            },
+        )
+
+        resp = logged_in_client.post(
+            "/api/summary_status",
+            json={"pids": ["up_pending001"], "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        info = (data.get("statuses") or {}).get("up_pending001") or {}
+        assert info.get("status") == "queued"
+        assert info.get("status") != "not_found"
+
+    def test_summary_status_falls_back_for_batch_meta_partial_miss(self, client, csrf_token, monkeypatch):
+        from backend import legacy
+
+        monkeypatch.setattr(
+            legacy.MetaRepository,
+            "get_by_ids",
+            staticmethod(lambda _pids: {"2301.00001": {"_time": 1}}),
+        )
+        monkeypatch.setattr(
+            legacy,
+            "paper_exists",
+            lambda pid: pid in {"2301.00001", "2301.00002"},
+        )
+
+        resp = client.post(
+            "/api/summary_status",
+            json={"pids": ["2301.00001", "2301.00002"], "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        statuses = data.get("statuses") or {}
+        assert (statuses.get("2301.00002") or {}).get("status") != "not_found"
+
+    def test_summary_status_falls_back_when_upload_batch_lookup_fails(self, logged_in_client, csrf_token, monkeypatch):
+        from backend import legacy
+
+        monkeypatch.setattr(
+            legacy.MetaRepository,
+            "get_by_ids",
+            staticmethod(lambda _pids: {}),
+        )
+        monkeypatch.setattr(
+            "aslite.repositories.UploadedPaperRepository.get_by_owner_for_pids",
+            lambda _owner, _pids: (_ for _ in ()).throw(RuntimeError("db busy")),
+        )
+        monkeypatch.setattr(
+            "aslite.repositories.UploadedPaperRepository.get",
+            lambda _pid: {
+                "owner": "test_user",
+                "parse_status": "queued",
+                "parse_error": "",
+            },
+        )
+
+        resp = logged_in_client.post(
+            "/api/summary_status",
+            json={"pids": ["up_pending001"], "model": "test-model"},
+            headers={"X-CSRF-Token": csrf_token},
+        )
+
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        info = (data.get("statuses") or {}).get("up_pending001") or {}
+        assert info.get("status") == "queued"
 
 
 class TestSummaryGetApi:
@@ -255,6 +376,8 @@ class TestSummaryGetApi:
         from backend import legacy
 
         captured = {}
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
 
         def _fake_generate(pid, model=None, force_refresh=False, cache_only=False):
             captured["pid"] = pid
@@ -298,8 +421,16 @@ class TestSummaryTldrApi:
 
         # Avoid depending on a real papers.db in CI.
         monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
-        monkeypatch.setattr(services.summary_service, "get_summary_status", lambda _pid, model=None: ("ok", None))
-        monkeypatch.setattr(services.summary_service, "extract_tldr_from_summary", lambda _pid: "Hello TL;DR")
+        monkeypatch.setattr(
+            services.summary_service,
+            "get_summary_status",
+            lambda _pid, model=None: ("ok", None),
+        )
+        monkeypatch.setattr(
+            services.summary_service,
+            "extract_tldr_from_summary",
+            lambda _pid: "Hello TL;DR",
+        )
 
         resp = client.post(
             "/api/get_paper_tldr",
@@ -326,9 +457,12 @@ class TestSummaryTriggerApi:
         self, logged_in_client, csrf_token, monkeypatch
     ):
         """P0: trigger_paper_summary supports force_regenerate and forwards to enqueue(force_refresh)."""
+        from backend import legacy
         from backend.services import readinglist_service
 
         captured = {}
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
 
         def _fake_enqueue(pid, model=None, user=None, priority=None, force_refresh=False):
             captured["pid"] = pid
@@ -354,9 +488,12 @@ class TestSummaryTriggerApi:
 
     def test_trigger_paper_summary_force_alias_passes_force_refresh(self, logged_in_client, csrf_token, monkeypatch):
         """Backward compatibility: trigger_paper_summary supports legacy `force` flag."""
+        from backend import legacy
         from backend.services import readinglist_service
 
         captured = {}
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
 
         def _fake_enqueue(pid, model=None, user=None, priority=None, force_refresh=False):
             captured["pid"] = pid
@@ -460,8 +597,12 @@ class TestClearModelSummaryApi:
         )
         assert resp.status_code == 400
 
-    def test_clear_model_summary_missing_model_returns_400(self, logged_in_client, csrf_token):
+    def test_clear_model_summary_missing_model_returns_400(self, logged_in_client, csrf_token, monkeypatch):
         """Test that missing model returns 400."""
+        from backend import legacy
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+
         resp = logged_in_client.post(
             "/api/clear_model_summary",
             json={"pid": "2301.00001"},
@@ -502,8 +643,12 @@ class TestClearPaperCacheApi:
 class TestCheckPaperSummariesApi:
     """Tests for check paper summaries API."""
 
-    def test_check_paper_summaries_returns_success(self, client):
+    def test_check_paper_summaries_returns_success(self, client, monkeypatch):
         """Test that check_paper_summaries returns success structure."""
+        from backend import legacy
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+
         resp = client.get("/api/check_paper_summaries", query_string={"pid": "2301.00001"})
         assert resp.status_code == 200
 

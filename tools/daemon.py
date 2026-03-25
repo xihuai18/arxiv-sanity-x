@@ -11,10 +11,16 @@ import subprocess as _real_subprocess
 import sys
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import holidays
 from apscheduler.schedulers.blocking import BlockingScheduler
 from loguru import logger
+
+try:
+    from holidays import UnitedStates as _UnitedStatesHolidays
+except Exception:  # pragma: no cover - compatibility fallback
+    _UnitedStatesHolidays = None
 
 # Get project root (parent of tools/ directory)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +46,22 @@ def _daemon_cfg():
 
 def _subprocess_timeout_s() -> int:
     return int(getattr(_daemon_cfg(), "subprocess_timeout_s", 7200) or 7200)
+
+
+def _us_holidays():
+    if _UnitedStatesHolidays is not None:
+        return _UnitedStatesHolidays()
+    return getattr(holidays, "UnitedStates")()
+
+
+def _now_in_daemon_timezone() -> datetime.datetime:
+    tz_name = str(getattr(settings.daemon, "timezone", "") or "").strip()
+    if tz_name:
+        try:
+            return datetime.datetime.now(ZoneInfo(tz_name))
+        except Exception:
+            logger.warning(f"Invalid daemon timezone '{tz_name}', falling back to local time")
+    return datetime.datetime.now().astimezone()
 
 
 _LAST_RUN_REASON: dict[str, str] = {}
@@ -287,12 +309,13 @@ def _get_email_time_delta() -> float:
     Calculate the time_delta that will be used for email recommendations.
     Matches the logic in send_email() to ensure priority papers align with email content.
     """
-    us_holidays = holidays.UnitedStates()
-    now = datetime.datetime.now()
+    us_holidays = _us_holidays()
+    now = _now_in_daemon_timezone()
+    today = now.date()
     weekday_int = now.weekday() + 1  # 1=Monday, 7=Sunday
 
-    # Base: 4 days for Mon/Tue (covers weekend), 2 days otherwise
-    time_delta = 4.0 if weekday_int in [1, 2] else 2.0
+    # Base: 4 days for Monday (covers weekend), 2 days otherwise.
+    time_delta = 4.0 if weekday_int == 1 else 2.0
 
     # Add holiday duration if today is post-holiday (same logic as send_email)
     def is_post_holiday(date):
@@ -306,8 +329,8 @@ def _get_email_time_delta() -> float:
             current_date -= datetime.timedelta(days=1)
         return duration
 
-    if is_post_holiday(now):
-        time_delta += count_holiday_duration(now)
+    if is_post_holiday(today):
+        time_delta += count_holiday_duration(today)
 
     return time_delta
 
@@ -408,7 +431,7 @@ def fetch_compute():
 
 
 def send_email():
-    us_holidays = holidays.UnitedStates()
+    us_holidays = _us_holidays()
 
     def is_post_holiday(date):
         # Check if today is the first day after a holiday
@@ -425,14 +448,9 @@ def send_email():
             current_date -= datetime.timedelta(days=1)
         return duration
 
-    now = datetime.datetime.now()
-    weekday_int = now.weekday() + 1
     logger.info("[pipeline] send_email started")
-
-    time_param = "2" if weekday_int not in [1, 2] else "4"
-    if is_post_holiday(now):
-        holiday_duration = count_holiday_duration(now)
-        time_param = str(float(time_param) + holiday_duration)
+    time_delta = float(_get_email_time_delta())
+    time_param = str(int(time_delta)) if time_delta.is_integer() else str(time_delta)
 
     t0 = time.time()
     try:
@@ -446,7 +464,7 @@ def send_email():
             ],
             timeout=_subprocess_timeout_s(),
         )
-        if rc not in (0, 1):
+        if rc != 0:
             logger.warning(f"[pipeline] send_email: returned code {rc}")
     except _real_subprocess.TimeoutExpired:
         logger.warning(f"[pipeline] send_email: timed out after {_subprocess_timeout_s()}s")

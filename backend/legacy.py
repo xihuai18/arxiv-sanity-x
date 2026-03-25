@@ -40,6 +40,7 @@ from flask import (  # global session-level object
     redirect,
     render_template,
     request,
+    session,
     stream_with_context,
     url_for,
 )
@@ -99,13 +100,13 @@ from .schemas.summary import (
 )
 from .schemas.tags import PaperTitlesRequest, TagFeedbackBulkRequest, TagFeedbackRequest
 from .services.search_service import apply_limit as _apply_limit
-from .services.summary_service import SummaryCacheMiss
+from .services.summary_service import SummaryCacheMiss, _repair_stale_summary_state
 from .services.summary_service import clear_model_summary as _clear_model_summary_impl
 from .services.summary_service import clear_paper_cache as _clear_paper_cache_impl
 from .services.summary_service import (
     get_summary_cache_stats as _get_summary_cache_stats,
 )
-from .services.summary_service import get_summary_status
+from .services.summary_service import get_summary_status, has_active_summary_lock
 from .utils.cache import LRUCacheTTL as _LRUCacheTTL
 from .utils.sse import register_user_stream as _register_user_stream
 from .utils.sse import (
@@ -352,8 +353,10 @@ def _parse_api_request(
     Returns (data, error_response) tuple. If error_response is not None, return it immediately.
     """
     data = request.get_json(silent=True)
-    if not data:
+    if data is None:
         data = {}
+    elif not isinstance(data, dict):
+        return None, _api_error("Request body must be a JSON object", 400)
 
     machine_authed = False
 
@@ -573,22 +576,19 @@ def get_keys() -> Any:
 def _build_user_tag_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_tag_list
 
-    rtags = build_user_tag_list()
-    return sorted(rtags, key=lambda item: item["name"])
+    return sorted(build_user_tag_list(), key=lambda item: item["name"])
 
 
 def _build_user_key_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_key_list
 
-    rkeys = build_user_key_list()
-    return sorted(rkeys, key=lambda item: item["name"])
+    return sorted(build_user_key_list(), key=lambda item: item["name"])
 
 
 def _build_user_combined_tag_list() -> list[dict[str, Any]]:
     from backend.services.user_service import build_user_combined_tag_list
 
-    rctags = build_user_combined_tag_list()
-    return sorted(rctags, key=lambda item: item["name"])
+    return sorted(build_user_combined_tag_list(), key=lambda item: item["name"])
 
 
 # -----------------------------------------------------------------------------
@@ -643,7 +643,9 @@ def paper_exists(pid: str) -> bool:
         record = UploadedPaperRepository.get(pid)
         if not record or record.get("owner") != g.user:
             return False
-        return record.get("parse_status") == "ok"
+        if record.get("deleting") is True:
+            return False
+        return True
 
     from backend.services.data_service import get_meta as _get_meta
 
@@ -776,6 +778,7 @@ def render_pid(
     pid_to_ntags=None,
     paper=None,
     *,
+    summary_snapshot=None,
     include_tldr: bool = True,
     include_summary_status: bool = True,
 ) -> ResponseReturnValue:
@@ -786,6 +789,7 @@ def render_pid(
         pid,
         pid_to_utags=pid_to_utags,
         pid_to_ntags=pid_to_ntags,
+        summary_snapshot=summary_snapshot,
         paper=paper,
         get_paper_fn=get_paper,
         get_tags_fn=get_tags,
@@ -793,6 +797,19 @@ def render_pid(
         include_tldr=include_tldr,
         include_summary_status=include_summary_status,
     )
+
+
+def _get_canonical_public_pid(raw_pid: str, paper: dict | None = None) -> str:
+    """Return the public-facing PID, preferring the last non-withdrawn version."""
+
+    raw_pid = (raw_pid or "").strip()
+    if not raw_pid:
+        return ""
+    data = paper if isinstance(paper, dict) else get_paper(raw_pid)
+    if not isinstance(data, dict):
+        return raw_pid
+    canonical_pid = str(data.get("_effective_idv") or data.get("_idv") or raw_pid).strip()
+    return canonical_pid or raw_pid
 
 
 # _apply_limit is imported from search_service
@@ -1283,8 +1300,9 @@ def main() -> ResponseReturnValue:
             tnow = time.time()
             pids_with_time = [(pid, (mdb.get(pid) or {}).get("_time", 0)) for pid in search_pids if pid in mdb]
             pids_with_time.sort(key=lambda x: x[1], reverse=True)
-            pids = [p[0] for p in pids_with_time][:dynamic_limit]
-            scores = [(tnow - (mdb.get(pid) or {}).get("_time", tnow)) / 60 / 60 / 24 for pid in pids]
+            limited = pids_with_time[:dynamic_limit]
+            pids = [pid for pid, _paper_time in limited]
+            scores = [(tnow - paper_time) / 60 / 60 / 24 for _pid, paper_time in limited]
             logger.debug(f"User {g.user} time rank with search '{opt_q}', time {time.time() - t_s:.3f}s")
         else:
             pids, scores = time_rank(limit=dynamic_limit)
@@ -1296,11 +1314,30 @@ def main() -> ResponseReturnValue:
     else:
         raise ValueError(f"opt_rank {opt_rank} is not a thing")
 
+    user_tags = {}
+    user_neg_tags = {}
+    all_user_tagged_pids = None
+    if g.user:
+        try:
+            user_tags = get_tags() or {}
+            user_neg_tags = get_neg_tags() or {}
+        except Exception:
+            user_tags = {}
+            user_neg_tags = {}
+
+    def _get_all_user_tagged_pids() -> set[str]:
+        nonlocal all_user_tagged_pids
+        if all_user_tagged_pids is None:
+            all_user_tagged_pids = set()
+            for tag_pids in user_tags.values():
+                all_user_tagged_pids.update(tag_pids)
+            for tag_pids in user_neg_tags.values():
+                all_user_tagged_pids.update(tag_pids)
+        return all_user_tagged_pids
+
     # For tag-based recommendations, exclude both positive and negative samples for the requested tags
     if opt_rank == "tags" and g.user:
         try:
-            user_tags = get_tags()
-            user_neg_tags = get_neg_tags()
             if opt_tags:
                 if opt_tags == "all":
                     tag_list = list(set(user_tags.keys()) | set(user_neg_tags.keys()))
@@ -1321,26 +1358,13 @@ def main() -> ResponseReturnValue:
 
     # filter by time (now handled within svm_rank for SVM-based rankings)
     if opt_time_filter and opt_rank not in ["tags", "pid"]:
-        # Collect user tagged papers for intelligent time filtering
-        user_tagged_pids = set()
-        tags = get_tags()
-        neg_tags = get_neg_tags()
-        for tag_pids in tags.values():
-            user_tagged_pids.update(tag_pids)
-        for tag_pids in neg_tags.values():
-            user_tagged_pids.update(tag_pids)
-
         # Use intelligent time filtering
-        pids, time_valid_indices = _filter_by_time_with_tags(pids, opt_time_filter, user_tagged_pids)
+        pids, time_valid_indices = _filter_by_time_with_tags(pids, opt_time_filter, _get_all_user_tagged_pids())
         scores = [scores[i] for i in time_valid_indices]
 
     # optionally hide papers we already have
     if opt_skip_have == "yes":
-        tags = get_tags()
-        have = set().union(*tags.values()) if tags else set()
-        neg_tags = get_neg_tags()
-        if neg_tags:
-            have.update(*neg_tags.values())
+        have = _get_all_user_tagged_pids()
         keep = [i for i, pid in enumerate(pids) if pid not in have]
         pids, scores = [pids[i] for i in keep], [scores[i] for i in keep]
 
@@ -1364,27 +1388,25 @@ def main() -> ResponseReturnValue:
     pid_to_ntags = None
     if g.user:
         try:
-            user_tags = get_tags()
-            user_neg_tags = get_neg_tags()
+            from backend.services.user_service import build_pid_tag_reverse_index
+
             pid_set = set(pids)
-            pid_to_utags = {pid: [] for pid in pid_set}
-            pid_to_ntags = {pid: [] for pid in pid_set}
-            for tag, tag_pids in user_tags.items():
-                for pid in pid_set.intersection(tag_pids):
-                    pid_to_utags[pid].append(tag)
-            for tag, tag_pids in user_neg_tags.items():
-                for pid in pid_set.intersection(tag_pids):
-                    pid_to_ntags[pid].append(tag)
+            pid_to_utags = build_pid_tag_reverse_index(user_tags, candidate_pids=pid_set)
+            pid_to_ntags = build_pid_tag_reverse_index(user_neg_tags, candidate_pids=pid_set)
         except Exception:
             pid_to_utags = None
             pid_to_ntags = None
 
     pid_to_paper = get_papers_bulk(pids)
+    from backend.services.summary_service import get_summary_render_snapshots
+
+    summary_snapshots = get_summary_render_snapshots(pids) if pids else {}
     papers = [
         render_pid(
             pid,
             pid_to_utags=pid_to_utags,
             pid_to_ntags=pid_to_ntags,
+            summary_snapshot=summary_snapshots.get(pid),
             paper=pid_to_paper.get(pid),
         )
         for pid in pids
@@ -1415,9 +1437,9 @@ def main() -> ResponseReturnValue:
     context["papers"] = papers
     context["words"] = words
 
-    context["tags"] = sorted(rtags, key=lambda item: item["name"])
-    context["keys"] = sorted(rkeys, key=lambda item: item["name"])
-    context["combined_tags"] = sorted(rctags, key=lambda item: item["name"])
+    context["tags"] = rtags
+    context["keys"] = rkeys
+    context["combined_tags"] = rctags
 
     # test keys
     # context["keys"] = [
@@ -1458,6 +1480,7 @@ def api_user_state() -> ResponseReturnValue:
         return _api_error("Not logged in", 401)
     try:
         result = _api_success(
+            user=g.user,
             tags=_build_user_tag_list(),
             keys=_build_user_key_list(),
             combined_tags=_build_user_combined_tag_list(),
@@ -1579,12 +1602,18 @@ def inspect() -> ResponseReturnValue:
     if not os.path.exists(PAPERS_DB_FILE):
         return "<h1>Error</h1><p>papers.db not found.</p>", 200
 
-    if not paper_exists(pid):
+    raw_pid, _version = split_pid_version(pid)
+
+    if not paper_exists(raw_pid):
         safe_pid = escape(pid or "")
         return (
             f"<h1>Error</h1><p>Paper with ID '{safe_pid}' not found in database.</p>",
             404,
         )
+
+    canonical_pid = _get_canonical_public_pid(raw_pid)
+    if canonical_pid and pid != canonical_pid:
+        return redirect(url_for("web.inspect", pid=canonical_pid), code=302)
 
     # Use intelligent cache to load features
     features = get_features_cached()  # Replace: features = load_features()
@@ -1592,12 +1621,14 @@ def inspect() -> ResponseReturnValue:
     # Use original TF-IDF matrix for inspect (if exists)
     x = features.get("x_tfidf", features["x"])
     idf = features["idf"]
-    ivocab = {v: k for k, v in features["vocab"].items()}
+    ivocab = features.get("ivocab")
+    if not isinstance(ivocab, dict):
+        ivocab = {v: k for k, v in features["vocab"].items()}
     pid_to_index = features.get("pid_to_index")
-    if isinstance(pid_to_index, dict) and pid in pid_to_index:
-        pix = pid_to_index[pid]
+    if isinstance(pid_to_index, dict) and raw_pid in pid_to_index:
+        pix = pid_to_index[raw_pid]
     else:
-        pix = features["pids"].index(pid)
+        pix = features["pids"].index(raw_pid)
     wixs = np.flatnonzero(np.asarray(x[pix].todense()))
     words = []
     for ix in wixs:
@@ -1612,7 +1643,7 @@ def inspect() -> ResponseReturnValue:
 
     # package everything up and render
     # Inspect page doesn't need TL;DR or summary status; skip extra disk/DB lookups.
-    paper = render_pid(pid, include_tldr=False, include_summary_status=False)
+    paper = render_pid(raw_pid, include_tldr=False, include_summary_status=False)
     context = default_context()
     context["paper"] = paper
     context["words"] = words
@@ -1713,7 +1744,9 @@ def _inspect_uploaded_paper(pid: str) -> ResponseReturnValue:
 
         vocab = global_features.get("vocab", {})
         idf = global_features.get("idf")
-        ivocab = {v: k for k, v in vocab.items()}
+        ivocab = global_features.get("ivocab")
+        if not isinstance(ivocab, dict):
+            ivocab = {v: k for k, v in vocab.items()}
 
         # Extract words and weights from TF-IDF vector
         words = []
@@ -1778,8 +1811,7 @@ def summary() -> ResponseReturnValue:
     """
     Display AI-generated markdown format summary of the paper.
 
-    If a versioned PID is provided (e.g., 2512.21789v1), redirect to the
-    unversioned URL (/summary?pid=2512.21789) since we only cache the latest version.
+    Normalize public URLs to the last accessible non-withdrawn version when available.
     """
     t_start = time.time()
     # Get paper ID
@@ -1809,11 +1841,7 @@ def summary() -> ResponseReturnValue:
         base_context["title"] = f"Paper Summary - {context['paper']['title']}"
         return render_template("summary.html", **base_context)
 
-    raw_pid, version = split_pid_version(pid)
-
-    # If versioned PID provided, redirect to unversioned URL
-    if version is not None:
-        return redirect(url_for("web.summary", pid=raw_pid), code=302)
+    raw_pid, _version = split_pid_version(pid)
 
     if not os.path.exists(PAPERS_DB_FILE):
         return "<h1>Error</h1><p>papers.db not found.</p>", 200
@@ -1825,21 +1853,21 @@ def summary() -> ResponseReturnValue:
             404,
         )
 
+    canonical_pid = _get_canonical_public_pid(raw_pid)
+    if canonical_pid and pid != canonical_pid:
+        return redirect(url_for("web.summary", pid=canonical_pid), code=302)
+
     # Get basic paper information with user tags (positive + negative)
     pid_to_utags = None
     pid_to_ntags = None
     if g.user:
         try:
+            from backend.services.user_service import build_pid_tag_reverse_index
+
             user_tags = get_tags()
             user_neg_tags = get_neg_tags()
-            pid_to_utags = {raw_pid: []}
-            pid_to_ntags = {raw_pid: []}
-            for tag, tag_pids in user_tags.items():
-                if raw_pid in tag_pids:
-                    pid_to_utags[raw_pid].append(tag)
-            for tag, tag_pids in user_neg_tags.items():
-                if raw_pid in tag_pids:
-                    pid_to_ntags[raw_pid].append(tag)
+            pid_to_utags = build_pid_tag_reverse_index(user_tags, candidate_pids={raw_pid})
+            pid_to_ntags = build_pid_tag_reverse_index(user_neg_tags, candidate_pids={raw_pid})
         except Exception:
             pid_to_utags = None
             pid_to_ntags = None
@@ -1859,9 +1887,9 @@ def summary() -> ResponseReturnValue:
     # Build page context, don't call get_paper_summary here
     context = default_context()
     context["paper"] = paper
-    context["pid"] = raw_pid  # Always use raw_pid (unversioned)
+    context["pid"] = raw_pid
     context["default_summary_model"] = _llm_name() or ""
-    context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
+    context["tags"] = rtags if rtags else []
     # Add paper name to page title
     context["title"] = f"Paper Summary - {paper['title']}"
     logger.trace(f"[API] summary: completed in {time.time() - t_start:.2f}s")
@@ -2361,6 +2389,7 @@ def api_summary_status() -> ResponseReturnValue:
         data, err = _parse_api_request(require_csrf=True, schema=SummaryStatusRequest)
         if err:
             return err
+        from backend.utils.upload_utils import is_upload_pid
 
         pids = data.get("pids")
         if not pids:
@@ -2387,17 +2416,55 @@ def api_summary_status() -> ResponseReturnValue:
             raw_pid, _ = split_pid_version(str(pid))
             if raw_pid:
                 raw_pids.append(raw_pid)
+        raw_pids = list(dict.fromkeys(raw_pids))
 
         # Batch check paper existence (if MetaRepository supports it)
         existing_pids = set()
+        upload_statuses = {}
+        non_upload_pids = [raw_pid for raw_pid in raw_pids if not is_upload_pid(raw_pid)]
         try:
-            metas = MetaRepository.get_by_ids(raw_pids)
+            metas = MetaRepository.get_by_ids(non_upload_pids)
             existing_pids = set(metas.keys())
         except Exception:
             pass
 
-        # For pids not found in MetaRepository, check if they are uploaded papers
+        # Uploaded papers need owner-aware handling even before parsing is complete.
+        upload_pids = [raw_pid for raw_pid in raw_pids if is_upload_pid(raw_pid)]
+        upload_records = {}
+        if upload_pids:
+            from aslite.repositories import UploadedPaperRepository
+
+            try:
+                upload_records = UploadedPaperRepository.get_by_owner_for_pids(g.user, upload_pids)
+            except Exception:
+                upload_records = {}
+
         for raw_pid in raw_pids:
+            if is_upload_pid(raw_pid):
+                from aslite.repositories import UploadedPaperRepository
+                from backend.services.upload_service import (
+                    _normalize_upload_parse_status,
+                )
+
+                record = upload_records.get(raw_pid)
+                if not isinstance(record, dict):
+                    try:
+                        fallback_record = UploadedPaperRepository.get(raw_pid)
+                    except Exception:
+                        fallback_record = None
+                    if isinstance(fallback_record, dict) and fallback_record.get("owner") == g.user:
+                        record = fallback_record
+                if not record or record.get("deleting") is True:
+                    continue
+                parse_status, parse_error = _normalize_upload_parse_status(raw_pid, record)
+                if parse_status != "ok":
+                    upload_statuses[raw_pid] = {
+                        "status": parse_status,
+                        "last_error": parse_error or None,
+                    }
+                    continue
+                existing_pids.add(raw_pid)
+                continue
             if raw_pid not in existing_pids and paper_exists(raw_pid):
                 existing_pids.add(raw_pid)
 
@@ -2407,6 +2474,11 @@ def api_summary_status() -> ResponseReturnValue:
         summary_source = normalize_summary_source(_summary_markdown_source())
 
         def _is_valid_cached_summary_path(md_path: Path) -> bool:
+            try:
+                if md_path.stat().st_size < 40:
+                    return False
+            except Exception:
+                return False
             try:
                 content = md_path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
@@ -2444,17 +2516,12 @@ def api_summary_status() -> ResponseReturnValue:
             m = (target_model or model or "").strip()
             if not m:
                 return False
-            (
-                _cache_file,
-                _meta_file,
-                lock_file,
-                _legacy_cache,
-                _legacy_meta,
-                legacy_lock,
-            ) = summary_cache_paths(raw_pid, m)
-            return lock_file.exists() or legacy_lock.exists()
+            return has_active_summary_lock(raw_pid, m)
 
         for raw_pid in raw_pids:
+            if raw_pid in upload_statuses:
+                statuses[raw_pid] = upload_statuses[raw_pid]
+                continue
             if raw_pid not in existing_pids:
                 statuses[raw_pid] = {
                     "status": "not_found",
@@ -2470,7 +2537,7 @@ def api_summary_status() -> ResponseReturnValue:
                 statuses[raw_pid] = {"status": "ok", "last_error": None}
                 continue
 
-            if lock_file.exists() or legacy_lock.exists():
+            if _has_lock_for_pid(raw_pid):
                 statuses[raw_pid] = {"status": "running", "last_error": None}
                 continue
 
@@ -2490,6 +2557,7 @@ def api_summary_status() -> ResponseReturnValue:
                     key = summary_status_key(raw_pid, model)
                     info = status_data.get(key)
                     if isinstance(info, dict):
+                        info = _repair_stale_summary_state(raw_pid, model, info)
                         allow_sensitive = _allow_task_id(info)
                         status_value = str(info.get("status") or "")
                         if status_value == "ok":
@@ -2511,6 +2579,13 @@ def api_summary_status() -> ResponseReturnValue:
                                 (info.get("last_error") if allow_sensitive else None) if status_value else None
                             ),
                         }
+                        resolved_model = (
+                            str(info.get("resolved_model") or info.get("llm_model") or "").strip()
+                            if status_value == "ok"
+                            else ""
+                        )
+                        if resolved_model:
+                            payload["resolved_model"] = resolved_model
                         if allow_sensitive:
                             task_id = info.get("task_id")
                             if task_id:
@@ -2522,6 +2597,7 @@ def api_summary_status() -> ResponseReturnValue:
                 logger.warning(f"Batch status query failed, falling back: {e}")
                 for raw_pid in pending_db:
                     status, last_error = get_summary_status(raw_pid, model)
+                    resolved_model = ""
                     if last_error:
                         try:
                             info = SummaryStatusRepository.get_status(raw_pid, model)
@@ -2529,7 +2605,17 @@ def api_summary_status() -> ResponseReturnValue:
                                 last_error = None
                         except Exception:
                             last_error = None
-                    statuses[raw_pid] = {"status": status, "last_error": last_error}
+                    if status == "ok":
+                        try:
+                            info = SummaryStatusRepository.get_status(raw_pid, model)
+                            if isinstance(info, dict):
+                                resolved_model = str(info.get("resolved_model") or info.get("llm_model") or "").strip()
+                        except Exception:
+                            resolved_model = ""
+                    payload = {"status": status, "last_error": last_error}
+                    if resolved_model:
+                        payload["resolved_model"] = resolved_model
+                    statuses[raw_pid] = payload
 
         logger.trace(f"[API] api_summary_status: completed in {time.time() - t_start:.2f}s, {len(statuses)} results")
         return _api_success(statuses=statuses, model=model)
@@ -3163,7 +3249,7 @@ def about() -> ResponseReturnValue:
 # -----------------------------------------------------------------------------
 
 
-def _resolve_time_delta(time_delta, time_filter) -> Any:
+def _resolve_time_delta(time_delta, time_filter, default=3.0) -> Any:
     """Resolve time_delta from time_filter string or return provided time_delta.
 
     Args:
@@ -3171,7 +3257,7 @@ def _resolve_time_delta(time_delta, time_filter) -> Any:
         time_filter: String filter like 'day', 'week', 'month', 'year', 'all'
 
     Returns:
-        float: Resolved time delta in days (defaults to 3.0 if neither provided)
+        float: Resolved time delta in days (defaults to `default` if neither provided)
     """
     if time_delta is not None:
         return time_delta
@@ -3184,8 +3270,27 @@ def _resolve_time_delta(time_delta, time_filter) -> Any:
         # (for backward compatibility with numeric string values)
         return time_filter
 
-    # Default to 3 days
-    return 3.0
+    return default
+
+
+def _normalize_logic_value(logic) -> str:
+    value = str(logic or "and").strip().lower()
+    if value not in {"and", "or"}:
+        raise ValueError("logic must be 'and' or 'or'")
+    return value
+
+
+def _read_optional_string_field(data: dict, keys: tuple[str, ...], field_name: str) -> tuple[str, str | None]:
+    for key in keys:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return "", f"{field_name} must be a string"
+        return value.strip(), None
+    return "", None
 
 
 @contextmanager
@@ -3206,12 +3311,22 @@ def api_keyword_search() -> ResponseReturnValue:
     """API interface: single keyword search"""
     t_start = time.time()
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
         # logger.info(f"API keyword search data: {data}")
+        if data is None:
+            return _api_error("No JSON data provided", 400)
+        if not isinstance(data, dict):
+            return _api_error("Request body must be a JSON object", 400)
         if not data:
             return _api_error("No JSON data provided", 400)
 
-        keyword = (data.get("keyword") or data.get("q") or data.get("search_query") or "").strip()
+        keyword, keyword_err = _read_optional_string_field(
+            data,
+            ("keyword", "q", "search_query"),
+            "keyword",
+        )
+        if keyword_err:
+            return _api_error(keyword_err, 400)
         time_delta = data.get("time_delta", None)  # days
         time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
@@ -3233,18 +3348,19 @@ def api_keyword_search() -> ResponseReturnValue:
         except Exception:
             skip_num = 0
 
-        time_delta = _resolve_time_delta(time_delta, time_filter)
-        try:
-            time_delta = float(time_delta)
-        except Exception:
-            return _api_error("time_delta must be a number", 400)
+        time_delta = _resolve_time_delta(time_delta, time_filter, default=None)
+        if time_delta is not None:
+            try:
+                time_delta = float(time_delta)
+            except Exception:
+                return _api_error("time_delta must be a number", 400)
 
         # Use enhanced search
         search_limit = min(limit * 5, MAX_RESULTS)  # Get more because time filtering is needed
         pids, scores, _ = enhanced_search_rank(q=keyword, limit=search_limit, search_mode="keyword")
 
         # Apply time filtering
-        if time_delta:
+        if time_delta is not None and time_delta > 0:
             mdb = get_metas()
             tnow = time.time()
             deltat = time_delta * 60 * 60 * 24
@@ -3282,7 +3398,9 @@ def api_tag_search() -> ResponseReturnValue:
 
         logger.trace(f"[API] api_tag_search: data={data}")
 
-        tag_name = (data.get("tag_name") or data.get("tag") or "").strip()  # tag name
+        tag_name, tag_err = _read_optional_string_field(data, ("tag_name", "tag"), "tag_name")
+        if tag_err:
+            return _api_error(tag_err, 400)
         body_user = data.get("user", "")  # backward-compatible field
         time_delta = data.get("time_delta", None)  # days
         time_filter = str(data.get("time_filter") or "").strip().lower()
@@ -3375,7 +3493,10 @@ def api_tags_search() -> ResponseReturnValue:
 
         tags_list = data.get("tags", [])  # List[tag_name]
         body_user = data.get("user", "")  # backward-compatible field
-        logic = data.get("logic", "and")  # and|or
+        try:
+            logic = _normalize_logic_value(data.get("logic", "and"))
+        except ValueError as e:
+            return _api_error(str(e), 400)
         time_delta = data.get("time_delta", None)  # days
         time_filter = str(data.get("time_filter") or "").strip().lower()
         limit = data.get("limit", 50)
@@ -3384,6 +3505,17 @@ def api_tags_search() -> ResponseReturnValue:
 
         if isinstance(tags_list, str):
             tags_list = [t.strip() for t in tags_list.split(",") if t.strip()]
+        elif isinstance(tags_list, list):
+            cleaned_tags = []
+            for tag in tags_list:
+                if not isinstance(tag, str):
+                    return _api_error("tags must be a list of strings", 400)
+                name = tag.strip()
+                if name:
+                    cleaned_tags.append(name)
+            tags_list = cleaned_tags
+        else:
+            return _api_error("tags must be a list of strings", 400)
 
         if not tags_list:
             return _api_error("Tags list is required", 400)
@@ -3410,6 +3542,9 @@ def api_tags_search() -> ResponseReturnValue:
         with _temporary_user_context(g.user) as user_tags:
             # Check if user has any of the tags
             valid_tags = [tag for tag in tags_list if tag in user_tags and len(user_tags[tag]) > 0]
+            if logic == "and" and len(valid_tags) != len(tags_list):
+                logger.warning(f"User {g.user} missing one or more tags required for strict AND: {tags_list}")
+                return _api_success(pids=[], scores=[], total_count=0)
             if not valid_tags:
                 logger.warning(f"User {g.user} has no papers tagged with any of {tags_list}")
                 return _api_success(pids=[], scores=[], total_count=0)
@@ -3612,14 +3747,17 @@ def api_tag_feedback() -> ResponseReturnValue:
         return _api_error("Not logged in", 401)
 
     try:
-        data, err = _parse_api_request(require_csrf=True, schema=TagFeedbackRequest)
+        data, err = _parse_api_request(require_csrf=True, require_pid=True, schema=TagFeedbackRequest)
         if err:
             return err
 
-        pid = data["pid"]
+        pid = data["_raw_pid"]
         tag = data["tag"]
         label = data["label"]
         logger.trace(f"[API] api_tag_feedback: pid={pid}, tag={tag}, label={label}")
+
+        if not paper_exists(pid):
+            return _api_error("Paper not found", 404)
 
         err = _validate_tag_name(tag)
         if err:
@@ -3689,13 +3827,38 @@ def api_tag_feedback_bulk() -> ResponseReturnValue:
             tag = payload["tag"]
             label = payload["label"]
 
+            raw_pid, _ = split_pid_version(str(pid))
+            if not raw_pid:
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "pid": pid,
+                        "tag": tag,
+                        "error": "Paper ID is required",
+                    }
+                )
+                continue
+
+            if not paper_exists(raw_pid):
+                results.append(
+                    {
+                        "index": ix,
+                        "success": False,
+                        "pid": raw_pid,
+                        "tag": tag,
+                        "error": "Paper not found",
+                    }
+                )
+                continue
+
             err_name = _validate_tag_name(tag)
             if err_name:
                 results.append(
                     {
                         "index": ix,
                         "success": False,
-                        "pid": pid,
+                        "pid": raw_pid,
                         "tag": tag,
                         "error": err_name,
                     }
@@ -3703,14 +3866,14 @@ def api_tag_feedback_bulk() -> ResponseReturnValue:
                 continue
 
             try:
-                set_tag_feedback(pid, tag, label)
-                results.append({"index": ix, "success": True, "pid": pid, "tag": tag})
+                set_tag_feedback(raw_pid, tag, label)
+                results.append({"index": ix, "success": True, "pid": raw_pid, "tag": tag})
             except Exception as e:
                 results.append(
                     {
                         "index": ix,
                         "success": False,
-                        "pid": pid,
+                        "pid": raw_pid,
                         "tag": tag,
                         "error": str(e),
                     }
@@ -4003,9 +4166,17 @@ def login() -> ResponseReturnValue:
     from backend.services.auth_service import login_user
 
     _csrf_protect()
-    username = (request.form.get("username") or "").strip()
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if request.is_json and not isinstance(payload, dict):
+        return _api_error("Request body must be a JSON object", 400)
+    username = (request.form.get("username") or (payload or {}).get("username") or "").strip()
     logger.trace(f"[API] login: username={username}")
-    return redirect(login_user(username))
+    redirect_url = login_user(username)
+    if request.is_json:
+        if session.get("user") == username and username:
+            return _api_success(user=username, redirect_url=redirect_url)
+        return _api_error("Invalid username", 400)
+    return redirect(redirect_url)
 
 
 def logout() -> ResponseReturnValue:
@@ -4023,7 +4194,11 @@ def logout() -> ResponseReturnValue:
 
 def register_email() -> ResponseReturnValue:
     """Register email - delegates to auth_service."""
-    from backend.services.auth_service import register_user_email
+    from backend.services.auth_service import (
+        get_user_emails,
+        register_user_email,
+        validate_user_email_input,
+    )
 
     _csrf_protect()
     if g.user is None:
@@ -4031,9 +4206,23 @@ def register_email() -> ResponseReturnValue:
 
         return api_error("Not logged in", 401)
 
-    email = (request.form.get("email") or "").strip()
+    payload = request.get_json(silent=True) if request.is_json else {}
+    if request.is_json and (not isinstance(payload, dict) or "email" not in payload):
+        return _api_error("email is required", 400)
+    email_value = request.form.get("email") if not request.is_json else payload.get("email")
+    if request.is_json and not isinstance(email_value, str):
+        return _api_error("email must be a string", 400)
+    email = (email_value or "").strip()
     logger.trace(f"[API] register_email: email={email}")
-    return redirect(register_user_email(email))
+    if request.is_json:
+        _emails, is_valid = validate_user_email_input(email)
+        if not is_valid:
+            return _api_error("Invalid email address(es).", 400)
+    redirect_url = register_user_email(email)
+    if request.is_json:
+        after = list(get_user_emails(g.user))
+        return _api_success(emails=after, redirect_url=redirect_url)
+    return redirect(redirect_url)
 
 
 # -----------------------------------------------------------------------------
@@ -4119,6 +4308,9 @@ def _trigger_summary_async(
 
 def readinglist_page() -> ResponseReturnValue:
     """Display reading list page"""
+    from backend.services.readinglist_service import overlay_summary_statuses_for_user
+    from backend.services.summary_service import get_summary_render_snapshots
+
     t_start = time.time()
     logger.trace("[API] readinglist_page: starting")
     context = default_context()
@@ -4142,6 +4334,11 @@ def readinglist_page() -> ResponseReturnValue:
     # Render papers
     papers = []
     pids = [pid for pid, _ in sorted_items]
+    from backend.services.user_service import (
+        build_pid_tag_reverse_index,
+        build_user_tag_list,
+    )
+
     t0 = time.time()
     pid_to_paper = get_papers_bulk(pids)
     logger.trace(f"[BLOCKING] readinglist_page: fetched {len(pid_to_paper)} papers in {time.time() - t0:.2f}s")
@@ -4151,27 +4348,41 @@ def readinglist_page() -> ResponseReturnValue:
     tags_db = get_tags()
     neg_tags_db = get_neg_tags()
     pid_set = set(pids)
-    pid_to_utags = {pid: [] for pid in pids}
-    pid_to_ntags = {pid: [] for pid in pids}
-    for tag, tag_pids in (tags_db or {}).items():
-        if not tag_pids:
-            continue
-        try:
-            hit = pid_set.intersection(tag_pids)
-        except Exception:
-            hit = {pid for pid in pid_set if pid in (tag_pids or ())}
-        for pid in hit:
-            pid_to_utags[pid].append(tag)
-    for tag, tag_pids in (neg_tags_db or {}).items():
-        if not tag_pids:
-            continue
-        try:
-            hit = pid_set.intersection(tag_pids)
-        except Exception:
-            hit = {pid for pid in pid_set if pid in (tag_pids or ())}
-        for pid in hit:
-            pid_to_ntags[pid].append(tag)
+    pid_to_utags = build_pid_tag_reverse_index(tags_db, candidate_pids=pid_set)
+    pid_to_ntags = build_pid_tag_reverse_index(neg_tags_db, candidate_pids=pid_set)
     logger.trace(f"[BLOCKING] readinglist_page: built pid->tags maps in {time.time() - t0:.2f}s")
+
+    summary_inputs = {
+        pid: {
+            "summary_status": info.get("summary_status"),
+            "summary_last_error": info.get("summary_last_error"),
+            "summary_updated_time": info.get("summary_updated_time"),
+            "summary_task_id": info.get("summary_task_id"),
+        }
+        for pid, info in sorted_items
+    }
+    model = (_llm_name() or "").strip()
+    batch_pids = [pid for pid in pids if pid and not pid.startswith("up_")]
+    prefetched_status_rows = {}
+    if model and batch_pids:
+        try:
+            prefetched_status_rows = SummaryStatusRepository.get_status_many(batch_pids, model)
+        except Exception:
+            prefetched_status_rows = {}
+    render_summary_snapshots = (
+        get_summary_render_snapshots(
+            pids,
+            prefetched_status_rows=prefetched_status_rows,
+        )
+        if pids
+        else {}
+    )
+    summary_items_by_pid = overlay_summary_statuses_for_user(
+        g.user,
+        summary_inputs,
+        prefetched_status_rows=prefetched_status_rows,
+        prefetched_summary_snapshots=render_summary_snapshots,
+    )
 
     t0 = time.time()
     for pid, info in sorted_items:
@@ -4185,14 +4396,16 @@ def readinglist_page() -> ResponseReturnValue:
             paper=paper,
             pid_to_utags=pid_to_utags,
             pid_to_ntags=pid_to_ntags,
+            summary_snapshot=render_summary_snapshots.get(pid),
             include_summary_status=False,
         )
+        summary_item = summary_items_by_pid.get(pid, {})
         rendered["added_time"] = info.get("added_time", 0)
         rendered["top_tags"] = info.get("top_tags", [])
-        rendered["summary_status"] = info.get("summary_status")
-        rendered["summary_last_error"] = info.get("summary_last_error")
-        rendered["summary_updated_time"] = info.get("summary_updated_time")
-        rendered["summary_task_id"] = info.get("summary_task_id")
+        rendered["summary_status"] = summary_item.get("summary_status")
+        rendered["summary_last_error"] = summary_item.get("summary_last_error")
+        rendered["summary_updated_time"] = summary_item.get("summary_updated_time")
+        rendered["summary_task_id"] = summary_item.get("summary_task_id")
         rendered["in_readinglist"] = True
         papers.append(rendered)
     logger.trace(f"[BLOCKING] readinglist_page: rendered {len(papers)} cards in {time.time() - t0:.2f}s")
@@ -4201,22 +4414,7 @@ def readinglist_page() -> ResponseReturnValue:
     context["default_summary_model"] = _llm_name() or ""
     # Provide tag list for tag dropdown (same shape as main page)
     if g.user:
-        rtags = []
-        for t in set(tags_db.keys()) | set(neg_tags_db.keys()):
-            pos_n = len(tags_db.get(t, set()))
-            neg_n = len(neg_tags_db.get(t, set()))
-            rtags.append(
-                {
-                    "name": t,
-                    "n": pos_n + neg_n,
-                    "pos_n": pos_n,
-                    "neg_n": neg_n,
-                    "neg_only": pos_n == 0 and neg_n > 0,
-                }
-            )
-        if rtags:
-            rtags.append({"name": "all", "n": 0, "pos_n": 0, "neg_n": 0, "neg_only": False})
-        context["tags"] = sorted(rtags, key=lambda item: item["name"]) if rtags else []
+        context["tags"] = sorted(build_user_tag_list(), key=lambda item: item["name"])
     else:
         context["tags"] = []
     logger.trace(f"[API] readinglist_page: completed in {time.time() - t_start:.2f}s")
@@ -4242,6 +4440,35 @@ def api_readinglist_add() -> ResponseReturnValue:
         from backend.services.readinglist_service import add_to_readinglist
 
         def _trigger_fn(user, pid):
+            from backend.utils.upload_utils import is_upload_pid
+
+            if is_upload_pid(pid):
+                from aslite.repositories import UploadedPaperRepository
+                from backend.services.upload_service import (
+                    _normalize_upload_parse_status,
+                )
+
+                record = UploadedPaperRepository.get(pid)
+                if not record or record.get("owner") != user:
+                    _update_readinglist_summary_status(
+                        user,
+                        pid,
+                        "",
+                        None,
+                        model=(_llm_name() or "").strip() or None,
+                    )
+                    return ""
+                parse_status, _parse_error = _normalize_upload_parse_status(pid, record)
+                if parse_status != "ok":
+                    _update_readinglist_summary_status(
+                        user,
+                        pid,
+                        "",
+                        None,
+                        model=(_llm_name() or "").strip() or None,
+                    )
+                    return ""
+
             task_id = _trigger_summary_async(user, pid)
             if task_id is None and not settings.huey.allow_thread_fallback:
                 err_msg = None
@@ -4297,11 +4524,16 @@ def api_readinglist_remove() -> ResponseReturnValue:
     """Remove paper from reading list - delegates to readinglist_service."""
     t_start = time.time()
     try:
-        data, err = _parse_api_request(require_login=True, require_csrf=True, schema=ReadingListPidRequest)
+        data, err = _parse_api_request(
+            require_login=True,
+            require_csrf=True,
+            require_pid=True,
+            schema=ReadingListPidRequest,
+        )
         if err:
             return err
 
-        raw_pid, _ = split_pid_version(data["pid"])
+        raw_pid = data["_raw_pid"]
         logger.trace(f"[API] api_readinglist_remove: pid={raw_pid}")
 
         from backend.services.readinglist_service import remove_from_readinglist
@@ -4344,6 +4576,8 @@ def api_readinglist_list() -> ResponseReturnValue:
 
 def api_readinglist_paper() -> ResponseReturnValue:
     """Get a single paper payload for reading list incremental UI updates."""
+    from backend.services.readinglist_service import overlay_summary_status_for_user
+
     t_start = time.time()
     logger.trace("[API] api_readinglist_paper: starting")
     if g.user is None:
@@ -4354,6 +4588,9 @@ def api_readinglist_paper() -> ResponseReturnValue:
         return _api_error("pid is required", 400)
 
     try:
+        from backend.services.summary_service import get_summary_render_snapshots
+
+        model = (_llm_name() or "").strip()
         readinglist = get_readinglist()
         info = (readinglist or {}).get(pid)
         if not info:
@@ -4364,23 +4601,48 @@ def api_readinglist_paper() -> ResponseReturnValue:
         if not paper:
             return _api_error("Paper not found", 404)
 
+        from backend.services.user_service import build_pid_tag_reverse_index
+
         tags_db = get_tags() or {}
         neg_tags_db = get_neg_tags() or {}
-        utags = [t for t, pids in tags_db.items() if pids and pid in pids]
-        ntags = [t for t, pids in neg_tags_db.items() if pids and pid in pids]
+        pid_to_utags = build_pid_tag_reverse_index(tags_db, candidate_pids={pid})
+        pid_to_ntags = build_pid_tag_reverse_index(neg_tags_db, candidate_pids={pid})
+        prefetched_status_rows = {}
+        if model and not pid.startswith("up_"):
+            try:
+                prefetched_status_rows = SummaryStatusRepository.get_status_many([pid], model)
+            except Exception:
+                prefetched_status_rows = {}
+        summary_snapshot = get_summary_render_snapshots(
+            [pid],
+            prefetched_status_rows=prefetched_status_rows,
+        ).get(pid)
         rendered = render_pid(
             pid,
             paper=paper,
-            pid_to_utags={pid: utags},
-            pid_to_ntags={pid: ntags},
+            pid_to_utags=pid_to_utags,
+            pid_to_ntags=pid_to_ntags,
+            summary_snapshot=summary_snapshot,
             include_summary_status=False,
+        )
+        summary_item = overlay_summary_status_for_user(
+            g.user,
+            pid,
+            {
+                "summary_status": info.get("summary_status"),
+                "summary_last_error": info.get("summary_last_error"),
+                "summary_updated_time": info.get("summary_updated_time"),
+                "summary_task_id": info.get("summary_task_id"),
+            },
+            prefetched_status_info=prefetched_status_rows.get(pid),
+            prefetched_summary_snapshot=summary_snapshot,
         )
         rendered["added_time"] = info.get("added_time", 0)
         rendered["top_tags"] = info.get("top_tags", [])
-        rendered["summary_status"] = info.get("summary_status")
-        rendered["summary_last_error"] = info.get("summary_last_error")
-        rendered["summary_updated_time"] = info.get("summary_updated_time")
-        rendered["summary_task_id"] = info.get("summary_task_id")
+        rendered["summary_status"] = summary_item.get("summary_status")
+        rendered["summary_last_error"] = summary_item.get("summary_last_error")
+        rendered["summary_updated_time"] = summary_item.get("summary_updated_time")
+        rendered["summary_task_id"] = summary_item.get("summary_task_id")
         rendered["in_readinglist"] = True
 
         logger.trace(f"[API] api_readinglist_paper: completed in {time.time() - t_start:.2f}s")

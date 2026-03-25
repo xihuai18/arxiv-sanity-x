@@ -12,7 +12,11 @@ from typing import Any
 from loguru import logger
 
 from aslite.db import FEATURES_FILE, FEATURES_FILE_NEW, PAPERS_DB_FILE, load_features
-from aslite.repositories import MetaRepository, PaperRepository
+from aslite.repositories import (
+    MetaRepository,
+    PaperRepository,
+    PaperTombstoneRepository,
+)
 from config import settings
 
 # Lock ordering notes (to prevent deadlocks):
@@ -317,6 +321,12 @@ def _schedule_features_refresh(effective_mtime: float) -> None:
             except Exception:
                 pass
 
+            try:
+                if isinstance(features, dict) and "vocab" in features and "ivocab" not in features:
+                    features["ivocab"] = {v: k for k, v in features["vocab"].items()}
+            except Exception:
+                pass
+
             with _FEATURES_LOCK:
                 _FEATURES_CACHE = features
                 _FEATURES_FILE_MTIME = float(effective or effective_mtime or 0.0)
@@ -392,6 +402,12 @@ def get_features_cached() -> dict[str, Any]:
                     try:
                         if isinstance(features, dict) and "pids" in features and "pid_to_index" not in features:
                             features["pid_to_index"] = {pid: i for i, pid in enumerate(features["pids"])}
+                    except Exception:
+                        pass
+
+                    try:
+                        if isinstance(features, dict) and "vocab" in features and "ivocab" not in features:
+                            features["ivocab"] = {v: k for k, v in features["vocab"].items()}
                     except Exception:
                         pass
 
@@ -545,6 +561,12 @@ def get_meta(pid: str) -> dict[str, Any] | None:
     if not pid:
         return None
 
+    try:
+        if PaperTombstoneRepository.get_by_id(pid) is not None:
+            return None
+    except Exception:
+        pass
+
     with _DATA_LOCK:
         metas = _METAS_CACHE
     if isinstance(metas, dict):
@@ -568,6 +590,11 @@ def get_paper(pid: str) -> dict[str, Any] | None:
     """Get single paper by ID."""
     if not pid:
         return None
+    try:
+        if PaperTombstoneRepository.get_by_id(pid) is not None:
+            return None
+    except Exception:
+        pass
     papers = get_data_cached().get("papers")
     if isinstance(papers, dict):
         return papers.get(pid)
@@ -578,10 +605,21 @@ def get_papers_bulk(pids: list[str]) -> dict[str, Any]:
     """Get multiple papers by IDs."""
     if not pids:
         return {}
+    filtered_pids = list(dict.fromkeys([str(pid or "").strip() for pid in pids if str(pid or "").strip()]))
+    if not filtered_pids:
+        return {}
+    try:
+        tombstones = PaperTombstoneRepository.get_by_ids(filtered_pids)
+        if tombstones:
+            filtered_pids = [pid for pid in filtered_pids if pid not in tombstones]
+    except Exception:
+        pass
+    if not filtered_pids:
+        return {}
     papers = get_data_cached().get("papers")
     if isinstance(papers, dict):
-        return {pid: papers[pid] for pid in pids if pid in papers}
-    return PaperRepository.get_by_ids(list(pids))
+        return {pid: papers[pid] for pid in filtered_pids if pid in papers}
+    return PaperRepository.get_by_ids(filtered_pids)
 
 
 def invalidate_cache():

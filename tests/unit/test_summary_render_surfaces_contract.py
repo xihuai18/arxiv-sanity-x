@@ -44,6 +44,22 @@ def test_mathjax_font_preload_hints_are_removed_to_avoid_console_noise():
     assert "link.rel = 'preload'" not in summary_js
 
 
+def test_abstract_renderer_uses_dedicated_markdown_pipeline():
+    repo_root = Path(__file__).resolve().parents[2]
+    common_utils = (repo_root / "static" / "common_utils.js").read_text(encoding="utf-8")
+
+    assert "return window.ArxivSanityTldr.render(s);" not in common_utils
+    assert "applyAbstractMathPlugin(md);" in common_utils
+
+
+def test_summary_page_does_not_reject_short_but_valid_markdown_by_length_only():
+    repo_root = Path(__file__).resolve().parents[2]
+    summary_js = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8")
+
+    assert "t.length < 250" not in summary_js
+    assert "function _getUploadParseNotice(paper)" in summary_js
+
+
 def test_base_template_does_not_request_google_fonts():
     repo_root = Path(__file__).resolve().parents[2]
     text = (repo_root / "templates" / "base.html").read_text(encoding="utf-8")

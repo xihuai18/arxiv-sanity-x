@@ -67,6 +67,36 @@ def build_user_tag_list():
     return rtags
 
 
+def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
+    """Build a pid -> [tags] reverse index for a target pid subset."""
+    pid_to_tags = {}
+    pid_filter = None
+    if candidate_pids is not None:
+        pid_filter = {str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()}
+
+    for tag, tag_pids in (tag_map or {}).items():
+        normalized_tag = str(tag or "").strip()
+        if not normalized_tag:
+            continue
+        try:
+            iterable = tag_pids or []
+        except Exception:
+            iterable = []
+        for raw_pid in iterable:
+            normalized_pid = str(raw_pid or "").strip()
+            if not normalized_pid:
+                continue
+            if pid_filter is not None and normalized_pid not in pid_filter:
+                continue
+            pid_to_tags.setdefault(normalized_pid, []).append(normalized_tag)
+
+    if pid_filter is not None:
+        for pid in pid_filter:
+            pid_to_tags.setdefault(pid, [])
+
+    return pid_to_tags
+
+
 def build_user_key_list():
     """Build keyword list for frontend."""
     keys = get_keys()

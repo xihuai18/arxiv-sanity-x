@@ -9,7 +9,7 @@ def test_enqueue_summary_task_force_refresh_calls_cancel(monkeypatch):
 
     canceled = {"called": False, "pid": None, "model": None}
     purged = {"called": False, "pid": None, "model": None}
-    enqueued = {"kwargs": None}
+    enqueued: dict[str, object] = {"kwargs": None}
 
     def _fake_cancel(pid, model=None, *, user=None, reason=None):
         canceled["called"] = True
@@ -32,7 +32,11 @@ def test_enqueue_summary_task_force_refresh_calls_cancel(monkeypatch):
 
     # Avoid repository I/O.
     monkeypatch.setattr(tasks.SummaryStatusRepository, "get_status", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(tasks.SummaryStatusRepository, "get_generation_epoch", lambda *_args, **_kwargs: 123)
+    monkeypatch.setattr(
+        tasks.SummaryStatusRepository,
+        "get_generation_epoch",
+        lambda *_args, **_kwargs: 123,
+    )
     monkeypatch.setattr(tasks.SummaryStatusRepository, "set_task_status", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(tasks.SummaryStatusRepository, "set_status", lambda *_args, **_kwargs: None)
 
@@ -67,4 +71,57 @@ def test_enqueue_summary_task_force_refresh_calls_cancel(monkeypatch):
     assert purged["pid"] == "2301.00001"
     assert purged["model"] == "test-model"
     # Compatibility: do not pass new kwargs in Huey payload.
-    assert "force_refresh" not in (enqueued["kwargs"] or {})
+    queued_kwargs = enqueued.get("kwargs") or {}
+    assert isinstance(queued_kwargs, dict)
+    assert "force_refresh" not in queued_kwargs
+
+
+def test_enqueue_summary_task_force_refresh_purges_resolved_model_cache(monkeypatch):
+    """force_refresh should purge both requested and resolved-model caches."""
+    import tasks
+
+    purged = []
+
+    monkeypatch.setattr(
+        tasks,
+        "cancel_summary_tasks",
+        lambda *_a, **_k: {"canceled_task_ids": ["old_task"], "epoch": 123},
+    )
+    monkeypatch.setattr(tasks, "_purge_summary_cache", lambda pid, model: purged.append((pid, model)))
+    monkeypatch.setattr(tasks, "_enqueue_lock_path", lambda pid, model: None)
+    monkeypatch.setattr(tasks, "acquire_summary_lock", lambda _path, timeout_s=0: object())
+    monkeypatch.setattr(tasks, "release_summary_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tasks, "_find_active_task", lambda _pid, _model: (None, None))
+    monkeypatch.setattr(
+        tasks.SummaryStatusRepository,
+        "get_status",
+        lambda *_args, **_kwargs: {"status": "ok", "resolved_model": "fallback-model"},
+    )
+    monkeypatch.setattr(tasks.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 123)
+    monkeypatch.setattr(tasks.SummaryStatusRepository, "set_task_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks.SummaryStatusRepository, "set_status", lambda *_a, **_k: None)
+    monkeypatch.setattr(tasks, "_emit_all_event", lambda *_args, **_kwargs: None)
+
+    def _fake_enqueue(task_obj):
+        task_obj.id = "task_new_2"
+
+        class _Result:
+            id = "task_new_2"
+
+        return _Result()
+
+    monkeypatch.setattr(tasks.huey, "enqueue", _fake_enqueue)
+
+    task_id = tasks.enqueue_summary_task(
+        "2301.00001",
+        model="requested-model",
+        user=None,
+        priority=1,
+        force_refresh=True,
+    )
+
+    assert task_id == "task_new_2"
+    assert purged == [
+        ("2301.00001", "requested-model"),
+        ("2301.00001", "fallback-model"),
+    ]
