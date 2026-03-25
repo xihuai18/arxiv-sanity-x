@@ -12,6 +12,16 @@ class TestGetTags:
 
         assert callable(get_tags)
 
+    def test_get_tags_accepts_explicit_user(self, monkeypatch):
+        from backend.services.user_service import get_tags
+
+        monkeypatch.setattr(
+            "backend.services.user_service.TagRepository.get_user_tags",
+            lambda user: {"ml": {user}},
+        )
+
+        assert get_tags(user="alice") == {"ml": {"alice"}}
+
 
 class TestGetNegTags:
     """Tests for get_neg_tags function."""
@@ -41,6 +51,16 @@ class TestGetKeys:
         from backend.services.user_service import get_keys
 
         assert callable(get_keys)
+
+    def test_get_keys_accepts_explicit_user(self, monkeypatch):
+        from backend.services.user_service import get_keys
+
+        monkeypatch.setattr(
+            "backend.services.user_service.KeywordRepository.get_user_keywords",
+            lambda user: {"graph": {user}},
+        )
+
+        assert get_keys(user="alice") == {"graph": {"alice"}}
 
 
 class TestBuildUserTagList:

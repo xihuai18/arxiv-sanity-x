@@ -537,7 +537,7 @@ python bin/run_services.py --fetch-compute 10000
 - **MinerU** (optional):
     - API backend uses mineru.net and requires `ARXIV_SANITY_MINERU_API_KEY`
     - local VLM backend uses `mineru-vllm-server` via [bin/mineru_serve.sh](bin/mineru_serve.sh)
-- **LiteLLM** (optional): multi-model gateway configured by [config/llm.yml](config/llm.yml).
+- **LiteLLM** (optional): multi-model gateway configured via `config/llm.yml` (copy from [config/llm_template.yml](config/llm_template.yml)).
 
 ### Windows note
 
@@ -558,7 +558,7 @@ If you want the exact code defaults (as opposed to recommended example values), 
 | ---------------------------------------- | --------------------------------------------- | ----------- |
 | [.env](.env.example)                     | Runtime configuration and non-secret defaults | ✅ Yes      |
 | [config/settings.py](config/settings.py) | Typed schema and code defaults                | ✅ Yes      |
-| [config/llm.yml](config/llm.yml)         | LiteLLM multi-model gateway aliases           | ⚙️ Optional |
+| `config/llm.yml`                         | LiteLLM multi-model gateway aliases           | ⚙️ Optional |
 
 **Files NOT in repository (.gitignore):**
 
@@ -772,7 +772,7 @@ print(settings.email.smtp_server)
 | `ARXIV_SANITY_WARMUP_ML` | `1` | Background ML model warmup |
 | `ARXIV_SANITY_ENABLE_SCHEDULER` | `1` | Enable APScheduler cache refresh |
 | `ARXIV_SANITY_ENABLE_CACHE_STATUS` | `0` | Enable `/cache_status` debug page |
-| `ARXIV_SANITY_EMAIL_API_WORKERS` | `8` | Max parallel API calls when running [send_emails.py](send_emails.py) |
+| `ARXIV_SANITY_EMAIL_API_WORKERS` | `8` | Max parallel API calls when running [tools/send_emails.py](tools/send_emails.py) |
 
 #### Web Security / Cookies
 

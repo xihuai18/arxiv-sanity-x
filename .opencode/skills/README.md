@@ -13,7 +13,7 @@ Reusable, testable OpenCode skills for real-world agent workflows.
 ## 目录结构
 
 ```text
-skills/
+.opencode/skills/
   README.md
   .gitignore
   mineru-api/
@@ -55,9 +55,9 @@ skills/
 
 ## 当前包含的 skill
 
-- `skills/mineru-api/SKILL.md`：MinerU 云端文档解析 API 的调用与结果处理说明
-- `skills/mineru-api/scripts/mineru_to_markdown.py`：把本地 PDF / 远程 PDF / 原始 ZIP 整理成干净 markdown + `assets/`
-- `skills/playwright-cli/SKILL.md`：`playwright-cli` 的安装、页面交互、会话与测试工作流说明
+- `.opencode/skills/mineru-api/SKILL.md`：MinerU 云端文档解析 API 的调用与结果处理说明
+- `.opencode/skills/mineru-api/scripts/mineru_to_markdown.py`：把本地 PDF / 远程 PDF / 原始 ZIP 整理成干净 markdown + `assets/`
+- `.opencode/skills/playwright-cli/SKILL.md`：`playwright-cli` 的安装、页面交互、会话与测试工作流说明
 - `.opencode/skills/arxiv-sanity-runtime-entry/SKILL.md`：Web 入口、Flask app factory、全局 hook 与探针维护手册
 - `.opencode/skills/arxiv-sanity-routing-layer/SKILL.md`：blueprints、schema、路由分发边界维护手册
 - `.opencode/skills/arxiv-sanity-legacy-core/SKILL.md`：`backend/legacy.py` 的兼容层与编排层维护手册
@@ -75,10 +75,10 @@ skills/
 ## Open source notes
 
 - 本目录不包含真实 API key 或其他 secret
-- `skills/mineru-api/.env.mineru.local` 只用于本地开发，已被忽略
-- Python 缓存和其他本地生成文件已通过 `skills/.gitignore` 排除
+- `.opencode/skills/mineru-api/.env.mineru.local` 只用于本地开发，已被忽略
+- Python 缓存和其他本地生成文件已通过 `.opencode/skills/.gitignore` 排除
 - 如果你把本目录拆成独立仓库，建议保留当前目录结构不变
-- License: `MIT`, see `skills/LICENSE`
+- License: `MIT`, see `.opencode/skills/LICENSE`
 
 ## Suggested repository metadata
 
@@ -95,23 +95,23 @@ skills/
 
 - `MINERU_API_TOKEN`
 - `MINERU_API_TOKEN_FILE`
-- `skills/mineru-api/.env.mineru.local`
+- `.opencode/skills/mineru-api/.env.mineru.local`
 - `~/.config/mineru/token`
 - 未入库的 `.env.mineru.local` 或 `.env.local`
 
 不要把 Token 提交进仓库。
 
-如果你正在直接使用本仓库里的 MinerU skill，优先把 token 放到：`skills/mineru-api/.env.mineru.local`
+如果你正在直接使用本仓库里的 MinerU skill，优先把 token 放到：`.opencode/skills/mineru-api/.env.mineru.local`
 
 这个目录里现在已经带了：
 
-- `skills/mineru-api/.gitignore`
-- `skills/mineru-api/.env.mineru.local.example`
+- `.opencode/skills/mineru-api/.gitignore`
+- `.opencode/skills/mineru-api/.env.mineru.local.example`
 
 建议复制模板后再填写：
 
 ```bash
-cp skills/mineru-api/.env.mineru.local.example skills/mineru-api/.env.mineru.local
+cp .opencode/skills/mineru-api/.env.mineru.local.example .opencode/skills/mineru-api/.env.mineru.local
 ```
 
 ## 测试
@@ -119,7 +119,7 @@ cp skills/mineru-api/.env.mineru.local.example skills/mineru-api/.env.mineru.loc
 MinerU helper 自带一个最小单元测试：
 
 ```bash
-python -m unittest "skills/mineru-api/tests/test_mineru_to_markdown.py"
+python -m unittest ".opencode/skills/mineru-api/tests/test_mineru_to_markdown.py"
 ```
 
 它会验证：
@@ -131,7 +131,7 @@ python -m unittest "skills/mineru-api/tests/test_mineru_to_markdown.py"
 Playwright skill 也带了一个最小 smoke test：
 
 ```bash
-python -m unittest "skills/playwright-cli/tests/test_playwright_cli_smoke.py"
+python -m unittest ".opencode/skills/playwright-cli/tests/test_playwright_cli_smoke.py"
 ```
 
 它会验证：

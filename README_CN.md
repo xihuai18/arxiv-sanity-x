@@ -507,7 +507,7 @@ python bin/run_services.py --fetch-compute 10000
 - **MinerU**（可选）：
     - `api` 后端：走 mineru.net，需要 `ARXIV_SANITY_MINERU_API_KEY`
     - 本地 VLM 后端：由 [bin/mineru_serve.sh](bin/mineru_serve.sh) 启动 `mineru-vllm-server`
-- **LiteLLM**（可选）：多模型网关，由 [config/llm.yml](config/llm.yml) 配置。
+- **LiteLLM**（可选）：多模型网关通过 `config/llm.yml` 配置（可从 [config/llm_template.yml](config/llm_template.yml) 复制）。
 
 ### Windows 注意事项
 
@@ -529,7 +529,7 @@ python bin/run_services.py --fetch-compute 10000
 | ---------------------------------------- | -------------------- | ------- |
 | [.env](.env.example)                     | 所有配置设置         | ✅ 必须 |
 | [config/settings.py](config/settings.py) | 类型定义与代码默认值 | ✅ 必须 |
-| [config/llm.yml](config/llm.yml)         | LiteLLM 多模型网关   | ⚙️ 可选 |
+| `config/llm.yml`                         | LiteLLM 多模型网关   | ⚙️ 可选 |
 
 **仓库中不包含的文件（.gitignore）：**
 

@@ -4,9 +4,9 @@ description: 使用 MinerU 云 API 解析 PDF、Office、图片或 HTML 文档�
 license: MIT
 compatibility: opencode
 metadata:
-  category: documents
-  transport: https
-  auth: bearer-token
+    category: documents
+    transport: https
+    auth: bearer-token
 ---
 
 # MinerU API Skill
@@ -51,7 +51,7 @@ metadata:
 
 1. 环境变量 `MINERU_API_TOKEN`
 2. `MINERU_API_TOKEN_FILE` 指向一个本地 secret 文件
-3. skill 目录里的 `skills/mineru-api/.env.mineru.local`
+3. skill 目录里的 `.opencode/skills/mineru-api/.env.mineru.local`
 4. 默认 token 文件 `~/.config/mineru/token`
 5. 交互式输入，仅用于临时手工执行
 
@@ -110,7 +110,7 @@ MINERU_API_TOKEN=your-token
 
 ```bash
 export MINERU_API_TOKEN='your-token'
-python skills/mineru-api/scripts/mineru_to_markdown.py \
+python .opencode/skills/mineru-api/scripts/mineru_to_markdown.py \
   --pdf ./paper.pdf \
   --output ./out/paper
 ```
@@ -119,7 +119,7 @@ python skills/mineru-api/scripts/mineru_to_markdown.py \
 
 ```bash
 export MINERU_API_TOKEN='your-token'
-python skills/mineru-api/scripts/mineru_to_markdown.py \
+python .opencode/skills/mineru-api/scripts/mineru_to_markdown.py \
   --url 'https://cdn-mineru.openxlab.org.cn/demo/example.pdf' \
   --output ./out/example
 ```
@@ -127,7 +127,7 @@ python skills/mineru-api/scripts/mineru_to_markdown.py \
 如果你已经有 `full_zip_url` 下载下来的原始 ZIP，也可以只做清洗：
 
 ```bash
-python skills/mineru-api/scripts/mineru_to_markdown.py \
+python .opencode/skills/mineru-api/scripts/mineru_to_markdown.py \
   --zip ./result.zip \
   --output ./out/result
 ```

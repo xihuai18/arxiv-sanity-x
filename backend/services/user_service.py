@@ -4,45 +4,70 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from flask import g, session
+from flask import g, has_app_context, session
 
 from aslite.repositories import KeywordRepository, NegativeTagRepository, TagRepository
 
+from .user_context import resolve_user
 
-def get_tags():
+
+def _request_user() -> str | None:
+    if not has_app_context():
+        return None
+    return getattr(g, "user", None)
+
+
+def _should_use_request_cache(user: str | None) -> bool:
+    request_user = _request_user()
+    return bool(user and request_user and user == request_user)
+
+
+def get_tags(user: str | None = None):
     """Get user tags with request-level caching."""
-    if g.user is None:
+    resolved_user = resolve_user(user)
+    if resolved_user is None:
         return {}
-    if not hasattr(g, "_tags"):
-        g._tags = TagRepository.get_user_tags(g.user)
-    return g._tags
+    if _should_use_request_cache(resolved_user):
+        if not hasattr(g, "_tags"):
+            g._tags = TagRepository.get_user_tags(resolved_user)
+        return g._tags
+    return TagRepository.get_user_tags(resolved_user)
 
 
-def get_neg_tags():
+def get_neg_tags(user: str | None = None):
     """Get user negative tags with request-level caching."""
-    if g.user is None:
+    resolved_user = resolve_user(user)
+    if resolved_user is None:
         return {}
-    if not hasattr(g, "_neg_tags"):
-        g._neg_tags = TagRepository.get_user_neg_tags(g.user)
-    return g._neg_tags
+    if _should_use_request_cache(resolved_user):
+        if not hasattr(g, "_neg_tags"):
+            g._neg_tags = TagRepository.get_user_neg_tags(resolved_user)
+        return g._neg_tags
+    return TagRepository.get_user_neg_tags(resolved_user)
 
 
-def get_combined_tags():
+def get_combined_tags(user: str | None = None):
     """Get user combined tags with request-level caching."""
-    if g.user is None:
+    resolved_user = resolve_user(user)
+    if resolved_user is None:
         return {}
-    if not hasattr(g, "_combined_tags"):
-        g._combined_tags = TagRepository.get_user_combined_tags(g.user)
-    return g._combined_tags
+    if _should_use_request_cache(resolved_user):
+        if not hasattr(g, "_combined_tags"):
+            g._combined_tags = TagRepository.get_user_combined_tags(resolved_user)
+        return g._combined_tags
+    return TagRepository.get_user_combined_tags(resolved_user)
 
 
-def get_keys():
+def get_keys(user: str | None = None):
     """Get user keywords with request-level caching."""
-    if g.user is None:
+    resolved_user = resolve_user(user)
+    if resolved_user is None:
         return {}
-    if not hasattr(g, "_keys"):
-        g._keys = KeywordRepository.get_user_keywords(g.user)
-    return g._keys
+    if _should_use_request_cache(resolved_user):
+        if not hasattr(g, "_keys"):
+            g._keys = KeywordRepository.get_user_keywords(resolved_user)
+        return g._keys
+    return KeywordRepository.get_user_keywords(resolved_user)
 
 
 def build_user_tag_list():
@@ -72,7 +97,9 @@ def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
     pid_to_tags = {}
     pid_filter = None
     if candidate_pids is not None:
-        pid_filter = {str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()}
+        pid_filter = {
+            str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()
+        }
 
     for tag, tag_pids in (tag_map or {}).items():
         normalized_tag = str(tag or "").strip()

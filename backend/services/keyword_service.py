@@ -8,16 +8,16 @@ This module handles all keyword-related operations including:
 
 from __future__ import annotations
 
-from flask import g
 from loguru import logger
 
 from aslite.repositories import KeywordRepository
 
 from ..utils.sse import emit_user_event
 from ..utils.validation import validate_keyword_name
+from .user_context import resolve_user
 
 
-def add_keyword(keyword: str) -> str:
+def add_keyword(keyword: str, *, user: str | None = None) -> str:
     """Add a keyword for the current user.
 
     Args:
@@ -26,7 +26,8 @@ def add_keyword(keyword: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = resolve_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     err = validate_keyword_name(keyword)
@@ -34,19 +35,22 @@ def add_keyword(keyword: str) -> str:
         return err
 
     # Check if keyword already exists
-    keywords = KeywordRepository.get_user_keywords(g.user)
+    keywords = KeywordRepository.get_user_keywords(current_user)
     if keyword in keywords:
         return "user has repeated keywords"
 
     # Add keyword using Repository
-    KeywordRepository.add_keyword(g.user, keyword)
+    KeywordRepository.add_keyword(current_user, keyword)
 
-    logger.debug(f"added keyword {keyword} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "add_key", "keyword": keyword})
+    logger.debug(f"added keyword {keyword} for user {current_user}")
+    emit_user_event(
+        current_user,
+        {"type": "user_state_changed", "reason": "add_key", "keyword": keyword},
+    )
     return "ok"
 
 
-def delete_keyword(keyword: str) -> str:
+def delete_keyword(keyword: str, *, user: str | None = None) -> str:
     """Delete a keyword for the current user.
 
     Args:
@@ -55,28 +59,34 @@ def delete_keyword(keyword: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = resolve_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not keyword:
         return "error, keyword is required"
 
     # Check if keyword exists
-    keywords = KeywordRepository.get_user_keywords(g.user)
+    keywords = KeywordRepository.get_user_keywords(current_user)
     if not keywords:
         return "user does not have a library"
     if keyword not in keywords:
         return "user does not have this keyword"
 
     # Delete keyword using Repository
-    KeywordRepository.remove_keyword(g.user, keyword)
+    KeywordRepository.remove_keyword(current_user, keyword)
 
-    logger.debug(f"deleted keyword {keyword} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "delete_key", "keyword": keyword})
+    logger.debug(f"deleted keyword {keyword} for user {current_user}")
+    emit_user_event(
+        current_user,
+        {"type": "user_state_changed", "reason": "delete_key", "keyword": keyword},
+    )
     return "ok"
 
 
-def rename_keyword(old_keyword: str, new_keyword: str) -> str:
+def rename_keyword(
+    old_keyword: str, new_keyword: str, *, user: str | None = None
+) -> str:
     """Rename a keyword for the current user.
 
     Args:
@@ -86,7 +96,8 @@ def rename_keyword(old_keyword: str, new_keyword: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = resolve_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not old_keyword or not new_keyword:
@@ -99,12 +110,20 @@ def rename_keyword(old_keyword: str, new_keyword: str) -> str:
         return "ok"
 
     # Rename keyword using Repository
-    result = KeywordRepository.rename_keyword(g.user, old_keyword, new_keyword)
+    result = KeywordRepository.rename_keyword(current_user, old_keyword, new_keyword)
     if result != "ok":
         return result
 
-    logger.debug(f"renamed keyword {old_keyword} to {new_keyword} for user {g.user}")
+    logger.debug(
+        f"renamed keyword {old_keyword} to {new_keyword} for user {current_user}"
+    )
     emit_user_event(
-        g.user, {"type": "user_state_changed", "reason": "rename_key", "from": old_keyword, "to": new_keyword}
+        current_user,
+        {
+            "type": "user_state_changed",
+            "reason": "rename_key",
+            "from": old_keyword,
+            "to": new_keyword,
+        },
     )
     return "ok"

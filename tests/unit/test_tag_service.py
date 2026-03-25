@@ -62,6 +62,22 @@ class TestCreateEmptyTag:
             mock_repo.create_tag.assert_called_once_with("test_user", "valid_tag")
             mock_emit.assert_called_once()
 
+    @patch("backend.services.tag_service.TagRepository")
+    @patch("backend.services.tag_service.emit_user_event")
+    def test_create_empty_tag_accepts_explicit_user(self, mock_emit, mock_repo):
+        from backend.services.tag_service import create_empty_tag
+
+        mock_repo.create_tag.return_value = "ok"
+
+        result = create_empty_tag("valid_tag", user="explicit_user")
+
+        assert result == "ok"
+        mock_repo.create_tag.assert_called_once_with("explicit_user", "valid_tag")
+        mock_emit.assert_called_once_with(
+            "explicit_user",
+            {"type": "user_state_changed", "reason": "add_tag", "tag": "valid_tag"},
+        )
+
 
 class TestAddPaperToTag:
     """Tests for add_paper_to_tag function."""
@@ -214,7 +230,9 @@ class TestRenameTag:
             g.user = "test_user"
             result = rename_tag("old_tag", "new_tag")
             assert result == "ok"
-            mock_repo.rename_tag_full.assert_called_once_with("test_user", "old_tag", "new_tag")
+            mock_repo.rename_tag_full.assert_called_once_with(
+                "test_user", "old_tag", "new_tag"
+            )
 
 
 class TestCreateCombinedTag:
@@ -255,7 +273,9 @@ class TestCreateCombinedTag:
 
 
 class TestGetTagMembers:
-    def test_get_tag_members_search_uses_metas_before_bulk_fetch(self, app, monkeypatch):
+    def test_get_tag_members_search_uses_metas_before_bulk_fetch(
+        self, app, monkeypatch
+    ):
         from backend.services.tag_service import get_tag_members
 
         calls = {"bulk": 0}
@@ -268,7 +288,10 @@ class TestGetTagMembers:
 
         def _get_papers_bulk(pids):
             calls["bulk"] += 1
-            return {pid: {"title": "fallback", "authors": [], "_time_str": ""} for pid in pids}
+            return {
+                pid: {"title": "fallback", "authors": [], "_time_str": ""}
+                for pid in pids
+            }
 
         with app.app_context():
             from flask import g

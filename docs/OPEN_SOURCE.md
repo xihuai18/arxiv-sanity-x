@@ -1,45 +1,35 @@
 # Open Source Release Guide
 
-This doc is for maintainers who develop in a private repo but publish an open source mirror.
+This doc is for maintainers preparing a public release of this repo.
 
-Goal: ship the **code + safe docs**, without leaking secrets, private data, or large local artifacts.
+Goal: ship the **code + safe docs**, without leaking secrets, sensitive data, or large local artifacts.
 
 ## What must NOT be published
 
 - Runtime data: `data/` (DBs, caches, uploads, summaries, logs)
 - Secrets/local config: `.env*`, `secret_key.txt`, `config/llm.yml`, SSH keys, API key files
-- Local tool config: `.claude/`, `.factory/`, `.skills/`, `.playwright-cli/`, IDE folders, plus private parts of `.opencode/` (keep `.opencode/skills/` only if you intentionally publish the reusable skills)
+- Local tool config: `.claude/`, `.factory/`, `.skills/`, `.playwright-cli/`, IDE folders, plus non-public parts of `.opencode/` (keep `.opencode/skills/` only if you intentionally publish the reusable skills)
 - Virtualenvs: `.venv/`, `venv/`
 - Build outputs: `static/dist/` (rebuildable)
-- Submodule contents: `data-repo/` (and avoid publishing `.gitmodules` if it contains private URLs)
+- Submodule contents: `data-repo/` (and avoid publishing `.gitmodules` if it contains non-public URLs)
 - Local test/runtime residue: `tmp/`, `coverage.xml`, `.hypothesis/`, `.tox/`, `.pytype/`, `static/test_mathjax.html`
 
-## Recommended release flow (mirror sync)
+## Recommended release checklist
 
-Use the sync helper (rsync-based):
+Before publishing, make sure the release process will:
 
-```bash
-# Preview
-./scripts/sync_to_opensource.sh --dry-run
+- exclude secrets, runtime files, and common sensitive patterns
+- keep `.opencode/skills/` but exclude the rest of `.opencode/`
+- rewrite `.gitmodules` to a dummy/public submodule URL when needed
+- scrub local-only residue such as non-public `.opencode/` files, `.playwright-cli/`, `tmp/`, coverage/test artifacts, IDE folders, and `config/llm.yml`
+- run a post-sync safety scan for forbidden files, local IPs, nested `.git`, and large files
 
-# Actual sync
-./scripts/sync_to_opensource.sh
-```
+## Release expectations
 
-The script:
-
-- excludes private/runtime files and common secret patterns
-- keeps `.opencode/skills/` but excludes the rest of `.opencode/`
-- defaults to syncing into a sibling `arxiv-sanity-x` directory, or use `TARGET_DIR=/path/to/mirror`
-- rewrites `.gitmodules` to a dummy/public submodule URL (if present)
-- can scrub target-side local-only residue such as private `.opencode/` files, `.playwright-cli/`, `tmp/`, coverage/test artifacts, IDE folders, and `config/llm.yml`
-- runs a post-sync safety scan (forbidden files, private IPs, nested `.git`, large files)
-
-## Current script assumptions
-
-- `scripts/sync_to_opensource.sh` supports `TARGET_DIR=/path/to/mirror` if you do not want the default sibling mirror path.
-- If you use `--purge-excluded`, excluded local-only files are deleted from the target mirror as well as skipped from the source sync.
-- Review the exclude list before each public release, especially if your private repo has new local tooling under hidden directories.
+- Review the published tree itself instead of depending on unpublished local tooling.
+- The release process should support overriding the target path instead of requiring a hardcoded location.
+- Destructive cleanup options should delete excluded local-only files from the release tree as well as skipping them during sync.
+- Review the exclude list before each release, especially if the repo has new local tooling under hidden directories.
 
 ## Manual safety checks (recommended)
 
@@ -49,7 +39,7 @@ Run these before pushing to a public repo:
 # 1) Check for accidental secrets in tracked files
 git ls-files | xargs rg -n \"sk-|BEGIN_PRIVATE_KEY|ghp_|github_pat_|AKIA\"
 
-# 2) Check for private IPs / user paths
+# 2) Check for local IPs / user paths
 git ls-files | xargs rg -n \"172\\.16\\.|192\\.168\\.|\\b10\\.[0-9]{1,3}\\.|/home/|/Users/\"
 
 # 3) Build sanity (should succeed; output is ignored)
@@ -61,10 +51,10 @@ test -f static/dist/manifest.json
 
 `data-repo/` is an optional submodule used for backing up `data/dict.db`.
 
-- Do not publish the private submodule URL.
+- Do not publish a non-public submodule URL.
 - Options for open source:
     - Remove submodule metadata entirely (recommended if you don't need it in public)
-    - Keep `.gitmodules` but ensure it uses a public/dummy URL (the sync script rewrites it for the mirror)
+    - Keep `.gitmodules` but ensure it uses a public/dummy URL
 
 ## CI expectations
 

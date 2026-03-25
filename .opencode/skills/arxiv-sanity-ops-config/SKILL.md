@@ -19,7 +19,7 @@ metadata:
 
 ## Scope
 
-- Covers: `config/*.py`, `config/llm.yml`, `.env.example`, `bin/*`, `tools/__main__.py`, `tools/arxiv_daemon.py`, `tools/compute.py`, `tools/batch_paper_summarizer.py`, `tools/daemon.py`, `tools/send_emails.py`, `tools/rebuild_time_index.py`, `scripts/__main__.py`, `scripts/cleanup_locks.py`, `scripts/cleanup_tasks.py`, `scripts/check-dist-sync.sh`, `scripts/sync_to_opensource.sh`
+- Covers: `config/*.py`, `config/llm.yml`, `.env.example`, `bin/*`, `tools/__main__.py`, `tools/arxiv_daemon.py`, `tools/compute.py`, `tools/batch_paper_summarizer.py`, `tools/daemon.py`, `tools/send_emails.py`, `tools/rebuild_time_index.py`, `scripts/__main__.py`, `scripts/cleanup_locks.py`, `scripts/cleanup_tasks.py`, `scripts/check-dist-sync.sh`
 - Also touches: `serve.py`, `tasks.py`, `docs/CONFIGURATION.md`, `docs/DEFAULTS.md`, `docs/OPERATIONS.md`, `docs/DEVELOPMENT.md`
 - Does not cover: 摘要器内部实现和上传状态机细节；分别看对应 skill
 
@@ -104,7 +104,7 @@ config settings
 - launcher 参数会改最终环境变量，排障时要看实际打印和子进程环境。
 - `config/llm.yml`、`config/llm_model_order.py`、fallback model 可见性和 `/ready` 探针是联动的；只改其中一个文件经常不够。
 - `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL` 太小会让长排队上传过早触发 stale repair，文档、默认值和运维告警要一起看。
-- `scripts/sync_to_opensource.sh` 默认同步到 sibling `arxiv-sanity-x` 目录，也支持通过 `TARGET_DIR` 覆盖；它会清理私有 `.opencode/` 内容、`tmp/`、coverage/test 产物等本地文件，不要把它当通用镜像脚本。
+- 发布到公开仓库时，要确保发布流程会清理非公开 `.opencode/` 内容、`tmp/`、coverage/test 产物等本地文件，不要把本地镜像流程当成通用分发工具。
 
 ## Validation
 

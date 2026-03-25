@@ -151,14 +151,12 @@ To reproduce the main CI test run locally:
 
 ## Open Source Release
 
-If you maintain a private fork and publish an open source mirror, use:
-
-- `scripts/sync_to_opensource.sh`
+If you publish an open source mirror, review the release checklist before pushing the public repo.
 
 Notes:
 
-- The current sync helper is repo-local, not a portable mirror utility: its target path is hardcoded inside `scripts/sync_to_opensource.sh`.
-- Review `docs/OPEN_SOURCE.md` and the script's exclude / scrub list before using `--purge-excluded`, because it now cleans more local-only artifacts from the target mirror.
+- Review `docs/OPEN_SOURCE.md` before publishing.
+- Destructive cleanup options in your release flow should remove local-only artifacts from the published tree.
 
 ## Pre-commit (Optional)
 

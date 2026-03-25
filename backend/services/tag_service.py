@@ -12,17 +12,21 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from flask import g
 from loguru import logger
 
 from aslite.repositories import CombinedTagRepository, TagRepository
 
 from ..utils.sse import emit_user_event
 from ..utils.validation import validate_tag_name
+from .user_context import resolve_user
 from .user_service import get_neg_tags, get_tags
 
 if TYPE_CHECKING:
     pass
+
+
+def _require_user(user: str | None = None) -> str | None:
+    return resolve_user(user)
 
 
 # -----------------------------------------------------------------------------
@@ -30,7 +34,7 @@ if TYPE_CHECKING:
 # -----------------------------------------------------------------------------
 
 
-def create_empty_tag(tag: str) -> str:
+def create_empty_tag(tag: str, *, user: str | None = None) -> str:
     """Create an empty tag for the current user.
 
     Args:
@@ -39,23 +43,26 @@ def create_empty_tag(tag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     err = validate_tag_name(tag)
     if err:
         return err
 
-    result = TagRepository.create_tag(g.user, tag)
+    result = TagRepository.create_tag(current_user, tag)
     if result != "ok":
         return result
 
-    logger.debug(f"added empty tag {tag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag})
+    logger.debug(f"added empty tag {tag} for user {current_user}")
+    emit_user_event(
+        current_user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag}
+    )
     return "ok"
 
 
-def add_paper_to_tag(pid: str, tag: str) -> str:
+def add_paper_to_tag(pid: str, tag: str, *, user: str | None = None) -> str:
     """Add a paper to a tag.
 
     Args:
@@ -65,7 +72,8 @@ def add_paper_to_tag(pid: str, tag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not pid:
@@ -76,10 +84,10 @@ def add_paper_to_tag(pid: str, tag: str) -> str:
         return err
 
     try:
-        TagRepository.add_paper_to_tag_and_remove_neg(g.user, pid, tag)
-        logger.debug(f"added paper {pid} to tag {tag} for user {g.user}")
+        TagRepository.add_paper_to_tag_and_remove_neg(current_user, pid, tag)
+        logger.debug(f"added paper {pid} to tag {tag} for user {current_user}")
         emit_user_event(
-            g.user,
+            current_user,
             {"type": "user_state_changed", "reason": "add", "tag": tag, "pid": pid},
         )
         return "ok"
@@ -88,7 +96,7 @@ def add_paper_to_tag(pid: str, tag: str) -> str:
         return f"error: {e}"
 
 
-def remove_paper_from_tag(pid: str, tag: str) -> str:
+def remove_paper_from_tag(pid: str, tag: str, *, user: str | None = None) -> str:
     """Remove a paper from a tag.
 
     Args:
@@ -98,17 +106,18 @@ def remove_paper_from_tag(pid: str, tag: str) -> str:
     Returns:
         Success message or error message
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not pid or not tag:
         return "error, pid and tag are required"
 
     try:
-        result = TagRepository.remove_paper_from_tag_verbose(g.user, pid, tag)
+        result = TagRepository.remove_paper_from_tag_verbose(current_user, pid, tag)
         if result == "ok":
             emit_user_event(
-                g.user,
+                current_user,
                 {"type": "user_state_changed", "reason": "sub", "tag": tag, "pid": pid},
             )
             return f"ok removed pid {pid} from tag {tag}"
@@ -118,7 +127,7 @@ def remove_paper_from_tag(pid: str, tag: str) -> str:
         return f"error: {e}"
 
 
-def delete_tag(tag: str) -> str:
+def delete_tag(tag: str, *, user: str | None = None) -> str:
     """Delete a tag completely.
 
     Args:
@@ -127,7 +136,8 @@ def delete_tag(tag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not tag:
@@ -136,18 +146,20 @@ def delete_tag(tag: str) -> str:
     # Capture affected combined tags before deletion (repository may delete them as cascade).
     deleted_ctags: list[str] = []
     try:
-        combined = CombinedTagRepository.get_user_combined_tags(g.user) or set()
-        deleted_ctags = sorted([ct for ct in combined if tag in map(str.strip, (ct or "").split(","))])
+        combined = CombinedTagRepository.get_user_combined_tags(current_user) or set()
+        deleted_ctags = sorted(
+            [ct for ct in combined if tag in map(str.strip, (ct or "").split(","))]
+        )
     except Exception:
         deleted_ctags = []
 
-    result = TagRepository.delete_tag_full(g.user, tag)
+    result = TagRepository.delete_tag_full(current_user, tag)
     if result != "ok":
         return result
 
-    logger.debug(f"deleted tag {tag} for user {g.user}")
+    logger.debug(f"deleted tag {tag} for user {current_user}")
     emit_user_event(
-        g.user,
+        current_user,
         {
             "type": "user_state_changed",
             "reason": "delete_tag",
@@ -158,7 +170,7 @@ def delete_tag(tag: str) -> str:
     return "ok"
 
 
-def rename_tag(old_tag: str, new_tag: str) -> str:
+def rename_tag(old_tag: str, new_tag: str, *, user: str | None = None) -> str:
     """Rename a tag.
 
     Args:
@@ -168,7 +180,8 @@ def rename_tag(old_tag: str, new_tag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not old_tag or not new_tag:
@@ -181,7 +194,7 @@ def rename_tag(old_tag: str, new_tag: str) -> str:
     # Capture affected combined tags so frontend can update caches.
     renamed_ctags: list[dict] = []
     try:
-        combined = CombinedTagRepository.get_user_combined_tags(g.user) or set()
+        combined = CombinedTagRepository.get_user_combined_tags(current_user) or set()
         for ct in sorted(combined):
             parts = [p.strip() for p in (ct or "").split(",")]
             if old_tag in parts:
@@ -190,13 +203,13 @@ def rename_tag(old_tag: str, new_tag: str) -> str:
     except Exception:
         renamed_ctags = []
 
-    result = TagRepository.rename_tag_full(g.user, old_tag, new_tag)
+    result = TagRepository.rename_tag_full(current_user, old_tag, new_tag)
     if result != "ok":
         return result
 
-    logger.debug(f"renamed tag {old_tag} to {new_tag} for user {g.user}")
+    logger.debug(f"renamed tag {old_tag} to {new_tag} for user {current_user}")
     emit_user_event(
-        g.user,
+        current_user,
         {
             "type": "user_state_changed",
             "reason": "rename_tag",
@@ -213,7 +226,7 @@ def rename_tag(old_tag: str, new_tag: str) -> str:
 # -----------------------------------------------------------------------------
 
 
-def create_combined_tag(ctag: str) -> str:
+def create_combined_tag(ctag: str, *, user: str | None = None) -> str:
     """Create a combined tag.
 
     Args:
@@ -222,7 +235,8 @@ def create_combined_tag(ctag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not ctag:
@@ -232,8 +246,8 @@ def create_combined_tag(ctag: str) -> str:
         return "error, cannot add the ctag 'null'"
 
     # Validate that all component tags exist (positive or negative tags are both allowed).
-    pos_tags = get_tags() or {}
-    neg_tags = get_neg_tags() or {}
+    pos_tags = get_tags(user=current_user) or {}
+    neg_tags = get_neg_tags(user=current_user) or {}
     all_tags = set(pos_tags.keys()) | set(neg_tags.keys())
     for tag in map(str.strip, ctag.split(",")):
         if not tag:
@@ -245,18 +259,20 @@ def create_combined_tag(ctag: str) -> str:
             return "invalid ctag"
 
     # Check if user already has this combined tag
-    if CombinedTagRepository.has_combined_tag(g.user, ctag):
+    if CombinedTagRepository.has_combined_tag(current_user, ctag):
         return "user has repeated ctag"
 
     # Add the combined tag
-    CombinedTagRepository.add_combined_tag(g.user, ctag)
+    CombinedTagRepository.add_combined_tag(current_user, ctag)
 
-    logger.debug(f"added ctag {ctag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag})
+    logger.debug(f"added ctag {ctag} for user {current_user}")
+    emit_user_event(
+        current_user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag}
+    )
     return "ok"
 
 
-def delete_combined_tag(ctag: str) -> str:
+def delete_combined_tag(ctag: str, *, user: str | None = None) -> str:
     """Delete a combined tag.
 
     Args:
@@ -265,25 +281,31 @@ def delete_combined_tag(ctag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     if not ctag:
         return "error, ctag is required"
 
     # Check if user has this combined tag
-    if not CombinedTagRepository.has_combined_tag(g.user, ctag):
+    if not CombinedTagRepository.has_combined_tag(current_user, ctag):
         return "user does not have this ctag"
 
     # Delete the tag
-    CombinedTagRepository.remove_combined_tag(g.user, ctag)
+    CombinedTagRepository.remove_combined_tag(current_user, ctag)
 
-    logger.debug(f"deleted ctag {ctag} for user {g.user}")
-    emit_user_event(g.user, {"type": "user_state_changed", "reason": "delete_ctag", "ctag": ctag})
+    logger.debug(f"deleted ctag {ctag} for user {current_user}")
+    emit_user_event(
+        current_user,
+        {"type": "user_state_changed", "reason": "delete_ctag", "ctag": ctag},
+    )
     return "ok"
 
 
-def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
+def rename_combined_tag(
+    old_ctag: str, new_ctag: str, *, user: str | None = None
+) -> str:
     """Rename a combined tag.
 
     Args:
@@ -293,7 +315,8 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
     Returns:
         "ok" on success, error message otherwise
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         return "error, not logged in"
 
     old_ctag = (old_ctag or "").strip()
@@ -309,8 +332,8 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
         return "ok"
 
     # Validate that all component tags exist (positive or negative tags are both allowed).
-    pos_tags = get_tags() or {}
-    neg_tags = get_neg_tags() or {}
+    pos_tags = get_tags(user=current_user) or {}
+    neg_tags = get_neg_tags(user=current_user) or {}
     all_tags = set(pos_tags.keys()) | set(neg_tags.keys())
     for tag in map(str.strip, new_ctag.split(",")):
         if not tag:
@@ -322,18 +345,18 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
             return "invalid ctag"
 
     # Check if old tag exists and new tag doesn't
-    if not CombinedTagRepository.has_combined_tag(g.user, old_ctag):
+    if not CombinedTagRepository.has_combined_tag(current_user, old_ctag):
         return "user does not have this ctag"
 
-    if CombinedTagRepository.has_combined_tag(g.user, new_ctag):
+    if CombinedTagRepository.has_combined_tag(current_user, new_ctag):
         return "user has repeated ctag"
 
     # Rename the tag
-    CombinedTagRepository.rename_combined_tag(g.user, old_ctag, new_ctag)
+    CombinedTagRepository.rename_combined_tag(current_user, old_ctag, new_ctag)
 
-    logger.debug(f"renamed ctag {old_ctag} to {new_ctag} for user {g.user}")
+    logger.debug(f"renamed ctag {old_ctag} to {new_ctag} for user {current_user}")
     emit_user_event(
-        g.user,
+        current_user,
         {
             "type": "user_state_changed",
             "reason": "rename_ctag",
@@ -349,7 +372,9 @@ def rename_combined_tag(old_ctag: str, new_ctag: str) -> str:
 # -----------------------------------------------------------------------------
 
 
-def set_tag_feedback(pid: str, tag: str, label: int) -> None:
+def set_tag_feedback(
+    pid: str, tag: str, label: int, *, user: str | None = None
+) -> None:
     """Set tag feedback (positive/negative/remove) for a paper.
 
     Args:
@@ -360,16 +385,17 @@ def set_tag_feedback(pid: str, tag: str, label: int) -> None:
     Raises:
         Exception: If operation fails
     """
-    if g.user is None:
+    current_user = _require_user(user)
+    if current_user is None:
         raise ValueError("not logged in")
 
     err = validate_tag_name(tag)
     if err:
         raise ValueError(err)
 
-    TagRepository.set_tag_label(g.user, pid, tag, label)
+    TagRepository.set_tag_label(current_user, pid, tag, label)
     emit_user_event(
-        g.user,
+        current_user,
         {
             "type": "user_state_changed",
             "reason": "tag_feedback",
@@ -416,7 +442,9 @@ def get_tag_members(
     elif label == "neg":
         pairs = [(pid, -1) for pid in neg_set]
     else:
-        pairs = [(pid, 1) for pid in pos_set] + [(pid, -1) for pid in (neg_set - pos_set)]
+        pairs = [(pid, 1) for pid in pos_set] + [
+            (pid, -1) for pid in (neg_set - pos_set)
+        ]
 
     # Pre-fetch all paper info for sorting and searching
     all_pids = [pid for pid, _ in pairs]
@@ -450,7 +478,11 @@ def get_tag_members(
     def _build_upload_paper(record: dict, pid: str) -> dict:
         meta = record.get("meta_extracted", {})
         override = record.get("meta_override", {})
-        title = override.get("title") or meta.get("title") or record.get("original_filename", pid)
+        title = (
+            override.get("title")
+            or meta.get("title")
+            or record.get("original_filename", pid)
+        )
         authors_list = override.get("authors") or meta.get("authors") or []
         return {
             "title": title,
@@ -509,12 +541,18 @@ def get_tag_members(
             authors_val = p.get("authors") or []
             if isinstance(authors_val, list):
                 if authors_val and isinstance(authors_val[0], dict):
-                    authors = " ".join(a.get("name", "") for a in authors_val if a).lower()
+                    authors = " ".join(
+                        a.get("name", "") for a in authors_val if a
+                    ).lower()
                 else:
                     authors = " ".join(str(a) for a in authors_val if a).lower()
             else:
                 authors = str(authors_val).lower()
-            if search_text in pid.lower() or search_text in title or search_text in authors:
+            if (
+                search_text in pid.lower()
+                or search_text in title
+                or search_text in authors
+            ):
                 filtered.append((pid, lab))
         pairs = filtered
 

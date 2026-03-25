@@ -17,6 +17,10 @@ from aslite.repositories import (
     UploadedPaperRepository,
     safe_closing,
 )
+from backend.services.summary_state_machine import (
+    build_readinglist_summary_transition,
+    build_summary_status_transition,
+)
 from config import settings
 from config.sentry import initialize_sentry
 from tools.paper_summarizer import (
@@ -117,7 +121,9 @@ def _allow_task_id(task_user: str | None, request_user: str | None) -> bool:
 def _find_active_task(pid: str, model: str) -> tuple[str | None, str | None]:
     """Return (task_id, task_user) for an active queued/running task, if any."""
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for key, info in items:
                 if not isinstance(info, dict):
                     continue
@@ -134,9 +140,15 @@ def _find_active_task(pid: str, model: str) -> tuple[str | None, str | None]:
 
 def _enqueue_lock_path(pid: str, model: str) -> Path:
     # Reuse model_key sanitization from summary_cache_paths()
-    _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, _legacy_lock = summary_cache_paths(pid, model)
+    _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, _legacy_lock = (
+        summary_cache_paths(pid, model)
+    )
     name = lock_file.name
-    model_key = name[1 : -len(".lock")] if (name.startswith(".") and name.endswith(".lock")) else "default"
+    model_key = (
+        name[1 : -len(".lock")]
+        if (name.startswith(".") and name.endswith(".lock"))
+        else "default"
+    )
     return lock_file.parent / f".{model_key}.enqueue.lock"
 
 
@@ -187,7 +199,9 @@ def _update_upload_task_reference(
             return
         UploadedPaperRepository.update(pid, {record_field: desired})
     except Exception as e:
-        logger.debug(f"Failed to sync upload task reference for {pid}:{record_field}: {e}")
+        logger.debug(
+            f"Failed to sync upload task reference for {pid}:{record_field}: {e}"
+        )
 
 
 def _is_current_upload_task(
@@ -265,36 +279,14 @@ def _maybe_mark_upload_task_canceled(
         )
 
 
-def _emit_summary_status_event(
-    pid: str,
-    *,
-    model: str,
-    status: str,
-    task_user: str | None,
-    public_error: str | None,
-    private_error: str | None,
-    resolved_model: str | None = None,
-) -> None:
-    payload: dict[str, Any] = {
-        "type": "summary_status",
-        "pid": pid,
-        "model": model,
-        "status": status,
-        "error": None,
-    }
-    normalized_resolved_model = (resolved_model or "").strip()
-    if normalized_resolved_model:
-        payload["resolved_model"] = normalized_resolved_model
-
-    if _is_upload_pid(pid):
-        if not task_user:
+def _emit_summary_status_event(transition) -> None:
+    if _is_upload_pid(transition.pid):
+        if not transition.task_user:
             return
-        payload["error"] = private_error
-        _emit_user_event(task_user, payload)
+        _emit_user_event(transition.task_user, transition.private_event_payload())
         return
 
-    payload["error"] = public_error
-    _emit_all_event(payload)
+    _emit_all_event(transition.public_event_payload())
 
 
 def _paper_exists(pid: str) -> bool:
@@ -330,45 +322,48 @@ def _update_summary_status_db(
     task_user: str | None = None,
     resolved_model: str | None = None,
 ) -> None:
-    model = (model or _default_llm_name() or "").strip()
-    if not model:
+    transition = build_summary_status_transition(
+        pid,
+        model,
+        status,
+        error,
+        task_id,
+        task_user,
+        resolved_model,
+        default_model=_default_llm_name(),
+    )
+    if transition is None:
         return
     try:
-        extra: dict[str, Any] = {}
-        if task_id is not None:
-            extra["task_id"] = str(task_id)
-        if task_user is not None:
-            extra["task_user"] = task_user
-        if status == "ok":
-            rm = (resolved_model or "").strip()
-            if rm:
-                extra["resolved_model"] = rm
-        else:
-            extra["resolved_model"] = None
-        if status not in ("queued", "running"):
-            extra["task_id"] = None
-            extra["task_user"] = None
-        SummaryStatusRepository.set_status(pid, model, status, cast(Any, error), **extra)
-        if _is_upload_pid(pid):
-            if status in ("queued", "running") and task_id is not None:
-                _update_upload_task_reference(pid, record_field="summary_task_id", task_id=task_id)
-            elif status not in ("queued", "running") and task_id is not None:
-                _update_upload_task_reference(pid, record_field="summary_task_id", task_id=task_id, clear=True)
-        public_error = "failed" if error else None
-        _emit_summary_status_event(
-            pid,
-            model=model,
-            status=status,
-            task_user=task_user,
-            public_error=public_error,
-            private_error=error,
-            resolved_model=resolved_model,
+        SummaryStatusRepository.set_status(
+            transition.pid,
+            transition.model,
+            transition.status,
+            cast(Any, transition.error),
+            **transition.repository_extra(),
         )
+        if _is_upload_pid(transition.pid):
+            if transition.is_active and task_id is not None:
+                _update_upload_task_reference(
+                    transition.pid,
+                    record_field="summary_task_id",
+                    task_id=task_id,
+                )
+            elif not transition.is_active and task_id is not None:
+                _update_upload_task_reference(
+                    transition.pid,
+                    record_field="summary_task_id",
+                    task_id=task_id,
+                    clear=True,
+                )
+        _emit_summary_status_event(transition)
     except Exception as e:
         logger.warning(f"Failed to update summary status db for {pid}: {e}")
 
 
-def _update_task_status(task_id: str | None, status: str, error: str | None = None, **extra) -> None:
+def _update_task_status(
+    task_id: str | None, status: str, error: str | None = None, **extra
+) -> None:
     if not task_id:
         return
     try:
@@ -390,30 +385,22 @@ def _update_readinglist_summary_status(
     try:
         if ReadingListRepository.get_reading_list_item(user, pid) is None:
             return
-        default_model = (_default_llm_name() or "").strip()
-        event_model = (model or default_model or "").strip()
-        should_persist = not event_model or not default_model or event_model == default_model
-        if should_persist:
-            updates = {
-                "summary_status": status,
-                "summary_last_error": error,
-                "summary_updated_time": time.time(),
-            }
-            if status not in ("queued", "running"):
-                updates["summary_task_id"] = None
-            elif task_id is not None:
-                updates["summary_task_id"] = str(task_id)
+        transition = build_readinglist_summary_transition(
+            user,
+            pid,
+            status,
+            error,
+            task_id,
+            model,
+            default_model=_default_llm_name(),
+            updated_time=time.time(),
+        )
+        if transition is None:
+            return
+        updates = transition.persisted_updates()
+        if updates is not None:
             ReadingListRepository.update_reading_list_item(user, pid, updates)
-        payload = {
-            "type": "summary_status",
-            "pid": pid,
-            "model": event_model or None,
-            "status": status,
-            "error": error,
-        }
-        if task_id is not None:
-            payload["task_id"] = str(task_id)
-        _emit_user_event(user, payload)
+        _emit_user_event(user, transition.event_payload())
     except Exception as e:
         logger.warning(f"Failed to update summary status for {user}:{pid}: {e}")
 
@@ -462,9 +449,13 @@ def _read_cached_summary(
     if cached:
         return cached, meta
 
-    legacy_cached, legacy_meta_data = _read_from_paths(legacy_cache, legacy_meta, inject_model=False)
+    legacy_cached, legacy_meta_data = _read_from_paths(
+        legacy_cache, legacy_meta, inject_model=False
+    )
     if legacy_cached:
-        legacy_model = (legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or "").strip()
+        legacy_model = (
+            legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or ""
+        ).strip()
         if not model or (legacy_model and legacy_model == model):
             return legacy_cached, legacy_meta_data
 
@@ -489,7 +480,9 @@ def _read_cached_summary(
         resolved_legacy_meta,
         _resolved_legacy_lock,
     ) = summary_cache_paths(status_pid, resolved_model)
-    resolved_cached, resolved_meta_data = _read_from_paths(resolved_cache, resolved_meta)
+    resolved_cached, resolved_meta_data = _read_from_paths(
+        resolved_cache, resolved_meta
+    )
     if resolved_cached:
         return resolved_cached, resolved_meta_data
 
@@ -500,7 +493,9 @@ def _read_cached_summary(
         return None, {}
 
     resolved_legacy_model = (
-        resolved_legacy_meta_data.get("model") or resolved_legacy_meta_data.get("llm_model") or ""
+        resolved_legacy_meta_data.get("model")
+        or resolved_legacy_meta_data.get("llm_model")
+        or ""
     ).strip()
     if resolved_legacy_model and resolved_legacy_model == resolved_model:
         return resolved_legacy_cached, resolved_legacy_meta_data
@@ -517,7 +512,9 @@ def _is_error_summary(summary_content: str) -> bool:
     return not looks_like_valid_cached_summary_markdown(text)
 
 
-def _extract_error_reason_from_summary(summary_content: str, *, max_len: int = 500) -> str:
+def _extract_error_reason_from_summary(
+    summary_content: str, *, max_len: int = 500
+) -> str:
     """Extract a concise human-readable error reason from a '# Error' summary body."""
     if not summary_content:
         return "Summary generation failed: empty summary content"
@@ -565,7 +562,9 @@ def _revoke_task_by_id(task_id: str) -> None:
     try:
         # Huey expects a Task instance (uses task.revoke_id). We can construct a dummy
         # task and override its revoke_id to match the target task id.
-        dummy = generate_summary_task.s("_", model=_default_llm_name() or "default", user=None)
+        dummy = generate_summary_task.s(
+            "_", model=_default_llm_name() or "default", user=None
+        )
         dummy.revoke_id = f"r:{task_id}"
         huey.revoke(dummy, revoke_once=True)
     except Exception:
@@ -638,7 +637,9 @@ def cancel_summary_tasks(
 
     # 2) Best-effort scan for any duplicate queued/running tasks for this pid/model.
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for key, tinfo in items:
                 if not isinstance(tinfo, dict):
                     continue
@@ -654,7 +655,9 @@ def cancel_summary_tasks(
 
     # De-dup while preserving order
     seen = set()
-    canceled_task_ids = [x for x in canceled_task_ids if x and (x not in seen and not seen.add(x))]
+    canceled_task_ids = [
+        x for x in canceled_task_ids if x and (x not in seen and not seen.add(x))
+    ]
 
     for tid in canceled_task_ids:
         existing_user = None
@@ -693,7 +696,9 @@ def cancel_summary_tasks(
         if isinstance(current, dict) and current.get("status") in ("queued", "running"):
             cur_tid = current.get("task_id")
             if cur_tid and _should_cancel_task(str(cur_tid)):
-                SummaryStatusRepository.set_status(pid, model, "canceled", reason, task_id=None, task_user=None)
+                SummaryStatusRepository.set_status(
+                    pid, model, "canceled", reason, task_id=None, task_user=None
+                )
                 if _is_upload_pid(pid):
                     _update_upload_task_reference(
                         pid,
@@ -725,7 +730,9 @@ def cancel_paper_summary_tasks(
     # Collect active tasks grouped by model.
     model_to_task_ids: dict[str, list[str]] = {}
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for key, info in items:
                 if not isinstance(info, dict):
                     continue
@@ -736,12 +743,16 @@ def cancel_paper_summary_tasks(
                 m = (info.get("model") or "").strip()
                 if not m:
                     continue
-                model_to_task_ids.setdefault(m, []).append(str(key).replace("task::", ""))
+                model_to_task_ids.setdefault(m, []).append(
+                    str(key).replace("task::", "")
+                )
     except Exception:
         model_to_task_ids = {}
     # Include models from status entries (even if no task:: record is present).
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix(f"{pid}::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix(f"{pid}::")
+        ) as items:
             for key, info in items:
                 if not isinstance(info, dict):
                     continue
@@ -781,7 +792,9 @@ def _generate_and_cache_summary(
 
     summary_source = normalize_summary_source(_summary_markdown_source())
 
-    cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = summary_cache_paths(cache_pid, model)
+    cache_file, meta_file, lock_file, legacy_cache, legacy_meta, legacy_lock = (
+        summary_cache_paths(cache_pid, model)
+    )
     # Use a paper-level lock (legacy_lock) to avoid cross-model races (e.g. model fallback).
     # This trades some parallelism for correctness and stability under concurrency.
     lock_file = legacy_lock
@@ -810,7 +823,11 @@ def _generate_and_cache_summary(
 
     lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
     if lock_fd is None:
-        if cached_summary and not force_refresh and summary_source_matches(cached_meta, summary_source):
+        if (
+            cached_summary
+            and not force_refresh
+            and summary_source_matches(cached_meta, summary_source)
+        ):
             return cached_summary, cached_meta
         return "# Error\n\nSummary is being generated, please retry shortly.", {}
 
@@ -847,7 +864,9 @@ def _generate_and_cache_summary(
         if progress_cb:
             progress_cb("llm_request")
 
-        summary_result = generate_paper_summary_from_module(pid_for_summary, source=summary_source, model=model)
+        summary_result = generate_paper_summary_from_module(
+            pid_for_summary, source=summary_source, model=model
+        )
         summary_content, summary_meta = normalize_summary_result(summary_result)
         summary_meta = summary_meta if isinstance(summary_meta, dict) else {}
 
@@ -856,7 +875,9 @@ def _generate_and_cache_summary(
         stat_model = actual_model if actual_model else model
         if actual_model and model and actual_model != model:
             # Model changed, update cache paths but keep original lock for release
-            cache_file, meta_file, _, legacy_cache, legacy_meta, _ = summary_cache_paths(cache_pid, actual_model)
+            cache_file, meta_file, _, legacy_cache, legacy_meta, _ = (
+                summary_cache_paths(cache_pid, actual_model)
+            )
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             # Re-check if this actual_model cache already existed
             try:
@@ -886,7 +907,9 @@ def _generate_and_cache_summary(
                 )
 
                 if not existed_before:
-                    summary_cache_stats_increment(cache_pid, stat_model)  # Use actual model for stats
+                    summary_cache_stats_increment(
+                        cache_pid, stat_model
+                    )  # Use actual model for stats
                 else:
                     invalidate_summary_cache_stats()
             except Exception:
@@ -922,16 +945,24 @@ def generate_summary_task(
     attempt = 1
     status_force_refresh = False
     try:
-        existing = SummaryStatusRepository.get_task_status(str(task_id)) if task_id else None
+        existing = (
+            SummaryStatusRepository.get_task_status(str(task_id)) if task_id else None
+        )
         if isinstance(existing, dict):
             status_force_refresh = bool(existing.get("force_refresh"))
             # Respect pre-cancellation (e.g. user cleared summary while task was queued).
             if existing.get("status") == "canceled":
                 reason = (existing.get("error") or "Canceled by user").strip()
-                _update_task_status(task_id, "canceled", error=reason, pid=pid, model=model, user=user)
-                _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+                _update_task_status(
+                    task_id, "canceled", error=reason, pid=pid, model=model, user=user
+                )
+                _update_summary_status_db(
+                    pid, model, "canceled", reason, task_id=None, task_user=user
+                )
                 if user:
-                    _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None, model=model)
+                    _update_readinglist_summary_status(
+                        user, pid, "canceled", reason, task_id=None, model=model
+                    )
                 return
             attempt = int(existing.get("attempt") or 0) + 1
     except Exception:
@@ -970,9 +1001,13 @@ def generate_summary_task(
             user=user,
             epoch=start_epoch,
         )
-        _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+        _update_summary_status_db(
+            pid, model, "canceled", reason, task_id=None, task_user=user
+        )
         if user:
-            _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None, model=model)
+            _update_readinglist_summary_status(
+                user, pid, "canceled", reason, task_id=None, model=model
+            )
         return
 
     # Uploaded papers are private; ensure the task user owns the paper before marking running.
@@ -985,7 +1020,9 @@ def generate_summary_task(
         if record.get("deleting") is True:
             raise SummaryCanceled("Uploaded paper deleted")
         if record.get("parse_status") != "ok":
-            raise RuntimeError(f"Uploaded paper not parsed (status: {record.get('parse_status')})")
+            raise RuntimeError(
+                f"Uploaded paper not parsed (status: {record.get('parse_status')})"
+            )
 
     _update_task_status(
         task_id,
@@ -998,9 +1035,13 @@ def generate_summary_task(
         epoch=start_epoch,
         force_refresh=bool(force_refresh),
     )
-    _update_summary_status_db(pid, model, "running", None, task_id=task_id, task_user=user)
+    _update_summary_status_db(
+        pid, model, "running", None, task_id=task_id, task_user=user
+    )
     if user:
-        _update_readinglist_summary_status(user, pid, "running", None, task_id=task_id, model=model)
+        _update_readinglist_summary_status(
+            user, pid, "running", None, task_id=task_id, model=model
+        )
 
     try:
         # If cancellation happened between the pre-check and the "running" update, abort quickly.
@@ -1016,7 +1057,10 @@ def generate_summary_task(
             if _is_task_canceled(str(task_id) if task_id else None):
                 return True
             try:
-                return SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch
+                return (
+                    SummaryStatusRepository.get_generation_epoch(pid, model)
+                    != start_epoch
+                )
             except Exception:
                 return False
 
@@ -1050,9 +1094,13 @@ def generate_summary_task(
                     attempt=attempt,
                     max_attempts=max_attempts,
                 )
-                _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
+                _update_summary_status_db(
+                    pid, model, "queued", None, task_id=task_id, task_user=user
+                )
                 if user:
-                    _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id, model=model)
+                    _update_readinglist_summary_status(
+                        user, pid, "queued", None, task_id=task_id, model=model
+                    )
 
                 # If we've exhausted our retries, mark as failed to avoid stuck states.
                 if attempt >= max_attempts:
@@ -1076,7 +1124,9 @@ def generate_summary_task(
 
         _update_task_status(task_id, "ok", pid=pid, model=model, user=user)
         resolved_model = (
-            (summary_meta.get("llm_model") or model or "").strip() if isinstance(summary_meta, dict) else model
+            (summary_meta.get("llm_model") or model or "").strip()
+            if isinstance(summary_meta, dict)
+            else model
         )
         _update_summary_status_db(
             pid,
@@ -1088,7 +1138,9 @@ def generate_summary_task(
             resolved_model=resolved_model,
         )
         if user:
-            _update_readinglist_summary_status(user, pid, "ok", None, task_id=task_id, model=model)
+            _update_readinglist_summary_status(
+                user, pid, "ok", None, task_id=task_id, model=model
+            )
     except SummaryCanceled as e:
         reason = str(e) if str(e) else "Canceled by user"
         _update_task_status(
@@ -1100,25 +1152,43 @@ def generate_summary_task(
             user=user,
             epoch=start_epoch,
         )
-        _update_summary_status_db(pid, model, "canceled", reason, task_id=None, task_user=user)
+        _update_summary_status_db(
+            pid, model, "canceled", reason, task_id=None, task_user=user
+        )
         if user:
-            _update_readinglist_summary_status(user, pid, "canceled", reason, task_id=None, model=model)
+            _update_readinglist_summary_status(
+                user, pid, "canceled", reason, task_id=None, model=model
+            )
     except Exception as e:
-        logger.warning(f"Failed to generate summary for {pid} model={model} attempt={attempt}/{max_attempts}: {e}")
+        logger.warning(
+            f"Failed to generate summary for {pid} model={model} attempt={attempt}/{max_attempts}: {e}"
+        )
         err = str(e)
 
         # Don't mark as failed if it's just lock contention
         if "Lock contention" in err:
             if attempt >= max_attempts:
-                _update_task_status(task_id, "failed", error=err, pid=pid, model=model, user=user)
-                _update_summary_status_db(pid, model, "failed", err, task_id=task_id, task_user=user)
+                _update_task_status(
+                    task_id, "failed", error=err, pid=pid, model=model, user=user
+                )
+                _update_summary_status_db(
+                    pid, model, "failed", err, task_id=task_id, task_user=user
+                )
                 if user:
-                    _update_readinglist_summary_status(user, pid, "failed", err, task_id=task_id, model=model)
+                    _update_readinglist_summary_status(
+                        user, pid, "failed", err, task_id=task_id, model=model
+                    )
         else:
-            _update_task_status(task_id, "failed", error=err, pid=pid, model=model, user=user)
-            _update_summary_status_db(pid, model, "failed", err, task_id=task_id, task_user=user)
+            _update_task_status(
+                task_id, "failed", error=err, pid=pid, model=model, user=user
+            )
+            _update_summary_status_db(
+                pid, model, "failed", err, task_id=task_id, task_user=user
+            )
             if user:
-                _update_readinglist_summary_status(user, pid, "failed", err, task_id=task_id, model=model)
+                _update_readinglist_summary_status(
+                    user, pid, "failed", err, task_id=task_id, model=model
+                )
 
         raise
 
@@ -1183,7 +1253,9 @@ def enqueue_summary_task(
             _purge_summary_cache(pid, model)
             if isinstance(existing_info, dict):
                 resolved_model = str(
-                    existing_info.get("resolved_model") or existing_info.get("llm_model") or ""
+                    existing_info.get("resolved_model")
+                    or existing_info.get("llm_model")
+                    or ""
                 ).strip()
                 if resolved_model and resolved_model != model:
                     _purge_summary_cache(pid, resolved_model)
@@ -1193,10 +1265,14 @@ def enqueue_summary_task(
             existing_task_id, existing_task_user = _find_active_task(pid, model)
             if existing_task_id:
                 if _allow_task_id(existing_task_user, user):
-                    logger.debug(f"Task already exists for {pid}::{model}: {existing_task_id}")
+                    logger.debug(
+                        f"Task already exists for {pid}::{model}: {existing_task_id}"
+                    )
                     return existing_task_id
                 # Don't leak task_id across users.
-                logger.debug(f"Active task exists for {pid}::{model} but belongs to a different user")
+                logger.debug(
+                    f"Active task exists for {pid}::{model} but belongs to a different user"
+                )
                 return ""
 
         task_priority = SUMMARY_PRIORITY_HIGH if priority is None else priority
@@ -1225,9 +1301,13 @@ def enqueue_summary_task(
             epoch=epoch,
             force_refresh=bool(force_refresh),
         )
-        _update_summary_status_db(pid, model, "queued", None, task_id=task_id, task_user=user)
+        _update_summary_status_db(
+            pid, model, "queued", None, task_id=task_id, task_user=user
+        )
         if user:
-            _update_readinglist_summary_status(user, pid, "queued", None, task_id=task_id, model=model)
+            _update_readinglist_summary_status(
+                user, pid, "queued", None, task_id=task_id, model=model
+            )
 
         return str(task_id)
     finally:
@@ -1244,7 +1324,9 @@ def _purge_summary_cache(pid: str, model: str) -> None:
     Huey task kwargs, which can break older workers when new kwargs are added.
     """
     try:
-        cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(pid, model)
+        cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = (
+            summary_cache_paths(pid, model)
+        )
     except Exception:
         return
 
@@ -1267,7 +1349,9 @@ def _collect_task_priority_map() -> dict:
     """Return latest priority per (pid, model) from task status records."""
     priority_map = {}
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for _key, info in items:
                 if not isinstance(info, dict):
                     continue
@@ -1293,7 +1377,9 @@ def _collect_task_user_map() -> dict:
     """Return latest user per (pid, model) from task status records."""
     user_map = {}
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for _key, info in items:
                 if not isinstance(info, dict):
                     continue
@@ -1312,7 +1398,9 @@ def _collect_task_user_map() -> dict:
     return user_map
 
 
-def repair_stale_summary_tasks(max_age_s: int | None = None, requeue: bool = False) -> int:
+def repair_stale_summary_tasks(
+    max_age_s: int | None = None, requeue: bool = False
+) -> int:
     """Repair stale running summary statuses and cleanup expired lock files.
 
     Args:
@@ -1521,7 +1609,9 @@ def cleanup_tasks(
     details = []
 
     try:
-        with safe_closing(SummaryStatusRepository.get_items_with_prefix("task::")) as items:
+        with safe_closing(
+            SummaryStatusRepository.get_items_with_prefix("task::")
+        ) as items:
             for key, info in list(items):
                 if not isinstance(info, dict):
                     continue
@@ -1603,7 +1693,9 @@ def cleanup_tasks(
 
 
 @huey.task(retries=2, retry_delay=60, context=True)
-def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, task=None, **_kwargs) -> None:
+def process_uploaded_pdf_task(
+    pid: str, user: str, model: str | None = None, task=None, **_kwargs
+) -> None:
     """
     Process an uploaded PDF: MinerU parsing + LLM metadata extraction.
     After parsing completes, automatically triggers summary generation.
@@ -1634,7 +1726,9 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
             user=user,
         )
         return
-    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user)
+    _update_task_status(
+        task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user
+    )
 
     try:
         process_uploaded_pdf(pid, user, model, current_task_id=task_id)
@@ -1652,10 +1746,16 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
                 user=user,
             )
             return
-        _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user)
-        _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+        _update_task_status(
+            task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PROCESS, user=user
+        )
+        _update_upload_task_reference(
+            pid, record_field="parse_task_id", task_id=task_id, clear=True
+        )
     except UploadServiceError as e:
-        if not _is_current_upload_task(pid, record_field="parse_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="parse_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="parse_task_id",
@@ -1663,7 +1763,9 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
                 model=UPLOAD_TASK_MODEL_PROCESS,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
         logger.error(f"Failed to process uploaded PDF {pid}: {e}")
         _update_task_status(
@@ -1674,10 +1776,14 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
             model=UPLOAD_TASK_MODEL_PROCESS,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="parse_task_id", task_id=task_id, clear=True
+        )
         raise
     except Exception as e:
-        if not _is_current_upload_task(pid, record_field="parse_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="parse_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="parse_task_id",
@@ -1685,7 +1791,9 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
                 model=UPLOAD_TASK_MODEL_PROCESS,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
         logger.error(f"Failed to process uploaded PDF {pid}: {e}")
         _update_task_status(
@@ -1696,7 +1804,9 @@ def process_uploaded_pdf_task(pid: str, user: str, model: str | None = None, tas
             model=UPLOAD_TASK_MODEL_PROCESS,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="parse_task_id", task_id=task_id, clear=True
+        )
         raise
 
 
@@ -1730,7 +1840,9 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
             user=user,
         )
         return
-    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
+    _update_task_status(
+        task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user
+    )
 
     try:
         ok = do_parse_only(pid, user, current_task_id=task_id)
@@ -1749,10 +1861,16 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
                     user=user,
                 )
                 return
-            _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user)
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_task_status(
+                task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_PARSE, user=user
+            )
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
-        if not _is_current_upload_task(pid, record_field="parse_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="parse_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="parse_task_id",
@@ -1760,7 +1878,9 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_PARSE,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
         _update_task_status(
             task_id,
@@ -1770,9 +1890,13 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
             model=UPLOAD_TASK_MODEL_PARSE,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="parse_task_id", task_id=task_id, clear=True
+        )
     except UploadServiceError:
-        if not _is_current_upload_task(pid, record_field="parse_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="parse_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="parse_task_id",
@@ -1780,11 +1904,15 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_PARSE,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
         raise
     except Exception as e:
-        if not _is_current_upload_task(pid, record_field="parse_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="parse_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="parse_task_id",
@@ -1792,7 +1920,9 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_PARSE,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="parse_task_id", task_id=task_id, clear=True
+            )
             return
         logger.error(f"Failed to parse uploaded PDF {pid}: {e}")
         _update_task_status(
@@ -1803,7 +1933,9 @@ def parse_uploaded_pdf_task(pid: str, user: str, task=None, **_kwargs) -> None:
             model=UPLOAD_TASK_MODEL_PARSE,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="parse_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="parse_task_id", task_id=task_id, clear=True
+        )
         raise
 
 
@@ -1836,12 +1968,16 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
             user=user,
         )
         return
-    _update_task_status(task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user)
+    _update_task_status(
+        task_id, "running", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user
+    )
 
     try:
         ok = do_extract_metadata(pid, user, current_task_id=task_id)
         if ok:
-            if not _is_current_upload_task(pid, record_field="extract_task_id", task_id=task_id):
+            if not _is_current_upload_task(
+                pid, record_field="extract_task_id", task_id=task_id
+            ):
                 _maybe_mark_upload_task_canceled(
                     pid,
                     record_field="extract_task_id",
@@ -1850,10 +1986,16 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
                     user=user,
                 )
                 return
-            _update_task_status(task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user)
-            _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+            _update_task_status(
+                task_id, "ok", pid=pid, model=UPLOAD_TASK_MODEL_EXTRACT, user=user
+            )
+            _update_upload_task_reference(
+                pid, record_field="extract_task_id", task_id=task_id, clear=True
+            )
             return
-        if not _is_current_upload_task(pid, record_field="extract_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="extract_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="extract_task_id",
@@ -1861,7 +2003,9 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_EXTRACT,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="extract_task_id", task_id=task_id, clear=True
+            )
             return
         _update_task_status(
             task_id,
@@ -1871,9 +2015,13 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
             model=UPLOAD_TASK_MODEL_EXTRACT,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="extract_task_id", task_id=task_id, clear=True
+        )
     except UploadServiceError:
-        if not _is_current_upload_task(pid, record_field="extract_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="extract_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="extract_task_id",
@@ -1881,11 +2029,15 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_EXTRACT,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="extract_task_id", task_id=task_id, clear=True
+            )
             return
         raise
     except Exception as e:
-        if not _is_current_upload_task(pid, record_field="extract_task_id", task_id=task_id):
+        if not _is_current_upload_task(
+            pid, record_field="extract_task_id", task_id=task_id
+        ):
             _maybe_mark_upload_task_canceled(
                 pid,
                 record_field="extract_task_id",
@@ -1893,7 +2045,9 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
                 model=UPLOAD_TASK_MODEL_EXTRACT,
                 user=user,
             )
-            _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+            _update_upload_task_reference(
+                pid, record_field="extract_task_id", task_id=task_id, clear=True
+            )
             return
         logger.error(f"Failed to extract info for {pid}: {e}")
         _update_task_status(
@@ -1904,5 +2058,7 @@ def extract_info_task(pid: str, user: str, task=None, **_kwargs) -> None:
             model=UPLOAD_TASK_MODEL_EXTRACT,
             user=user,
         )
-        _update_upload_task_reference(pid, record_field="extract_task_id", task_id=task_id, clear=True)
+        _update_upload_task_reference(
+            pid, record_field="extract_task_id", task_id=task_id, clear=True
+        )
         raise
