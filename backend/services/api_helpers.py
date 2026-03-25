@@ -23,6 +23,19 @@ def api_success(**data) -> Any:
     return jsonify(resp)
 
 
+def read_json_object(*, require_nonempty: bool = True) -> tuple[dict | None, tuple[Any, int] | None]:
+    """Read a JSON object body or return a standardized API error."""
+
+    data = request.get_json(silent=True)
+    if data is None:
+        return None, api_error("No JSON data provided", 400)
+    if not isinstance(data, dict):
+        return None, api_error("Request body must be a JSON object", 400)
+    if require_nonempty and not data:
+        return None, api_error("No JSON data provided", 400)
+    return data, None
+
+
 def parse_api_request(
     require_login: bool = False,
     require_csrf: bool = True,
@@ -41,13 +54,9 @@ def parse_api_request(
     if require_csrf and csrf_protect_fn:
         csrf_protect_fn()
 
-    data = request.get_json(silent=True)
-    if data is None:
-        return None, api_error("No JSON data provided", 400)
-    if not isinstance(data, dict):
-        return None, api_error("Request body must be a JSON object", 400)
-    if not data:
-        return None, api_error("No JSON data provided", 400)
+    data, err = read_json_object(require_nonempty=True)
+    if err is not None:
+        return None, err
 
     if require_pid:
         pid = (data.get("pid") or "").strip()

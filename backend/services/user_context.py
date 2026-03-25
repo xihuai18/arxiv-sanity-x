@@ -23,7 +23,7 @@ class UserContext:
     is_machine_auth: bool = False
 
     @classmethod
-    def from_request(cls) -> "UserContext":
+    def from_request(cls) -> UserContext:
         if not has_app_context():
             return cls()
         try:
@@ -40,9 +40,7 @@ class UserContext:
         return cls(user=user, csrf_token=csrf_token)
 
 
-def resolve_user(
-    user: str | None = None, *, context: UserContext | None = None
-) -> str | None:
+def resolve_user(user: str | None = None, *, context: UserContext | None = None) -> str | None:
     """Resolve an explicit user first, then fall back to request context."""
 
     normalized_user = _normalize_optional_string(user)

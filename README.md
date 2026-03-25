@@ -49,7 +49,7 @@ A comprehensive arXiv paper browsing and recommendation system featuring AI-powe
 ## Docs
 
 - Entry point: [docs/INDEX.md](docs/INDEX.md)
-- Repo maintenance manuals: [.opencode/skills/README.md](.opencode/skills/README.md)
+- Repo skills manuals: [.opencode/skills/README.md](.opencode/skills/README.md)
 - Operations: [docs/OPERATIONS.md](docs/OPERATIONS.md)
 - Security: [docs/SECURITY.md](docs/SECURITY.md)
 - Development: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)

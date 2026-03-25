@@ -49,7 +49,7 @@
 ## Docs
 
 - 入口：[docs/INDEX.md](docs/INDEX.md)
-- 仓库维护手册：[.opencode/skills/README.md](.opencode/skills/README.md)
+- 仓库技能手册：[.opencode/skills/README.md](.opencode/skills/README.md)
 - 运维：[docs/OPERATIONS.md](docs/OPERATIONS.md)
 - 安全：[docs/SECURITY.md](docs/SECURITY.md)
 - 开发：[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)

@@ -8,7 +8,7 @@ Goal: ship the **code + safe docs**, without leaking secrets, sensitive data, or
 
 - Runtime data: `data/` (DBs, caches, uploads, summaries, logs)
 - Secrets/local config: `.env*`, `secret_key.txt`, `config/llm.yml`, SSH keys, API key files
-- Local tool config: `.claude/`, `.factory/`, `.skills/`, `.playwright-cli/`, IDE folders, plus non-public parts of `.opencode/` (keep `.opencode/skills/` only if you intentionally publish the reusable skills)
+- Local tool config: `.claude/`, `.factory/`, `.skills/`, `.playwright-cli/`, IDE folders, plus non-public parts of `.opencode/` (keep `.opencode/skills/` in the public tree)
 - Virtualenvs: `.venv/`, `venv/`
 - Build outputs: `static/dist/` (rebuildable)
 - Submodule contents: `data-repo/` (and avoid publishing `.gitmodules` if it contains non-public URLs)

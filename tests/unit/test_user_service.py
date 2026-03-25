@@ -152,3 +152,46 @@ class TestTemporaryUserContext:
         from backend.services.user_service import temporary_user_context
 
         assert callable(temporary_user_context)
+
+    def test_temporary_user_context_swaps_and_restores_all_cached_user_fields(self, app, monkeypatch):
+        from backend.services.user_service import temporary_user_context
+
+        monkeypatch.setattr(
+            "backend.services.user_service.TagRepository.get_user_tags",
+            lambda user: {"tag": {user}},
+        )
+        monkeypatch.setattr(
+            "backend.services.user_service.NegativeTagRepository.get_user_neg_tags",
+            lambda user: {"neg": {user}},
+        )
+        monkeypatch.setattr(
+            "backend.services.user_service.KeywordRepository.get_user_keywords",
+            lambda user: {"kw": {user}},
+        )
+        monkeypatch.setattr(
+            "backend.services.user_service.TagRepository.get_user_combined_tags",
+            lambda user: {f"combo:{user}"},
+        )
+
+        with app.app_context():
+            from flask import g
+
+            g.user = "original"
+            g._tags = {"orig": {"original"}}
+            g._neg_tags = {"orig_neg": {"original"}}
+            g._keys = {"orig_kw": {"original"}}
+            g._combined_tags = {"combo:original"}
+
+            with temporary_user_context("alice") as user_tags:
+                assert g.user == "alice"
+                assert user_tags == {"tag": {"alice"}}
+                assert g._tags == {"tag": {"alice"}}
+                assert g._neg_tags == {"neg": {"alice"}}
+                assert g._keys == {"kw": {"alice"}}
+                assert g._combined_tags == {"combo:alice"}
+
+            assert g.user == "original"
+            assert g._tags == {"orig": {"original"}}
+            assert g._neg_tags == {"orig_neg": {"original"}}
+            assert g._keys == {"orig_kw": {"original"}}
+            assert g._combined_tags == {"combo:original"}

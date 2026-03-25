@@ -47,9 +47,7 @@ class TestAddKeyword:
             g.user = "test_user"
             result = add_keyword("machine learning")
             assert result == "ok"
-            mock_repo.add_keyword.assert_called_once_with(
-                "test_user", "machine learning"
-            )
+            mock_repo.add_keyword.assert_called_once_with("test_user", "machine learning")
             mock_emit.assert_called_once()
 
     @patch("backend.services.keyword_service.KeywordRepository")
@@ -62,9 +60,7 @@ class TestAddKeyword:
         result = add_keyword("machine learning", user="explicit_user")
 
         assert result == "ok"
-        mock_repo.add_keyword.assert_called_once_with(
-            "explicit_user", "machine learning"
-        )
+        mock_repo.add_keyword.assert_called_once_with("explicit_user", "machine learning")
         mock_emit.assert_called_once_with(
             "explicit_user",
             {
@@ -128,9 +124,7 @@ class TestDeleteKeyword:
             g.user = "test_user"
             result = delete_keyword("machine learning")
             assert result == "ok"
-            mock_repo.remove_keyword.assert_called_once_with(
-                "test_user", "machine learning"
-            )
+            mock_repo.remove_keyword.assert_called_once_with("test_user", "machine learning")
             mock_emit.assert_called_once()
 
     @patch("backend.services.keyword_service.KeywordRepository")
@@ -225,7 +219,5 @@ class TestRenameKeyword:
             g.user = "test_user"
             result = rename_keyword("old_keyword", "new_keyword")
             assert result == "ok"
-            mock_repo.rename_keyword.assert_called_once_with(
-                "test_user", "old_keyword", "new_keyword"
-            )
+            mock_repo.rename_keyword.assert_called_once_with("test_user", "old_keyword", "new_keyword")
             mock_emit.assert_called_once()

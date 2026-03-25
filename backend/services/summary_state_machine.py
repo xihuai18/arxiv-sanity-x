@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 ACTIVE_SUMMARY_STATUSES = frozenset({"queued", "running"})
 
 
@@ -158,9 +157,7 @@ def build_readinglist_summary_transition(
     normalized_default_model = str(default_model or "").strip()
     normalized_model = str(model or normalized_default_model or "").strip() or None
     should_persist = (
-        not normalized_model
-        or not normalized_default_model
-        or normalized_model == normalized_default_model
+        not normalized_model or not normalized_default_model or normalized_model == normalized_default_model
     )
 
     normalized_task_id = None if task_id is None else str(task_id)

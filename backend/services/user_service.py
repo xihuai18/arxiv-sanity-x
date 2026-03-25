@@ -97,9 +97,7 @@ def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
     pid_to_tags = {}
     pid_filter = None
     if candidate_pids is not None:
-        pid_filter = {
-            str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()
-        }
+        pid_filter = {str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()}
 
     for tag, tag_pids in (tag_map or {}).items():
         normalized_tag = str(tag or "").strip()
@@ -160,16 +158,22 @@ def temporary_user_context(user):
     original_user = getattr(g, "user", None)
     original_tags = getattr(g, "_tags", None)
     original_neg_tags = getattr(g, "_neg_tags", None)
+    original_keys = getattr(g, "_keys", None)
+    original_combined_tags = getattr(g, "_combined_tags", None)
 
     try:
         # Get user tags
         user_tags = TagRepository.get_user_tags(user)
         user_neg_tags = NegativeTagRepository.get_user_neg_tags(user)
+        user_keys = KeywordRepository.get_user_keywords(user)
+        user_combined_tags = TagRepository.get_user_combined_tags(user)
 
         # Set temporary context
         g.user = user
         g._tags = user_tags
         g._neg_tags = user_neg_tags
+        g._keys = user_keys
+        g._combined_tags = user_combined_tags
 
         yield user_tags
 
@@ -190,3 +194,13 @@ def temporary_user_context(user):
         else:
             if hasattr(g, "_neg_tags"):
                 delattr(g, "_neg_tags")
+        if original_keys is not None:
+            g._keys = original_keys
+        else:
+            if hasattr(g, "_keys"):
+                delattr(g, "_keys")
+        if original_combined_tags is not None:
+            g._combined_tags = original_combined_tags
+        else:
+            if hasattr(g, "_combined_tags"):
+                delattr(g, "_combined_tags")

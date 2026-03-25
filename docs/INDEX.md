@@ -4,7 +4,7 @@ This directory contains operational and developer-facing documentation for arxiv
 
 Recommended reading order:
 
-- For non-trivial maintenance, read the matching `.opencode/skills/` manual first, then use this index to choose focused docs.
+- For subsystem-specific implementation notes, start with the matching `.opencode/skills/` manual, then use this index to choose focused docs.
 - Start with [CONFIGURATION.md](CONFIGURATION.md) to align `.env` with the canonical `ARXIV_SANITY_*` names.
 - Use [DEFAULTS.md](DEFAULTS.md) if you want a single reference for code defaults vs recommended baseline.
 - Then use [DEVELOPMENT.md](DEVELOPMENT.md) for local workflows and [OPERATIONS.md](OPERATIONS.md) for runtime process model / daemon behavior.

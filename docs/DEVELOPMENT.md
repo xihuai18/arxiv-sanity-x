@@ -3,7 +3,7 @@
 ## Environment
 
 - Recommended: `conda activate sanity`
-- For non-trivial repo maintenance, read the matching `.opencode/skills/` manual first, then use `docs/INDEX.md` and `tests/README.md` as the focused support docs.
+- For subsystem-specific implementation notes, read the matching `.opencode/skills/` manual, then use `docs/INDEX.md` and `tests/README.md` as focused support docs.
 
 ## Install
 

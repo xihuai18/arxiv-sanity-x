@@ -2,7 +2,7 @@
 
 This directory contains tests for arxiv-sanity-X, organized by scope and runtime requirements.
 
-For maintenance dispatch and validation matrices, also see `.opencode/skills/arxiv-sanity-testing/SKILL.md`.
+For testing validation matrices and repo-specific testing notes, also see `.opencode/skills/arxiv-sanity-testing/SKILL.md`.
 
 ## Directory Structure
 

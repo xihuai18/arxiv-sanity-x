@@ -230,9 +230,7 @@ class TestRenameTag:
             g.user = "test_user"
             result = rename_tag("old_tag", "new_tag")
             assert result == "ok"
-            mock_repo.rename_tag_full.assert_called_once_with(
-                "test_user", "old_tag", "new_tag"
-            )
+            mock_repo.rename_tag_full.assert_called_once_with("test_user", "old_tag", "new_tag")
 
 
 class TestCreateCombinedTag:
@@ -273,9 +271,7 @@ class TestCreateCombinedTag:
 
 
 class TestGetTagMembers:
-    def test_get_tag_members_search_uses_metas_before_bulk_fetch(
-        self, app, monkeypatch
-    ):
+    def test_get_tag_members_search_uses_metas_before_bulk_fetch(self, app, monkeypatch):
         from backend.services.tag_service import get_tag_members
 
         calls = {"bulk": 0}
@@ -288,10 +284,7 @@ class TestGetTagMembers:
 
         def _get_papers_bulk(pids):
             calls["bulk"] += 1
-            return {
-                pid: {"title": "fallback", "authors": [], "_time_str": ""}
-                for pid in pids
-            }
+            return {pid: {"title": "fallback", "authors": [], "_time_str": ""} for pid in pids}
 
         with app.app_context():
             from flask import g

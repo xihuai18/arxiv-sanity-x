@@ -6,9 +6,12 @@ All endpoints require authentication.
 
 import time
 
-from flask import Blueprint, abort, g, jsonify, request, send_file
+from flask import Blueprint, abort, g, request, send_file
 from loguru import logger
 
+from backend.services.api_helpers import api_error as _api_error
+from backend.services.api_helpers import api_success as _api_success
+from backend.services.api_helpers import read_json_object as _read_json_object
 from backend.utils.upload_utils import get_upload_pdf_path, validate_upload_pid
 from backend.utils.validation import csrf_protect
 from config import settings
@@ -39,32 +42,6 @@ def _looks_like_pdf(content: bytes, max_scan: int = 1024) -> bool:
     # Skip leading whitespace/newlines.
     head = head.lstrip(b" \t\r\n\f\v")
     return head.startswith(b"%PDF")
-
-
-def _api_error(error: str, status: int = 400, **extra):
-    """Return a standardized JSON error response."""
-    resp = {"success": False, "error": error}
-    resp.update(extra)
-    return jsonify(resp), status
-
-
-def _api_success(**data):
-    """Return a standardized JSON success response."""
-    resp = {"success": True}
-    resp.update(data)
-    return jsonify(resp)
-
-
-def _read_json_object():
-    """Read a JSON object request body or return a JSON error response."""
-    data = request.get_json(silent=True)
-    if data is None:
-        return None, _api_error("No JSON data provided", 400)
-    if not isinstance(data, dict):
-        return None, _api_error("Request body must be a JSON object", 400)
-    if not data:
-        return None, _api_error("No JSON data provided", 400)
-    return data, None
 
 
 @bp.route("/upload_pdf", methods=["POST"])

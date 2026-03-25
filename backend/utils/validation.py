@@ -7,8 +7,6 @@ from urllib.parse import urlparse
 
 from flask import abort, jsonify, request, session
 
-from tools.paper_summarizer import split_pid_version
-
 
 def get_or_set_csrf_token() -> str:
     tok = session.get("_csrf_token")
@@ -79,7 +77,7 @@ def csrf_protect() -> None:
 
 
 # Import from api_helpers to avoid duplication
-from ..services.api_helpers import api_error
+from ..services.api_helpers import parse_api_request as _shared_parse_api_request
 
 
 def parse_api_request(
@@ -94,32 +92,16 @@ def parse_api_request(
 
     Returns (data, error_response) tuple. If error_response is not None, return it immediately.
     """
-    if require_login and user is None:
-        return None, api_error("Not logged in", 401)
+    if require_pid and paper_exists is None:
+        raise RuntimeError("parse_api_request requires paper_exists callable when require_pid=True")
 
-    if require_csrf:
-        csrf_protect()
-
-    data = request.get_json(silent=True)
-    if data is None:
-        return None, api_error("No JSON data provided", 400)
-    if not isinstance(data, dict):
-        return None, api_error("Request body must be a JSON object", 400)
-    if not data:
-        return None, api_error("No JSON data provided", 400)
-
-    if require_pid:
-        if paper_exists is None:
-            raise RuntimeError("parse_api_request requires paper_exists callable when require_pid=True")
-        pid = (data.get("pid") or "").strip()
-        if not pid:
-            return None, api_error("Paper ID is required", 400)
-        raw_pid, _ = split_pid_version(pid)
-        if not paper_exists(raw_pid):
-            return None, api_error("Paper not found", 404)
-        data["_raw_pid"] = raw_pid
-
-    return data, None
+    return _shared_parse_api_request(
+        require_login=require_login,
+        require_csrf=require_csrf,
+        require_pid=require_pid,
+        paper_exists_fn=paper_exists,
+        csrf_protect_fn=csrf_protect,
+    )
 
 
 def validate_tag_name(tag: str) -> str | None:
