@@ -15,6 +15,7 @@ from aslite.repositories import KeywordRepository
 from ..utils.sse import emit_user_event
 from ..utils.validation import validate_keyword_name
 from .user_context import resolve_user
+from .user_service import invalidate_user_state_cache
 
 
 def add_keyword(keyword: str, *, user: str | None = None) -> str:
@@ -42,6 +43,7 @@ def add_keyword(keyword: str, *, user: str | None = None) -> str:
     # Add keyword using Repository
     KeywordRepository.add_keyword(current_user, keyword)
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"added keyword {keyword} for user {current_user}")
     emit_user_event(
         current_user,
@@ -76,6 +78,7 @@ def delete_keyword(keyword: str, *, user: str | None = None) -> str:
     # Delete keyword using Repository
     KeywordRepository.remove_keyword(current_user, keyword)
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"deleted keyword {keyword} for user {current_user}")
     emit_user_event(
         current_user,
@@ -84,7 +87,9 @@ def delete_keyword(keyword: str, *, user: str | None = None) -> str:
     return "ok"
 
 
-def rename_keyword(old_keyword: str, new_keyword: str, *, user: str | None = None) -> str:
+def rename_keyword(
+    old_keyword: str, new_keyword: str, *, user: str | None = None
+) -> str:
     """Rename a keyword for the current user.
 
     Args:
@@ -104,6 +109,10 @@ def rename_keyword(old_keyword: str, new_keyword: str, *, user: str | None = Non
     if new_keyword == "null":
         return "error, cannot add the protected keyword 'null'"
 
+    err = validate_keyword_name(new_keyword)
+    if err:
+        return err
+
     if old_keyword == new_keyword:
         return "ok"
 
@@ -112,7 +121,10 @@ def rename_keyword(old_keyword: str, new_keyword: str, *, user: str | None = Non
     if result != "ok":
         return result
 
-    logger.debug(f"renamed keyword {old_keyword} to {new_keyword} for user {current_user}")
+    invalidate_user_state_cache(current_user)
+    logger.debug(
+        f"renamed keyword {old_keyword} to {new_keyword} for user {current_user}"
+    )
     emit_user_event(
         current_user,
         {

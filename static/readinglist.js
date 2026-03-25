@@ -330,6 +330,10 @@
     function handleReadingListEvent(event) {
         if (!event || !event.pid) return;
         if (event.action === 'add') {
+            if (String(event.pid).indexOf('up_') === 0) {
+                fetchUploadedPapers(true).catch(function () {});
+                return;
+            }
             const safePid = escapeCssAttrValue(event.pid);
             const existing = document.querySelector(`.rl-paper-card[data-pid="${safePid}"]`);
             if (!existing) {

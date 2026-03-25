@@ -19,7 +19,7 @@ from aslite.repositories import CombinedTagRepository, TagRepository
 from ..utils.sse import emit_user_event
 from ..utils.validation import validate_tag_name
 from .user_context import resolve_user
-from .user_service import get_neg_tags, get_tags
+from .user_service import get_neg_tags, get_tags, invalidate_user_state_cache
 
 if TYPE_CHECKING:
     pass
@@ -55,8 +55,11 @@ def create_empty_tag(tag: str, *, user: str | None = None) -> str:
     if result != "ok":
         return result
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"added empty tag {tag} for user {current_user}")
-    emit_user_event(current_user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag})
+    emit_user_event(
+        current_user, {"type": "user_state_changed", "reason": "add_tag", "tag": tag}
+    )
     return "ok"
 
 
@@ -83,6 +86,7 @@ def add_paper_to_tag(pid: str, tag: str, *, user: str | None = None) -> str:
 
     try:
         TagRepository.add_paper_to_tag_and_remove_neg(current_user, pid, tag)
+        invalidate_user_state_cache(current_user)
         logger.debug(f"added paper {pid} to tag {tag} for user {current_user}")
         emit_user_event(
             current_user,
@@ -114,6 +118,7 @@ def remove_paper_from_tag(pid: str, tag: str, *, user: str | None = None) -> str
     try:
         result = TagRepository.remove_paper_from_tag_verbose(current_user, pid, tag)
         if result == "ok":
+            invalidate_user_state_cache(current_user)
             emit_user_event(
                 current_user,
                 {"type": "user_state_changed", "reason": "sub", "tag": tag, "pid": pid},
@@ -145,7 +150,9 @@ def delete_tag(tag: str, *, user: str | None = None) -> str:
     deleted_ctags: list[str] = []
     try:
         combined = CombinedTagRepository.get_user_combined_tags(current_user) or set()
-        deleted_ctags = sorted([ct for ct in combined if tag in map(str.strip, (ct or "").split(","))])
+        deleted_ctags = sorted(
+            [ct for ct in combined if tag in map(str.strip, (ct or "").split(","))]
+        )
     except Exception:
         deleted_ctags = []
 
@@ -153,6 +160,7 @@ def delete_tag(tag: str, *, user: str | None = None) -> str:
     if result != "ok":
         return result
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"deleted tag {tag} for user {current_user}")
     emit_user_event(
         current_user,
@@ -203,6 +211,7 @@ def rename_tag(old_tag: str, new_tag: str, *, user: str | None = None) -> str:
     if result != "ok":
         return result
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"renamed tag {old_tag} to {new_tag} for user {current_user}")
     emit_user_event(
         current_user,
@@ -261,8 +270,11 @@ def create_combined_tag(ctag: str, *, user: str | None = None) -> str:
     # Add the combined tag
     CombinedTagRepository.add_combined_tag(current_user, ctag)
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"added ctag {ctag} for user {current_user}")
-    emit_user_event(current_user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag})
+    emit_user_event(
+        current_user, {"type": "user_state_changed", "reason": "add_ctag", "ctag": ctag}
+    )
     return "ok"
 
 
@@ -289,6 +301,7 @@ def delete_combined_tag(ctag: str, *, user: str | None = None) -> str:
     # Delete the tag
     CombinedTagRepository.remove_combined_tag(current_user, ctag)
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"deleted ctag {ctag} for user {current_user}")
     emit_user_event(
         current_user,
@@ -297,7 +310,9 @@ def delete_combined_tag(ctag: str, *, user: str | None = None) -> str:
     return "ok"
 
 
-def rename_combined_tag(old_ctag: str, new_ctag: str, *, user: str | None = None) -> str:
+def rename_combined_tag(
+    old_ctag: str, new_ctag: str, *, user: str | None = None
+) -> str:
     """Rename a combined tag.
 
     Args:
@@ -346,6 +361,7 @@ def rename_combined_tag(old_ctag: str, new_ctag: str, *, user: str | None = None
     # Rename the tag
     CombinedTagRepository.rename_combined_tag(current_user, old_ctag, new_ctag)
 
+    invalidate_user_state_cache(current_user)
     logger.debug(f"renamed ctag {old_ctag} to {new_ctag} for user {current_user}")
     emit_user_event(
         current_user,
@@ -364,7 +380,9 @@ def rename_combined_tag(old_ctag: str, new_ctag: str, *, user: str | None = None
 # -----------------------------------------------------------------------------
 
 
-def set_tag_feedback(pid: str, tag: str, label: int, *, user: str | None = None) -> None:
+def set_tag_feedback(
+    pid: str, tag: str, label: int, *, user: str | None = None
+) -> None:
     """Set tag feedback (positive/negative/remove) for a paper.
 
     Args:
@@ -384,6 +402,7 @@ def set_tag_feedback(pid: str, tag: str, label: int, *, user: str | None = None)
         raise ValueError(err)
 
     TagRepository.set_tag_label(current_user, pid, tag, label)
+    invalidate_user_state_cache(current_user)
     emit_user_event(
         current_user,
         {
@@ -402,6 +421,7 @@ def get_tag_members(
     search: str = "",
     page_number: int = 1,
     page_size: int = 20,
+    user: str | None = None,
     get_metas_fn: Callable | None = None,
     get_papers_bulk_fn: Callable | None = None,
 ) -> dict:
@@ -419,8 +439,9 @@ def get_tag_members(
     Returns:
         Dict with tag, label, pagination info, and items
     """
-    pos_d = get_tags() or {}
-    neg_d = get_neg_tags() or {}
+    current_user = _require_user(user)
+    pos_d = get_tags(user=current_user) or {}
+    neg_d = get_neg_tags(user=current_user) or {}
 
     pos_set = set(pos_d.get(tag, set()))
     neg_set = set(neg_d.get(tag, set()))
@@ -432,7 +453,9 @@ def get_tag_members(
     elif label == "neg":
         pairs = [(pid, -1) for pid in neg_set]
     else:
-        pairs = [(pid, 1) for pid in pos_set] + [(pid, -1) for pid in (neg_set - pos_set)]
+        pairs = [(pid, 1) for pid in pos_set] + [
+            (pid, -1) for pid in (neg_set - pos_set)
+        ]
 
     # Pre-fetch all paper info for sorting and searching
     all_pids = [pid for pid, _ in pairs]
@@ -441,18 +464,15 @@ def get_tag_members(
     upload_time = {}
     if all_pids:
         upload_pids = [pid for pid in all_pids if pid.startswith("up_")]
-        if upload_pids:
-            from flask import g
-
+        if upload_pids and current_user:
             from aslite.repositories import UploadedPaperRepository
 
-            if g.user:
-                all_uploads = UploadedPaperRepository.get_by_owner(g.user) or {}
-                for pid in upload_pids:
-                    record = all_uploads.get(pid)
-                    if record:
-                        upload_records[pid] = record
-                        upload_time[pid] = float(record.get("created_time") or 0.0)
+            all_uploads = UploadedPaperRepository.get_by_owner(current_user) or {}
+            for pid in upload_pids:
+                record = all_uploads.get(pid)
+                if record:
+                    upload_records[pid] = record
+                    upload_time[pid] = float(record.get("created_time") or 0.0)
 
     def _format_upload_time(record: dict) -> str:
         created_time = record.get("created_time", 0)
@@ -466,7 +486,11 @@ def get_tag_members(
     def _build_upload_paper(record: dict, pid: str) -> dict:
         meta = record.get("meta_extracted", {})
         override = record.get("meta_override", {})
-        title = override.get("title") or meta.get("title") or record.get("original_filename", pid)
+        title = (
+            override.get("title")
+            or meta.get("title")
+            or record.get("original_filename", pid)
+        )
         authors_list = override.get("authors") or meta.get("authors") or []
         return {
             "title": title,
@@ -525,12 +549,18 @@ def get_tag_members(
             authors_val = p.get("authors") or []
             if isinstance(authors_val, list):
                 if authors_val and isinstance(authors_val[0], dict):
-                    authors = " ".join(a.get("name", "") for a in authors_val if a).lower()
+                    authors = " ".join(
+                        a.get("name", "") for a in authors_val if a
+                    ).lower()
                 else:
                     authors = " ".join(str(a) for a in authors_val if a).lower()
             else:
                 authors = str(authors_val).lower()
-            if search_text in pid.lower() or search_text in title or search_text in authors:
+            if (
+                search_text in pid.lower()
+                or search_text in title
+                or search_text in authors
+            ):
                 filtered.append((pid, lab))
         pairs = filtered
 

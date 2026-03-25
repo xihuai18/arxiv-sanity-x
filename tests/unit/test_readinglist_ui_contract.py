@@ -18,7 +18,9 @@ def test_readinglist_template_empty_states_are_announced():
 
 
 def test_readinglist_cards_use_grouped_action_layout():
-    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "paper-actions-group paper-actions-group-primary" in text
     assert "paper-actions-group paper-actions-group-secondary" in text
@@ -26,7 +28,9 @@ def test_readinglist_cards_use_grouped_action_layout():
 
 
 def test_readinglist_css_keeps_mobile_safe_padding_and_focus_states():
-    text = (_repo_root() / "static" / "css" / "pages" / "readinglist.css").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "css" / "pages" / "readinglist.css").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "padding: 24px !important" not in text
     assert "@media (hover: hover) and (pointer: fine)" in text
@@ -36,9 +40,15 @@ def test_readinglist_css_keeps_mobile_safe_padding_and_focus_states():
 
 def test_readinglist_mutations_use_keepalive_for_fast_navigation():
     repo_root = _repo_root()
-    homepage_js = (repo_root / "static" / "paper_list.js").read_text(encoding="utf-8", errors="ignore")
-    readinglist_js = (repo_root / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
-    summary_js = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")
+    homepage_js = (repo_root / "static" / "paper_list.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    readinglist_js = (repo_root / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+    summary_js = (repo_root / "static" / "paper_summary.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "csrfFetch('/api/readinglist/add'" in homepage_js
     assert "csrfFetch('/api/readinglist/remove'" in homepage_js
@@ -56,28 +66,45 @@ def test_readinglist_mutations_use_keepalive_for_fast_navigation():
 
 
 def test_homepage_readinglist_add_uses_backend_summary_status():
-    text = (_repo_root() / "static" / "paper_list.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "paper_list.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "const responseStatus = String(data.summary_status || '').trim();" in text
     assert "summaryStatus: 'queued'" not in text
 
 
 def test_uploaded_summary_link_requires_parse_only_not_metadata():
-    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "const summaryDisabled = p.parse_status !== 'ok';" in text
     assert "if (summaryDisabled) {" in text
 
 
+def test_uploaded_readinglist_events_resync_uploaded_section_instead_of_public_card_endpoint():
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
+
+    assert "String(event.pid).indexOf('up_') === 0" in text
+    assert "fetchUploadedPapers(true)" in text
+
+
 def test_readinglist_empty_state_checks_only_for_any_card_not_all_cards():
-    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "container.querySelector('.rl-paper-card')" in text
     assert "querySelectorAll('.rl-paper-card')" not in text
 
 
 def test_uploaded_readinglist_ui_stores_hot_dom_refs_for_follow_up_updates():
-    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     assert "uploadedSummaryUI.set(p.id, {" in text
     assert "titleDiv: titleDiv" in text
@@ -89,7 +116,9 @@ def test_uploaded_readinglist_ui_stores_hot_dom_refs_for_follow_up_updates():
 
 
 def test_uploaded_tldr_and_extract_updates_reuse_cached_dom_refs():
-    text = (_repo_root() / "static" / "readinglist.js").read_text(encoding="utf-8", errors="ignore")
+    text = (_repo_root() / "static" / "readinglist.js").read_text(
+        encoding="utf-8", errors="ignore"
+    )
 
     tldr_start = text.find("function updateTldrDisplay(ui, tldr)")
     tldr_end = text.find("function handleReadingListEvent", tldr_start)

@@ -35,7 +35,8 @@ class TestAddKeyword:
 
     @patch("backend.services.keyword_service.KeywordRepository")
     @patch("backend.services.keyword_service.emit_user_event")
-    def test_add_keyword_success(self, mock_emit, mock_repo, app):
+    @patch("backend.services.keyword_service.invalidate_user_state_cache")
+    def test_add_keyword_success(self, mock_invalidate, mock_emit, mock_repo, app):
         """Test successful keyword addition."""
         from backend.services.keyword_service import add_keyword
 
@@ -47,7 +48,10 @@ class TestAddKeyword:
             g.user = "test_user"
             result = add_keyword("machine learning")
             assert result == "ok"
-            mock_repo.add_keyword.assert_called_once_with("test_user", "machine learning")
+            mock_repo.add_keyword.assert_called_once_with(
+                "test_user", "machine learning"
+            )
+            mock_invalidate.assert_called_once_with("test_user")
             mock_emit.assert_called_once()
 
     @patch("backend.services.keyword_service.KeywordRepository")
@@ -60,7 +64,9 @@ class TestAddKeyword:
         result = add_keyword("machine learning", user="explicit_user")
 
         assert result == "ok"
-        mock_repo.add_keyword.assert_called_once_with("explicit_user", "machine learning")
+        mock_repo.add_keyword.assert_called_once_with(
+            "explicit_user", "machine learning"
+        )
         mock_emit.assert_called_once_with(
             "explicit_user",
             {
@@ -124,7 +130,9 @@ class TestDeleteKeyword:
             g.user = "test_user"
             result = delete_keyword("machine learning")
             assert result == "ok"
-            mock_repo.remove_keyword.assert_called_once_with("test_user", "machine learning")
+            mock_repo.remove_keyword.assert_called_once_with(
+                "test_user", "machine learning"
+            )
             mock_emit.assert_called_once()
 
     @patch("backend.services.keyword_service.KeywordRepository")
@@ -194,6 +202,17 @@ class TestRenameKeyword:
             result = rename_keyword("old_keyword", "null")
             assert "error" in result.lower() or "protected" in result.lower()
 
+    def test_rename_keyword_rejects_slashes(self, app):
+        """Test that rename_keyword applies the shared keyword validation rules."""
+        from backend.services.keyword_service import rename_keyword
+
+        with app.app_context():
+            from flask import g
+
+            g.user = "test_user"
+            result = rename_keyword("old_keyword", "bad/name")
+            assert "slash" in result.lower()
+
     def test_rename_keyword_same_name(self, app):
         """Test that rename_keyword handles same name gracefully."""
         from backend.services.keyword_service import rename_keyword
@@ -219,5 +238,7 @@ class TestRenameKeyword:
             g.user = "test_user"
             result = rename_keyword("old_keyword", "new_keyword")
             assert result == "ok"
-            mock_repo.rename_keyword.assert_called_once_with("test_user", "old_keyword", "new_keyword")
+            mock_repo.rename_keyword.assert_called_once_with(
+                "test_user", "old_keyword", "new_keyword"
+            )
             mock_emit.assert_called_once()

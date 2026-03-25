@@ -22,6 +22,24 @@ def _should_use_request_cache(user: str | None) -> bool:
     return bool(user and request_user and user == request_user)
 
 
+def invalidate_user_state_cache(user: str | None = None) -> None:
+    """Clear request-local cached user state after successful mutations."""
+
+    if not has_app_context():
+        return
+
+    request_user = _request_user()
+    target_user = resolve_user(user)
+    if request_user is None:
+        return
+    if target_user is not None and request_user != target_user:
+        return
+
+    for attr in ("_tags", "_neg_tags", "_keys", "_combined_tags"):
+        if hasattr(g, attr):
+            delattr(g, attr)
+
+
 def get_tags(user: str | None = None):
     """Get user tags with request-level caching."""
     resolved_user = resolve_user(user)
@@ -70,10 +88,10 @@ def get_keys(user: str | None = None):
     return KeywordRepository.get_user_keywords(resolved_user)
 
 
-def build_user_tag_list():
+def build_user_tag_list(user: str | None = None):
     """Build tag list for frontend."""
-    tags = get_tags()
-    neg_tags = get_neg_tags()
+    tags = get_tags(user=user)
+    neg_tags = get_neg_tags(user=user)
     rtags = []
     for t in set(tags.keys()) | set(neg_tags.keys()):
         pos_n = len(tags.get(t, set()))
@@ -97,16 +115,15 @@ def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
     pid_to_tags = {}
     pid_filter = None
     if candidate_pids is not None:
-        pid_filter = {str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()}
+        pid_filter = {
+            str(pid or "").strip() for pid in candidate_pids if str(pid or "").strip()
+        }
 
     for tag, tag_pids in (tag_map or {}).items():
         normalized_tag = str(tag or "").strip()
         if not normalized_tag:
             continue
-        try:
-            iterable = tag_pids or []
-        except Exception:
-            iterable = []
+        iterable = tag_pids or []
         for raw_pid in iterable:
             normalized_pid = str(raw_pid or "").strip()
             if not normalized_pid:
@@ -122,15 +139,15 @@ def build_pid_tag_reverse_index(tag_map, *, candidate_pids=None):
     return pid_to_tags
 
 
-def build_user_key_list():
+def build_user_key_list(user: str | None = None):
     """Build keyword list for frontend."""
-    keys = get_keys()
+    keys = get_keys(user=user)
     return [{"name": k, "n": len(pids)} for k, pids in keys.items()]
 
 
-def build_user_combined_tag_list():
+def build_user_combined_tag_list(user: str | None = None):
     """Build combined tag list for frontend."""
-    combined_tags = get_combined_tags()
+    combined_tags = get_combined_tags(user=user)
     # combined_tags is a Set[str] when user is logged in, or {} when not
     # Handle both cases by iterating directly (sets are iterable, empty dict iterates over keys)
     return [{"name": ct} for ct in combined_tags]
@@ -148,7 +165,7 @@ def before_request():
 
 
 def close_connection(_error=None):
-    """Clean up request context."""
+    """Compatibility no-op teardown hook."""
     return None
 
 

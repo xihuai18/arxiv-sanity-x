@@ -63,6 +63,40 @@ class TestGetKeys:
         assert get_keys(user="alice") == {"graph": {"alice"}}
 
 
+class TestInvalidateUserStateCache:
+    def test_invalidate_user_state_cache_clears_request_cached_fields(self, app):
+        from backend.services.user_service import invalidate_user_state_cache
+
+        with app.app_context():
+            from flask import g
+
+            g.user = "alice"
+            g._tags = {"ml": {"alice"}}
+            g._neg_tags = {"neg": {"alice"}}
+            g._keys = {"graph": {"alice"}}
+            g._combined_tags = {"combo:alice"}
+
+            invalidate_user_state_cache("alice")
+
+            assert not hasattr(g, "_tags")
+            assert not hasattr(g, "_neg_tags")
+            assert not hasattr(g, "_keys")
+            assert not hasattr(g, "_combined_tags")
+
+    def test_invalidate_user_state_cache_ignores_other_user(self, app):
+        from backend.services.user_service import invalidate_user_state_cache
+
+        with app.app_context():
+            from flask import g
+
+            g.user = "alice"
+            g._tags = {"ml": {"alice"}}
+
+            invalidate_user_state_cache("bob")
+
+            assert g._tags == {"ml": {"alice"}}
+
+
 class TestBuildUserTagList:
     """Tests for build_user_tag_list function."""
 
@@ -71,6 +105,22 @@ class TestBuildUserTagList:
         from backend.services.user_service import build_user_tag_list
 
         assert callable(build_user_tag_list)
+
+    def test_build_user_tag_list_accepts_explicit_user(self, monkeypatch):
+        from backend.services.user_service import build_user_tag_list
+
+        monkeypatch.setattr(
+            "backend.services.user_service.get_tags",
+            lambda user=None: {"ml": {user}},
+        )
+        monkeypatch.setattr(
+            "backend.services.user_service.get_neg_tags",
+            lambda user=None: {"neg": {user}},
+        )
+
+        items = build_user_tag_list(user="alice")
+
+        assert {item["name"] for item in items} == {"ml", "neg", "all"}
 
     def test_build_pid_tag_reverse_index_filters_candidates(self):
         from backend.services.user_service import build_pid_tag_reverse_index
@@ -113,6 +163,18 @@ class TestBuildUserKeyList:
 
         assert callable(build_user_key_list)
 
+    def test_build_user_key_list_accepts_explicit_user(self, monkeypatch):
+        from backend.services.user_service import build_user_key_list
+
+        monkeypatch.setattr(
+            "backend.services.user_service.get_keys",
+            lambda user=None: {"graph": {user, "p2"}},
+        )
+
+        items = build_user_key_list(user="alice")
+
+        assert items == [{"name": "graph", "n": 2}]
+
 
 class TestBuildUserCombinedTagList:
     """Tests for build_user_combined_tag_list function."""
@@ -122,6 +184,16 @@ class TestBuildUserCombinedTagList:
         from backend.services.user_service import build_user_combined_tag_list
 
         assert callable(build_user_combined_tag_list)
+
+    def test_build_user_combined_tag_list_accepts_explicit_user(self, monkeypatch):
+        from backend.services.user_service import build_user_combined_tag_list
+
+        monkeypatch.setattr(
+            "backend.services.user_service.get_combined_tags",
+            lambda user=None: {f"combo:{user}"},
+        )
+
+        assert build_user_combined_tag_list(user="alice") == [{"name": "combo:alice"}]
 
 
 class TestBeforeRequest:
@@ -153,7 +225,9 @@ class TestTemporaryUserContext:
 
         assert callable(temporary_user_context)
 
-    def test_temporary_user_context_swaps_and_restores_all_cached_user_fields(self, app, monkeypatch):
+    def test_temporary_user_context_swaps_and_restores_all_cached_user_fields(
+        self, app, monkeypatch
+    ):
         from backend.services.user_service import temporary_user_context
 
         monkeypatch.setattr(

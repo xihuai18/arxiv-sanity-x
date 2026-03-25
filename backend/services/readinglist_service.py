@@ -14,7 +14,6 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
-from flask import g
 from loguru import logger
 
 from aslite.repositories import (
@@ -29,6 +28,7 @@ from .summary_state_machine import (
     build_readinglist_summary_transition,
     build_summary_status_transition,
 )
+from .user_context import resolve_user
 
 if TYPE_CHECKING:
     pass
@@ -62,7 +62,7 @@ def get_user_readinglist(user: str | None = None) -> dict:
     Returns:
         Dict mapping pid to reading list item info
     """
-    user = user or getattr(g, "user", None)
+    user = resolve_user(user)
     if user is None:
         return {}
 
@@ -151,7 +151,9 @@ def _overlay_summary_status_for_user(
     if last_error is None and allow_sensitive:
         last_error = normalized_last_error
     item["summary_status"] = status
-    item["summary_updated_time"] = info.get("updated_time") or item.get("summary_updated_time")
+    item["summary_updated_time"] = info.get("updated_time") or item.get(
+        "summary_updated_time"
+    )
     item["summary_last_error"] = last_error
     if status in ("queued", "running") and allow_sensitive and info.get("task_id"):
         item["summary_task_id"] = str(info.get("task_id"))
@@ -200,7 +202,9 @@ def overlay_summary_statuses_for_user(
     model = (_default_summary_model() or "").strip()
     status_rows: dict[str, dict] = dict(prefetched_status_rows or {})
     if model and not status_rows:
-        batch_pids = [pid for pid in items_by_pid.keys() if pid and not _is_upload_pid(pid)]
+        batch_pids = [
+            pid for pid in items_by_pid.keys() if pid and not _is_upload_pid(pid)
+        ]
         if batch_pids:
             try:
                 status_rows = SummaryStatusRepository.get_status_many(batch_pids, model)
@@ -211,7 +215,9 @@ def overlay_summary_statuses_for_user(
     upload_pids = [pid for pid in items_by_pid.keys() if pid and _is_upload_pid(pid)]
     if upload_pids:
         try:
-            upload_records = UploadedPaperRepository.get_by_owner_for_pids(user, upload_pids)
+            upload_records = UploadedPaperRepository.get_by_owner_for_pids(
+                user, upload_pids
+            )
         except Exception:
             upload_records = {}
         missing_upload_pids = [pid for pid in upload_pids if pid not in upload_records]
@@ -440,7 +446,9 @@ def trigger_summary_async(
 
         try:
             if user and update_readinglist_fn:
-                update_readinglist_fn(user, pid, "running", None, task_id=None, model=model)
+                update_readinglist_fn(
+                    user, pid, "running", None, task_id=None, model=model
+                )
             if update_db_fn:
                 update_db_fn(pid, model, "running", None, task_id=None, task_user=user)
 
@@ -457,7 +465,9 @@ def trigger_summary_async(
                 if isinstance(result, tuple):
                     summary_content = str(result[0] or "")
                     if len(result) > 1 and isinstance(result[1], dict):
-                        resolved_model = str(result[1].get("llm_model") or resolved_model or "").strip()
+                        resolved_model = str(
+                            result[1].get("llm_model") or resolved_model or ""
+                        ).strip()
                 elif result is not None:
                     summary_content = str(result or "")
 
@@ -466,7 +476,10 @@ def trigger_summary_async(
                 )
 
                 if not looks_like_valid_cached_summary_markdown(summary_content):
-                    if "Summary canceled." in summary_content or "Canceled by user" in summary_content:
+                    if (
+                        "Summary canceled." in summary_content
+                        or "Canceled by user" in summary_content
+                    ):
                         if user and update_readinglist_fn:
                             update_readinglist_fn(
                                 user,
@@ -488,19 +501,31 @@ def trigger_summary_async(
                         return
                     if "Summary is being generated" in summary_content:
                         if user and update_readinglist_fn:
-                            update_readinglist_fn(user, pid, "queued", None, task_id=None, model=model)
+                            update_readinglist_fn(
+                                user, pid, "queued", None, task_id=None, model=model
+                            )
                         if update_db_fn:
-                            update_db_fn(pid, model, "queued", None, task_id=None, task_user=user)
+                            update_db_fn(
+                                pid, model, "queued", None, task_id=None, task_user=user
+                            )
                         return
-                    raise RuntimeError("Summary generation failed: invalid summary content")
+                    raise RuntimeError(
+                        "Summary generation failed: invalid summary content"
+                    )
             else:
                 resolved_model = (model or "").strip()
 
             # If canceled mid-flight, do not mark ok.
             try:
-                if model and SummaryStatusRepository.get_generation_epoch(pid, model) != start_epoch:
+                if (
+                    model
+                    and SummaryStatusRepository.get_generation_epoch(pid, model)
+                    != start_epoch
+                ):
                     if user and update_readinglist_fn:
-                        update_readinglist_fn(user, pid, "canceled", "Canceled by user", task_id=None)
+                        update_readinglist_fn(
+                            user, pid, "canceled", "Canceled by user", task_id=None
+                        )
                     if update_db_fn:
                         update_db_fn(
                             pid,
@@ -529,7 +554,9 @@ def trigger_summary_async(
         except Exception as e:
             logger.warning(f"Failed to generate summary for {pid}: {e}")
             if user and update_readinglist_fn:
-                update_readinglist_fn(user, pid, "failed", str(e), task_id=None, model=model)
+                update_readinglist_fn(
+                    user, pid, "failed", str(e), task_id=None, model=model
+                )
             if update_db_fn:
                 update_db_fn(pid, model, "failed", str(e), task_id=None, task_user=user)
 
@@ -556,7 +583,7 @@ def add_to_readinglist(
     Returns:
         Dict with result info (message, top_tags, task_id, already_exists)
     """
-    user = user or getattr(g, "user", None)
+    user = resolve_user(user)
     if user is None:
         return {"error": "Not logged in"}
 
@@ -574,7 +601,9 @@ def add_to_readinglist(
     existing = ReadingListRepository.get_reading_list_item(user, pid)
     if existing is not None:
         # If summary is already ready, do not re-trigger it.
-        current_status = current_status or (existing.get("summary_status") or "").strip()
+        current_status = (
+            current_status or (existing.get("summary_status") or "").strip()
+        )
         task_id = str(existing.get("summary_task_id") or "") or None
         if current_status not in ("ok", "queued", "running"):
             ReadingListRepository.update_reading_list_item(
@@ -603,7 +632,9 @@ def add_to_readinglist(
         user_tags = get_tags_fn()
         top_tags = compute_top_tags_fn(pid, user_tags)
 
-    initial_status = current_status if current_status in ("ok", "queued", "running") else "queued"
+    initial_status = (
+        current_status if current_status in ("ok", "queued", "running") else "queued"
+    )
 
     # Add to reading list
     ReadingListRepository.add_to_reading_list(
@@ -623,7 +654,9 @@ def add_to_readinglist(
     if trigger_summary_fn and initial_status != "ok":
         task_id = trigger_summary_fn(user, pid)
 
-    logger.debug(f"Added paper {pid} to reading list for user {user}, top_tags={top_tags}")
+    logger.debug(
+        f"Added paper {pid} to reading list for user {user}, top_tags={top_tags}"
+    )
     emit_user_event(user, {"type": "readinglist_changed", "action": "add", "pid": pid})
 
     return {
@@ -646,7 +679,7 @@ def remove_from_readinglist(pid: str, user: str | None = None) -> dict:
     Returns:
         Dict with result info (success, message, error)
     """
-    user = user or getattr(g, "user", None)
+    user = resolve_user(user)
     if user is None:
         return {"error": "Not logged in"}
 
@@ -655,7 +688,9 @@ def remove_from_readinglist(pid: str, user: str | None = None) -> dict:
         return {"error": "Paper not in reading list"}
 
     logger.debug(f"Removed paper {pid} from reading list for user {user}")
-    emit_user_event(user, {"type": "readinglist_changed", "action": "remove", "pid": pid})
+    emit_user_event(
+        user, {"type": "readinglist_changed", "action": "remove", "pid": pid}
+    )
 
     return {"pid": pid, "message": "Removed from reading list"}
 
@@ -669,14 +704,16 @@ def list_readinglist(user: str | None = None) -> list:
     Returns:
         List of reading list items sorted by added_time descending
     """
-    user = user or getattr(g, "user", None)
+    user = resolve_user(user)
     if user is None:
         return []
 
     readinglist = get_user_readinglist(user)
 
     # Sort by added_time descending
-    sorted_items = sorted(readinglist.items(), key=lambda x: x[1].get("added_time", 0), reverse=True)
+    sorted_items = sorted(
+        readinglist.items(), key=lambda x: x[1].get("added_time", 0), reverse=True
+    )
 
     from backend.services.data_service import paper_exists
 
@@ -702,7 +739,9 @@ def list_readinglist(user: str | None = None) -> list:
     prefetched_status_rows = {}
     if model and batch_pids:
         try:
-            prefetched_status_rows = SummaryStatusRepository.get_status_many(batch_pids, model)
+            prefetched_status_rows = SummaryStatusRepository.get_status_many(
+                batch_pids, model
+            )
         except Exception:
             prefetched_status_rows = {}
     summary_snapshots = get_summary_render_snapshots(
