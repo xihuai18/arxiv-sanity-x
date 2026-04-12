@@ -50,3 +50,39 @@ def test_progress_postfix_includes_generated_count_for_cached_result():
 def test_is_error_summary_content_does_not_misclassify_errorllm_title():
     assert is_error_summary_content("# ErrorLLM: Title\n\n## TL;DR\n\nBody") is False
     assert is_error_summary_content("# Error\n\nSomething failed") is True
+
+
+def test_classify_summary_failure_reason_detects_download_error():
+    processor = BatchProcessor(max_workers=1, model="gpt-5.4")
+
+    reason, detail = processor._classify_summary_failure_reason(
+        "# Error\n\nUnable to download paper PDF: HTTP 404 from arXiv PDF endpoint",
+        {},
+    )
+
+    assert reason == "download_failed"
+    assert "HTTP 404" in detail
+
+
+def test_classify_summary_failure_reason_detects_parse_error():
+    processor = BatchProcessor(max_workers=1, model="gpt-5.4")
+
+    reason, detail = processor._classify_summary_failure_reason(
+        "# MinerU API Error\n\nFailed to parse PDF using MinerU API. Please try again later.",
+        {},
+    )
+
+    assert reason == "parse_failed"
+    assert "Failed to parse PDF" in detail
+
+
+def test_classify_summary_failure_reason_detects_empty_content():
+    processor = BatchProcessor(max_workers=1, model="gpt-5.4")
+
+    reason, detail = processor._classify_summary_failure_reason(
+        "# Error\n\nParsed Markdown content is empty",
+        {},
+    )
+
+    assert reason == "empty_content"
+    assert "Parsed Markdown content is empty" in detail

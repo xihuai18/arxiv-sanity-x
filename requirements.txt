@@ -33,6 +33,7 @@ sentry-sdk
 requests
 beautifulsoup4
 markdownify
+Pillow
 pydantic>=2.6,<3
 pydantic-settings>=2.0,<3
 flasgger

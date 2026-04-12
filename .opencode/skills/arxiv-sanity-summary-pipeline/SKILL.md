@@ -70,7 +70,7 @@ summary page
 
 ### 改摘要模型或 prompt
 
-1. 同时看 `tools/paper_summarizer.py`、`config/llm.yml`、`config/settings_services.py`
+1. 同时看 `tools/paper_summarizer.py`、`backend/services/opencode_service.py`、`config/settings_services.py`
 2. 如果模型名改变，检查 resolved model / fallback 读取逻辑
 3. 确认前端模型列表和默认模型仍一致
 

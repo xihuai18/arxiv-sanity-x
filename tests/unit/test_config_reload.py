@@ -13,10 +13,10 @@ def test_reload_settings_updates_module_binding(monkeypatch):
 
     old = config.settings
 
-    monkeypatch.setenv("ARXIV_SANITY_LLM_BASE_URL", "http://example.invalid:1234")
+    monkeypatch.setenv("ARXIV_SANITY_OPENCODE_BASE_URL", "http://example.invalid:1234")
     new = config.reload_settings()
 
     assert new is not old
     assert new is config.settings
     assert new is settings_module.settings
-    assert new.llm.base_url == "http://example.invalid:1234"
+    assert new.opencode.resolved_base_url == "http://example.invalid:1234"

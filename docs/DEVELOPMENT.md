@@ -17,6 +17,8 @@ For editable installs (optional):
 - `pip install -e ".[dev]"`
 - `npm install` for frontend asset builds (`npm run build:static`, `bin/up.sh`)
 
+**LLM backend prerequisite**: [OpenCode](https://opencode.ai) must be installed separately and available on `PATH`. The default launcher (`python bin/run_services.py`) starts `opencode serve` automatically when `ARXIV_SANITY_OPENCODE_MANAGED=true`. See <https://opencode.ai> for installation instructions.
+
 ## Configuration CLI
 
 - `python -m config.cli show`
@@ -29,6 +31,8 @@ Notes:
 
 - Canonical variable names live in `.env.example`; a small set of legacy aliases is still accepted for backward compatibility, but prefer canonical names for new configs.
 - `python bin/run_services.py` does not start the scheduler daemon unless you add `--with-daemon`.
+- `ARXIV_SANITY_OPENCODE_MANAGED` defaults to `true`, so the launcher starts `opencode serve` locally unless you explicitly set it to `false`.
+- With the default managed behavior, `opencode` must be installed locally and available on `PATH`.
 
 ## Tests
 

@@ -2921,7 +2921,7 @@ summaryApp.exportMarkdownZip = async function () {
                       pdf: `https://arxiv.org/pdf/${exportPid}.pdf`,
                   },
             summary: {
-                model: meta.llm_model || this.selectedModel || '',
+                model: meta.resolved_model || meta.llm_model || this.selectedModel || '',
                 generated_at: meta.generated_at || null,
             },
             exported_at: new Date().toISOString(),

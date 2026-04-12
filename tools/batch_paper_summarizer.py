@@ -28,7 +28,18 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 # Repository layer for cleaner data access
-from aslite.repositories import MetaRepository, PaperRepository, TagRepository
+from aslite.arxiv import (
+    check_withdrawn_via_abs_page,
+    get_entries_by_ids,
+    is_withdrawn_entry,
+)
+from aslite.repositories import (
+    MetaRepository,
+    PaperCorpusRepository,
+    PaperRepository,
+    PaperTombstoneRepository,
+    TagRepository,
+)
 from config import settings
 from tools.paper_summarizer import (
     PaperSummarizer,
@@ -230,6 +241,42 @@ class BatchProcessor:
             return f"{detail} [last model={attempt_model}]"
         return detail
 
+    def _classify_summary_failure_reason(
+        self, summary_content: str, summary_meta: dict | None = None
+    ) -> tuple[str, str]:
+        """Classify summary failures into operationally useful buckets."""
+        detail = self._extract_summary_failure_detail(summary_content, summary_meta)
+        lowered = detail.lower()
+
+        if "unable to download paper pdf" in lowered or "downloading pdf" in lowered:
+            return "download_failed", detail
+
+        if "parsed markdown content is empty" in lowered:
+            return "empty_content", detail
+
+        parse_markers = (
+            "unable to parse pdf to markdown",
+            "failed to parse pdf using mineru api",
+            "mineru api error",
+            "mineru api service unavailable",
+            "mineru api configuration error",
+            "uploaded paper has not been parsed yet",
+        )
+        if any(marker in lowered for marker in parse_markers):
+            return "parse_failed", detail
+
+        llm_markers = (
+            "summary generation failed:",
+            "llm returned",
+            "provider timeout",
+            "tool calls instead of content",
+            "incomplete summary content",
+        )
+        if any(marker in lowered for marker in llm_markers):
+            return "llm_failed", detail
+
+        return "other_error", detail
+
     def _progress_postfix(
         self,
         *,
@@ -274,6 +321,104 @@ class BatchProcessor:
                 self.stats["failure_reasons"][reason] += 1
             else:
                 self.stats["failure_reasons"]["other_error"] += 1
+
+    @staticmethod
+    def _build_public_records(latest_paper: dict, selected_paper: dict) -> tuple[dict, dict]:
+        effective_paper = dict(selected_paper)
+        effective_paper["_effective_idv"] = effective_paper.get("_idv")
+        effective_paper["_effective_version"] = effective_paper.get("_version")
+        effective_paper["_latest_idv"] = latest_paper.get("_idv")
+        effective_paper["_latest_version"] = latest_paper.get("_version")
+        effective_paper["_latest_withdrawn"] = bool(is_withdrawn_entry(latest_paper))
+
+        meta = {
+            "_time": effective_paper.get("_time", 0),
+            "_id": effective_paper.get("_id"),
+            "_idv": effective_paper.get("_idv"),
+            "_version": effective_paper.get("_version"),
+            "_effective_idv": effective_paper.get("_effective_idv"),
+            "_effective_version": effective_paper.get("_effective_version"),
+            "_latest_idv": effective_paper.get("_latest_idv"),
+            "_latest_version": effective_paper.get("_latest_version"),
+            "_latest_withdrawn": bool(effective_paper.get("_latest_withdrawn", False)),
+        }
+        return effective_paper, meta
+
+    @staticmethod
+    def _build_withdrawn_tombstone(
+        raw_pid: str,
+        latest_paper: dict,
+        current_paper: dict | None,
+        current_tombstone: dict | None,
+    ) -> dict:
+        now = time.time()
+        tombstone = dict(current_tombstone or {})
+        tombstone.update(
+            {
+                "pid": raw_pid,
+                "reason": "withdrawn_only",
+                "deleted_at": float(tombstone.get("deleted_at") or now),
+                "seen_at": now,
+                "latest_idv": latest_paper.get("_idv"),
+                "latest_version": latest_paper.get("_version"),
+                "latest_comment": latest_paper.get("arxiv_comment") or latest_paper.get("comment") or "",
+            }
+        )
+        if isinstance(current_paper, dict):
+            tombstone.setdefault(
+                "previous_effective_idv",
+                current_paper.get("_effective_idv") or current_paper.get("_idv") or "",
+            )
+            tombstone.setdefault(
+                "previous_effective_version",
+                current_paper.get("_effective_version") or current_paper.get("_version"),
+            )
+            tombstone.setdefault("previous_title", current_paper.get("title") or "")
+        return tombstone
+
+    def _refresh_public_visibility_from_arxiv(
+        self,
+        raw_pid: str,
+        *,
+        force_latest_withdrawn: bool = False,
+    ) -> dict | None:
+        raw_pid = str(raw_pid or "").strip()
+        if not raw_pid or raw_pid.startswith("up_"):
+            return None
+
+        try:
+            entries = get_entries_by_ids([raw_pid])
+        except Exception as e:
+            logger.debug(f"Failed to refresh arXiv visibility for {raw_pid}: {e}")
+            return None
+        if not entries:
+            return None
+
+        latest_paper = entries[0]
+        latest_is_withdrawn = bool(force_latest_withdrawn or is_withdrawn_entry(latest_paper))
+        if latest_is_withdrawn:
+            current_paper = PaperRepository.get_by_id(raw_pid)
+            current_tombstone = PaperTombstoneRepository.get_by_id(raw_pid)
+            tombstone = self._build_withdrawn_tombstone(raw_pid, latest_paper, current_paper, current_tombstone)
+            PaperCorpusRepository.apply_daemon_batch(tombstones={raw_pid: tombstone})
+            return {
+                "action": "tombstone",
+                "pid": raw_pid,
+                "latest_idv": latest_paper.get("_idv") or "",
+            }
+
+        selected_paper = latest_paper
+        desired_paper, desired_meta = self._build_public_records(latest_paper, selected_paper)
+        PaperCorpusRepository.apply_daemon_batch(
+            papers={raw_pid: desired_paper},
+            metas={raw_pid: desired_meta},
+        )
+        return {
+            "action": "sync",
+            "pid": raw_pid,
+            "effective_idv": desired_paper.get("_effective_idv") or "",
+            "latest_idv": desired_paper.get("_latest_idv") or "",
+        }
 
     def get_latest_papers(self, n: int) -> list[tuple[str, dict]]:
         """
@@ -564,9 +709,21 @@ class BatchProcessor:
         try:
             summary_source = normalize_summary_source(None)
             cache_pid, raw_pid, has_explicit_version = resolve_cache_pid(pid, paper_info)
+            cache_must_refresh = False
+
+            if is_withdrawn_entry(paper_info):
+                repair_result = self._refresh_public_visibility_from_arxiv(raw_pid)
+                if repair_result and repair_result.get("action") == "tombstone":
+                    logger.info(f"Skipping withdrawn-only paper after arXiv refresh: {pid}")
+                    with self.stats_lock:
+                        self.stats["skipped"] += 1
+                    return pid, True, "Withdrawn"
+                if repair_result and repair_result.get("action") in {"refresh", "sync"}:
+                    paper_info = PaperRepository.get_by_id(raw_pid) or paper_info
+                    cache_must_refresh = repair_result.get("action") == "refresh"
 
             # Check if already cached
-            if skip_cached and self.is_summary_cached(cache_pid, summary_source):
+            if skip_cached and not cache_must_refresh and self.is_summary_cached(cache_pid, summary_source):
                 logger.trace(f"Skipped cached paper: {pid}")
                 with self.stats_lock:
                     self.stats["cached"] += 1
@@ -594,13 +751,13 @@ class BatchProcessor:
             try:
                 lock_fd = acquire_summary_lock(lock_file, timeout_s=300)
                 if lock_fd is None:
-                    if self.is_summary_cached(cache_pid, summary_source):
+                    if not cache_must_refresh and self.is_summary_cached(cache_pid, summary_source):
                         with self.stats_lock:
                             self.stats["cached"] += 1
                         return pid, True, "Cached"
                     return pid, False, "Summary busy"
 
-                if skip_cached and self.is_summary_cached(cache_pid, summary_source):
+                if skip_cached and not cache_must_refresh and self.is_summary_cached(cache_pid, summary_source):
                     logger.trace(f"Skipped cached paper after lock: {pid}")
                     with self.stats_lock:
                         self.stats["cached"] += 1
@@ -613,22 +770,65 @@ class BatchProcessor:
                 else:
                     pid_for_summary = pid if has_explicit_version else raw_pid
 
-                summary_result = summarizer.generate_summary(pid_for_summary, source=summary_source, model=self.model)
-                summary_content, summary_meta = normalize_summary_result(summary_result)
+                def _generate_once():
+                    summary_result_local = summarizer.generate_summary(
+                        pid_for_summary,
+                        source=summary_source,
+                        model=self.model,
+                    )
+                    return normalize_summary_result(summary_result_local)
+
+                summary_content, summary_meta = _generate_once()
                 end_time = time.time()
 
                 # Check if summary generation was successful
                 if is_error_summary_content(summary_content):
-                    failure_detail = self._extract_summary_failure_detail(summary_content, summary_meta)
-                    logger.error(f"Summary generation failed: {pid} - {failure_detail}")
-                    self._record_failure_detail(
-                        pid,
-                        "llm_failed",
-                        failure_detail,
+                    failure_reason, failure_detail = self._classify_summary_failure_reason(
+                        summary_content, summary_meta
                     )
-                    with self.stats_lock:
-                        self.stats["failed"] += 1
-                    return pid, False, failure_detail
+                    if failure_reason == "download_failed":
+                        abs_url = str(paper_info.get("link") or paper_info.get("id") or "").strip() or None
+                        abs_withdrawn = check_withdrawn_via_abs_page(raw_pid, abs_url=abs_url)
+                        if abs_withdrawn:
+                            repair_result = self._refresh_public_visibility_from_arxiv(
+                                raw_pid,
+                                force_latest_withdrawn=True,
+                            )
+                            if repair_result and repair_result.get("action") == "tombstone":
+                                logger.info(f"Skipping withdrawn-only paper after abs-page probe: {pid}")
+                                with self.stats_lock:
+                                    self.stats["skipped"] += 1
+                                return pid, True, "Withdrawn"
+                            if repair_result and repair_result.get("action") in {
+                                "refresh",
+                                "sync",
+                            }:
+                                logger.info(
+                                    f"Repaired public visibility for {pid} "
+                                    f"({repair_result.get('latest_idv') or raw_pid} -> "
+                                    f"{repair_result.get('effective_idv') or raw_pid}), retrying summary once"
+                                )
+                                paper_info = PaperRepository.get_by_id(raw_pid) or paper_info
+                                summary_content, summary_meta = _generate_once()
+                                end_time = time.time()
+                                if not is_error_summary_content(summary_content):
+                                    failure_detail = ""
+                                else:
+                                    failure_reason, failure_detail = self._classify_summary_failure_reason(
+                                        summary_content,
+                                        summary_meta,
+                                    )
+
+                    if failure_detail:
+                        logger.error(f"Summary generation failed: {pid} - {failure_detail}")
+                        self._record_failure_detail(
+                            pid,
+                            failure_reason,
+                            failure_detail,
+                        )
+                        with self.stats_lock:
+                            self.stats["failed"] += 1
+                        return pid, False, failure_detail
 
                 # Cache summary
                 cache_success, _ = self.cache_summary(
@@ -870,6 +1070,7 @@ class BatchProcessor:
         logger.success(f"Successfully processed: {self.stats['success']}")
         logger.success(f"Failed: {self.stats['failed']}")
         logger.success(f"Skipped cached: {self.stats['cached']}")
+        logger.success(f"Skipped withdrawn-only: {self.stats['skipped']}")
         logger.success(f"Total time: {total_time:.2f} s")
 
         processed_count = self.stats["success"] + self.stats["failed"]

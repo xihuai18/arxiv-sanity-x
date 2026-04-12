@@ -54,7 +54,9 @@ class TestRouteRegistration:
 
         # Expected minimum routes (excluding static)
         expected_min = 45
-        assert route_count >= expected_min, f"Only {route_count} routes, expected >= {expected_min}"
+        assert route_count >= expected_min, (
+            f"Only {route_count} routes, expected >= {expected_min}"
+        )
 
     def test_critical_routes_exist(self, app):
         """Test that critical routes exist."""
@@ -122,7 +124,9 @@ class TestHtmlCacheHeaders:
     HTML must not be cached to avoid stale CSRF tokens and stale hashed asset references.
     """
 
-    @pytest.mark.parametrize("path", ["/", "/about", "/stats", "/profile", "/readinglist"])
+    @pytest.mark.parametrize(
+        "path", ["/", "/about", "/stats", "/profile", "/readinglist"]
+    )
     def test_html_pages_are_not_cached(self, client, path):
         resp = client.get(path)
         assert resp.mimetype == "text/html"
@@ -158,12 +162,38 @@ class TestPageRoutes:
         resp = client.get("/summary?pid=2301.00001", follow_redirects=True)
         assert resp.status_code == 200
 
+    def test_home_page_injects_alias_default_summary_model(self, client, monkeypatch):
+        from backend import legacy
+
+        monkeypatch.setattr(legacy.settings.llm, "name", "openai/gpt-5.4")
+
+        resp = client.get("/")
+        body = resp.get_data(as_text=True)
+
+        assert 'var defaultSummaryModel = "gpt-5.4";' in body
+        assert 'var defaultSummaryModel = "openai/gpt-5.4";' not in body
+
+    def test_readinglist_page_injects_alias_default_summary_model(
+        self, logged_in_client, monkeypatch
+    ):
+        from backend import legacy
+
+        monkeypatch.setattr(legacy.settings.llm, "name", "openai/gpt-5.4")
+
+        resp = logged_in_client.get("/readinglist")
+        body = resp.get_data(as_text=True)
+
+        assert 'var defaultSummaryModel = "gpt-5.4";' in body
+        assert 'var defaultSummaryModel = "openai/gpt-5.4";' not in body
+
     def test_summary_page_redirects_to_canonical_version(self, client, monkeypatch):
         from backend import legacy
 
         monkeypatch.setattr(legacy.os.path, "exists", lambda _path: True)
         monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
-        monkeypatch.setattr(legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2")
+        monkeypatch.setattr(
+            legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2"
+        )
 
         resp = client.get("/summary?pid=2301.00001")
 
@@ -175,7 +205,9 @@ class TestPageRoutes:
 
         monkeypatch.setattr(legacy.os.path, "exists", lambda _path: True)
         monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
-        monkeypatch.setattr(legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2")
+        monkeypatch.setattr(
+            legacy, "_get_canonical_public_pid", lambda _pid, paper=None: "2301.00001v2"
+        )
 
         resp = client.get("/inspect?pid=2301.00001")
 
@@ -223,7 +255,9 @@ class TestCacheStatusEndpoint:
         resp = client.get("/cache_status")
         assert resp.status_code == 404
 
-    def test_cache_status_enabled_without_login_returns_401_json(self, client, monkeypatch):
+    def test_cache_status_enabled_without_login_returns_401_json(
+        self, client, monkeypatch
+    ):
         """Test that cache_status requires login when enabled."""
         monkeypatch.setattr("backend.legacy.settings.web.enable_cache_status", True)
 
@@ -234,7 +268,9 @@ class TestCacheStatusEndpoint:
         assert payload.get("success") is False
         assert payload.get("error") == "Not logged in"
 
-    def test_cache_status_enabled_with_login_returns_200_json(self, logged_in_client, monkeypatch):
+    def test_cache_status_enabled_with_login_returns_200_json(
+        self, logged_in_client, monkeypatch
+    ):
         """Test that cache_status returns status JSON for logged-in users."""
         monkeypatch.setattr("backend.legacy.settings.web.enable_cache_status", True)
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from flask import Blueprint, jsonify
 
 from config import settings
+from config.model_aliases import display_model_id
 
 from .. import legacy
 
@@ -38,12 +41,20 @@ def _health_response(*, strict_ready: bool) -> tuple[object, int]:
     from backend.services.data_service import get_data_cached
 
     try:
-        require_embedding_ready = bool(getattr(settings.web, "ready_require_embedding", True))
+        require_embedding_ready = bool(
+            getattr(settings.web, "ready_require_embedding", True)
+        )
         require_mineru_ready = bool(getattr(settings.web, "ready_require_mineru", True))
-        mineru_backend = str(getattr(settings.mineru, "backend", "pipeline") or "pipeline").strip().lower()
+        mineru_backend = (
+            str(getattr(settings.mineru, "backend", "pipeline") or "pipeline")
+            .strip()
+            .lower()
+        )
         mineru_enabled = bool(getattr(settings.mineru, "enabled", False))
         # Local MinerU HTTP health probe only applies to the vLLM backend.
-        require_local_mineru_probe = mineru_enabled and mineru_backend == "vlm-http-client"
+        require_local_mineru_probe = (
+            mineru_enabled and mineru_backend == "vlm-http-client"
+        )
 
         # Non-blocking peek: avoid /health being stuck on cold-start cache loading.
         data = get_data_cached(wait=False)
@@ -62,70 +73,88 @@ def _health_response(*, strict_ready: bool) -> tuple[object, int]:
         # DB file presence is an operator hint.
         try:
             deps["papers_db_file"] = {
-                "exists": bool(PAPERS_DB_FILE and PAPERS_DB_FILE.exists()),
+                "exists": bool(PAPERS_DB_FILE and Path(PAPERS_DB_FILE).exists()),
             }
         except Exception as e:
             deps["papers_db_file"] = {"error": str(e)}
 
-        # Optional dependency probes. In strict readiness mode, enforce that
-        # default/fallback models exist in the /models list.
+        # Text-model probe now uses OpenCode semantics instead of /v1/models.
         try:
-            llm_base = (settings.llm.base_url or "").rstrip("/")
-            if llm_base:
-                from backend.services.health_service import (
-                    fetch_llm_model_ids,
-                    validate_required_models,
+            from backend.services.health_service import check_text_model_service
+
+            result = check_text_model_service(
+                str(settings.llm.name or "").strip(),
+                timeout_s=5.0 if strict_ready else 3.0,
+                probe=strict_ready,
+            )
+            service_info = (
+                result.get("service") if isinstance(result.get("service"), dict) else {}
+            )
+            required_info = (
+                result.get("required")
+                if isinstance(result.get("required"), dict)
+                else {}
+            )
+            models_info = (
+                result.get("models") if isinstance(result.get("models"), dict) else {}
+            )
+            deps["opencode"] = {
+                "reachable": bool(service_info.get("reachable")),
+                "healthy": bool(service_info.get("healthy")),
+                "version": service_info.get("version"),
+                "base_url": result.get("base_url"),
+                "error_kind": result.get("error_kind"),
+                "error": result.get("error"),
+            }
+            deps["llm_model_check"] = required_info
+            deps["llm_models"] = models_info
+            if isinstance(result.get("probe"), dict):
+                probe_info = dict(result.get("probe") or {})
+                probe_info["resolved_model"] = display_model_id(
+                    probe_info.get("resolved_model")
                 )
+                deps["llm_probe"] = probe_info
 
-                result = fetch_llm_model_ids(llm_base, settings.llm.api_key, timeout_s=1.0)
-                deps["llm"] = {
-                    "reachable": bool(result.get("ok")),
-                    "url": result.get("url"),
-                    "error": result.get("error"),
-                }
-                deps["llm_models"] = result
-                llm_issue: str | None = None
-                if not result.get("ok"):
-                    llm_issue = "Failed to fetch LLM model list for fallback validation"
-                else:
-                    model_ids = result.get("model_ids") or []
-                    required = []
-                    try:
-                        required.append(str(settings.llm.name or "").strip())
-                    except Exception:
-                        pass
-                    try:
-                        required.extend(list(settings.llm.fallback_model_list or []))
-                    except Exception:
-                        pass
-                    check = validate_required_models(required, list(model_ids))
-                    deps["llm_fallback_check"] = check
-                    if not check.get("ok"):
-                        llm_issue = "Fallback model(s) missing from LLM model list"
-
-                if llm_issue and strict_ready:
-                    return (
-                        jsonify(
-                            {
-                                "status": "error",
-                                "message": llm_issue,
-                                "deps": deps,
-                            }
-                        ),
-                        503,
+            llm_issue: str | None = None
+            if not result.get("ok"):
+                missing = list(required_info.get("missing") or [])
+                error_kind = str(result.get("error_kind") or "").strip()
+                if error_kind == "service_unreachable":
+                    llm_issue = "OpenCode service is unreachable"
+                elif error_kind == "auth_failed":
+                    llm_issue = "OpenCode authentication failed"
+                elif error_kind == "configuration_error":
+                    llm_issue = f"OpenCode configuration error: {result.get('error') or 'invalid configuration'}"
+                elif missing:
+                    llm_issue = (
+                        f"Required OpenCode models are missing: {', '.join(missing)}"
                     )
-                if llm_issue:
-                    warnings.append(llm_issue)
+                else:
+                    llm_issue = f"OpenCode probe failed: {result.get('error') or 'unknown error'}"
+
+            if llm_issue and strict_ready:
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": llm_issue,
+                            "deps": deps,
+                        }
+                    ),
+                    503,
+                )
+            if llm_issue:
+                warnings.append(llm_issue)
         except Exception as e:
-            deps["llm"] = {"reachable": False, "error": str(e)}
+            deps["opencode"] = {"reachable": False, "healthy": False, "error": str(e)}
             if strict_ready:
-                strict_dep_issues.append("LLM probe failed")
+                strict_dep_issues.append("OpenCode probe failed")
             else:
-                warnings.append("LLM probe failed")
+                warnings.append("OpenCode probe failed")
 
         try:
             if getattr(settings.embedding, "use_llm_api", False):
-                embed_base = (settings.embedding.api_base or settings.llm.base_url or "").rstrip("/")
+                embed_base = (settings.embedding.api_base or "").rstrip("/")
                 if embed_base:
                     deps["embedding"] = _http_probe(f"{embed_base}/v1/models")
                 else:
@@ -134,11 +163,17 @@ def _health_response(*, strict_ready: bool) -> tuple[object, int]:
                         "error": "missing_embed_api_base",
                     }
             else:
-                deps["embedding"] = _http_probe(f"http://localhost:{int(settings.embedding.port)}/api/version")
+                deps["embedding"] = _http_probe(
+                    f"http://localhost:{int(settings.embedding.port)}/api/version"
+                )
         except Exception as e:
             deps["embedding"] = {"reachable": False, "error": str(e)}
         embed_dep = deps.get("embedding")
-        if require_embedding_ready and isinstance(embed_dep, dict) and embed_dep.get("reachable") is False:
+        if (
+            require_embedding_ready
+            and isinstance(embed_dep, dict)
+            and embed_dep.get("reachable") is False
+        ):
             if strict_ready:
                 strict_dep_issues.append("Embedding service is unreachable")
             else:
@@ -146,7 +181,9 @@ def _health_response(*, strict_ready: bool) -> tuple[object, int]:
 
         try:
             if require_local_mineru_probe:
-                deps["mineru"] = _http_probe(f"http://localhost:{int(settings.mineru.port)}/health")
+                deps["mineru"] = _http_probe(
+                    f"http://localhost:{int(settings.mineru.port)}/health"
+                )
             elif mineru_enabled:
                 if mineru_backend == "api":
                     api_key = str(getattr(settings.mineru, "api_key", "") or "").strip()
@@ -164,7 +201,11 @@ def _health_response(*, strict_ready: bool) -> tuple[object, int]:
         except Exception as e:
             deps["mineru"] = {"reachable": False, "error": str(e)}
         mineru_dep = deps.get("mineru")
-        if require_mineru_ready and isinstance(mineru_dep, dict) and mineru_dep.get("reachable") is False:
+        if (
+            require_mineru_ready
+            and isinstance(mineru_dep, dict)
+            and mineru_dep.get("reachable") is False
+        ):
             if strict_ready:
                 strict_dep_issues.append("MinerU service is unreachable")
             else:

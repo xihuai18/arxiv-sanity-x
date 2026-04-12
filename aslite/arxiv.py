@@ -4,11 +4,13 @@ Utils for dealing with arxiv API and related processing
 
 import logging
 import random
+import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
+from html import unescape
 
 import feedparser
 
@@ -22,12 +24,33 @@ _WITHDRAWN_BODY_MARKERS = (
     "this article has been withdrawn",
     "the paper has been withdrawn",
     "the article has been withdrawn",
+    "this paper is withdrawn",
+    "this article is withdrawn",
+    "the paper is withdrawn",
+    "the article is withdrawn",
+    "this manuscript has been withdrawn",
+    "this manuscript is withdrawn",
     "withdrawn by the author",
     "withdrawn by the authors",
     "this paper has been retracted",
     "this article has been retracted",
     "retracted by the author",
     "retracted by the authors",
+    "we are withdrawing this preprint",
+    "we are withdrawing this manuscript",
+    "we have decided to withdraw this manuscript",
+    "the authors have decided to withdraw this manuscript",
+    "the authors withdraw this manuscript",
+    "withdraw this preprint",
+    "withdraw this manuscript",
+)
+_WITHDRAWN_PAGE_MARKERS = (
+    "this paper has been withdrawn",
+    "this article has been withdrawn",
+    "this paper is withdrawn",
+    "this article is withdrawn",
+    "withdrawn by the author",
+    "withdrawn by the authors",
 )
 
 
@@ -77,7 +100,7 @@ def _open_arxiv_api_url(url: str) -> bytes:
             last_exc = e
             if attempt >= _ARXIV_RETRY_MAX_TRIES - 1:
                 break
-            logger.warning(f"arxiv API request failed (attempt {attempt + 1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
+            logger.debug(f"arxiv API request failed (attempt {attempt + 1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
             _sleep_backoff(attempt)
 
     if last_exc is not None:
@@ -88,13 +111,50 @@ def _open_arxiv_api_url(url: str) -> bytes:
     return b""
 
 
+def _open_arxiv_page_url(url: str) -> bytes:
+    """Open an arXiv abstract page with bounded retries."""
+
+    logger.debug(f"arxiv page url {url}")
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "arxiv-sanity-x (+https://github.com/karpathy/arxiv-sanity-lite)",
+        },
+    )
+    last_exc: Exception | None = None
+    for attempt in range(_ARXIV_RETRY_MAX_TRIES):
+        try:
+            with urllib.request.urlopen(req, timeout=settings.arxiv.api_timeout) as resp:
+                response = resp.read()
+                if getattr(resp, "status", 200) != 200:
+                    logger.error("arxiv page did not return status 200 response")
+                return response
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            last_exc = e
+            if attempt >= _ARXIV_RETRY_MAX_TRIES - 1:
+                break
+            logger.debug(f"arxiv page request failed (attempt {attempt + 1}/{_ARXIV_RETRY_MAX_TRIES}): {e}")
+            _sleep_backoff(attempt)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("arxiv page request failed")
+
+
 def get_entries_by_ids(ids: list[str]) -> list[dict]:
     """Fetch one or more specific arXiv IDs via the public API."""
 
     normalized_ids = [str(pid or "").strip() for pid in ids if str(pid or "").strip()]
     if not normalized_ids:
         return []
-    query = urllib.parse.urlencode({"id_list": ",".join(normalized_ids)})
+    query = urllib.parse.urlencode(
+        {
+            "id_list": ",".join(normalized_ids),
+            # arXiv API defaults to max_results=10; override it so batched id_list
+            # lookups return the full requested set.
+            "max_results": len(normalized_ids),
+        }
+    )
     response = _open_arxiv_api_url(f"https://export.arxiv.org/api/query?{query}")
     return parse_response(response)
 
@@ -169,6 +229,12 @@ def _normalize_marker_text(value: str | None) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _normalize_html_marker_text(value: str | None) -> str:
+    text = unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return _normalize_marker_text(text)
+
+
 def is_withdrawn_entry(entry: dict | None) -> bool:
     """Best-effort withdrawn/retracted detection from arXiv API comments."""
 
@@ -179,17 +245,50 @@ def is_withdrawn_entry(entry: dict | None) -> bool:
     return bool(comment and any(marker in comment for marker in _WITHDRAWN_BODY_MARKERS))
 
 
+def is_withdrawn_abs_page(html_text: str | bytes | None) -> bool:
+    """Best-effort withdrawn detection from an arXiv abstract HTML page."""
+
+    if isinstance(html_text, bytes):
+        normalized = _normalize_html_marker_text(html_text.decode("utf-8", "ignore"))
+    else:
+        normalized = _normalize_html_marker_text(html_text)
+    return bool(normalized and any(marker in normalized for marker in _WITHDRAWN_PAGE_MARKERS))
+
+
+def check_withdrawn_via_abs_page(pid: str | None = None, *, abs_url: str | None = None) -> bool | None:
+    """Return whether an arXiv abstract page indicates the paper is withdrawn.
+
+    Returns:
+        True / False when the page is fetched successfully; None on fetch errors.
+    """
+
+    target = str(abs_url or "").strip()
+    if not target:
+        raw_pid = str(pid or "").strip()
+        if not raw_pid:
+            return None
+        target = f"https://arxiv.org/abs/{raw_pid}"
+
+    try:
+        html_text = _open_arxiv_page_url(target).decode("utf-8", "ignore")
+    except Exception as exc:
+        logger.warning("Failed to fetch arXiv abs page for withdrawn probe (%s): %s", target, exc)
+        return None
+    return is_withdrawn_abs_page(html_text)
+
+
 def resolve_latest_nonwithdrawn_version(
     latest_entry: dict | None,
     *,
     entries_getter=None,
     batch_size: int = 20,
+    treat_latest_as_withdrawn: bool = False,
 ) -> dict | None:
     """Return the latest non-withdrawn version for a paper, or None if none exists."""
 
     if not isinstance(latest_entry, dict):
         return None
-    if not is_withdrawn_entry(latest_entry):
+    if not treat_latest_as_withdrawn and not is_withdrawn_entry(latest_entry):
         return latest_entry
 
     raw_pid = str(latest_entry.get("_id") or "").strip()

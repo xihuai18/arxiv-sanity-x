@@ -73,6 +73,16 @@ def _pipeline_notice(message: str) -> None:
     print(message, flush=True)
 
 
+def _parse_applied_actions(name: str) -> int:
+    output = _LAST_RUN_OUTPUT.get(name, "") or ""
+    if not output:
+        return 0
+    match = re.search(r"Applied\s+(\d+)\s+repair action", output)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
 def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     """Compute SHA-256 for a file (best-effort)."""
     import hashlib
@@ -386,6 +396,37 @@ def gen_summary():
     return ok
 
 
+def cleanup_withdrawn_public_papers() -> bool:
+    daemon = _daemon_cfg()
+    if not bool(getattr(daemon, "enable_withdrawn_cleanup", True)):
+        logger.debug("Withdrawn cleanup disabled (set ARXIV_SANITY_DAEMON_ENABLE_WITHDRAWN_CLEANUP=false)")
+        return False
+
+    recent_n = max(0, int(getattr(daemon, "withdrawn_cleanup_recent", 0) or 0))
+    if recent_n <= 0:
+        logger.debug("Withdrawn cleanup skipped because withdrawn_cleanup_recent <= 0")
+        return False
+
+    cmd = [
+        PYTHON,
+        str(TOOLS_DIR / "repair_paper_history.py"),
+        "--scan-recent-public",
+        str(recent_n),
+        "--withdrawn-only",
+        "--apply",
+    ]
+    _pipeline_notice(f"[pipeline] cleanup_withdrawn: starting (recent={recent_n})")
+    logger.warning(f"[pipeline] cleanup_withdrawn: command={' '.join(cmd)}")
+
+    ok = _run_cmd(cmd, "cleanup_withdrawn", fail_level="warning", capture=True)
+    reason = _LAST_RUN_REASON.get("cleanup_withdrawn") or ("ok" if ok else "unknown")
+    changed = _parse_applied_actions("cleanup_withdrawn")
+    if ok and changed:
+        logger.info(f"[pipeline] cleanup_withdrawn: applied {changed} repair action(s)")
+    _pipeline_notice(f"[pipeline] cleanup_withdrawn: finished ({reason}, changed={changed})")
+    return ok and changed > 0
+
+
 def fetch_compute():
     logger.info("[pipeline] === fetch_compute started ===")
     fetch_ok = _run_cmd(
@@ -413,11 +454,20 @@ def fetch_compute():
         if total_new or total_replaced:
             logger.info(f"[pipeline] fetch: +{total_new} new, ~{total_replaced} replaced")
 
+    fetch_reason = _LAST_RUN_REASON.get("fetch") or "unknown"
+    cleanup_changed = False
+    if fetch_ok or fetch_reason == "no_new_papers":
+        cleanup_changed = cleanup_withdrawn_public_papers()
+
     if not fetch_ok:
-        reason = _LAST_RUN_REASON.get("fetch") or "unknown"
-        if reason != "no_new_papers":
-            logger.warning(f"[pipeline] Fetch failed ({reason}); skipping compute and summary")
-        return
+        if fetch_reason != "no_new_papers":
+            logger.warning(f"[pipeline] Fetch failed ({fetch_reason}); skipping compute and summary")
+            return
+        if not cleanup_changed:
+            logger.info(
+                "[pipeline] fetch: no new papers and withdrawn cleanup found no changes; skipping compute and summary"
+            )
+            return
 
     compute_cmd = [PYTHON, str(TOOLS_DIR / "compute.py")]
     if _daemon_cfg().enable_embeddings:
@@ -663,6 +713,8 @@ def _log_startup_info():
     flags = []
     if daemon.enable_embeddings:
         flags.append("embeddings")
+    if getattr(daemon, "enable_withdrawn_cleanup", True):
+        flags.append(f"withdrawn-cleanup({getattr(daemon, 'withdrawn_cleanup_recent', 0)})")
     if settings.daemon.email_dry_run:
         flags.append("email-dry-run")
     if settings.daemon.enable_git_backup:

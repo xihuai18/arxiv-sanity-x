@@ -30,6 +30,7 @@ from .settings_services import (
     ExtractInfoSettings,
     LLMSettings,
     MinerUSettings,
+    OpenCodeSettings,
     SummarySettings,
 )
 
@@ -44,7 +45,6 @@ class Settings(BaseSettings):
     log_dir: Path | None = None
     host: str = "http://localhost:55555"
     serve_port: int = 55555
-    litellm_port: int = 53000
     process_role: Literal["", "web", "worker"] = Field(
         default="",
         description="Optional process role override for SQLite timeout/retry tuning",
@@ -56,6 +56,7 @@ class Settings(BaseSettings):
 
     email: EmailSettings = Field(default_factory=EmailSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    opencode: OpenCodeSettings = Field(default_factory=OpenCodeSettings)
     extract_info: ExtractInfoSettings = Field(default_factory=ExtractInfoSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     mineru: MinerUSettings = Field(default_factory=MinerUSettings)
@@ -89,6 +90,8 @@ class Settings(BaseSettings):
             self.sse.db_path = str(self.data_dir / "sse_events.db")
         if not self.reco.api_base_url:
             self.reco.api_base_url = f"http://localhost:{self.serve_port}"
+        if not self.extract_info.model_name:
+            self.extract_info.model_name = self.llm.name
         return self
 
     @field_validator("data_dir", "summary_dir", "log_dir", mode="before")

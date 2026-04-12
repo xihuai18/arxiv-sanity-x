@@ -789,6 +789,24 @@ def get_latest_pids_by_time(n: int) -> list[tuple[str, float]]:
         conn.close()
 
 
+def get_latest_pids_by_time_offset(limit: int, offset: int) -> list[tuple[str, float]]:
+    """Return pid/_time pairs ordered by _time descending with pagination."""
+
+    if limit <= 0:
+        return []
+    conn = _get_metas_time_index_conn(flag="r")
+    try:
+        cursor = conn.execute(
+            "SELECT pid, _time FROM metas_time_index ORDER BY _time DESC LIMIT ? OFFSET ?",
+            (limit, max(0, int(offset or 0))),
+        )
+        return cursor.fetchall()
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
 def update_metas_time_index(pid_time_pairs: list[tuple[str, float]]):
     """Update the metas_time_index table with new pid/_time pairs.
 

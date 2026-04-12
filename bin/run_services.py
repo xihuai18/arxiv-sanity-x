@@ -5,7 +5,7 @@ One-command launcher for arxiv-sanity-X services.
 Starts (optionally):
 - Ollama embedding server (embedding_serve.sh)
 - minerU vLLM server (mineru_serve.sh)
-- LiteLLM gateway (litellm.sh)
+- OpenCode server (opencode serve)
 - Web app (serve.py or up.sh)
 - Scheduler (daemon.py)
 
@@ -16,6 +16,7 @@ Press Ctrl+C to stop everything.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -28,6 +29,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 # Ensure repository root is importable when executing this file directly.
@@ -40,6 +42,7 @@ if str(_REPO_ROOT) not in sys.path:
 # Import settings early for configuration access
 try:
     from config import settings
+    from config.model_aliases import display_model_id
 except Exception as e:
     # Keep launcher robust, but make the root cause visible.
     import traceback
@@ -91,6 +94,8 @@ _SUMMARY_COUNT_THRESHOLD = 20
 _SUMMARY_TIME_THRESHOLD_S = 60.0
 _MISFIRE_SUMMARY_COUNT_THRESHOLD = 3
 _MISFIRE_SUMMARY_TIME_THRESHOLD_S = 10 * 60.0
+_OPENCODE_NOISE_SUMMARY_COUNT_THRESHOLD = 10
+_OPENCODE_NOISE_SUMMARY_TIME_THRESHOLD_S = 60.0
 _USE_RAW_LOG_STREAM = False
 
 
@@ -210,11 +215,55 @@ def _flush_log_summaries(service: str | None = None) -> None:
                     key[0],
                     f"Scheduler summary: {snapshot.last_message}; missed_runs={snapshot.count}",
                 )
+            elif kind == "opencode-noise":
+                _print_launcher_line(
+                    key[0],
+                    f"Suppressed repeated OpenCode session-not-found noise; occurrences={snapshot.count}",
+                )
+
+
+def _is_opencode_noise_line(service: str, text: str) -> bool:
+    if str(service or "").strip().lower() != "opencode":
+        return False
+    normalized = _sanitize_message(text)
+    if not normalized:
+        return False
+    if 'message: "Session not found:' in normalized:
+        return True
+    if normalized == "data: {" or normalized == "},":
+        return True
+    if normalized == "NotFoundError: NotFoundError":
+        return True
+    if normalized.startswith("at ") and "/$bunfs/root/src/index.js:" in normalized:
+        return True
+    return False
+
+
+def _handle_opencode_noise(service: str, text: str) -> bool:
+    if not _is_opencode_noise_line(service, text):
+        return False
+    key = (service, "opencode-noise")
+    _update_aggregate(key, message="session-not-found")
+    if _should_report_summary(
+        key,
+        threshold_count=_OPENCODE_NOISE_SUMMARY_COUNT_THRESHOLD,
+        threshold_seconds=_OPENCODE_NOISE_SUMMARY_TIME_THRESHOLD_S,
+    ):
+        with _LOG_STATE_LOCK:
+            snapshot = _LOG_STATE.get(key)
+            count = snapshot.count if snapshot else 0
+        _print_launcher_line(
+            service,
+            f"Suppressed repeated OpenCode session-not-found noise; occurrences={count}",
+        )
+    return True
 
 
 def _emit_normalized_line(service: str, line: str) -> None:
     text = _sanitize_message(line)
     if not text:
+        return
+    if _handle_opencode_noise(service, text):
         return
 
     gin_match = _GIN_RE.match(text)
@@ -299,18 +348,45 @@ def _emit_raw_line(service: str, line: str) -> None:
     text = line.rstrip("\n")
     if not text:
         return
+    if _handle_opencode_noise(service, text):
+        return
     _print_launcher_line(service, text)
+
+
+def _request_headers(url: str) -> dict[str, str]:
+    headers = {"User-Agent": "arxiv-sanity-x-launcher"}
+    path = urlparse(url).path.rstrip("/")
+    if path not in {"/global/health", "/config/providers"}:
+        return headers
+    if settings is None:
+        return headers
+
+    username = str(getattr(settings.opencode, "username", "") or "")
+    password = str(getattr(settings.opencode, "password", "") or "")
+    if not username and not password:
+        return headers
+
+    token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+    headers["Authorization"] = f"Basic {token}"
+    return headers
 
 
 def _http_ok(url: str, timeout_s: float = 1.0) -> bool:
     try:
-        req = Request(url, headers={"User-Agent": "arxiv-sanity-x-launcher"})
+        req = Request(url, headers=_request_headers(url))
         # Ignore env proxies (HTTP(S)_PROXY) for local health checks.
         opener = build_opener(ProxyHandler({}))
         with opener.open(req, timeout=timeout_s) as resp:  # nosec - local health checks only
             return 200 <= resp.status < 300
     except Exception:
         return False
+
+
+def _service_probe_timeout(name: str) -> float:
+    normalized = str(name or "").strip().lower()
+    if normalized == "web":
+        return 5.0
+    return 1.0
 
 
 def _http_get_json(url: str, timeout_s: float = 2.0) -> dict | list | None:
@@ -321,11 +397,23 @@ def _http_get_json(url: str, timeout_s: float = 2.0) -> dict | list | None:
     """
 
     try:
-        req = Request(url, headers={"User-Agent": "arxiv-sanity-x-launcher"})
+        req = Request(url, headers=_request_headers(url))
         opener = build_opener(ProxyHandler({}))
         with opener.open(req, timeout=timeout_s) as resp:  # nosec - local endpoints only
             body = resp.read().decode("utf-8", errors="replace")
         return json.loads(body)
+    except Exception:
+        return None
+
+
+def _http_get_text(url: str, timeout_s: float = 2.0) -> str | None:
+    """Best-effort text GET for local health endpoints."""
+
+    try:
+        req = Request(url, headers=_request_headers(url))
+        opener = build_opener(ProxyHandler({}))
+        with opener.open(req, timeout=timeout_s) as resp:  # nosec - local endpoints only
+            return resp.read().decode("utf-8", errors="replace")
     except Exception:
         return None
 
@@ -371,6 +459,16 @@ def _get_command_version(cmd: list[str], timeout_s: float = 2.0) -> str | None:
         return None
 
 
+def _resolve_opencode_binary() -> str | None:
+    candidate = shutil.which("opencode")
+    if candidate:
+        return candidate
+    fallback = Path.home() / ".opencode" / "bin" / "opencode"
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
 def _print_versions(*, args) -> None:
     """Log key binary versions (best-effort)."""
 
@@ -378,10 +476,11 @@ def _print_versions(*, args) -> None:
     py_v = sys.version.split()[0]
     print(f"[launcher] - python_version: {py_v}", flush=True)
 
-    if not args.no_litellm:
-        v = _get_command_version(["litellm", "--version"])
+    opencode_bin = _resolve_opencode_binary()
+    if opencode_bin:
+        v = _get_command_version([opencode_bin, "--version"])
         if v:
-            print(f"[launcher] - litellm_version: {v}", flush=True)
+            print(f"[launcher] - opencode_version: {v}", flush=True)
 
     if not args.no_embed:
         v = _get_command_version(["ollama", "--version"])
@@ -425,33 +524,31 @@ def _print_startup_context(*, repo_root: Path, args, verbose: bool) -> None:
     )
     print(
         "[launcher] - ports: "
-        f"web={settings.serve_port} litellm={settings.litellm_port} embed={settings.embedding.port} mineru={settings.mineru.port}",
+        f"web={settings.serve_port} opencode={settings.opencode.port} embed={settings.embedding.port} mineru={settings.mineru.port}",
         flush=True,
     )
 
     # Versions are extremely helpful for diagnosing incompatible binaries.
     _print_versions(args=args)
 
-    # LLM / LiteLLM (no secrets).
+    # OpenCode / text-model configuration (no secrets).
     print(
-        "[launcher] - llm: "
-        f"base_url={settings.llm.base_url} default_model={settings.llm.name} "
-        f"fallback_models={settings.llm.fallback_model_list} litellm_verbose={settings.llm.litellm_verbose}",
+        "[launcher] - opencode: "
+        f"base_url={settings.opencode.resolved_base_url} managed={settings.opencode.managed} "
+        f"default_model={display_model_id(settings.llm.name)}",
         flush=True,
     )
-
-    # LiteLLM config + log file locations (no secrets).
-    litellm_cfg = repo_root / "config" / "llm.yml"
-    litellm_log = (settings.log_dir / "litellm.log") if settings.log_dir else None
-    print(f"[launcher] - litellm: config={litellm_cfg}", flush=True)
-    if litellm_log is not None:
-        print(f"[launcher] - litellm: log_file={litellm_log}", flush=True)
+    if settings.opencode.managed:
+        print(
+            f"[launcher] - opencode: launcher_target=http://{settings.opencode.host}:{settings.opencode.port}",
+            flush=True,
+        )
 
     # Embedding.
     print(
         "[launcher] - embedding: "
         f"use_llm_api={settings.embedding.use_llm_api} model_name={settings.embedding.model_name} "
-        f"api_base={(settings.embedding.api_base or '(inherit LLM_BASE_URL)')}",
+        f"api_base={(settings.embedding.api_base or '(required when use_llm_api=true)')}",
         flush=True,
     )
 
@@ -498,39 +595,53 @@ def _print_startup_context(*, repo_root: Path, args, verbose: bool) -> None:
         )
 
 
-def _log_litellm_models(port: int, *, verbose: bool) -> None:
-    """Log which OpenAI-compatible models LiteLLM exposes."""
+def _log_opencode_models(base_url: str, *, verbose: bool) -> None:
+    """Log which summary model aliases OpenCode exposes."""
 
-    url = f"http://localhost:{port}/v1/models"
+    url = f"{str(base_url or '').rstrip('/')}/config/providers"
     data = _http_get_json(url, timeout_s=2.5)
     if not isinstance(data, dict):
-        print(f"[launcher] LiteLLM models: unable to read {url}", flush=True)
+        print(f"[launcher] OpenCode models: unable to read {url}", flush=True)
         return
 
-    models = data.get("data")
-    if not isinstance(models, list):
+    providers = data.get("providers")
+    if not isinstance(providers, list):
         print(
-            f"[launcher] LiteLLM models: unexpected response schema from {url}",
+            f"[launcher] OpenCode models: unexpected response schema from {url}",
             flush=True,
         )
         return
 
     ids: list[str] = []
-    for m in models:
-        if isinstance(m, dict) and isinstance(m.get("id"), str):
-            ids.append(m["id"])
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        provider_id = str(provider.get("id") or "").strip()
+        models = provider.get("models")
+        if not provider_id or not isinstance(models, dict):
+            continue
+        for model_key, model_info in models.items():
+            if isinstance(model_info, dict) and isinstance(model_info.get("id"), str):
+                model_id = model_info["id"]
+            else:
+                model_id = str(model_key or "").strip()
+            if model_id:
+                ids.append(display_model_id(f"{provider_id}/{model_id}"))
 
     if not ids:
-        print("[launcher] LiteLLM models: (none)", flush=True)
+        print("[launcher] OpenCode models: (none)", flush=True)
         return
 
-    ids_sorted = sorted(set(ids))
-    if verbose or len(ids_sorted) <= 20:
-        print(f"[launcher] LiteLLM models ({len(ids_sorted)}): {ids_sorted}", flush=True)
-    else:
-        head = ids_sorted[:20]
+    ids_ordered = list(dict.fromkeys(ids))
+    if verbose or len(ids_ordered) <= 20:
         print(
-            f"[launcher] LiteLLM models ({len(ids_sorted)}): {head} ... (+{len(ids_sorted) - len(head)} more)",
+            f"[launcher] OpenCode models ({len(ids_ordered)}): {ids_ordered}",
+            flush=True,
+        )
+    else:
+        head = ids_ordered[:20]
+        print(
+            f"[launcher] OpenCode models ({len(ids_ordered)}): {head} ... (+{len(ids_ordered) - len(head)} more)",
             flush=True,
         )
 
@@ -611,7 +722,7 @@ def _wait_for_all_services(
             for name, url in services_to_wait:
                 if status[name]:
                     continue
-                if _http_ok(url, timeout_s=0.5):
+                if _http_ok(url, timeout_s=_service_probe_timeout(name)):
                     status[name] = True
                     ready_count = sum(1 for ready in status.values() if ready)
                     total = len(status)
@@ -1031,7 +1142,6 @@ def main() -> int:
     )
     parser.add_argument("--no-embed", action="store_true", help="Do not start Ollama embedding service.")
     parser.add_argument("--no-mineru", action="store_true", help="Do not start minerU service.")
-    parser.add_argument("--no-litellm", action="store_true", help="Do not start LiteLLM gateway.")
     parser.add_argument(
         "--web",
         choices=["python", "gunicorn", "none"],
@@ -1061,7 +1171,7 @@ def main() -> int:
     parser.add_argument(
         "--wait-timeout",
         type=float,
-        default=60.0,
+        default=120.0,
         help="Health-check wait timeout seconds.",
     )
     parser.add_argument(
@@ -1112,7 +1222,12 @@ def main() -> int:
         os.environ["ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE"] = args.summary_source
 
     EMBED_PORT = settings.embedding.port
-    LITELLM_PORT = settings.litellm_port
+    OPENCODE_PORT = settings.opencode.port
+    OPENCODE_BASE_URL = settings.opencode.resolved_base_url.rstrip("/")
+    OPENCODE_MANAGED = bool(settings.opencode.managed)
+    LAUNCHER_OPENCODE_BASE_URL = (
+        f"http://{settings.opencode.host}:{OPENCODE_PORT}" if OPENCODE_MANAGED else OPENCODE_BASE_URL
+    ).rstrip("/")
     MINERU_PORT = settings.mineru.port
     MINERU_ENABLED = settings.mineru.enabled
     MINERU_BACKEND = settings.mineru.backend
@@ -1126,6 +1241,11 @@ def main() -> int:
             num_papers=args.fetch_compute,
             max_r=1000,
         )
+
+    if OPENCODE_MANAGED:
+        # Child processes should talk to the locally managed OpenCode instance,
+        # not a stale external base URL left in the operator environment.
+        os.environ["ARXIV_SANITY_OPENCODE_BASE_URL"] = LAUNCHER_OPENCODE_BASE_URL
 
     # Check if MinerU is disabled globally
     if not MINERU_ENABLED and not args.no_mineru:
@@ -1192,15 +1312,34 @@ def main() -> int:
             )
         )
 
-    if not args.no_litellm:
+    if OPENCODE_MANAGED:
+        opencode_bin = _resolve_opencode_binary()
+        if not opencode_bin:
+            print(
+                "[launcher] Error: OpenCode binary not found. Install it or disable ARXIV_SANITY_OPENCODE_MANAGED.",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 3
         services.append(
             ServiceSpec(
-                name="litellm",
-                cmd=["bash", str(bin_dir / "litellm.sh")],
+                name="opencode",
+                cmd=[
+                    opencode_bin,
+                    "serve",
+                    "--hostname",
+                    str(settings.opencode.host),
+                    "--port",
+                    str(OPENCODE_PORT),
+                ],
                 cwd=repo_root,
-                # LiteLLM exposes an OpenAI-compatible API; /v1/models is a stable readiness check.
-                health_url=f"http://localhost:{LITELLM_PORT}/v1/models",
+                health_url=f"{LAUNCHER_OPENCODE_BASE_URL}/global/health",
             )
+        )
+    elif verbose:
+        print(
+            f"[launcher] Using external OpenCode server: {LAUNCHER_OPENCODE_BASE_URL}",
+            flush=True,
         )
 
     if args.web == "python":
@@ -1323,8 +1462,8 @@ def main() -> int:
                 # Log additional info for ready services
                 for spec, _ in procs:
                     if spec.health_url and status.get(spec.name):
-                        if spec.name == "litellm":
-                            _log_litellm_models(LITELLM_PORT, verbose=verbose)
+                        if spec.name == "opencode":
+                            _log_opencode_models(LAUNCHER_OPENCODE_BASE_URL, verbose=verbose)
                         elif spec.name == "embed":
                             _log_ollama_models(EMBED_PORT, verbose=verbose)
 
@@ -1343,6 +1482,15 @@ def main() -> int:
                         print("[launcher] All services ready", flush=True)
                 else:
                     not_ready = [name for name, ok in status.items() if not ok]
+                    for spec, _ in procs:
+                        if spec.name not in not_ready or not spec.health_url:
+                            continue
+                        body = _http_get_text(spec.health_url, timeout_s=2.0)
+                        if body:
+                            _print_launcher_line(
+                                "launcher",
+                                f"{spec.name} diagnostic body: {body}",
+                            )
                     print(
                         f"[launcher] Readiness check failed for: {', '.join(not_ready)}",
                         flush=True,

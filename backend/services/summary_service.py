@@ -16,6 +16,7 @@ from loguru import logger
 
 from aslite.repositories import SummaryStatusRepository, UploadedPaperRepository
 from config import settings
+from config.model_aliases import display_model_id, model_lookup_ids
 from tools.paper_summarizer import (
     acquire_summary_lock,
     atomic_write_json,
@@ -79,6 +80,7 @@ def _start_daemon_thread(*, target, name: str) -> None:
 # - a small snapshot for UI under `_SUMMARY_CACHE_STATS_KEY`
 # - per-model counts under `_SUMMARY_CACHE_MODEL_PREFIX + model`
 # - per-pid counts under `_SUMMARY_CACHE_PID_PREFIX + pid`
+# - per-pid-per-model counts under `_SUMMARY_CACHE_PID_MODEL_PREFIX + pid + "::" + model`
 # - aggregate totals under `_SUMMARY_CACHE_TOTALS_KEY`
 #
 # And we periodically rebuild from disk to ensure correctness.
@@ -88,6 +90,7 @@ _SUMMARY_CACHE_STATS_KEY = "stats::summary_cache"  # UI snapshot
 _SUMMARY_CACHE_TOTALS_KEY = "stats::summary_cache::totals"
 _SUMMARY_CACHE_PID_PREFIX = "stats::summary_cache::pid::"
 _SUMMARY_CACHE_MODEL_PREFIX = "stats::summary_cache::model::"
+_SUMMARY_CACHE_PID_MODEL_PREFIX = "stats::summary_cache::pid_model::"
 
 
 def _get_stats_db(flag: str = "r"):
@@ -179,6 +182,48 @@ def _iter_model_counts(sdb) -> dict:
     return counts
 
 
+def _summary_cache_pid_model_key(pid: str, model: str) -> str:
+    return f"{_SUMMARY_CACHE_PID_MODEL_PREFIX}{pid}::{model}"
+
+
+def count_summary_cache_papers_for_models(
+    models: list[str] | set[str] | tuple[str, ...],
+) -> int:
+    """Return the number of papers with at least one cached summary in the given models."""
+    wanted = {display_model_id(model) for model in (models or []) if str(model or "").strip()}
+    if not wanted:
+        return 0
+
+    def _count_from_db() -> tuple[int, bool]:
+        matched_pids: set[str] = set()
+        saw_pid_model_key = False
+        with _get_stats_db("r") as sdb:
+            for key, val in sdb.items_with_prefix(_SUMMARY_CACHE_PID_MODEL_PREFIX):
+                saw_pid_model_key = True
+                try:
+                    count = int(val or 0)
+                except Exception:
+                    continue
+                if count <= 0:
+                    continue
+                suffix = key[len(_SUMMARY_CACHE_PID_MODEL_PREFIX) :]
+                if "::" not in suffix:
+                    continue
+                pid, model = suffix.split("::", 1)
+                if display_model_id(model) in wanted and pid:
+                    matched_pids.add(pid)
+        return len(matched_pids), saw_pid_model_key
+
+    count, saw_pid_model_key = _count_from_db()
+    if saw_pid_model_key:
+        return count
+
+    # Older stats snapshots may not have pid-model keys yet. Rebuild once and retry.
+    refresh_summary_cache_stats_full()
+    count, _ = _count_from_db()
+    return count
+
+
 def _build_snapshot_data(total: int, paper_count: int, model_counts: dict) -> dict:
     return {
         "summary_cache_total": int(total),
@@ -209,8 +254,8 @@ def _normalize_model_for_stats(model: str | None, meta: dict | None = None) -> s
     if isinstance(meta, dict):
         m = (meta.get("model") or meta.get("llm_model") or "").strip()
         if m:
-            return m
-    return (model or "").strip()
+            return display_model_id(m)
+    return display_model_id(model)
 
 
 def summary_cache_stats_increment(pid: str, model: str) -> None:
@@ -233,6 +278,10 @@ def summary_cache_stats_increment(pid: str, model: str) -> None:
             model_key = f"{_SUMMARY_CACHE_MODEL_PREFIX}{model}"
             old_model_n = int(sdb.get(model_key) or 0)
             sdb[model_key] = old_model_n + 1
+
+            pid_model_key = _summary_cache_pid_model_key(pid, model)
+            old_pid_model_n = int(sdb.get(pid_model_key) or 0)
+            sdb[pid_model_key] = old_pid_model_n + 1
 
             totals["total"] += 1
             totals["updated_time"] = time.time()
@@ -259,8 +308,11 @@ def summary_cache_stats_decrement(pid: str, model: str) -> None:
             model_key = f"{_SUMMARY_CACHE_MODEL_PREFIX}{model}"
             old_model_n = int(sdb.get(model_key) or 0)
 
+            pid_model_key = _summary_cache_pid_model_key(pid, model)
+            old_pid_model_n = int(sdb.get(pid_model_key) or 0)
+
             # If counters are missing, don't mutate them; just mark stale so full refresh can fix.
-            if old_pid_n <= 0 or old_model_n <= 0:
+            if old_pid_n <= 0 or old_model_n <= 0 or old_pid_model_n <= 0:
                 try:
                     snap = sdb.get(_SUMMARY_CACHE_STATS_KEY)
                     if isinstance(snap, dict):
@@ -293,6 +345,16 @@ def summary_cache_stats_decrement(pid: str, model: str) -> None:
                 else:
                     sdb[model_key] = new_model_n
 
+            if old_pid_model_n > 0:
+                new_pid_model_n = old_pid_model_n - 1
+                if new_pid_model_n <= 0:
+                    try:
+                        del sdb[pid_model_key]
+                    except Exception:
+                        sdb[pid_model_key] = 0
+                else:
+                    sdb[pid_model_key] = new_pid_model_n
+
             if totals["total"] > 0:
                 totals["total"] = max(0, totals["total"] - 1)
             totals["updated_time"] = time.time()
@@ -312,10 +374,12 @@ def refresh_summary_cache_stats_full() -> dict:
     # Extract computed counts.
     model_counts = data.get("_model_counts") if isinstance(data, dict) else None
     pid_counts = data.get("_pid_counts") if isinstance(data, dict) else None
-    if not isinstance(model_counts, dict) or not isinstance(pid_counts, dict):
+    pid_model_counts = data.get("_pid_model_counts") if isinstance(data, dict) else None
+    if not isinstance(model_counts, dict) or not isinstance(pid_counts, dict) or not isinstance(pid_model_counts, dict):
         # Fall back to legacy output.
         model_counts = {}
         pid_counts = {}
+        pid_model_counts = {}
         for row in data.get("summary_cache_model_counts") or []:
             try:
                 model_counts[str(row.get("model"))] = int(row.get("count") or 0)
@@ -330,6 +394,11 @@ def refresh_summary_cache_stats_full() -> dict:
             # Clear existing pid/model keys.
             try:
                 for key, _ in list(sdb.items_with_prefix(_SUMMARY_CACHE_PID_PREFIX)):
+                    try:
+                        del sdb[key]
+                    except Exception:
+                        pass
+                for key, _ in list(sdb.items_with_prefix(_SUMMARY_CACHE_PID_MODEL_PREFIX)):
                     try:
                         del sdb[key]
                     except Exception:
@@ -359,6 +428,18 @@ def refresh_summary_cache_stats_full() -> dict:
                 if n <= 0:
                     continue
                 sdb[f"{_SUMMARY_CACHE_MODEL_PREFIX}{model}"] = n
+
+            for pid, per_model in pid_model_counts.items():
+                if not isinstance(per_model, dict):
+                    continue
+                for model, n in per_model.items():
+                    try:
+                        n = int(n or 0)
+                    except Exception:
+                        continue
+                    if not pid or not model or n <= 0:
+                        continue
+                    sdb[_summary_cache_pid_model_key(str(pid), str(model))] = n
 
             totals = {
                 "total": total,
@@ -430,7 +511,14 @@ def public_summary_meta(meta: dict) -> dict:
     """Filter summary metadata for client responses."""
     if not isinstance(meta, dict):
         return {}
-    allowed = ("generated_at", "source", "llm", "llm_model", "llm_fallback_attempts")
+    allowed = (
+        "generated_at",
+        "source",
+        "llm",
+        "llm_model",
+        "resolved_model",
+        "llm_fallback_attempts",
+    )
     return {key: meta.get(key) for key in allowed if meta.get(key) is not None}
 
 
@@ -511,10 +599,13 @@ def has_active_summary_lock(pid: str, model: str) -> bool:
     target_model = (model or "").strip()
     if not pid or not target_model:
         return False
-    _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
-        pid, target_model
-    )
-    return _summary_lock_is_active(lock_file) or _summary_lock_is_active(legacy_lock)
+    for candidate_model in model_lookup_ids(target_model):
+        _cache_file, _meta_file, lock_file, _legacy_cache, _legacy_meta, legacy_lock = summary_cache_paths(
+            pid, candidate_model
+        )
+        if _summary_lock_is_active(lock_file) or _summary_lock_is_active(legacy_lock):
+            return True
+    return False
 
 
 def _repair_stale_summary_state(pid: str, model: str, info: dict[str, Any]) -> dict[str, Any]:
@@ -656,15 +747,21 @@ def _get_summary_render_snapshot(
         return content
 
     def _get_valid_cache_content_for_model(target_model: str) -> tuple[str, str | None]:
-        cache_file, meta_file, _lock_file, legacy_cache, legacy_meta, _legacy_lock = summary_cache_paths(
-            pid, target_model
-        )
-        content = _is_valid_cache(cache_file, meta_file, expected_legacy_model=None)
-        if content is not None:
-            return target_model, content
-        content = _is_valid_cache(legacy_cache, legacy_meta, expected_legacy_model=target_model)
-        if content is not None:
-            return target_model, content
+        for candidate_model in model_lookup_ids(target_model):
+            (
+                cache_file,
+                meta_file,
+                _lock_file,
+                legacy_cache,
+                legacy_meta,
+                _legacy_lock,
+            ) = summary_cache_paths(pid, candidate_model)
+            content = _is_valid_cache(cache_file, meta_file, expected_legacy_model=None)
+            if content is not None:
+                return candidate_model, content
+            content = _is_valid_cache(legacy_cache, legacy_meta, expected_legacy_model=candidate_model)
+            if content is not None:
+                return candidate_model, content
         return "", None
 
     resolved_model, content = _get_valid_cache_content_for_model(model)
@@ -682,7 +779,7 @@ def _get_summary_render_snapshot(
     info = prefetched_status_info if isinstance(prefetched_status_info, dict) else None
     try:
         if info is None:
-            info = SummaryStatusRepository.get_status(pid, model or "")
+            info = get_summary_status_info(pid, model)
         if isinstance(info, dict):
             info = _repair_stale_summary_state(pid, model, info)
             status = info.get("status") or ""
@@ -722,6 +819,53 @@ def get_summary_status(pid: str, model: str | None = None) -> tuple[str, str | N
     return str(snapshot.get("status") or ""), snapshot.get("last_error")
 
 
+def get_summary_status_info(pid: str, model: str | None = None) -> dict[str, Any] | None:
+    normalized_pid = str(pid or "").strip()
+    normalized_model = str(model or "").strip()
+    if not normalized_pid or not normalized_model:
+        return None
+
+    for candidate_model in model_lookup_ids(normalized_model):
+        try:
+            info = SummaryStatusRepository.get_status(normalized_pid, candidate_model)
+        except Exception:
+            continue
+        if not isinstance(info, dict):
+            continue
+        normalized = dict(info)
+        normalized.setdefault("requested_model", normalized_model)
+        normalized.setdefault("lookup_model", candidate_model)
+        return normalized
+    return None
+
+
+def get_summary_status_info_many(pids: list[str], model: str | None = None) -> dict[str, dict[str, Any]]:
+    normalized_model = str(model or "").strip()
+    pending = [str(pid or "").strip() for pid in (pids or []) if str(pid or "").strip()]
+    if not pending or not normalized_model:
+        return {}
+
+    found: dict[str, dict[str, Any]] = {}
+    for candidate_model in model_lookup_ids(normalized_model):
+        missing = [pid for pid in pending if pid not in found]
+        if not missing:
+            break
+        try:
+            rows = SummaryStatusRepository.get_status_many(missing, candidate_model)
+        except Exception:
+            continue
+        if not isinstance(rows, dict):
+            continue
+        for pid, info in rows.items():
+            if pid in found or not isinstance(info, dict):
+                continue
+            normalized = dict(info)
+            normalized.setdefault("requested_model", normalized_model)
+            normalized.setdefault("lookup_model", candidate_model)
+            found[pid] = normalized
+    return found
+
+
 def get_summary_render_snapshots(
     pids: list[str],
     model: str | None = None,
@@ -743,7 +887,7 @@ def get_summary_render_snapshots(
     missing_pids = [pid for pid in seen if pid not in prefetched_rows]
     if resolved_model and missing_pids:
         try:
-            fetched_rows = SummaryStatusRepository.get_status_many(missing_pids, resolved_model)
+            fetched_rows = get_summary_status_info_many(missing_pids, resolved_model)
             if fetched_rows:
                 prefetched_rows.update(fetched_rows)
         except Exception:
@@ -783,6 +927,7 @@ def compute_summary_cache_stats() -> dict:
     logger.trace("[BLOCKING] compute_summary_cache_stats: starting to scan summary directory...")
     cache_models = defaultdict(int)
     pid_counts = defaultdict(int)
+    pid_model_counts = defaultdict(lambda: defaultdict(int))
     cache_total = 0
     summary_dir = Path(_summary_dir())
 
@@ -815,6 +960,7 @@ def compute_summary_cache_stats() -> dict:
                     cache_models[model] += 1
                     cache_total += 1
                     pid_counts[pid] += 1
+                    pid_model_counts[pid][model] += 1
             elif entry.is_file() and entry.name.endswith(".meta.json") and not entry.name.startswith("."):
                 pid = entry.name[: -len(".meta.json")]
                 meta = read_summary_meta(entry)
@@ -822,9 +968,15 @@ def compute_summary_cache_stats() -> dict:
                 cache_models[model] += 1
                 cache_total += 1
                 pid_counts[pid] += 1
+                pid_model_counts[pid][model] += 1
 
     model_counts = dict(cache_models)
     pid_counts_dict = dict(pid_counts)
+    pid_model_counts_dict = {
+        pid: {model: int(count) for model, count in per_model.items() if int(count) > 0}
+        for pid, per_model in pid_model_counts.items()
+        if per_model
+    }
     logger.trace(
         f"[BLOCKING] compute_summary_cache_stats: scanned {cache_total} summaries in {len(pid_counts_dict)} papers, took {time.time() - t0:.2f}s"
     )
@@ -839,6 +991,7 @@ def compute_summary_cache_stats() -> dict:
         # For full rebuild
         "_model_counts": model_counts,
         "_pid_counts": pid_counts_dict,
+        "_pid_model_counts": pid_model_counts_dict,
     }
 
 
@@ -1310,21 +1463,28 @@ def generate_paper_summary(
                 return None, {}
 
         def _read_cached_summary():
-            cached, meta = _read_from_paths(cache_file, meta_file)
-            if cached:
-                return cached, meta
+            for candidate_model in model_lookup_ids(model):
+                (
+                    candidate_cache_file,
+                    candidate_meta_file,
+                    _candidate_lock_file,
+                    candidate_legacy_cache,
+                    candidate_legacy_meta,
+                    _candidate_legacy_lock,
+                ) = summary_cache_paths(cache_pid, candidate_model)
 
-            legacy_cached, legacy_meta_data = _read_from_paths(legacy_cache, legacy_meta)
-            if legacy_cached:
-                legacy_model = (legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or "").strip()
-                if not model or (legacy_model and legacy_model == model):
-                    return legacy_cached, legacy_meta_data
+                cached, meta = _read_from_paths(candidate_cache_file, candidate_meta_file)
+                if cached:
+                    return cached, meta
+
+                legacy_cached, legacy_meta_data = _read_from_paths(candidate_legacy_cache, candidate_legacy_meta)
+                if legacy_cached:
+                    legacy_model = (legacy_meta_data.get("model") or legacy_meta_data.get("llm_model") or "").strip()
+                    if not candidate_model or (legacy_model and legacy_model == candidate_model):
+                        return legacy_cached, legacy_meta_data
 
             # If status DB records a resolved_model (fallback), try that cache path too.
-            try:
-                info = SummaryStatusRepository.get_status(cache_pid, model or "")
-            except Exception:
-                info = None
+            info = get_summary_status_info(cache_pid, model)
             if not isinstance(info, dict):
                 return None, {}
 
@@ -1332,29 +1492,30 @@ def generate_paper_summary(
             if not resolved_model or resolved_model == model:
                 return None, {}
 
-            (
-                resolved_cache_file,
-                resolved_meta_file,
-                _resolved_lock_file,
-                resolved_legacy_cache,
-                resolved_legacy_meta,
-                _resolved_legacy_lock,
-            ) = summary_cache_paths(cache_pid, resolved_model)
+            for candidate_model in model_lookup_ids(resolved_model):
+                (
+                    resolved_cache_file,
+                    resolved_meta_file,
+                    _resolved_lock_file,
+                    resolved_legacy_cache,
+                    resolved_legacy_meta,
+                    _resolved_legacy_lock,
+                ) = summary_cache_paths(cache_pid, candidate_model)
 
-            resolved_cached, resolved_meta_data = _read_from_paths(resolved_cache_file, resolved_meta_file)
-            if resolved_cached:
-                return resolved_cached, resolved_meta_data
+                resolved_cached, resolved_meta_data = _read_from_paths(resolved_cache_file, resolved_meta_file)
+                if resolved_cached:
+                    return resolved_cached, resolved_meta_data
 
-            resolved_legacy_cached, resolved_legacy_meta_data = _read_from_paths(
-                resolved_legacy_cache, resolved_legacy_meta
-            )
-            if not resolved_legacy_cached:
-                return None, {}
-            resolved_legacy_model = (
-                resolved_legacy_meta_data.get("model") or resolved_legacy_meta_data.get("llm_model") or ""
-            ).strip()
-            if resolved_legacy_model and resolved_legacy_model == resolved_model:
-                return resolved_legacy_cached, resolved_legacy_meta_data
+                resolved_legacy_cached, resolved_legacy_meta_data = _read_from_paths(
+                    resolved_legacy_cache, resolved_legacy_meta
+                )
+                if not resolved_legacy_cached:
+                    continue
+                resolved_legacy_model = (
+                    resolved_legacy_meta_data.get("model") or resolved_legacy_meta_data.get("llm_model") or ""
+                ).strip()
+                if resolved_legacy_model and resolved_legacy_model == candidate_model:
+                    return resolved_legacy_cached, resolved_legacy_meta_data
             return None, {}
 
         # Check if cached summary exists (must match current markdown source)

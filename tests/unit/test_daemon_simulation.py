@@ -14,9 +14,16 @@ def test_fetch_compute_skips_on_fetch_failure(monkeypatch):
 
     def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
         calls.append((name, list(cmd)))
+        if name == "fetch":
+            d._LAST_RUN_REASON["fetch"] = "exit_2"
         return False if name == "fetch" else True
 
     monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(
+        d,
+        "cleanup_withdrawn_public_papers",
+        lambda: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
 
     # Should only attempt fetch; compute/summary should be skipped.
     d.fetch_compute()
@@ -31,9 +38,12 @@ def test_fetch_compute_runs_compute_and_optional_embeddings(monkeypatch):
 
     def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
         calls.append((name, list(map(str, cmd))))
+        if name == "fetch":
+            d._LAST_RUN_REASON["fetch"] = "ok"
         return True
 
     monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(d, "cleanup_withdrawn_public_papers", lambda: False)
 
     # Keep test deterministic.
     monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
@@ -51,6 +61,48 @@ def test_fetch_compute_runs_compute_and_optional_embeddings(monkeypatch):
     d.fetch_compute()
     compute_cmd = next(cmd for name, cmd in calls if name == "compute")
     assert "--use_embeddings" not in compute_cmd
+
+
+def test_fetch_compute_runs_compute_when_withdrawn_cleanup_changes(monkeypatch):
+    import tools.daemon as d
+
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
+        calls.append((name, list(map(str, cmd))))
+        if name == "fetch":
+            d._LAST_RUN_REASON["fetch"] = "no_new_papers"
+            return False
+        return True
+
+    monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(d, "cleanup_withdrawn_public_papers", lambda: True)
+    monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
+
+    d.fetch_compute()
+
+    assert [name for name, _cmd in calls] == ["fetch", "compute"]
+
+
+def test_fetch_compute_skips_compute_when_no_new_papers_and_cleanup_noop(monkeypatch):
+    import tools.daemon as d
+
+    calls: list[tuple[str, list[str]]] = []
+
+    def fake_run_cmd(cmd, name: str, **kwargs) -> bool:
+        calls.append((name, list(map(str, cmd))))
+        if name == "fetch":
+            d._LAST_RUN_REASON["fetch"] = "no_new_papers"
+            return False
+        return True
+
+    monkeypatch.setattr(d, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(d, "cleanup_withdrawn_public_papers", lambda: False)
+    monkeypatch.setattr(d.settings.daemon, "enable_summary", False, raising=False)
+
+    d.fetch_compute()
+
+    assert [name for name, _cmd in calls] == ["fetch"]
 
 
 def test_gen_summary_respects_enable_summary(monkeypatch):

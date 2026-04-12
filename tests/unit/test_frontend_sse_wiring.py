@@ -175,6 +175,38 @@ def test_summary_page_keeps_requested_model_selected_after_fallback():
     assert "const selectedModel = this.selectedModel || chosenModel || actualModel || '';" in text
 
 
+def test_shared_fallback_detection_prefers_resolved_model_metadata():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "static" / "common_utils.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "const resolvedModel = String((meta && meta.resolved_model) || '').trim();" in text
+    assert "const displayModel = String((meta && meta.llm_model) || resolvedModel || '').trim();" in text
+    assert "const actualModel = resolvedModel || displayModel;" in text
+
+
+def test_summary_export_prefers_resolved_model_metadata():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "model: meta.resolved_model || meta.llm_model || this.selectedModel || ''" in text
+
+
+def test_shared_fallback_detection_prefers_resolved_model_metadata():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "static" / "common_utils.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "const resolvedModel = String((meta && meta.resolved_model) || '').trim();" in text
+    assert "const displayModel = String((meta && meta.llm_model) || resolvedModel || '').trim();" in text
+    assert "const actualModel = resolvedModel || displayModel;" in text
+
+
+def test_summary_export_prefers_resolved_model_metadata():
+    repo_root = Path(__file__).resolve().parents[2]
+    text = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")
+
+    assert "model: meta.resolved_model || meta.llm_model || this.selectedModel || ''" in text
+
+
 def test_summary_page_retry_callback_is_not_blocked_by_other_pending_model():
     repo_root = Path(__file__).resolve().parents[2]
     text = (repo_root / "static" / "paper_summary.js").read_text(encoding="utf-8", errors="ignore")

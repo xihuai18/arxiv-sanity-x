@@ -20,7 +20,7 @@ tests/
 │   └── ...                  # API contracts, auth/CSRF, uploads, concurrency, etc.
 │
 ├── live/                    # Live service tests (requires running services)
-│   └── ...                  # Probes web/LLM/embedding availability and skips when absent
+│   └── ...                  # Probes web/OpenCode/embedding availability and skips when absent
 │
 └── e2e/                     # End-to-end tests (requires running server)
     └── test_api_e2e.py      # Complete API test suite
@@ -146,7 +146,8 @@ This test uses `playwright-cli` against the real summary page, auto-discovers a 
 - Test features that require running services
 - Automatically detect if services are available
 - Automatically skip tests when services are unavailable
-- Includes Embedding, LLM, Web server tests
+- Includes Embedding, OpenCode, Web server tests
+- OpenCode live tests now honor `ARXIV_SANITY_OPENCODE_BASE_URL` and optional Basic Auth from config, so they work with both the default launcher-managed local service and an explicitly configured remote OpenCode service
 
 Running live service tests:
 

@@ -1,115 +1,93 @@
-"""Live tests for LLM service.
-
-These tests run against the actual LiteLLM service when available.
-Tests are automatically skipped if the LLM service is not running.
-"""
+"""Live tests for the OpenCode text-model service."""
 
 from __future__ import annotations
 
 import pytest
 
 from tests.service_detection import (
-    get_available_llm_models,
-    is_litellm_service_available,
-    requires_litellm_service,
+    _opencode_auth,
+    get_available_text_models,
+    is_opencode_service_available,
+    requires_opencode_service,
 )
 
 
-class TestLiteLLMServiceAvailability:
-    """Tests for LiteLLM service availability detection."""
-
-    def test_can_detect_litellm_service(self):
-        """Test that we can detect LiteLLM service status."""
-        result = is_litellm_service_available()
+class TestOpenCodeServiceAvailability:
+    def test_can_detect_opencode_service(self):
+        result = is_opencode_service_available()
         assert isinstance(result, bool)
         if result:
-            print("✓ LiteLLM service is available")
-            models = get_available_llm_models()
-            print(f"  Available models: {models}")
-        else:
-            print("✗ LiteLLM service is not available")
+            models = get_available_text_models()
+            print(f"OpenCode service is available. Models: {models}")
 
 
-@requires_litellm_service
-class TestLiteLLMServiceLive:
-    """Live tests for LiteLLM service (requires running service)."""
-
-    def test_litellm_models_endpoint(self):
-        """Test that LiteLLM /v1/models endpoint works."""
+@requires_opencode_service
+class TestOpenCodeServiceLive:
+    def test_opencode_health_endpoint(self):
         import requests
 
         from tests.service_detection import get_vars_config
 
         config = get_vars_config()
-        port = config.get("LITELLM_PORT", 53000)
+        base_url = str(config.get("OPENCODE_BASE_URL", "http://127.0.0.1:53000") or "").rstrip("/")
 
-        resp = requests.get(f"http://localhost:{port}/v1/models", timeout=5)
+        resp = requests.get(f"{base_url}/global/health", timeout=5, auth=_opencode_auth())
         assert resp.status_code == 200
+        assert (resp.json() or {}).get("healthy") is True
 
-        data = resp.json()
-        assert "data" in data
-        assert isinstance(data["data"], list)
+    def test_opencode_providers_endpoint(self):
+        import requests
 
-    def test_litellm_has_models(self):
-        """Test that LiteLLM has at least one model configured."""
-        models = get_available_llm_models()
-        # May be empty if no models configured, but should not crash
+        from tests.service_detection import get_vars_config
+
+        config = get_vars_config()
+        base_url = str(config.get("OPENCODE_BASE_URL", "http://127.0.0.1:53000") or "").rstrip("/")
+
+        resp = requests.get(f"{base_url}/config/providers", timeout=5, auth=_opencode_auth())
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert isinstance(payload, dict)
+        assert isinstance(payload.get("providers"), list)
+
+    def test_opencode_has_models(self):
+        models = get_available_text_models()
         assert isinstance(models, list)
 
-    def test_litellm_chat_completion(self):
-        """Test that LiteLLM can handle chat completion requests."""
+    def test_opencode_message_roundtrip(self):
         import requests
 
         from tests.service_detection import get_vars_config
 
         config = get_vars_config()
-        port = config.get("LITELLM_PORT", 53000)
-
-        models = get_available_llm_models()
+        base_url = str(config.get("OPENCODE_BASE_URL", "http://127.0.0.1:53000") or "").rstrip("/")
+        models = get_available_text_models()
         if not models:
-            pytest.skip("No LLM models available")
+            pytest.skip("No OpenCode models available")
 
-        model = models[0]
+        provider_id, model_id = models[0].split("/", 1)
+        session = requests.post(
+            f"{base_url}/session",
+            json={"title": "live test"},
+            timeout=10,
+            auth=_opencode_auth(),
+        )
+        session.raise_for_status()
+        session_id = (session.json() or {}).get("id")
+        assert session_id
 
-        # Try a simple chat completion
         try:
             resp = requests.post(
-                f"http://localhost:{port}/v1/chat/completions",
+                f"{base_url}/session/{session_id}/message",
                 json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "Say 'test' and nothing else."}],
-                    "max_tokens": 10,
+                    "model": {"providerID": provider_id, "modelID": model_id},
+                    "parts": [{"type": "text", "text": "Reply with the single word test."}],
                 },
                 timeout=30,
+                auth=_opencode_auth(),
             )
-            # Should return 200 or 4xx (rate limit, etc.)
-            if resp.status_code >= 500:
-                # Print response body for debugging (truncate to 1KB)
-                body = resp.text[:1024] if resp.text else "(empty)"
-                pytest.fail(
-                    f"LiteLLM returned {resp.status_code} for model '{model}'. " f"Response body (first 1KB): {body}"
-                )
-        except requests.exceptions.Timeout:
-            pytest.skip("LLM request timed out")
-
-
-@requires_litellm_service
-class TestSummaryServiceLive:
-    """Live tests for summary service with LLM (requires LiteLLM)."""
-
-    def test_get_summary_status(self):
-        """Test getting summary status."""
-        from backend.services.summary_service import get_summary_status
-
-        status = get_summary_status("2301.00001", model="test-model")
-        # get_summary_status returns a tuple (content, meta) or similar
-        # Just verify it doesn't crash
-        assert status is not None
-
-    def test_summary_cache_stats(self):
-        """Test getting summary cache statistics."""
-        from backend.services.summary_service import get_summary_cache_stats
-
-        stats = get_summary_cache_stats(ttl=1)
-        assert isinstance(stats, dict)
-        assert "data" in stats
+            assert resp.status_code == 200
+            payload = resp.json()
+            assert isinstance(payload, dict)
+            assert isinstance(payload.get("parts"), list)
+        finally:
+            requests.delete(f"{base_url}/session/{session_id}", timeout=10, auth=_opencode_auth())

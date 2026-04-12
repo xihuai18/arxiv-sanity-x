@@ -19,7 +19,7 @@ metadata:
 
 ## Scope
 
-- Covers: `config/*.py`, `config/llm.yml`, `.env.example`, `bin/*`, `tools/__main__.py`, `tools/arxiv_daemon.py`, `tools/compute.py`, `tools/batch_paper_summarizer.py`, `tools/daemon.py`, `tools/send_emails.py`, `tools/rebuild_time_index.py`, `scripts/__main__.py`, `scripts/cleanup_locks.py`, `scripts/cleanup_tasks.py`, `scripts/check-dist-sync.sh`
+- Covers: `config/*.py`, `.env.example`, `bin/*`, `tools/__main__.py`, `tools/arxiv_daemon.py`, `tools/compute.py`, `tools/batch_paper_summarizer.py`, `tools/daemon.py`, `tools/send_emails.py`, `tools/rebuild_time_index.py`, `scripts/__main__.py`, `scripts/cleanup_locks.py`, `scripts/cleanup_tasks.py`, `scripts/check-dist-sync.sh`
 - Also touches: `serve.py`, `tasks.py`, `docs/CONFIGURATION.md`, `docs/DEFAULTS.md`, `docs/OPERATIONS.md`, `docs/DEVELOPMENT.md`
 - Does not cover: 摘要器内部实现和上传状态机细节；分别看对应 skill
 
@@ -44,6 +44,7 @@ config settings
 
 - `from config import settings` 是唯一可信配置入口。
 - `bin/run_services.py` 是本地全栈推荐入口，`/ready` 是编排层真正看的健康标准。
+- OpenCode 现在默认由 launcher 托管启动；只有明确接外部服务时才需要把 `ARXIV_SANITY_OPENCODE_MANAGED=false`。
 - `tools/daemon.py` 有真实副作用，开发环境不要随手跑。
 
 ## Design decisions
@@ -102,7 +103,8 @@ config settings
 - `send_emails.py` 只要任一用户处理失败或任一收件人发送失败就会返回非 0；`daemon.py` 会把任何非 0 记成 warning。
 - `/health` 不是 `/ready`；编排成功与否看 `/ready`。
 - launcher 参数会改最终环境变量，排障时要看实际打印和子进程环境。
-- `config/llm.yml`、`config/llm_model_order.py`、fallback model 可见性和 `/ready` 探针是联动的；只改其中一个文件经常不够。
+- `ARXIV_SANITY_OPENCODE_MANAGED` 默认是 `true`；如果你配置了外部 `ARXIV_SANITY_OPENCODE_BASE_URL` 却忘了关掉 managed，launcher 仍会优先拉起并使用本地 OpenCode。
+- OpenCode `base_url`、显式 fallback model 可见性和 `/ready` 探针是联动的；只改其中一个文件经常不够。
 - `ARXIV_SANITY_HUEY_UPLOAD_REPAIR_TTL` 太小会让长排队上传过早触发 stale repair，文档、默认值和运维告警要一起看。
 - 发布到公开仓库时，要确保发布流程会清理非公开 `.opencode/` 内容、`tmp/`、coverage/test 产物等本地文件，不要把本地镜像流程当成通用分发工具。
 
@@ -113,7 +115,7 @@ conda activate sanity
 python -m config.cli show
 python -m config.cli validate
 python -m config.cli doctor
-ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_settings_base_env_file.py tests/unit/test_settings_path_resolution.py tests/unit/test_config_settings_legacy_aliases.py tests/unit/test_config_reload.py tests/unit/test_config_cli_extract.py tests/unit/test_llm_model_order.py tests/unit/test_llm_model_order_auto_fallback.py tests/unit/test_run_services.py tests/unit/test_health_llm_fallback.py tests/unit/test_background_service.py tests/unit/test_metrics_endpoint.py tests/unit/test_sentry_init.py tests/unit/test_daemon_simulation.py tests/unit/test_daemon_extended.py tests/unit/test_send_emails.py -q
+ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_settings_base_env_file.py tests/unit/test_settings_path_resolution.py tests/unit/test_config_settings_legacy_aliases.py tests/unit/test_config_reload.py tests/unit/test_config_cli_extract.py tests/unit/test_opencode_settings.py tests/unit/test_opencode_service.py tests/unit/test_run_services.py tests/unit/test_health_llm_fallback.py tests/unit/test_background_service.py tests/unit/test_metrics_endpoint.py tests/unit/test_sentry_init.py tests/unit/test_daemon_simulation.py tests/unit/test_daemon_extended.py tests/unit/test_send_emails.py -q
 ```
 
 ## Related skills

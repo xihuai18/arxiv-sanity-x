@@ -51,14 +51,6 @@ def _embed_api_key() -> str:
     return str(settings.embedding.api_key or "")
 
 
-def _llm_base_url() -> str:
-    return str(settings.llm.base_url or "")
-
-
-def _llm_api_key() -> str:
-    return str(settings.llm.api_key or "")
-
-
 # Multi-core optimization configuration - Ubuntu system
 
 
@@ -180,15 +172,14 @@ class Qwen3EmbeddingVllm:
         # Determine API base URL
         if api_base is None:
             if self.use_openai_api:
-                # Use EMBED_API_BASE if set, otherwise fallback to LLM_BASE_URL
-                api_base = _embed_api_base() if _embed_api_base() else _llm_base_url()
+                api_base = _embed_api_base()
             else:
                 api_base = f"http://localhost:{_embed_port()}"
 
         # Determine API key (only needed for OpenAI-compatible API)
         if api_key is None:
             if self.use_openai_api:
-                api_key = _embed_api_key() if _embed_api_key() else _llm_api_key()
+                api_key = _embed_api_key()
             else:
                 api_key = None
         self.api_key = api_key
@@ -200,6 +191,8 @@ class Qwen3EmbeddingVllm:
         self.model_path = model_name_or_path
         self.api_base = self._normalize_api_base(api_base)
         self.model_name = None
+        if self.use_openai_api and not self.api_base:
+            raise ValueError("Embedding API base URL is required when EMBED_USE_LLM_API=true")
 
     @staticmethod
     def _normalize_api_base(api_base: str) -> str:
@@ -699,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
         "--embed_api_base",
         type=str,
         default=None,  # Use config.settings by default
-        help="Embedding server base URL (default: use EMBED_API_BASE or LLM_BASE_URL from config.settings)",
+        help="Embedding server base URL (default: use EMBED_API_BASE from config.settings)",
     )
 
     args = parser.parse_args(argv)

@@ -18,6 +18,11 @@ class DaemonSettings(SettingsGroup):
     enable_summary_queue: bool = Field(default=True, description="Enable summary queue")
     priority_days: float = Field(default=2.0, description="Priority process papers from last N days")
     priority_limit: int = Field(default=200, description="Priority queue max size")
+    enable_withdrawn_cleanup: bool = Field(default=True, description="Enable proactive withdrawn paper cleanup")
+    withdrawn_cleanup_recent: int = Field(
+        default=250,
+        description="Recent public papers to scan for withdrawn status per daemon run (0=disable)",
+    )
     email_dry_run: bool = Field(default=False, description="Email dry-run mode (no actual sending)")
     enable_git_backup: bool = Field(default=True, description="Enable git backup")
     backup_repo_dir: str = Field(default="data-repo", description="Directory used for git backups of dict.db")

@@ -544,6 +544,41 @@ class TestLlmModelsApi:
         assert "models" in data
         assert isinstance(data["models"], list)
 
+    def test_llm_models_stale_cache_keeps_default_field(self, client, monkeypatch):
+        from backend import legacy
+
+        cache_backup = dict(legacy._LLM_MODELS_CACHE)
+
+        class _FakeThread:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            def start(self):
+                return None
+
+        try:
+            legacy._LLM_MODELS_CACHE.clear()
+            legacy._LLM_MODELS_CACHE.update(
+                {
+                    "models": [{"id": "openai/gpt-5.4"}],
+                    "warning": None,
+                    "updated_time": 0.0,
+                    "in_progress": False,
+                }
+            )
+            monkeypatch.setattr(legacy.threading, "Thread", _FakeThread)
+
+            resp = client.get("/api/llm_models")
+
+            assert resp.status_code == 200
+            data = resp.get_json(silent=True) or {}
+            assert data.get("models") == [{"id": "gpt-5.4"}]
+            assert data.get("default") == "gpt-5.4"
+            assert data.get("warning") == "Using cached model list (refreshing...)"
+        finally:
+            legacy._LLM_MODELS_CACHE.clear()
+            legacy._LLM_MODELS_CACHE.update(cache_backup)
+
 
 class TestTaskStatusApi:
     """Tests for task status API."""
@@ -661,3 +696,25 @@ class TestCheckPaperSummariesApi:
         resp = client.get("/api/check_paper_summaries")
         # Should return 400 or handle gracefully
         assert resp.status_code in [200, 400]
+
+    def test_check_paper_summaries_collapses_alias_models(self, client, monkeypatch, tmp_path):
+        from backend import legacy
+
+        pid = "2301.00001"
+        summary_dir = tmp_path / pid
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        body = summary_dir / "openai_gpt-5.4.md"
+        meta = summary_dir / "openai_gpt-5.4.meta.json"
+        body.write_text(
+            "# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n" + "detail " * 80,
+            encoding="utf-8",
+        )
+        meta.write_text(json.dumps({"source": "html", "model": "openai/gpt-5.4"}), encoding="utf-8")
+
+        monkeypatch.setattr(legacy, "paper_exists", lambda _pid: True)
+        monkeypatch.setattr(legacy, "_summary_dir", lambda: str(tmp_path))
+
+        resp = client.get("/api/check_paper_summaries", query_string={"pid": pid})
+        assert resp.status_code == 200
+        data = resp.get_json(silent=True) or {}
+        assert data.get("available_models") == ["gpt-5.4"]

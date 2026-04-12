@@ -111,7 +111,10 @@ def _overlay_summary_status_for_user(
         normalized_last_error = prefetched_summary_snapshot.get("last_error")
     else:
         try:
-            from backend.services.summary_service import get_summary_status
+            from backend.services.summary_service import (
+                get_summary_status,
+                get_summary_status_info,
+            )
 
             normalized_status, normalized_last_error = get_summary_status(pid, model)
         except Exception:
@@ -123,7 +126,9 @@ def _overlay_summary_status_for_user(
         info = prefetched_status_info
     else:
         try:
-            info = SummaryStatusRepository.get_status(pid, model)
+            from backend.services.summary_service import get_summary_status_info
+
+            info = get_summary_status_info(pid, model)
         except Exception:
             info = None
 
@@ -203,7 +208,11 @@ def overlay_summary_statuses_for_user(
         batch_pids = [pid for pid in items_by_pid.keys() if pid and not _is_upload_pid(pid)]
         if batch_pids:
             try:
-                status_rows = SummaryStatusRepository.get_status_many(batch_pids, model)
+                from backend.services.summary_service import (
+                    get_summary_status_info_many,
+                )
+
+                status_rows = get_summary_status_info_many(batch_pids, model)
             except Exception:
                 status_rows = {}
 
@@ -457,7 +466,9 @@ def trigger_summary_async(
                 if isinstance(result, tuple):
                     summary_content = str(result[0] or "")
                     if len(result) > 1 and isinstance(result[1], dict):
-                        resolved_model = str(result[1].get("llm_model") or resolved_model or "").strip()
+                        resolved_model = str(
+                            result[1].get("resolved_model") or result[1].get("llm_model") or resolved_model or ""
+                        ).strip()
                 elif result is not None:
                     summary_content = str(result or "")
 
@@ -702,7 +713,9 @@ def list_readinglist(user: str | None = None) -> list:
     prefetched_status_rows = {}
     if model and batch_pids:
         try:
-            prefetched_status_rows = SummaryStatusRepository.get_status_many(batch_pids, model)
+            from backend.services.summary_service import get_summary_status_info_many
+
+            prefetched_status_rows = get_summary_status_info_many(batch_pids, model)
         except Exception:
             prefetched_status_rows = {}
     summary_snapshots = get_summary_render_snapshots(

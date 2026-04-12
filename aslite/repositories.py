@@ -522,6 +522,32 @@ class MetaRepository:
             reverse=True,
         )
 
+    @staticmethod
+    def iter_latest_all(batch_size: int = 1000):
+        """Iterate all metas from newest to oldest using metas_time_index when available."""
+
+        size = max(1, int(batch_size or 1))
+        from aslite.db import get_latest_pids_by_time_offset, metas_time_index_count
+
+        index_count = metas_time_index_count()
+        if index_count > 0:
+            offset = 0
+            while True:
+                pid_time_pairs = get_latest_pids_by_time_offset(size, offset)
+                if not pid_time_pairs:
+                    break
+                pids = [pid for pid, _time in pid_time_pairs]
+                metas_dict = MetaRepository.get_by_ids(pids)
+                for pid in pids:
+                    meta = metas_dict.get(pid)
+                    if meta is not None:
+                        yield pid, meta
+                offset += len(pid_time_pairs)
+            return
+
+        latest = MetaRepository.get_latest_n(10**9, use_index=False)
+        yield from latest
+
 
 class PaperTombstoneRepository:
     """Repository for public paper tombstones."""

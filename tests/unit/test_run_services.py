@@ -280,8 +280,33 @@ def test_emit_raw_line_keeps_original_text(monkeypatch):
     ]
 
 
+def test_emit_raw_line_suppresses_opencode_session_not_found_noise(monkeypatch):
+    module = _load_run_services_module()
+    printed: list[tuple[str, str]] = []
+
+    module._LOG_STATE.clear()
+    monkeypatch.setattr(module, "_OPENCODE_NOISE_SUMMARY_COUNT_THRESHOLD", 2)
+    monkeypatch.setattr(module, "_OPENCODE_NOISE_SUMMARY_TIME_THRESHOLD_S", 10**9)
+    monkeypatch.setattr(
+        module,
+        "_print_launcher_line",
+        lambda prefix, message: printed.append((prefix, message)),
+    )
+
+    module._emit_raw_line("opencode", "NotFoundError: NotFoundError\n")
+    module._emit_raw_line("opencode", '  message: "Session not found: ses_test",\n')
+
+    assert printed == [
+        (
+            "opencode",
+            "Suppressed repeated OpenCode session-not-found noise; occurrences=2",
+        )
+    ]
+
+
 def test_main_enables_raw_log_stream_flag(monkeypatch):
     module = _load_run_services_module()
+    monkeypatch.setattr(module.settings.opencode, "managed", False)
 
     monkeypatch.setattr(
         module.argparse.ArgumentParser,
@@ -291,7 +316,6 @@ def test_main_enables_raw_log_stream_flag(monkeypatch):
             verbose_raw_logs=True,
             no_embed=True,
             no_mineru=True,
-            no_litellm=True,
             web="none",
             with_daemon=False,
             no_huey=True,
@@ -313,6 +337,7 @@ def test_main_enables_raw_log_stream_flag(monkeypatch):
 def test_main_verbose_raw_logs_keeps_huey_task_logs(monkeypatch):
     module = _load_run_services_module()
     captured = {}
+    monkeypatch.setattr(module.settings.opencode, "managed", False)
 
     monkeypatch.setattr(
         module.argparse.ArgumentParser,
@@ -322,7 +347,6 @@ def test_main_verbose_raw_logs_keeps_huey_task_logs(monkeypatch):
             verbose_raw_logs=True,
             no_embed=True,
             no_mineru=True,
-            no_litellm=True,
             web="none",
             with_daemon=False,
             no_huey=False,
@@ -360,6 +384,7 @@ def test_main_verbose_raw_logs_keeps_huey_task_logs(monkeypatch):
 def test_main_verbose_raw_logs_disables_task_summary_thread(monkeypatch):
     module = _load_run_services_module()
     thread_started = {"value": False}
+    monkeypatch.setattr(module.settings.opencode, "managed", False)
 
     monkeypatch.setattr(
         module.argparse.ArgumentParser,
@@ -369,7 +394,6 @@ def test_main_verbose_raw_logs_disables_task_summary_thread(monkeypatch):
             verbose_raw_logs=True,
             no_embed=True,
             no_mineru=True,
-            no_litellm=True,
             web="none",
             with_daemon=False,
             no_huey=False,
@@ -409,3 +433,188 @@ def test_main_verbose_raw_logs_disables_task_summary_thread(monkeypatch):
 
     assert rc == 0
     assert thread_started["value"] is False
+
+
+def test_main_managed_opencode_uses_local_health_target(monkeypatch):
+    module = _load_run_services_module()
+    started_specs = []
+
+    monkeypatch.setattr(
+        module.argparse.ArgumentParser,
+        "parse_args",
+        lambda self: SimpleNamespace(
+            verbose=False,
+            verbose_raw_logs=False,
+            no_embed=True,
+            no_mineru=True,
+            web="none",
+            with_daemon=False,
+            no_huey=True,
+            huey_workers=None,
+            huey_worker_type=None,
+            no_wait=True,
+            wait_timeout=60.0,
+            fetch_compute=None,
+            summary_source=None,
+            task_summary_interval=0.0,
+        ),
+    )
+    monkeypatch.setattr(module.settings.opencode, "managed", True)
+    monkeypatch.setattr(module.settings.opencode, "base_url", "https://external.example/opencode")
+    monkeypatch.setattr(module.settings.opencode, "host", "127.0.0.1")
+    monkeypatch.setattr(module.settings.opencode, "port", 53000)
+    monkeypatch.setenv("ARXIV_SANITY_OPENCODE_BASE_URL", "https://external.example/opencode")
+    monkeypatch.setattr(module, "_resolve_opencode_binary", lambda: "/tmp/opencode")
+    monkeypatch.setattr(module, "_print_startup_context", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "_flush_log_summaries", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_stop_process", lambda *_args, **_kwargs: None)
+
+    class _FakeProc:
+        def poll(self):
+            return 0
+
+    def fake_start_service(spec):
+        started_specs.append(spec)
+        return _FakeProc()
+
+    monkeypatch.setattr(module, "_start_service", fake_start_service)
+
+    rc = module.main()
+
+    assert rc == 0
+    opencode_specs = [spec for spec in started_specs if spec.name == "opencode"]
+    assert len(opencode_specs) == 1
+    assert opencode_specs[0].health_url == "http://127.0.0.1:53000/global/health"
+    assert os.environ.get("ARXIV_SANITY_OPENCODE_BASE_URL") == "http://127.0.0.1:53000"
+
+
+def test_request_headers_include_opencode_basic_auth(monkeypatch):
+    module = _load_run_services_module()
+
+    monkeypatch.setattr(module.settings.opencode, "username", "alice")
+    monkeypatch.setattr(module.settings.opencode, "password", "secret")
+
+    headers = module._request_headers("http://127.0.0.1:53000/global/health")
+
+    assert headers["User-Agent"] == "arxiv-sanity-x-launcher"
+    assert headers["Authorization"] == "Basic YWxpY2U6c2VjcmV0"
+
+
+def test_request_headers_skip_auth_for_non_opencode_endpoint(monkeypatch):
+    module = _load_run_services_module()
+
+    monkeypatch.setattr(module.settings.opencode, "username", "alice")
+    monkeypatch.setattr(module.settings.opencode, "password", "secret")
+
+    headers = module._request_headers("http://127.0.0.1:55555/ready")
+
+    assert headers == {"User-Agent": "arxiv-sanity-x-launcher"}
+
+
+def test_main_logs_diagnostic_body_for_unready_service(monkeypatch):
+    module = _load_run_services_module()
+    printed = []
+
+    monkeypatch.setattr(module.settings.opencode, "managed", False)
+    monkeypatch.setattr(
+        module.argparse.ArgumentParser,
+        "parse_args",
+        lambda self: SimpleNamespace(
+            verbose=False,
+            verbose_raw_logs=False,
+            no_embed=True,
+            no_mineru=True,
+            web="python",
+            with_daemon=False,
+            no_huey=True,
+            huey_workers=None,
+            huey_worker_type=None,
+            no_wait=False,
+            wait_timeout=1.0,
+            fetch_compute=None,
+            summary_source=None,
+            task_summary_interval=0.0,
+        ),
+    )
+    monkeypatch.setattr(module, "_print_startup_context", lambda **_kwargs: None)
+    monkeypatch.setattr(module, "_flush_log_summaries", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_stop_process", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "_http_get_text", lambda url, timeout_s=2.0: '{"status":"error"}')
+    monkeypatch.setattr(module, "_wait_for_all_services", lambda *_args, **_kwargs: {"web": False})
+    monkeypatch.setattr(
+        module,
+        "_print_launcher_line",
+        lambda prefix, message: printed.append((prefix, message)),
+    )
+
+    class _FakeProc:
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(module, "_start_service", lambda _spec: _FakeProc())
+
+    rc = module.main()
+
+    assert rc == 2
+    assert any(prefix == "launcher" and "web diagnostic body" in message for prefix, message in printed)
+
+
+def test_wait_for_all_services_uses_longer_timeout_for_web(monkeypatch):
+    module = _load_run_services_module()
+    calls = []
+
+    def fake_http_ok(url, timeout_s=1.0):
+        calls.append((url, timeout_s))
+        return True
+
+    monkeypatch.setattr(module, "_http_ok", fake_http_ok)
+
+    status = module._wait_for_all_services(
+        [
+            ("web", "http://localhost:55555/ready"),
+            ("embed", "http://localhost:54000/api/version"),
+        ],
+        timeout_s=1.0,
+        verbose=False,
+    )
+
+    assert status == {"web": True, "embed": True}
+    assert ("http://localhost:55555/ready", 5.0) in calls
+    assert ("http://localhost:54000/api/version", 1.0) in calls
+
+
+def test_log_opencode_models_collapses_to_aliases(monkeypatch, capsys):
+    module = _load_run_services_module()
+
+    monkeypatch.setattr(
+        module,
+        "_http_get_json",
+        lambda url, timeout_s=2.5: {
+            "providers": [
+                {
+                    "id": "openai",
+                    "models": {
+                        "gpt-5.4": {"id": "gpt-5.4"},
+                        "gpt-5.4-mini": {"id": "gpt-5.4-mini"},
+                    },
+                },
+                {
+                    "id": "rightcode-openai",
+                    "models": {"gpt-5.4": {"id": "gpt-5.4"}},
+                },
+                {
+                    "id": "anthropic",
+                    "models": {"claude-sonnet-4-6": {"id": "claude-sonnet-4-6"}},
+                },
+            ]
+        },
+    )
+
+    module._log_opencode_models("http://127.0.0.1:53000", verbose=True)
+
+    out = capsys.readouterr().out
+    assert "gpt-5.4" in out
+    assert "gpt-5.4-mini" in out
+    assert "anthropic/claude-sonnet-4-6" in out
+    assert "openai/gpt-5.4" not in out
+    assert "rightcode-openai/gpt-5.4" not in out

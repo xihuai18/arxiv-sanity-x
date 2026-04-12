@@ -9,7 +9,7 @@ from pathlib import Path
 from loguru import logger
 
 from config import settings
-from tools.paper_summarizer import split_pid_version
+from tools.paper_summarizer import model_cache_key, split_pid_version
 
 
 def _default_llm_name() -> str:
@@ -566,9 +566,12 @@ def get_summary_file(pid: str, preferred_model: str | None = None) -> Path | Non
         # Prefer the configured default model unless overridden.
         preferred = (preferred_model or _default_llm_name() or "").strip()
         if preferred:
-            preferred_path = summary_dir / f"{preferred}.md"
-            if preferred_path.is_file():
-                return preferred_path
+            try:
+                preferred_path = summary_dir / f"{model_cache_key(preferred)}.md"
+                if preferred_path.is_file():
+                    return preferred_path
+            except Exception:
+                pass
 
         # Fallback: find any .md file (sorted for stability)
         md_files = sorted(summary_dir.glob("*.md"))

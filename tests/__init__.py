@@ -27,7 +27,7 @@ This package contains tests organized into four categories:
   - test_api_user.py: User APIs
 
 - **live/**: Live service tests (auto-skip if service unavailable)
-  - test_llm_service.py: LLM/LiteLLM service tests
+  - test_llm_service.py: LLM/OpenCode service tests
   - test_web_server.py: Web server tests
   - test_data_service.py: Data service tests (requires data files)
 

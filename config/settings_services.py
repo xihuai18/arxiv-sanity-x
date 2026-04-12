@@ -32,46 +32,37 @@ class LLMSettings(SettingsGroup):
 
     model_config = group_model_config("ARXIV_SANITY_LLM_")
 
-    base_url: str = Field(default="http://localhost:53000", description="LLM API base URL")
-    api_key: str = Field(default="no-key", description="LLM API key")
-    name: str = Field(default="gpt-5.4", description="Default LLM model name")
-    summary_lang: str = Field(default="zh", description="Summary language (zh/en)")
-    fallback_models: str = Field(
-        default="auto",
-        description='Fallback models (comma-separated) or "auto" to fallback backwards from the current model based on config/llm.yml order',
+    name: str = Field(
+        default="openai/gpt-5.4",
+        description="Default OpenCode text model id (provider/model)",
     )
+    summary_lang: str = Field(default="zh", description="Summary language (zh/en)")
     timeout: int = Field(default=600, description="LLM request timeout (seconds)")
-    litellm_verbose: bool = Field(default=False, description="LiteLLM verbose logging mode")
+
+
+class OpenCodeSettings(SettingsGroup):
+    """OpenCode HTTP server configuration."""
+
+    model_config = group_model_config("ARXIV_SANITY_OPENCODE_")
+
+    base_url: str = Field(default="", description="OpenCode server base URL")
+    managed: bool = Field(
+        default=True,
+        description="Whether bin/run_services.py should launch OpenCode locally",
+    )
+    host: str = Field(default="127.0.0.1", description="Managed OpenCode host")
+    port: int = Field(default=53000, description="Managed OpenCode port")
+    username: str = Field(default="", description="Optional OpenCode basic-auth username")
+    password: str = Field(default="", description="Optional OpenCode basic-auth password")
+    timeout: int = Field(default=600, description="OpenCode request timeout (seconds)")
 
     @property
-    def fallback_model_list(self) -> list[str]:
-        raw = str(self.fallback_models or "").strip()
-        mode = raw.lower()
-
-        from .llm_model_order import (
-            compute_auto_fallback_models,
-            read_llm_yml_model_order,
-        )
-
-        yml_order = read_llm_yml_model_order()
-        default_fallback = ["glm-4.7"]
-
-        def _parse_list(value: str) -> list[str]:
-            return [m.strip() for m in str(value or "").split(",") if m.strip()]
-
-        if mode in ("", "auto", "yml"):
-            if not yml_order:
-                return default_fallback
-            return compute_auto_fallback_models(yml_order=yml_order, anchor=str(self.name or "").strip())
-
-        allowlist = _parse_list(raw)
-        if not yml_order:
-            return allowlist
-
-        allowed = set(allowlist)
-        in_order = [m for m in yml_order if m in allowed]
-        extras = [m for m in allowlist if m not in set(yml_order)]
-        return in_order + extras
+    def resolved_base_url(self) -> str:
+        base = str(self.base_url or "").strip().rstrip("/")
+        if base:
+            return base
+        host = str(self.host or "").strip() or "127.0.0.1"
+        return f"http://{host}:{int(self.port)}"
 
 
 class ExtractInfoSettings(SettingsGroup):
@@ -79,11 +70,10 @@ class ExtractInfoSettings(SettingsGroup):
 
     model_config = group_model_config("ARXIV_SANITY_EXTRACT_")
 
-    model_name: str = Field(default="qwen3.5-plus", description="LLM model for metadata extraction")
-    base_url: str = Field(default="", description="Extract Info API base URL (empty uses LLM_BASE_URL)")
-    api_key: str = Field(default="", description="Extract Info API key (empty uses LLM_API_KEY)")
-    temperature: float = Field(default=0.1, description="LLM temperature for extraction")
-    max_tokens: int = Field(default=8192, description="Max tokens for extraction response")
+    model_name: str = Field(
+        default="",
+        description="OpenCode text model for metadata extraction (empty uses llm.name)",
+    )
     timeout: int = Field(default=600, description="Request timeout in seconds")
 
 
@@ -95,8 +85,8 @@ class EmbeddingSettings(SettingsGroup):
     port: int = Field(default=54000, description="Ollama embedding service port")
     use_llm_api: bool = Field(default=False, description="Whether to use LLM API for embedding")
     model_name: str = Field(default="qwen3-embedding:0.6b", description="Embedding model name")
-    api_base: str = Field(default="", description="Embedding API base URL (empty uses LLM_BASE_URL)")
-    api_key: str = Field(default="", description="Embedding API key (empty uses LLM_API_KEY)")
+    api_base: str = Field(default="", description="Embedding API base URL")
+    api_key: str = Field(default="", description="Embedding API key")
 
 
 class MinerUSettings(SettingsGroup):
@@ -163,6 +153,26 @@ class SummarySettings(SettingsGroup):
     force_cache_only: bool = Field(
         default=True,
         description="Force /api/get_paper_summary to be cache-only (regeneration must go through /api/trigger_paper_summary)",
+    )
+    image_compression_enabled: bool = Field(
+        default=True,
+        description="Whether to compress cached summary images after download or MinerU extraction",
+    )
+    image_max_long_edge: int = Field(
+        default=0,
+        description="Maximum long edge for cached summary raster images (0 disables resizing)",
+    )
+    image_webp_quality: int = Field(
+        default=86,
+        description="Target quality for lossy WebP compression of photo-like summary images",
+    )
+    image_min_savings_bytes: int = Field(
+        default=8192,
+        description="Minimum byte savings before rewriting an already-sized cached summary image",
+    )
+    image_skip_below_bytes: int = Field(
+        default=32768,
+        description="Skip compression for cached summary images smaller than this size in bytes",
     )
 
     @property

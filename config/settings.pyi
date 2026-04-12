@@ -22,22 +22,23 @@ class EmailSettings(BaseSettings):
     api_workers: int
 
 class LLMSettings(BaseSettings):
-    base_url: str
-    api_key: str
     name: str
     summary_lang: str
-    fallback_models: str
     timeout: int
-    litellm_verbose: bool
+
+class OpenCodeSettings(BaseSettings):
+    base_url: str
+    managed: bool
+    host: str
+    port: int
+    username: str
+    password: str
+    timeout: int
     @property
-    def fallback_model_list(self) -> list[str]: ...
+    def resolved_base_url(self) -> str: ...
 
 class ExtractInfoSettings(BaseSettings):
     model_name: str
-    base_url: str
-    api_key: str
-    temperature: float
-    max_tokens: int
     timeout: int
 
 class EmbeddingSettings(BaseSettings):
@@ -182,7 +183,6 @@ class Settings(BaseSettings):
     log_dir: Path | None
     host: str
     serve_port: int
-    litellm_port: int
     log_level: str
     enable_swagger: bool
     main_content_min_ratio: float
@@ -190,6 +190,7 @@ class Settings(BaseSettings):
     # Nested configuration - explicit types
     email: EmailSettings
     llm: LLMSettings
+    opencode: OpenCodeSettings
     extract_info: ExtractInfoSettings
     embedding: EmbeddingSettings
     mineru: MinerUSettings

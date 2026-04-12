@@ -15,6 +15,8 @@ Notes:
 
 - Canonical environment variable names are the `ARXIV_SANITY_*` names in `.env.example`.
 - `python bin/run_services.py` does not start the daemon unless you add `--with-daemon`.
+- `ARXIV_SANITY_OPENCODE_MANAGED` defaults to `true`, so the launcher will also start a local OpenCode service unless you explicitly disable it.
+- When managed startup is enabled, the `opencode` binary must be installed on the host and available on `PATH`.
 
 ## Process Model
 
@@ -22,8 +24,8 @@ arxiv-sanity-X typically runs as **multiple processes**:
 
 - **Web**: Flask app served by Gunicorn (`bin/up.sh`)
 - **Huey consumer**: executes background tasks (summary generation, upload parsing, etc.)
-- **Daemon (optional)**: scheduled pipeline (fetch → compute → summarize → email → backup)
-- **Optional model services**: LiteLLM gateway / embedding backend / MinerU backend
+- **Daemon (optional)**: scheduled pipeline (fetch → withdrawn cleanup → compute → summarize → email → backup)
+- **Optional model services**: OpenCode server / embedding backend / MinerU backend
 
 For local development, `bin/run_services.py` can start a full stack in one terminal.
 
@@ -57,6 +59,7 @@ Operationally, `tasks.py` is the async orchestration center for summary generati
 - `bin/up.sh` sets `ARXIV_SANITY_PROCESS_ROLE=web` (fail-fast DB settings).
 - `bin/huey_consumer.py` sets `ARXIV_SANITY_PROCESS_ROLE=worker` (more tolerant DB settings) and supports a memory cap via `ARXIV_SANITY_HUEY_MAX_MEMORY_MB`.
 - `python bin/run_services.py` now handles external `SIGTERM` by running the same cleanup path as Ctrl+C, so child Gunicorn / Huey process groups are torn down instead of being left behind as orphaned processes.
+- The launcher starts a local `opencode serve` by default and points child web/worker processes at that local instance for the current session.
 - If `55555` or another web port still reports `address already in use` after stopping the launcher, confirm whether an older Gunicorn was started outside the current launcher session before assuming the latest launch failed.
 
 ## Observability
@@ -190,6 +193,11 @@ The scheduler in `tools/daemon.py` runs cron-style jobs in `settings.daemon.time
 - `send_email`: Mon–Fri 18:00
 - `backup_user_data`: Daily 20:00 (requires a git repo under `backup_repo_dir` + git remote/credentials)
 - `cleanup_task_records`: Daily 03:00 (keeps task-status DB bounded)
+
+During each `fetch_compute` run, the daemon can proactively scan the latest public papers already in `papers.db` and tombstone withdrawn-only papers via `python -m tools repair_paper_history --scan-recent-public <N> --apply`. Control this with:
+
+- `ARXIV_SANITY_DAEMON_ENABLE_WITHDRAWN_CLEANUP=true|false`
+- `ARXIV_SANITY_DAEMON_WITHDRAWN_CLEANUP_RECENT=250`
 
 ### Email Run Semantics
 

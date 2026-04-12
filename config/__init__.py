@@ -4,7 +4,7 @@
 # Usage:
 #   from config import settings
 #   print(settings.data_dir)
-#   print(settings.llm.base_url)
+#   print(settings.opencode.resolved_base_url)
 #
 # CLI tool:
 #   python -m config.cli show      # Show configuration

@@ -256,6 +256,28 @@ class TestGetSummaryStatus:
         assert status == "ok"
         assert error is None
 
+    def test_get_summary_status_reads_running_provider_row_via_alias(self, monkeypatch):
+        from backend.services import summary_service as ss
+
+        pid = "2301.00001"
+
+        def _fake_get_status(_pid, model):
+            if model == "openai/gpt-5.4":
+                return {
+                    "status": "running",
+                    "last_error": None,
+                    "updated_time": time.time(),
+                }
+            return None
+
+        monkeypatch.setattr(ss.SummaryStatusRepository, "get_status", _fake_get_status)
+        monkeypatch.setattr(ss, "has_active_summary_lock", lambda _pid, _model: False)
+
+        status, error = ss.get_summary_status(pid, "gpt-5.4")
+
+        assert status == "running"
+        assert error is None
+
     def test_generate_paper_summary_reads_resolved_model_cache(self, monkeypatch, tmp_path):
         """Cache-only read should fall back to resolved_model cache path."""
         from backend.services import summary_service as ss
@@ -304,6 +326,53 @@ class TestGetSummaryStatus:
             metas_getter=lambda: {},
             paper_exists_fn=lambda _pid: True,
         )
+        assert "## TL;DR" in content
+        assert meta_out.get("source") == "html"
+
+    def test_generate_paper_summary_reads_provider_cache_via_alias(self, monkeypatch, tmp_path):
+        from backend.services import summary_service as ss
+
+        pid = "2301.00001"
+        request_model = "gpt-5.4"
+        provider_model = "openai/gpt-5.4"
+        cache_dir = tmp_path / pid
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        body = cache_dir / "openai_gpt-5.4.md"
+        meta = cache_dir / "openai_gpt-5.4.meta.json"
+        long_body = " ".join(["detail"] * 80)
+        body.write_text(f"# Title\n\n## TL;DR\n\nhello\n\n## Body\n\n{long_body}", encoding="utf-8")
+        meta.write_text(json.dumps({"source": "html", "model": provider_model}), encoding="utf-8")
+
+        def _paths(_pid, _model):
+            model_key = _model.replace("/", "_")
+            cache_file = cache_dir / f"{model_key}.md"
+            meta_file = cache_dir / f"{model_key}.meta.json"
+            lock_file = cache_dir / f".{model_key}.lock"
+            legacy_cache = tmp_path / f"{_pid}.md"
+            legacy_meta = tmp_path / f"{_pid}.meta.json"
+            legacy_lock = tmp_path / f".{_pid}.lock"
+            return (
+                cache_file,
+                meta_file,
+                lock_file,
+                legacy_cache,
+                legacy_meta,
+                legacy_lock,
+            )
+
+        monkeypatch.setattr(ss, "summary_cache_paths", _paths)
+        monkeypatch.setattr(ss, "_summary_markdown_source", lambda: "html")
+        monkeypatch.setattr(ss.SummaryStatusRepository, "get_generation_epoch", lambda *_a, **_k: 0)
+
+        content, meta_out = ss.generate_paper_summary(
+            pid,
+            model=request_model,
+            cache_only=True,
+            metas_getter=lambda: {},
+            paper_exists_fn=lambda _pid: True,
+        )
+
         assert "## TL;DR" in content
         assert meta_out.get("source") == "html"
 

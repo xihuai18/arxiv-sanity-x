@@ -16,6 +16,8 @@ _COMMANDS: dict[str, str] = {
     "compute": "tools.compute",
     "arxiv_daemon": "tools.arxiv_daemon",
     "paper_summarizer": "tools.paper_summarizer",
+    "normalize_summary_cache_format": "tools.normalize_summary_cache_format",
+    "compress_summary_images": "tools.compress_summary_images",
     "batch_paper_summarizer": "tools.batch_paper_summarizer",
     "send_emails": "tools.send_emails",
     "daemon": "tools.daemon",

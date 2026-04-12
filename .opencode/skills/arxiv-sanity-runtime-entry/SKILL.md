@@ -55,6 +55,7 @@ serve.py
 ## Design decisions
 
 - `/ready` 比 `/health` 更严格，`bin/run_services.py` 等待的是 `/ready`，不是 `/health`。
+- `bin/run_services.py` 默认还会拉起本地 OpenCode；ready 排障时要先确认你实际走的是 launcher-managed 本地实例还是显式配置的外部实例。
 - `/ready` 不只看依赖是否可达，还会校验主模型与 fallback model 是否满足当前 readiness 语义。
 - SSE runtime 和 background service 都偏向惰性启动，以兼容 gunicorn preload 和多 worker 场景。
 - HTML 响应默认 `no-store`，而 `static/dist/` 走 hashed asset + immutable cache；两套缓存策略不能混。
@@ -66,7 +67,7 @@ serve.py
 
 1. 先检查 `serve.py` 是否仍在早期设置 `ARXIV_SANITY_PROCESS_ROLE=web`
 2. 若涉及 gevent，确认 monkey patch 仍早于会创建线程/锁/网络连接的导入
-3. 用 `python serve.py` 和 `python bin/run_services.py --no-embed --no-mineru --no-litellm` 都走一遍
+3. 用 `python serve.py` 和 `python bin/run_services.py --no-embed --no-mineru` 都走一遍
 
 ### 改 `/health` 或 `/ready`
 
@@ -100,9 +101,9 @@ serve.py
 ```bash
 conda activate sanity
 npm run build:static
-ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_run_services.py tests/unit/test_health_llm_fallback.py tests/unit/test_background_service.py tests/unit/test_metrics_endpoint.py tests/unit/test_sentry_init.py tests/unit/test_manifest.py tests/unit/test_manifest_fallback.py tests/unit/test_static_font_mimetypes.py tests/integration/test_app.py -q
+ARXIV_SANITY_DATA_DIR=$(mktemp -d) pytest tests/unit/test_run_services.py tests/unit/test_opencode_settings.py tests/unit/test_opencode_service.py tests/unit/test_health_llm_fallback.py tests/unit/test_background_service.py tests/unit/test_metrics_endpoint.py tests/unit/test_sentry_init.py tests/unit/test_manifest.py tests/unit/test_manifest_fallback.py tests/unit/test_static_font_mimetypes.py tests/integration/test_app.py -q
 python -m config.cli validate
-python bin/run_services.py --no-embed --no-mineru --no-litellm
+python bin/run_services.py --no-embed --no-mineru
 ```
 
 ## Related skills

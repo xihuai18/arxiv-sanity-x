@@ -7,7 +7,7 @@ Goal: ship the **code + safe docs**, without leaking secrets, sensitive data, or
 ## What must NOT be published
 
 - Runtime data: `data/` (DBs, caches, uploads, summaries, logs)
-- Secrets/local config: `.env*`, `secret_key.txt`, `config/llm.yml`, SSH keys, API key files
+- Secrets/local config: `.env*`, `secret_key.txt`, SSH keys, API key files
 - Local tool config: `.claude/`, `.factory/`, `.skills/`, `.playwright-cli/`, IDE folders, plus non-public parts of `.opencode/` (keep `.opencode/skills/` in the public tree)
 - Virtualenvs: `.venv/`, `venv/`
 - Build outputs: `static/dist/` (rebuildable)
@@ -21,7 +21,7 @@ Before publishing, make sure the release process will:
 - exclude secrets, runtime files, and common sensitive patterns
 - keep `.opencode/skills/` but exclude the rest of `.opencode/`
 - rewrite `.gitmodules` to a dummy/public submodule URL when needed
-- scrub local-only residue such as non-public `.opencode/` files, `.playwright-cli/`, `tmp/`, coverage/test artifacts, IDE folders, and `config/llm.yml`
+- scrub local-only residue such as non-public `.opencode/` files, `.playwright-cli/`, `tmp/`, coverage/test artifacts, IDE folders, and local secret files
 - run a post-sync safety scan for forbidden files, local IPs, nested `.git`, and large files
 
 ## Release expectations

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arxiv-sanity"
-version = "0.0.0"
+version = "3.3.0"
 description = "Arxiv Sanity X"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = [
   "requests",
   "beautifulsoup4",
   "markdownify",
+  "Pillow",
 
   # Scheduling / tasks
   "schedule",
@@ -63,6 +64,10 @@ dev = [
 mineru = [
   "mineru[all]",
   "mineru_vl_utils",
+]
+
+fast-images = [
+  "pyvips",
 ]
 
 # Heavy dependencies: torch/vllm are usually managed by conda or specific CUDA versions

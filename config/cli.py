@@ -14,14 +14,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
+from config.model_aliases import (
+    display_model_id,
+    is_valid_model_selector,
+    validate_model_aliases,
+)
+
 _SENSITIVE_FIELDS = {
-    ("llm", "api_key"),
-    ("extract_info", "api_key"),
+    ("opencode", "password"),
     ("embedding", "api_key"),
     ("mineru", "api_key"),
     ("email", "password"),
@@ -34,7 +40,8 @@ _SENSITIVE_FIELDS = {
 _ENV_SECTION_TITLES = {
     "__root__": "Main configuration",
     "email": "Email configuration",
-    "llm": "LLM configuration",
+    "llm": "Text model configuration",
+    "opencode": "OpenCode configuration",
     "extract_info": "Extract info configuration",
     "embedding": "Embedding configuration",
     "mineru": "MinerU configuration",
@@ -75,10 +82,14 @@ def _redact_json_data(obj, path=(), *, include_secrets: bool = False):
             if not include_secrets and next_path in _SENSITIVE_FIELDS:
                 redacted[key] = _mask_secret(value)
             else:
-                redacted[key] = _redact_json_data(value, next_path, include_secrets=include_secrets)
+                redacted[key] = _redact_json_data(
+                    value, next_path, include_secrets=include_secrets
+                )
         return redacted
     if isinstance(obj, list):
-        return [_redact_json_data(v, path, include_secrets=include_secrets) for v in obj]
+        return [
+            _redact_json_data(v, path, include_secrets=include_secrets) for v in obj
+        ]
     return obj
 
 
@@ -88,7 +99,9 @@ def _format_secret(value, *, include_secrets: bool) -> str:
     return str(value) if include_secrets else _mask_secret(value)
 
 
-def _print_env_var(name: str, value, *, include_secrets: bool, secret: bool = False) -> None:
+def _print_env_var(
+    name: str, value, *, include_secrets: bool, secret: bool = False
+) -> None:
     if secret and not include_secrets:
         if value in (None, ""):
             print(f"{name}=")
@@ -109,7 +122,9 @@ def _normalize_env_value(value):
 
 
 def _iter_env_items(model, *, path=()):
-    env_prefix = str(getattr(model.__class__, "model_config", {}).get("env_prefix") or "")
+    env_prefix = str(
+        getattr(model.__class__, "model_config", {}).get("env_prefix") or ""
+    )
 
     for field_name in model.__class__.model_fields:
         value = getattr(model, field_name)
@@ -146,38 +161,38 @@ def _collect_validation_messages(settings) -> tuple[list[str], list[str]]:
     if not settings.data_dir.exists():
         warnings.append(f"Data directory does not exist: {settings.data_dir}")
 
-    llm_base_url = str(settings.llm.base_url or "").strip().lower()
-    llm_is_local_gateway = llm_base_url.startswith("http://localhost:") or llm_base_url.startswith("http://127.0.0.1:")
+    alias_errors = validate_model_aliases()
+    errors.extend(alias_errors)
 
-    llm_yml_order: list[str] = []
-    llm_yml_read_error = ""
-    if llm_is_local_gateway:
-        try:
-            from config.llm_model_order import read_llm_yml_model_order
-
-            llm_yml_order = read_llm_yml_model_order()
-        except Exception as exc:
-            llm_yml_read_error = str(exc or exc.__class__.__name__)
-            llm_yml_order = []
-
-    if llm_is_local_gateway and not llm_yml_order:
-        detail = f" (last read error: {llm_yml_read_error})" if llm_yml_read_error else ""
-        warnings.append(
-            "Local LLM gateway detected but config/llm.yml could not be read or contains no model aliases; "
-            f"model alias validation is skipped{detail}. Ensure your gateway serves "
-            f"`{settings.llm.name}` and `{settings.extract_info.model_name}`, or add routes to config/llm.yml"
+    if not is_valid_model_selector(settings.llm.name):
+        errors.append(
+            "LLM model must use an alias or OpenCode provider/model format "
+            f"(current: {settings.llm.name or '(empty)'})"
         )
 
-    if settings.llm.api_key == "no-key" and not llm_is_local_gateway:
-        warnings.append("LLM API key not set (using default value 'no-key')")
-
-    if llm_is_local_gateway and llm_yml_order and settings.llm.name not in llm_yml_order:
-        warnings.append(
-            f"Main LLM model `{settings.llm.name}` is not declared in config/llm.yml; "
-            "use a configured alias or add a matching route"
+    if not is_valid_model_selector(settings.extract_info.model_name):
+        errors.append(
+            "Extract model must use an alias or OpenCode provider/model format "
+            f"(current: {settings.extract_info.model_name or '(empty)'})"
         )
 
-    if settings.mineru.enabled and settings.mineru.backend == "api" and not settings.mineru.api_key:
+    base_url = str(settings.opencode.base_url or "").strip()
+    if base_url and not base_url.startswith(("http://", "https://")):
+        errors.append("OpenCode base URL must start with http:// or https://")
+
+    if (
+        settings.embedding.use_llm_api
+        and not str(settings.embedding.api_base or "").strip()
+    ):
+        errors.append(
+            "Embedding API base URL is required when ARXIV_SANITY_EMBED_USE_LLM_API=true"
+        )
+
+    if (
+        settings.mineru.enabled
+        and settings.mineru.backend == "api"
+        and not settings.mineru.api_key
+    ):
         errors.append(
             "MinerU is enabled and using API backend, but API key is not set "
             "(set ARXIV_SANITY_MINERU_API_KEY, or disable MinerU via ARXIV_SANITY_MINERU_ENABLED=false)"
@@ -188,31 +203,19 @@ def _collect_validation_messages(settings) -> tuple[list[str], list[str]]:
     if settings.email.smtp_server and not settings.email.from_email:
         warnings.append("SMTP server is set but from_email is not configured")
 
-    if (
-        settings.extract_info.model_name != settings.llm.name
-        and not str(settings.extract_info.base_url or "").strip()
-        and not llm_is_local_gateway
-    ):
-        warnings.append(
-            "Extract model differs from main LLM model, but ARXIV_SANITY_EXTRACT_BASE_URL is empty; "
-            "this assumes your main LLM endpoint can route that extract model alias"
-        )
-
-    if (
-        llm_is_local_gateway
-        and llm_yml_order
-        and not str(settings.extract_info.base_url or "").strip()
-        and settings.extract_info.model_name not in llm_yml_order
-    ):
-        warnings.append(
-            f"Extract model `{settings.extract_info.model_name}` is not declared in config/llm.yml; "
-            "set ARXIV_SANITY_EXTRACT_MODEL_NAME to a configured alias or add a matching route"
-        )
-
     if not settings.reco.api_base_url:
-        warnings.append("Recommendation API base URL is empty; local service URL will be inferred from serve_port")
+        warnings.append(
+            "Recommendation API base URL is empty; local service URL will be inferred from serve_port"
+        )
 
-    if settings.daemon.enable_git_backup and not getattr(settings.daemon, "backup_repo_dir", ""):
+    if settings.opencode.managed and shutil.which("opencode") is None:
+        warnings.append(
+            "OpenCode is configured for launcher-managed startup, but the `opencode` binary is not on PATH"
+        )
+
+    if settings.daemon.enable_git_backup and not getattr(
+        settings.daemon, "backup_repo_dir", ""
+    ):
         errors.append("Git backup is enabled but daemon.backup_repo_dir is empty")
 
     return errors, warnings
@@ -222,19 +225,35 @@ def _doctor_status(ok: bool) -> str:
     return "OK" if ok else "WARN"
 
 
+def _display_model_selector(model: str | None) -> str:
+    text = str(model or "").strip()
+    if not text:
+        return "(empty)"
+    return display_model_id(text) or text
+
+
 def cmd_doctor(_args):
     """Show operator-focused configuration diagnosis."""
     from config.settings import settings
 
     errors, warnings = _collect_validation_messages(settings)
 
-    llm_ready = bool(str(settings.llm.base_url or "").strip()) and bool(str(settings.llm.name or "").strip())
+    llm_ready = bool(str(settings.opencode.resolved_base_url or "").strip()) and bool(
+        str(settings.llm.name or "").strip()
+    )
     summary_ready = llm_ready and bool(settings.daemon.enable_summary)
     extract_ready = bool(str(settings.extract_info.model_name or "").strip())
     email_ready = bool(
-        settings.email.from_email and settings.email.smtp_server and settings.email.username and settings.email.password
+        settings.email.from_email
+        and settings.email.smtp_server
+        and settings.email.username
+        and settings.email.password
     )
-    mineru_ready = (not settings.mineru.enabled) or settings.mineru.backend != "api" or bool(settings.mineru.api_key)
+    mineru_ready = (
+        (not settings.mineru.enabled)
+        or settings.mineru.backend != "api"
+        or bool(settings.mineru.api_key)
+    )
 
     print("=" * 60)
     print("Arxiv Sanity Config Doctor")
@@ -246,13 +265,13 @@ def cmd_doctor(_args):
     print()
     print("Core")
     print(
-        f"- [{_doctor_status(llm_ready)}] LLM configured: base_url={settings.llm.base_url or '(empty)'} model={settings.llm.name or '(empty)'}"
+        f"- [{_doctor_status(llm_ready)}] OpenCode configured: base_url={settings.opencode.resolved_base_url or '(empty)'} managed={settings.opencode.managed} model={_display_model_selector(settings.llm.name)}"
     )
     print(
         f"- [{_doctor_status(summary_ready)}] Batch summary path: daemon_enable_summary={settings.daemon.enable_summary} huey_workers={settings.huey.workers}"
     )
     print(
-        f"- [{_doctor_status(extract_ready)}] Upload metadata extraction: model={settings.extract_info.model_name or '(empty)'} base_url={settings.extract_info.base_url or '(uses main LLM)'}"
+        f"- [{_doctor_status(extract_ready)}] Upload metadata extraction: model={_display_model_selector(settings.extract_info.model_name)}"
     )
     print(
         f"- [{_doctor_status(email_ready)}] Email delivery: from={settings.email.from_email or '(empty)'} smtp={settings.email.smtp_server or '(empty)'}"
@@ -328,26 +347,27 @@ def cmd_show(args):
         print("\n🌐 Service Configuration:")
         print(f"  host:         {settings.host}")
         print(f"  serve_port:   {settings.serve_port}")
-        print(f"  litellm_port: {settings.litellm_port}")
+        print(f"  log_level:    {settings.log_level}")
 
-        print("\n🤖 LLM Configuration:")
-        print(f"  base_url:     {settings.llm.base_url}")
-        print(f"  api_key:      {_format_secret(settings.llm.api_key, include_secrets=args.include_secrets)}")
-        print(f"  model:        {settings.llm.name}")
+        print("\n🤖 OpenCode Configuration:")
+        print(f"  base_url:     {settings.opencode.resolved_base_url}")
+        print(f"  managed:      {settings.opencode.managed}")
+        print(f"  host:         {settings.opencode.host}")
+        print(f"  port:         {settings.opencode.port}")
+        print(
+            f"  password:     {_format_secret(settings.opencode.password, include_secrets=args.include_secrets)}"
+        )
+        print(f"  timeout:      {settings.opencode.timeout}s")
+
+        print("\n🧠 Text Model Configuration:")
+        print(f"  model:        {_display_model_selector(settings.llm.name)}")
         print(f"  summary_lang: {settings.llm.summary_lang}")
-        print(f"  fallback:     {settings.llm.fallback_models}")
         print(f"  timeout:      {settings.llm.timeout}s")
 
-        print("\n🧾 Extract Info LLM Configuration:")
-        print(f"  model_name:   {settings.extract_info.model_name}")
-        print(f"  base_url:     {settings.extract_info.base_url or '(uses LLM base_url)'}")
-        if settings.extract_info.api_key:
-            extract_api_key = _format_secret(settings.extract_info.api_key, include_secrets=args.include_secrets)
-        else:
-            extract_api_key = "(uses LLM api_key)"
-        print(f"  api_key:      {extract_api_key}")
-        print(f"  temperature:  {settings.extract_info.temperature}")
-        print(f"  max_tokens:   {settings.extract_info.max_tokens}")
+        print("\n🧾 Extract Info Configuration:")
+        print(
+            f"  model_name:   {_display_model_selector(settings.extract_info.model_name)}"
+        )
         print(f"  timeout:      {settings.extract_info.timeout}s")
 
         print("\n🔢 Embedding Configuration:")
@@ -359,19 +379,33 @@ def cmd_show(args):
         print(f"  enabled:      {settings.mineru.enabled}")
         print(f"  backend:      {settings.mineru.backend}")
         print(f"  port:         {settings.mineru.port}")
-        print(f"  api_key:      {_format_secret(settings.mineru.api_key, include_secrets=args.include_secrets)}")
+        print(
+            f"  api_key:      {_format_secret(settings.mineru.api_key, include_secrets=args.include_secrets)}"
+        )
 
         print("\n📝 Summary Configuration:")
         print(f"  markdown_source:  {settings.summary.markdown_source}")
         print(f"  html_sources:     {settings.summary.html_sources}")
         print(f"  batch_num:        {settings.summary.batch_num}")
         print(f"  force_cache_only: {getattr(settings.summary, 'force_cache_only')}")
+        print(
+            f"  image_compress:   {getattr(settings.summary, 'image_compression_enabled')}"
+        )
+        print(
+            f"  image_max_edge:   {getattr(settings.summary, 'image_max_long_edge')}px"
+        )
+        print(f"  image_webp_q:     {getattr(settings.summary, 'image_webp_quality')}")
+        print(
+            f"  image_skip_below: {getattr(settings.summary, 'image_skip_below_bytes')}B"
+        )
 
         print("\n📧 Email Configuration:")
         print(f"  from_email:   {settings.email.from_email or '(not set)'}")
         print(f"  smtp_server:  {settings.email.smtp_server or '(not set)'}")
         print(f"  smtp_port:    {settings.email.smtp_port}")
-        print(f"  password:     {_format_secret(settings.email.password, include_secrets=args.include_secrets)}")
+        print(
+            f"  password:     {_format_secret(settings.email.password, include_secrets=args.include_secrets)}"
+        )
 
         print("\n📊 SVM Configuration:")
         print(f"  C:            {settings.svm.c}")
@@ -387,6 +421,12 @@ def cmd_show(args):
         print(f"  enable_embeddings:{settings.daemon.enable_embeddings}")
         print(f"  priority_queue:   {settings.daemon.enable_priority_queue}")
         print(f"  priority_days:    {settings.daemon.priority_days}")
+        print(
+            f"  withdrawn_cleanup:{getattr(settings.daemon, 'enable_withdrawn_cleanup')}"
+        )
+        print(
+            f"  withdrawn_recent: {getattr(settings.daemon, 'withdrawn_cleanup_recent')}"
+        )
         print(f"  git_backup:       {settings.daemon.enable_git_backup}")
         print(f"  timezone:         {settings.daemon.timezone}")
 
@@ -405,7 +445,9 @@ def cmd_show(args):
         print(f"  poll_interval:    {settings.sse.poll_interval}")
         print(f"  batch_size:       {settings.sse.batch_size}")
         print(f"  queue_maxsize:    {settings.sse.queue_maxsize}")
-        print(f"  max_conn/user:    {getattr(settings.sse, 'max_connections_per_user')}")
+        print(
+            f"  max_conn/user:    {getattr(settings.sse, 'max_connections_per_user')}"
+        )
         print(f"  strict_worker:    {getattr(settings.sse, 'strict_worker_class')}")
 
         print("\n🚀 Gunicorn Configuration:")
@@ -421,11 +463,17 @@ def cmd_show(args):
         print(f"  warmup_data:      {settings.web.warmup_data}")
         print(f"  warmup_ml:        {settings.web.warmup_ml}")
         print(f"  enable_scheduler: {settings.web.enable_scheduler}")
-        print(f"  ready_embed:      {getattr(settings.web, 'ready_require_embedding', True)}")
-        print(f"  ready_mineru:     {getattr(settings.web, 'ready_require_mineru', True)}")
+        print(
+            f"  ready_embed:      {getattr(settings.web, 'ready_require_embedding', True)}"
+        )
+        print(
+            f"  ready_mineru:     {getattr(settings.web, 'ready_require_mineru', True)}"
+        )
         print(f"  reload:           {settings.web.reload}")
         print(f"  access_log:       {settings.web.access_log}")
-        print(f"  secret_key:       {_format_secret(settings.web.secret_key, include_secrets=args.include_secrets)}")
+        print(
+            f"  secret_key:       {_format_secret(settings.web.secret_key, include_secrets=args.include_secrets)}"
+        )
         print(
             f"  metrics_key:      {_format_secret(getattr(settings.web, 'metrics_key'), include_secrets=args.include_secrets)}"
         )
@@ -452,7 +500,9 @@ def cmd_show(args):
         print("\n📬 Recommendation Configuration:")
         print(f"  api_base_url:     {settings.reco.api_base_url}")
         reco_api_key = str(getattr(settings.reco, "api_key", "") or "")
-        print(f"  api_key:          {_format_secret(reco_api_key, include_secrets=args.include_secrets)}")
+        print(
+            f"  api_key:          {_format_secret(reco_api_key, include_secrets=args.include_secrets)}"
+        )
         print(f"  api_timeout:      {settings.reco.api_timeout}s")
         print(f"  api_limit:        {settings.reco.api_limit}")
         print(f"  model_c:          {settings.reco.model_c}")
@@ -467,9 +517,6 @@ def cmd_show(args):
         print(f"  app_tags:         {settings.arxiv.app_tags}")
         print(f"  empty_fallback:   {settings.arxiv.empty_response_fallback}")
         print(f"  api_timeout:      {settings.arxiv.api_timeout}s")
-
-        print("\n📋 Log Configuration:")
-        print(f"  log_level:    {settings.log_level}")
 
         print("\n" + "=" * 60)
 
@@ -508,7 +555,9 @@ def cmd_env(args):
     print("# Environment variable representation of current configuration")
     print("# Can be copied to .env file")
     if not args.include_secrets:
-        print("# Secret values are redacted by default. Use --include-secrets to print them.")
+        print(
+            "# Secret values are redacted by default. Use --include-secrets to print them."
+        )
     print()
 
     current_section = None
@@ -546,7 +595,9 @@ Examples:
     # show command
     show_parser = subparsers.add_parser("show", help="Show current configuration")
     show_parser.add_argument("--json", action="store_true", help="JSON format output")
-    show_parser.add_argument("--include-secrets", action="store_true", help="Include secret values in output")
+    show_parser.add_argument(
+        "--include-secrets", action="store_true", help="Include secret values in output"
+    )
 
     # validate command
     subparsers.add_parser("validate", help="Validate configuration")
@@ -555,8 +606,12 @@ Examples:
     subparsers.add_parser("doctor", help="Diagnose common operator mistakes")
 
     # env command
-    env_parser = subparsers.add_parser("env", help="Generate environment variable template")
-    env_parser.add_argument("--include-secrets", action="store_true", help="Include secret values in output")
+    env_parser = subparsers.add_parser(
+        "env", help="Generate environment variable template"
+    )
+    env_parser.add_argument(
+        "--include-secrets", action="store_true", help="Include secret values in output"
+    )
 
     args = parser.parse_args()
 

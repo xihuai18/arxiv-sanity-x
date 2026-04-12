@@ -35,14 +35,6 @@ def _embed_api_key() -> str:
     return str(settings.embedding.api_key or "")
 
 
-def _llm_base_url() -> str:
-    return str(settings.llm.base_url or "")
-
-
-def _llm_api_key() -> str:
-    return str(settings.llm.api_key or "")
-
-
 from .data_service import get_features_cached
 from .search_service import QUERY_EMBED_CACHE, SEARCH_RANK_CACHE, filter_public_results
 
@@ -87,8 +79,12 @@ def get_semantic_model() -> Qwen3EmbeddingVllm | None:
 
         try:
             if _embed_use_llm_api():
-                api_base = (_embed_api_base() or _llm_base_url() or "").rstrip("/")
-                api_key = (_embed_api_key() or _llm_api_key() or "").strip() or None
+                api_base = (_embed_api_base() or "").rstrip("/")
+                api_key = (_embed_api_key() or "").strip() or None
+                if not api_base:
+                    logger.error("Embedding API base URL is required when EMBED_USE_LLM_API=true")
+                    _semantic_model = None
+                    return None
             else:
                 api_base = f"http://localhost:{_embed_port()}"
                 api_key = None
@@ -135,8 +131,12 @@ def get_document_model() -> Qwen3EmbeddingVllm | None:
 
         try:
             if _embed_use_llm_api():
-                api_base = (_embed_api_base() or _llm_base_url() or "").rstrip("/")
-                api_key = (_embed_api_key() or _llm_api_key() or "").strip() or None
+                api_base = (_embed_api_base() or "").rstrip("/")
+                api_key = (_embed_api_key() or "").strip() or None
+                if not api_base:
+                    logger.error("Embedding API base URL is required when EMBED_USE_LLM_API=true")
+                    _document_model = None
+                    return None
             else:
                 api_base = f"http://localhost:{_embed_port()}"
                 api_key = None

@@ -9,7 +9,6 @@ This module provides business logic for:
 """
 
 import importlib
-import json
 import re
 import shutil
 import time
@@ -19,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import openai
 from loguru import logger
 
 import tools.paper_summarizer as paper_summarizer
@@ -30,6 +28,7 @@ from aslite.repositories import (
     UploadedPaperRepository,
     safe_closing,
 )
+from backend.services.opencode_service import generate_structured_json
 from backend.utils.upload_utils import (
     compute_bytes_sha256,
     generate_upload_pid,
@@ -39,6 +38,7 @@ from backend.utils.upload_utils import (
     validate_upload_pid,
 )
 from config import settings
+from config.model_aliases import build_model_candidate_chain
 
 from .user_service import build_pid_tag_reverse_index as _build_pid_tag_reverse_index
 
@@ -83,37 +83,12 @@ def _emit_upload_event(user: str, payload: dict) -> None:
         logger.debug(f"Failed to emit upload event: {e}")
 
 
-# Main LLM settings (for fallback)
 def _llm_name() -> str:
     return str(settings.llm.name or "")
 
 
-def _llm_base_url() -> str:
-    return str(settings.llm.base_url or "")
-
-
-def _llm_api_key() -> str:
-    return str(settings.llm.api_key or "")
-
-
 def _extract_model_name() -> str:
     return str(settings.extract_info.model_name or "")
-
-
-def _extract_base_url() -> str:
-    return str(settings.extract_info.base_url or _llm_base_url() or "")
-
-
-def _extract_api_key() -> str:
-    return str(settings.extract_info.api_key or _llm_api_key() or "")
-
-
-def _extract_uses_main_llm_route() -> bool:
-    return (
-        _extract_model_name() == _llm_name()
-        and _extract_base_url() == _llm_base_url()
-        and _extract_api_key() == _llm_api_key()
-    )
 
 
 # Reasonable limits to prevent abuse / DB bloat.
@@ -943,101 +918,8 @@ def _invalidate_upload_features(pid: str) -> None:
         pass
 
 
-def _get_extract_info_client():
-    """Get OpenAI client for Extract Info task.
-
-    Uses settings.extract_info configuration, falling back to main LLM settings.
-    This is lazy-loaded to avoid import issues at module load time.
-    """
-    return openai.OpenAI(api_key=_extract_api_key(), base_url=_extract_base_url())
-
-
-def _extract_shares_main_llm_endpoint() -> bool:
-    return _extract_base_url() == _llm_base_url() and _extract_api_key() == _llm_api_key()
-
-
-def _call_metadata_llm(
-    *,
-    client,
-    model_name: str,
-    prompt: str,
-    allow_direct_responses_route: bool,
-) -> tuple[str, str]:
-    temperature = settings.extract_info.temperature
-    max_tokens = settings.extract_info.max_tokens
-    timeout = settings.extract_info.timeout
-
-    response_api = "chat_completions"
-
-    if paper_summarizer.PaperSummarizer._should_use_responses_api(model_name):
-        response_api = "responses"
-        responses_client = client
-        responses_model = model_name
-        responses_kwargs = {
-            "temperature": temperature,
-            "timeout": timeout,
-            "max_output_tokens": max_tokens,
-        }
-
-        if allow_direct_responses_route:
-            direct_route = paper_summarizer.PaperSummarizer._resolve_direct_responses_route(model_name)
-            if direct_route:
-                responses_client = openai.OpenAI(
-                    api_key=direct_route["api_key"],
-                    base_url=direct_route["base_url"],
-                )
-                responses_model = direct_route["model"]
-                responses_kwargs.update(direct_route.get("extra_body") or {})
-                route_max_output_tokens = direct_route.get("max_output_tokens")
-                if route_max_output_tokens:
-                    responses_kwargs["max_output_tokens"] = min(
-                        int(route_max_output_tokens),
-                        int(responses_kwargs["max_output_tokens"]),
-                    )
-
-        try:
-            response = responses_client.responses.create(
-                model=responses_model,
-                instructions="Return JSON only. Do not call tools/functions.",
-                input=[{"role": "user", "content": prompt}],
-                **responses_kwargs,
-            )
-            content, _status, _usage = paper_summarizer.PaperSummarizer._extract_responses_text_fields(response)
-            if str(content or "").strip():
-                return response_api, str(content or "")
-            logger.warning(
-                f"Responses API returned empty content for metadata extraction model={model_name}, falling back to chat completions"
-            )
-            response_api = "chat_completions"
-        except Exception as exc:
-            if not paper_summarizer.PaperSummarizer._should_fallback_to_chat_completions_for_responses_error(exc):
-                raise
-            logger.warning(
-                f"Responses API unavailable for metadata extraction model={model_name}, falling back to chat completions: {exc}"
-            )
-            response_api = "chat_completions"
-
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-        timeout=timeout,
-    )
-
-    if not response.choices:
-        logger.warning(f"LLM {model_name} returned empty choices for metadata extraction")
-        return response_api, ""
-
-    choice = response.choices[0]
-
-    finish_reason = getattr(choice, "finish_reason", None)
-    if finish_reason == "length":
-        logger.warning(f"LLM {model_name} response truncated (finish_reason=length), may have incomplete JSON")
-
-    content = choice.message.content or ""
-    reasoning_content = getattr(choice.message, "reasoning_content", None) or ""
-    return response_api, f"{reasoning_content}\n{content}".strip()
+def _extract_model_candidates() -> list[str]:
+    return build_model_candidate_chain(_extract_model_name(), _llm_name())
 
 
 def _normalize_extracted_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -1107,6 +989,18 @@ Rules:
 - No affiliations/emails in author names
 - JSON only, no explanation"""
 
+METADATA_EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": ["string", "null"]},
+        "authors": {"type": "array", "items": {"type": "string"}},
+        "year": {"type": ["integer", "null"]},
+        "abstract": {"type": ["string", "null"]},
+    },
+    "required": ["title", "authors", "year", "abstract"],
+    "additionalProperties": False,
+}
+
 
 def _redact_error_message(msg: str, max_len: int = 300) -> str:
     """Redact likely filesystem paths from user-visible error messages."""
@@ -1147,10 +1041,7 @@ def extract_front_matter(md_content: str, max_chars: int = 12000) -> str:
 def extract_metadata_with_llm(front_matter: str) -> dict[str, Any]:
     """Extract metadata from front matter using LLM.
 
-    Uses settings.extract_info configuration (default model: qwen3.5-plus).
-    Falls back to main LLM if extract_info model fails.
-
-    Uses OpenAI client library for consistency with main LLM logic in paper_summarizer.
+    Uses OpenCode structured output with the configured extract/default/fallback models.
 
     Args:
         front_matter: Text content before Introduction
@@ -1158,63 +1049,29 @@ def extract_metadata_with_llm(front_matter: str) -> dict[str, Any]:
     Returns:
         Dictionary with title, authors, year (always None), abstract
     """
-    extract_base_url = _extract_base_url()
-    if not extract_base_url or not front_matter.strip():
+    if not front_matter.strip():
         return {"title": "", "authors": [], "year": None, "abstract": None}
 
     prompt = METADATA_EXTRACTION_PROMPT.format(content=front_matter[:8000])
 
-    # Try extract_info model first, then fallback to main LLM
-    models_to_try = [
-        (
-            _extract_model_name(),
-            _get_extract_info_client(),
-            _extract_shares_main_llm_endpoint(),
-        ),
-    ]
-    # Add main LLM fallback unless extract_info already uses the same effective route.
-    if not _extract_uses_main_llm_route():
-        main_client = openai.OpenAI(api_key=_llm_api_key(), base_url=_llm_base_url())
-        models_to_try.append((_llm_name(), main_client, True))
-
-    for model_name, client, allow_direct_responses_route in models_to_try:
+    for model_name in _extract_model_candidates():
         try:
-            response_api, combined_content = _call_metadata_llm(
-                client=client,
-                model_name=model_name,
+            result = generate_structured_json(
+                model=model_name,
                 prompt=prompt,
-                allow_direct_responses_route=allow_direct_responses_route,
+                system=(
+                    "Return structured JSON only. Do not call tools other than the "
+                    "structured output required by the schema."
+                ),
+                schema=METADATA_EXTRACTION_SCHEMA,
+                timeout=settings.extract_info.timeout,
             )
-
-            if not combined_content:
-                logger.warning(f"LLM {model_name} returned empty content for metadata extraction via {response_api}")
-                continue
-
-            # Find all JSON objects and use the last one (final output from reasoning)
-            json_pattern = r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"
-            json_matches = list(re.finditer(json_pattern, combined_content, re.DOTALL))
-
-            # Try JSON matches from last to first (last one is usually the final answer)
-            for match in reversed(json_matches):
-                try:
-                    meta = json.loads(match.group())
-                    if meta.get("title") or meta.get("authors"):
-                        logger.info(f"Successfully extracted metadata using {model_name}")
-                        return _normalize_extracted_metadata(meta)
-                except json.JSONDecodeError:
-                    continue
-
-            # Fallback: try to parse the entire content as JSON
-            try:
-                meta = json.loads(combined_content.strip())
-                if meta.get("title") or meta.get("authors"):
-                    logger.info(f"Successfully extracted metadata using {model_name}")
-                    return _normalize_extracted_metadata(meta)
-            except json.JSONDecodeError:
-                pass
-
-            # Don't log response content to avoid leaking sensitive paper information
-            logger.warning(f"Failed to parse JSON from {model_name} response (length={len(combined_content)})")
+            meta = result.get("json")
+            if isinstance(meta, dict) and (meta.get("title") or meta.get("authors")):
+                resolved_model = str(result.get("resolved_model") or model_name).strip()
+                logger.info(f"Successfully extracted metadata using {resolved_model}")
+                return _normalize_extracted_metadata(meta)
+            logger.warning(f"Structured metadata extraction returned no usable fields for model={model_name}")
         except Exception as e:
             logger.warning(f"Failed to extract metadata with {model_name}: {e}")
 

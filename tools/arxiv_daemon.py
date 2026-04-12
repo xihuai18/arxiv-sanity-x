@@ -19,12 +19,7 @@ if _REPO_ROOT not in sys.path:
 
 import tqdm
 
-from aslite.arxiv import (
-    get_response,
-    is_withdrawn_entry,
-    parse_response,
-    resolve_latest_nonwithdrawn_version,
-)
+from aslite.arxiv import get_response, is_withdrawn_entry, parse_response
 
 # Repository layer for cleaner data access
 from aslite.repositories import PaperCorpusRepository, PaperRepository
@@ -166,30 +161,27 @@ def run(args: argparse.Namespace, *, all_tags: list[str], empty_response_fallbac
             skipped_withdrawn = 0
             tombstone_updates = {}
             for latest_paper in papers:
-                selected_paper = latest_paper
                 latest_is_withdrawn = bool(is_withdrawn_entry(latest_paper))
                 if latest_is_withdrawn:
-                    selected_paper = resolve_latest_nonwithdrawn_version(latest_paper)
-                    if selected_paper is None:
-                        skipped_withdrawn += 1
-                        raw_pid = latest_paper.get("_id")
-                        tombstone_updates[raw_pid] = {
-                            "pid": raw_pid,
-                            "reason": "withdrawn_only",
-                            "deleted_at": time.time(),
-                            "seen_at": time.time(),
-                            "latest_idv": latest_paper.get("_idv"),
-                            "latest_version": latest_paper.get("_version"),
-                            "latest_comment": latest_paper.get("arxiv_comment") or latest_paper.get("comment") or "",
-                        }
-                        logging.info(
-                            "Skipping withdrawn-only paper %s (latest %s)",
-                            latest_paper.get("_id"),
-                            latest_paper.get("_idv"),
-                        )
-                        continue
+                    skipped_withdrawn += 1
+                    raw_pid = latest_paper.get("_id")
+                    tombstone_updates[raw_pid] = {
+                        "pid": raw_pid,
+                        "reason": "withdrawn_only",
+                        "deleted_at": time.time(),
+                        "seen_at": time.time(),
+                        "latest_idv": latest_paper.get("_idv"),
+                        "latest_version": latest_paper.get("_version"),
+                        "latest_comment": latest_paper.get("arxiv_comment") or latest_paper.get("comment") or "",
+                    }
+                    logging.info(
+                        "Skipping withdrawn paper %s (latest %s)",
+                        latest_paper.get("_id"),
+                        latest_paper.get("_idv"),
+                    )
+                    continue
 
-                effective_paper = dict(selected_paper)
+                effective_paper = dict(latest_paper)
                 effective_paper["_effective_idv"] = effective_paper.get("_idv")
                 effective_paper["_effective_version"] = effective_paper.get("_version")
                 effective_paper["_latest_idv"] = latest_paper.get("_idv")

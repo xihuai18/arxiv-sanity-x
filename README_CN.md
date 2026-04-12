@@ -93,14 +93,14 @@ arxiv-sanity-X 是一个面向个人科研/工程阅读流的 arXiv 工作台：
 
 - **搜索**：TF-IDF（scikit-learn）+ 语义嵌入（Ollama/OpenAI API）
 - **推荐**：基于用户反馈训练的 SVM 分类器
-- **摘要生成**：OpenAI 兼容的 LLM API
+- **摘要生成**：基于 OpenCode 的文本模型
 - **PDF 解析**：MinerU（API 或本地 VLM）
 
 ### 基础设施
 
 - **Web 服务器**：Gunicorn，多 worker 支持
 - **调度器**：APScheduler，自动化流水线
-- **服务组件**：LiteLLM 网关、Ollama 嵌入、MinerU VLM
+- **服务组件**：OpenCode 服务、Ollama 嵌入、MinerU VLM
 
 ## 📁 项目结构
 
@@ -139,7 +139,7 @@ arxiv-sanity-x/
 ├── config/               # 配置
 │   ├── settings.py       # pydantic-settings 定义
 │   ├── cli.py            # 配置 CLI 工具
-│   └── llm.yml           # LiteLLM 网关配置
+│   └── ...               # OpenCode / 应用配置
 │
 ├── tools/                # CLI 工具 & 自动化
 │   ├── arxiv_daemon.py   # 从 arXiv 拉取论文
@@ -155,7 +155,7 @@ arxiv-sanity-x/
 │   ├── huey_consumer.py  # Huey consumer 封装（内存限制 + worker 角色）
 │   ├── embedding_serve.sh# Ollama 嵌入服务
 │   ├── mineru_serve.sh   # MinerU VLM 服务
-│   └── litellm.sh        # LiteLLM 网关
+│   └── ...               # 可选本地服务启动脚本
 │
 ├── static/               # 前端资源
 │   ├── *.js              # JavaScript 源文件
@@ -303,7 +303,7 @@ arxiv-sanity-x/
 ## 🧩 常见问题与排错
 
 - **网站空白/没有论文**：通常是还没跑 [tools/arxiv_daemon.py](tools/arxiv_daemon.py) + [tools/compute.py](tools/compute.py)。
-- **总结一直失败**：检查 `.env` 里的 `ARXIV_SANITY_LLM_API_KEY`、`ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`。
+- **总结一直失败**：检查 `.env` 里的 `ARXIV_SANITY_OPENCODE_BASE_URL`、`ARXIV_SANITY_LLM_NAME`、`ARXIV_SANITY_EXTRACT_MODEL_NAME`。
 - **总结不自动开始生成**：总结页在“缓存缺失”时不会自动入队，请手动点击 **Generate**；同时确保 Huey consumer 在跑（推荐：`python bin/run_services.py` 一键启动；或只启动 consumer：`python bin/huey_consumer.py tasks.huey -w 4 -k thread`）。
 - **语义/混合检索没效果**：确认嵌入（Embedding）已启用，并用 [tools/compute.py](tools/compute.py) 重新生成特征（混合特征需要包含嵌入）。
 - **按时间排序异常/变慢**：重建元数据时间索引：`python -m tools rebuild_time_index`。
@@ -319,585 +319,124 @@ arxiv-sanity-x/
 
 ## ⚡ 快速开始
 
-本项目 Web 本体开箱即用，但会依赖你选择的**外部模型服务**（LLM / Embedding / MinerU）。建议先选一个“运行档位”，再按步骤操作。
-
-### 推荐运行档位
-
-| 档位               | 你能得到什么                     | 需要什么                     | 适合                |
-| ------------------ | -------------------------------- | ---------------------------- | ------------------- |
-| **最小（仅 LLM）** | 浏览 + TF‑IDF 搜索 + LLM 总结    | LLM API key                  | 上手体验 / 资源有限 |
-| **混合搜索**       | TF‑IDF + Embedding 混合搜索      | LLM API key + Embedding 后端 | 更好的检索相关性    |
-| **完整（MinerU）** | 更强的 PDF→Markdown（公式/表格） | MinerU（API 或本地）         | 最佳总结可读性      |
-
 ### 1. 安装
 
 ```bash
-# 克隆并安装
 git clone https://github.com/xihuai18/arxiv-sanity-x && cd arxiv-sanity-x
 pip install -r requirements.txt
 npm install
 ```
 
-### 2. 创建配置文件
+还需要单独安装 [OpenCode](https://opencode.ai) CLI，并确保在当前 shell 里执行 `opencode --version` 能成功。默认启动流程会自动拉起 OpenCode。OpenCode 的安装和配置详见 <https://opencode.ai>。
+
+### 2. 创建 `.env`
 
 ```bash
-# 必须：从模板创建 .env
 cp .env.example .env
-
-# 可选：创建 LiteLLM 配置（使用多模型网关时）
-cp config/llm_template.yml config/llm.yml
 ```
 
-### 3. 配置核心设置
+### 3. 配置 OpenCode 与模型
 
-编辑 `.env`（由 [.env.example](.env.example) 复制生成）。至少建议检查：**LLM 设置**，以及可选的**总结来源 / Embedding / MinerU**。
+文本模型现在统一走 OpenCode HTTP 服务。
 
 ```bash
-# LLM API 示例（论文总结必需）
-ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
-ARXIV_SANITY_LLM_API_KEY=your-api-key
-ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free  # 示例模型，不是代码默认值
+ARXIV_SANITY_OPENCODE_BASE_URL=http://127.0.0.1:53000
+ARXIV_SANITY_OPENCODE_MANAGED=true
+
+ARXIV_SANITY_LLM_NAME=gpt-5.4
+ARXIV_SANITY_EXTRACT_MODEL_NAME=gpt-5.4-mini
 ARXIV_SANITY_LLM_SUMMARY_LANG=zh
 
-# Web
 ARXIV_SANITY_HOST=http://localhost:55555
 ARXIV_SANITY_SERVE_PORT=55555
-
-# 总结来源（默认 HTML 快且稳定）
 ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html
 ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
+```
 
-# 邮件（可选，用于每日推荐）
-ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
-ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
-ARXIV_SANITY_EMAIL_SMTP_PORT=465
-ARXIV_SANITY_EMAIL_USERNAME=username
-ARXIV_SANITY_EMAIL_PASSWORD=your-password
+说明：
 
-# 内部 API Key（可选：供脚本在无浏览器会话时调用接口）
-# ARXIV_SANITY_RECO_API_KEY=your-internal-key
+- 模型选择器既可以是 `provider/model`，也可以是支持的 alias，比如 `gpt-5.4`。
+- alias 成员会自动尝试；如果该 alias 下的候选都失败，就直接报错。
+- 上传论文元信息提取也走 OpenCode。
+- embedding 仍然独立，不会复用 OpenCode 文本模型配置。
+- `ARXIV_SANITY_OPENCODE_MANAGED` 默认就是 `true`，所以 `bin/run_services.py` 会本地启动 `opencode serve`，并让子进程统一指向本地实例。
+- 在默认 `managed=true` 的情况下，`python bin/run_services.py` 也要求本机已经安装并能在 `PATH` 中找到 `opencode`。
 
-# Embedding（可选）
-# ARXIV_SANITY_EMBED_USE_LLM_API=false
-# ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
+### 4. 如需配置 Embedding / MinerU
 
-# MinerU（可选）
-# ARXIV_SANITY_MINERU_ENABLED=false
+```bash
+# 本地 embedding（默认）
+ARXIV_SANITY_EMBED_USE_LLM_API=false
+ARXIV_SANITY_EMBED_PORT=54000
+ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
+
+# 远程 embedding API（显式配置；不会再回退到文本模型配置）
+# ARXIV_SANITY_EMBED_USE_LLM_API=true
+# ARXIV_SANITY_EMBED_API_BASE=https://your-embedding-endpoint/v1
+# ARXIV_SANITY_EMBED_API_KEY=...
+
+# MinerU API
+# ARXIV_SANITY_MINERU_ENABLED=true
 # ARXIV_SANITY_MINERU_BACKEND=api
-# ARXIV_SANITY_MINERU_API_KEY=your-mineru-api-key
+# ARXIV_SANITY_MINERU_API_KEY=...
 ```
 
-同时请检查 `.env` 里的 `ARXIV_SANITY_ARXIV_CORE_TAGS`、`ARXIV_SANITY_ARXIV_LANG_TAGS`、`ARXIV_SANITY_ARXIV_AGENT_TAGS`、`ARXIV_SANITY_ARXIV_APP_TAGS`，它们决定你到底拉取/展示哪些领域的论文。
-
-### 4. 验证配置
+### 5. 验证并启动
 
 ```bash
-# 显示当前配置
-python -m config.cli show
-
-# 验证配置
 python -m config.cli validate
-
-# 诊断常见运维/配置问题
 python -m config.cli doctor
-```
 
-### 5. 获取论文并启动
-
-```bash
-# 获取论文并计算特征
 python -m tools arxiv_daemon -n 10000 -m 500
 python -m tools compute --num 20000
 
-# 一键启动所有服务
-python bin/run_services.py
-
-# 访问 http://localhost:55555
-```
-
-### 服务启动方式详解
-
-根据你的需求，可以选择不同的启动方式：
-
-#### 方式一：最简启动（仅 Web）
-
-```bash
-# 开发模式
-# 如果 static/dist 缺失，先构建前端资源
-npm run build:static
-# 如需自动重载，请先设置 ARXIV_SANITY_RELOAD=true
-python serve.py
-
-# 生产模式（Gunicorn）
-bash bin/up.sh
-```
-
-#### 方式二：一键启动（推荐）
-
-```bash
-# 启动 Web + Huey + 可选服务（Embedding/MinerU/LiteLLM）
-python bin/run_services.py
-
-# 常用选项
-python bin/run_services.py --no-embed      # 不启动 Embedding 服务
-python bin/run_services.py --no-mineru     # 不启动 MinerU 服务
-python bin/run_services.py --no-litellm    # 不启动 LiteLLM 网关
-python bin/run_services.py --with-daemon   # 同时启动定时任务调度器
-```
-
-`python bin/run_services.py` 默认不会启动 daemon。若你希望自动拉论文 / compute / summary / 邮件推荐，请加 `--with-daemon`，或者单独运行 `python -m tools daemon`。
-
-#### 方式三：分别启动各服务
-
-```bash
-# 终端 1：Web 服务
-bash bin/up.sh
-
-# 终端 2：Embedding 服务（可选）
-./bin/embedding_serve.sh
-
-# 终端 3：MinerU 服务（可选）
-./bin/mineru_serve.sh
-
-# 终端 4：LiteLLM 网关（可选）
-./bin/litellm.sh
-
-# 终端 5：Huey worker（异步任务必需）
-python bin/huey_consumer.py tasks.huey -w 4 -k thread
-
-# 终端 6：定时任务调度器（可选）
-python -m tools daemon
-```
-
-#### 方式四：一次性数据初始化
-
-```bash
-# 仅拉取论文和计算特征，不启动服务
-python bin/run_services.py --fetch-compute 10000
-```
-
-> **提示**：如果你想在一个终端里把 embedding / minerU / litellm 一起拉起来，推荐用 [bin/run_services.py](bin/run_services.py)。但注意它会调用 bash 脚本（见下方"系统说明"）。
-
-### 配置清单
-
-| 项目               | 文件/位置            | 必需    | 说明                                                                             |
-| ------------------ | -------------------- | ------- | -------------------------------------------------------------------------------- |
-| **核心配置**       | [.env](.env.example) | ✅ 必需 | 所有配置通过环境变量设置                                                         |
-| **LLM 服务**       | `.env`               | ✅ 必需 | `ARXIV_SANITY_LLM_BASE_URL`、`ARXIV_SANITY_LLM_NAME`、`ARXIV_SANITY_LLM_API_KEY` |
-| **arXiv 分类**     | `.env`               | ⚙️ 重要 | `ARXIV_SANITY_ARXIV_*` 决定拉取范围与 About 展示                                 |
-| **总结来源**       | `.env`               | ⚙️ 推荐 | `ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html\|mineru`                              |
-| **Embedding 后端** | `.env`               | ⚙️ 可选 | `ARXIV_SANITY_EMBED_*` 相关设置                                                  |
-| **MinerU 后端**    | `.env`               | ⚙️ 可选 | `ARXIV_SANITY_MINERU_*` 相关设置                                                 |
-| **邮件 SMTP**      | `.env`               | ⚙️ 可选 | `ARXIV_SANITY_EMAIL_*` 相关设置                                                  |
-| **会话密钥**       | 环境变量/文件        | ⚙️ 推荐 | `ARXIV_SANITY_SECRET_KEY` 或 `secret_key.txt`（公网部署强烈建议）                |
-
----
-
-## 🧰 运行前准备与系统说明
-
-### Python
-
-- 推荐 Python 3.10+
-- 依赖见 [requirements.txt](requirements.txt)
-
-### 你可能需要的外部服务
-
-- **LLM 服务商**（OpenAI 兼容 API）：用于总结（必需）。
-- **Ollama**（可选）：当你选择本地 embedding 时，由 [bin/embedding_serve.sh](bin/embedding_serve.sh) 启动。
-- **MinerU**（可选）：
-    - `api` 后端：走 mineru.net，需要 `ARXIV_SANITY_MINERU_API_KEY`
-    - 本地 VLM 后端：由 [bin/mineru_serve.sh](bin/mineru_serve.sh) 启动 `mineru-vllm-server`
-- **LiteLLM**（可选）：多模型网关通过 `config/llm.yml` 配置（可从 [config/llm_template.yml](config/llm_template.yml) 复制）。
-
-### Windows 注意事项
-
-部分启动脚本是 bash（[bin/up.sh](bin/up.sh)、[bin/embedding_serve.sh](bin/embedding_serve.sh)、[bin/mineru_serve.sh](bin/mineru_serve.sh)、[bin/litellm.sh](bin/litellm.sh)），而 [bin/run_services.py](bin/run_services.py) 会用 `bash` 调它们。
-
-- Windows 建议使用 **WSL**（最省心）。
-- 或使用能提供 bash 的环境。
-- 只跑 Web 的话，也请先执行 `npm run build:static`，再运行 `python serve.py`；embedding/MinerU 可以走 API 后端。
-
-## 配置指南
-
-### 配置概览
-
-本项目使用 **pydantic-settings** 进行配置管理。规范配置入口是 `.env.example` / `.env` 与 `config/settings.py`。
-
-如果你想看“代码真实默认值”而不是文档里的推荐示例，请直接查看 `docs/DEFAULTS.md`。
-
-| 来源                                     | 作用                 | 必需    |
-| ---------------------------------------- | -------------------- | ------- |
-| [.env](.env.example)                     | 所有配置设置         | ✅ 必须 |
-| [config/settings.py](config/settings.py) | 类型定义与代码默认值 | ✅ 必须 |
-| `config/llm.yml`                         | LiteLLM 多模型网关   | ⚙️ 可选 |
-
-**仓库中不包含的文件（.gitignore）：**
-
-- `.env` - 从 [.env.example](.env.example) 复制
-- `config/llm.yml` - 从 [config/llm_template.yml](config/llm_template.yml) 复制
-- `secret_key.txt` - 可选，Flask 会话密钥
-- `data/` - 运行时自动生成
-- 本地嵌入模型（如 `qwen3-embed-0.6B/`）
-
----
-
-### 常见场景
-
-- 本地阅读/搜索：配置 `ARXIV_SANITY_LLM_*`，保持 `ARXIV_SANITY_MINERU_ENABLED=false`，运行 `python bin/run_services.py`
-- 自动化日常流水线：保持 `.env.example` 的推荐基线，再额外启动 `python -m tools daemon` 或 `python bin/run_services.py --with-daemon`
-- 邮件推荐：补充 `ARXIV_SANITY_EMAIL_*` 与 `ARXIV_SANITY_RECO_API_KEY`
-- MinerU API 解析：设置 `ARXIV_SANITY_MINERU_ENABLED=true`、`ARXIV_SANITY_MINERU_BACKEND=api`、`ARXIV_SANITY_MINERU_API_KEY=...`
-
----
-
-### 1. .env 文件 - 核心配置
-
-从 `.env.example` 复制到 `.env` 并配置以下部分：
-
-#### 1.1 数据存储
-
-```bash
-ARXIV_SANITY_DATA_DIR=data                    # 数据存储根目录（推荐 SSD）
-ARXIV_SANITY_SUMMARY_DIR=data/summary         # 论文总结缓存目录
-```
-
-#### 1.2 服务端口
-
-```bash
-ARXIV_SANITY_SERVE_PORT=55555      # Web 应用端口
-ARXIV_SANITY_EMBED_PORT=54000      # Ollama 嵌入服务端口
-ARXIV_SANITY_MINERU_PORT=52000     # MinerU VLM 服务端口
-ARXIV_SANITY_LITELLM_PORT=53000    # LiteLLM 网关端口
-```
-
-#### 1.3 LLM API 配置
-
-```bash
-# 方式 1：直接 API 示例（OpenRouter、OpenAI 等）
-ARXIV_SANITY_LLM_BASE_URL=https://openrouter.ai/api/v1
-ARXIV_SANITY_LLM_API_KEY=your-api-key
-ARXIV_SANITY_LLM_NAME=deepseek/deepseek-chat-v3.1:free  # 示例 provider 模型，不是代码默认值
-ARXIV_SANITY_LLM_SUMMARY_LANG=zh
-
-# 方式 2：通过 LiteLLM 网关（需要 config/llm.yml）
-ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
-ARXIV_SANITY_LLM_API_KEY=no-key
-ARXIV_SANITY_LLM_NAME=or-mimo
-```
-
-#### 1.3.1 运行稳定性（推荐）
-
-```bash
-# Daemon 子进程超时（防止某个子命令卡死导致 daemon 永久挂住；2 小时）
-# ARXIV_SANITY_DAEMON_SUBPROCESS_TIMEOUT_S=7200
-
-# SSE IPC（SQLite 跨进程事件总线）
-# ARXIV_SANITY_SSE_ENABLED=true
-# ARXIV_SANITY_SSE_QUEUE_MAXSIZE=200
-# ARXIV_SANITY_SSE_PUBLISH_RETRY_QUEUE_MAXSIZE=2000
-# ARXIV_SANITY_SSE_PUBLISH_RETRY_BACKOFF_MAX_S=1.0
-# ARXIV_SANITY_SSE_PUBLISH_ASYNC=true
-
-# 缓存刷新节流（papers.db / features 更新时，后台刷新；前台优先返回旧缓存）
-# ARXIV_SANITY_DATA_CACHE_REFRESH_MIN_INTERVAL=60
-# ARXIV_SANITY_FEATURES_CACHE_REFRESH_MIN_INTERVAL=300
-
-# Gunicorn（bin/up.sh 会在 SSE 开启且安装了 gevent 时自动选 gevent；也可手动覆盖）
-# ARXIV_SANITY_GUNICORN_WORKER_CLASS=gevent
-# ARXIV_SANITY_GUNICORN_EXTRA_ARGS="--timeout 600 --graceful-timeout 600"
-# ARXIV_SANITY_GUNICORN_FORCE_WORKERS=1
-```
-
-#### 1.3.2 推荐的非密钥默认配置
-
-下面这组值适合作为单用户或小团队部署的起点，密钥/密码请单独填写：
-
-```bash
-ARXIV_SANITY_HOST=http://localhost:55555
-ARXIV_SANITY_LOG_LEVEL=INFO
-ARXIV_SANITY_WARMUP_DATA=true
-ARXIV_SANITY_WARMUP_ML=true
-ARXIV_SANITY_ENABLE_SCHEDULER=true
-ARXIV_SANITY_READY_REQUIRE_EMBEDDING=true
-ARXIV_SANITY_READY_REQUIRE_MINERU=true
-
-ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html
-ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv
-ARXIV_SANITY_SUMMARY_FORCE_CACHE_ONLY=true
-
-ARXIV_SANITY_EMBED_USE_LLM_API=false
-ARXIV_SANITY_MINERU_ENABLED=false
-
-ARXIV_SANITY_DAEMON_FETCH_NUM=2000
-ARXIV_SANITY_DAEMON_SUMMARY_NUM=250
-ARXIV_SANITY_DAEMON_SUMMARY_WORKERS=2
-ARXIV_SANITY_DAEMON_ENABLE_SUMMARY=true
-ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS=true
-ARXIV_SANITY_DAEMON_ENABLE_PRIORITY_QUEUE=true
-ARXIV_SANITY_DAEMON_ENABLE_SUMMARY_QUEUE=true
-
-ARXIV_SANITY_HUEY_WORKERS=4
-ARXIV_SANITY_HUEY_WORKER_TYPE=thread
-ARXIV_SANITY_SSE_ENABLED=true
-ARXIV_SANITY_GUNICORN_PRELOAD=true
-```
-
-#### 1.4 嵌入配置
-
-```bash
-# 使用 OpenAI 兼容 API 生成嵌入（可选；启用这条路径时设为 true）
-ARXIV_SANITY_EMBED_USE_LLM_API=true
-ARXIV_SANITY_EMBED_MODEL_NAME=qwen3-embedding:0.6b
-ARXIV_SANITY_EMBED_API_BASE=       # 空 = 使用 LLM_BASE_URL
-ARXIV_SANITY_EMBED_API_KEY=        # 空 = 使用 LLM_API_KEY
-
-# 或使用本地 Ollama 服务
-ARXIV_SANITY_EMBED_USE_LLM_API=false  # 使用 http://localhost:{EMBED_PORT}
-```
-
-#### 1.5 邮件服务
-
-```bash
-ARXIV_SANITY_EMAIL_FROM_EMAIL=your_email@mail.com
-ARXIV_SANITY_EMAIL_SMTP_SERVER=smtp.mail.com
-ARXIV_SANITY_EMAIL_SMTP_PORT=465
-ARXIV_SANITY_EMAIL_USERNAME=username
-ARXIV_SANITY_EMAIL_PASSWORD=your-password
-ARXIV_SANITY_HOST=http://your-server:55555  # 邮件链接的公网地址
-```
-
-#### 1.6 论文总结配置
-
-```bash
-ARXIV_SANITY_SUMMARY_MIN_CHINESE_RATIO=0.25      # 缓存有效性的最低中文比例
-ARXIV_SANITY_SUMMARY_DEFAULT_SEMANTIC_WEIGHT=0.5 # 混合搜索权重（0.0-1.0）
-ARXIV_SANITY_SUMMARY_MARKDOWN_SOURCE=html        # "html"（默认）或 "mineru"
-ARXIV_SANITY_SUMMARY_HTML_SOURCES=ar5iv,arxiv    # HTML 来源优先顺序
-```
-
-#### 1.7 MinerU PDF 解析
-
-```bash
-ARXIV_SANITY_MINERU_ENABLED=false                # 配好 MinerU 后再改成 true
-ARXIV_SANITY_MINERU_BACKEND=api                  # "api"、"pipeline" 或 "vlm-http-client"
-ARXIV_SANITY_MINERU_DEVICE=cuda                  # "cuda" 或 "cpu"（仅 pipeline）
-ARXIV_SANITY_MINERU_MAX_WORKERS=2
-ARXIV_SANITY_MINERU_MAX_VRAM=4
-ARXIV_SANITY_MINERU_API_KEY=your-mineru-api-key  # API 后端密钥
-```
-
-#### 1.8 SVM 推荐参数
-
-```bash
-ARXIV_SANITY_SVM_C=0.02
-ARXIV_SANITY_SVM_MAX_ITER=5000
-ARXIV_SANITY_SVM_TOL=0.001
-ARXIV_SANITY_SVM_NEG_WEIGHT=5.0
-```
-
----
-
-### 2. `.env` 中的 arXiv 分类
-
-论文采集查询由 `.env` 里的 `ARXIV_SANITY_ARXIV_*` 分类组构建。建议直接在 `.env` 中维护，而不是修改脚本源码：
-
-```bash
-ARXIV_SANITY_ARXIV_CORE_TAGS=cs.AI,cs.LG,stat.ML
-ARXIV_SANITY_ARXIV_LANG_TAGS=cs.CL,cs.IR,cs.CV
-ARXIV_SANITY_ARXIV_AGENT_TAGS=cs.MA,cs.RO,cs.HC,cs.GT,cs.NE
-ARXIV_SANITY_ARXIV_APP_TAGS=cs.SE,cs.CY
-```
-
-查询会被构建为 `cat:cs.AI OR cat:cs.LG OR ...`。根据您的研究兴趣添加或删除分类。
-
-**常用 arXiv CS 分类：**
-
-- `cs.AI` - 人工智能
-- `cs.LG` - 机器学习
-- `cs.CL` - 计算与语言（NLP）
-- `cs.CV` - 计算机视觉
-- `cs.RO` - 机器人学
-- `cs.NE` - 神经与进化计算
-- `stat.ML` - 统计机器学习
-
-完整列表请参见 [arXiv 分类体系](https://arxiv.org/category_taxonomy)。
-
----
-
-### 3. llm.yml - LiteLLM 网关
-
-如果您想使用 LiteLLM 作为多 LLM 服务商的统一网关，请将 `config/llm_template.yml` 复制为 `config/llm.yml`。
-
-```yaml
-model_list:
-    # OpenRouter - 免费模型
-    - model_name: or-mimo # .env 中 ARXIV_SANITY_LLM_NAME 使用的别名
-      litellm_params:
-          model: openrouter/xiaomi/mimo-v2-flash:free
-          api_base: https://openrouter.ai/api/v1
-          api_key: YOUR_OPENROUTER_API_KEY # 替换为您的密钥
-          max_tokens: 32768
-
-    - model_name: or-glm
-      litellm_params:
-          model: openai/z-ai/glm-4.5-air:free
-          api_base: https://openrouter.ai/api/v1
-          api_key: YOUR_OPENROUTER_API_KEY
-
-litellm_settings:
-    drop_params: true
-```
-
-**使用方法：**
-
-```bash
-# 启动 LiteLLM 网关
-litellm -c config/llm.yml --port 53000
-
-# 或使用 run_services.py（自动启动 LiteLLM）
 python bin/run_services.py
 ```
 
-然后配置 `.env`：
+然后访问 `http://localhost:55555`。
 
-```bash
-ARXIV_SANITY_LLM_BASE_URL=http://localhost:53000
-ARXIV_SANITY_LLM_API_KEY=no-key
-ARXIV_SANITY_LLM_NAME=or-mimo  # 使用 llm.yml 中的别名
+## 🧰 运行说明
+
+- 推荐全栈启动：`python bin/run_services.py`
+- 全栈 + daemon：`python bin/run_services.py --with-daemon`
+- 仅 Web：`npm run build:static && python serve.py`
+- Gunicorn：`bash bin/up.sh`
+- 仅 Huey worker：`python bin/huey_consumer.py tasks.huey -w 4 -k thread`
+
+默认情况下，`bin/run_services.py` 会本地启动 `opencode serve`。只有在你明确要连接外部 OpenCode 服务时，才需要把 `ARXIV_SANITY_OPENCODE_MANAGED=false`。
+
+## 🤖 AI 总结
+
+总结主链路：
+
+1. 获取 HTML/PDF 内容
+2. 转换为 Markdown（`html` 或 `mineru`）
+3. 通过 OpenCode 发送文本生成请求
+4. 以 canonical model id 为 key 写入缓存
+5. 对前端/API 保留 `summary_meta.llm_model`、`resolved_model`、usage 等字段
+
+`GET /api/llm_models` 现在来自 OpenCode `/config/providers`，但仍返回兼容形态：
+
+```json
+{ "models": [{ "id": "openai/gpt-5.4" }], "default": "openai/gpt-5.4" }
 ```
 
-如果你直接使用 `config/llm_template.yml` 而不改路由，也请把 `ARXIV_SANITY_EXTRACT_MODEL_NAME` 改成模板里已有的模型别名，或者自行补一条 `qwen3.5-plus` 路由。
+## 📚 API 重点
 
-**关于 `gpt-5.4` / `gpt-5.5` / `gpt-6` 这类版本化 GPT 模型的说明：**
+- `GET /health`：非严格健康检查
+- `GET /ready`：严格就绪检查（包含 OpenCode 与必需模型校验）
+- `GET /api/llm_models`：OpenCode 可用模型列表
+- `POST /api/get_paper_summary`：只读缓存摘要
+- `POST /api/trigger_paper_summary`：触发异步摘要生成
+- `POST /api/summary_status`：摘要状态
+- `POST /api/uploaded_papers/extract_info`：通过 OpenCode 提取上传元信息
 
-- `tools/paper_summarizer.py` 会优先对这类模型使用 OpenAI Responses API。
-- 如果模型是通过 `config/llm.yml` 配到 LiteLLM 的别名，代码会优先读取该别名对应的 `api_base` / `api_key` / `extra_body`，直接访问上游 Responses API。
-- 这样做是为了绕过部分 OpenAI-compatible 网关对 `/responses` SSE 返回的不完整兼容；普通 `/chat/completions` 仍然可以继续走 LiteLLM。
-- 如果 `api_key` 在 `llm.yml` 里写成 `os.environ/XXX`，那么运行摘要命令的进程里必须存在对应环境变量，否则无法直连上游。
-- 当上述环境变量缺失时，程序会记录 warning，并退回本地网关路径；如果本地网关对 `/responses` 兼容不好，问题也会重新出现。
+## 说明
 
-**关于上传论文元信息提取（Extract Info）的说明：**
-
-- 代码默认 `ARXIV_SANITY_EXTRACT_MODEL_NAME=qwen3.5-plus`
-- 如果 `ARXIV_SANITY_EXTRACT_BASE_URL` / `ARXIV_SANITY_EXTRACT_API_KEY` 为空，它会复用主 LLM 的 `base_url` / `api_key`
-- 这意味着你的主 LLM 网关必须能识别 `qwen3.5-plus`，否则请把 `ARXIV_SANITY_EXTRACT_MODEL_NAME` 显式改成可用模型
-
----
-
-### 4. 配置 CLI 工具
-
-项目提供了配置管理 CLI 工具：
-
-```bash
-# 显示当前配置
-python -m config.cli show
-
-# JSON 格式输出
-python -m config.cli show --json
-
-# 验证配置
-python -m config.cli validate
-
-# 生成环境变量模板
-python -m config.cli env
-```
-
-#### 在代码中使用配置
-
-```python
-from config import settings
-
-# 访问配置
-print(settings.data_dir)
-print(settings.llm.base_url)
-print(settings.llm.api_key)
-print(settings.mineru.enabled)
-print(settings.email.smtp_server)
-```
-
-| 变量                                    | 默认值  | 说明                                   |
-| --------------------------------------- | ------- | -------------------------------------- |
-| `ARXIV_SANITY_MINERU_ENABLED`           | `false` | 启用/禁用 MinerU                       |
-| `ARXIV_SANITY_MINERU_BACKEND`           | `api`   | `api`、`pipeline` 或 `vlm-http-client` |
-| `ARXIV_SANITY_MINERU_DEVICE`            | `cuda`  | pipeline 后端设备                      |
-| `ARXIV_SANITY_MINERU_MAX_WORKERS`       | `2`     | 最大并发 minerU 进程数                 |
-| `ARXIV_SANITY_MINERU_MAX_VRAM`          | `4`     | 每进程最大显存（GB）                   |
-| `ARXIV_SANITY_MINERU_API_POLL_INTERVAL` | `5`     | API 轮询间隔（秒）                     |
-| `ARXIV_SANITY_MINERU_API_TIMEOUT`       | `900`   | API 任务超时（秒）                     |
-
-#### 锁与并发
-
-| 变量                                  | 默认值 | 说明                                               |
-| ------------------------------------- | ------ | -------------------------------------------------- |
-| `ARXIV_SANITY_SUMMARY_LOCK_STALE_SEC` | `3600` | 总结缓存锁“过期清理”阈值（异常退出后建议保留默认） |
-| `ARXIV_SANITY_MINERU_LOCK_STALE_SEC`  | `3600` | MinerU 解析 / GPU-slot 锁过期清理阈值              |
-
-#### 嵌入
-
-| 变量                             | 默认值  | 说明                  |
-| -------------------------------- | ------- | --------------------- |
-| `ARXIV_SANITY_EMBED_USE_LLM_API` | `false` | 使用 LLM API 生成嵌入 |
-
-#### 守护进程/调度器
-
-| 变量                                        | 默认值 | 说明                     |
-| ------------------------------------------- | ------ | ------------------------ |
-| `ARXIV_SANITY_DAEMON_FETCH_NUM`             | `2000` | 每次获取的论文数         |
-| `ARXIV_SANITY_DAEMON_FETCH_MAX`             | `1000` | 每次 API 查询最大结果数  |
-| `ARXIV_SANITY_DAEMON_SUMMARY_NUM`           | `250`  | 每次总结的论文数         |
-| `ARXIV_SANITY_DAEMON_SUMMARY_WORKERS`       | `2`    | 总结工作线程数           |
-| `ARXIV_SANITY_DAEMON_ENABLE_SUMMARY`        | `1`    | 守护进程中启用总结生成   |
-| `ARXIV_SANITY_DAEMON_ENABLE_EMBEDDINGS`     | `1`    | 守护进程中启用嵌入       |
-| `ARXIV_SANITY_DAEMON_ENABLE_PRIORITY_QUEUE` | `1`    | 启用总结优先队列         |
-| `ARXIV_SANITY_DAEMON_PRIORITY_DAYS`         | `2`    | 优先窗口（天）           |
-| `ARXIV_SANITY_DAEMON_PRIORITY_LIMIT`        | `200`  | 最大优先论文数           |
-| `ARXIV_SANITY_DAEMON_ENABLE_GIT_BACKUP`     | `1`    | 启用 dict.db 的 git 备份 |
-
-#### 网络 / 代理
-
-- `http_proxy`、`https_proxy`：被 [tools/arxiv_daemon.py](tools/arxiv_daemon.py) 等出网请求使用。
-
-#### Gunicorn（up.sh）
-
-| 变量                               | 默认值 | 说明                 |
-| ---------------------------------- | ------ | -------------------- |
-| `ARXIV_SANITY_GUNICORN_WORKERS`    | `2`    | 工作进程数           |
-| `ARXIV_SANITY_GUNICORN_THREADS`    | `2`    | 每工作进程线程数     |
-| `ARXIV_SANITY_GUNICORN_PRELOAD`    | `1`    | 在主进程中预加载应用 |
-| `ARXIV_SANITY_GUNICORN_EXTRA_ARGS` | ``     | 额外的 gunicorn 参数 |
-
-`bin/up.sh` 仍兼容旧的 `GUNICORN_WORKERS`、`GUNICORN_THREADS` 和 `GUNICORN_EXTRA_ARGS`，但新部署建议统一使用 `ARXIV_SANITY_GUNICORN_*`。
-
----
-
-### 5. 启动参数
-
-#### run_services.py
-
-```bash
-# 一键启动（推荐）
-python bin/run_services.py
-
-# Web 服务器选项
-python bin/run_services.py --web gunicorn    # 使用 gunicorn
-python bin/run_services.py --web none        # 不启动 Web 服务器
-
-# 跳过重型服务
-python bin/run_services.py --no-embed        # 跳过 Ollama 嵌入
-python bin/run_services.py --no-mineru       # 跳过 MinerU
-python bin/run_services.py --no-litellm      # 跳过 LiteLLM 网关
-
-# 总结来源
-python bin/run_services.py --summary-source html
-python bin/run_services.py --summary-source mineru
-
-# 包含调度器守护进程
-python bin/run_services.py --with-daemon
-
-# 一次性：仅获取和计算
-python bin/run_services.py --fetch-compute         # 默认 10000 篇论文
-python bin/run_services.py --fetch-compute 1000    # 自定义数量
-```
+- 文本生成需要 [OpenCode](https://opencode.ai)（`opencode serve`）作为 LLM 后端。详见[配置指南](#配置指南)。
+- 默认启动器（`python bin/run_services.py`）在 `ARXIV_SANITY_OPENCODE_MANAGED=true`（默认）时会自动在本地启动 OpenCode。
+- `config.cli` 与 `/ready` 都已切换到 OpenCode 语义。
+- 代码默认值请查看 `docs/DEFAULTS.md`。
 
 #### arxiv_daemon
 
@@ -941,22 +480,19 @@ python -m tools batch_paper_summarizer -m "gpt-4o-mini"    # 指定模型
 4. **质量控制**：中文文本比例验证和内容过滤
 5. **智能缓存**：智能缓存机制，自动质量检查和存储优化
 
-### LLM 服务商示例
+### OpenCode 模型示例
 
-#### OpenRouter（免费模型）
+#### 默认总结模型
 
 ```python
-LLM_BASE_URL = "https://openrouter.ai/api/v1"
-LLM_API_KEY = "sk-or-v1-..."
-LLM_NAME = "deepseek/deepseek-chat-v3.1:free"
+ARXIV_SANITY_OPENCODE_BASE_URL = "http://127.0.0.1:53000"
+ARXIV_SANITY_LLM_NAME = "openai/gpt-5.4"
 ```
 
-#### OpenAI
+#### 上传元信息提取模型
 
 ```python
-LLM_BASE_URL = "https://api.openai.com/v1"
-LLM_API_KEY = "sk-..."
-LLM_NAME = "gpt-4o-mini"
+ARXIV_SANITY_EXTRACT_MODEL_NAME = "openai/gpt-5.4-mini"
 ```
 
 ### 总结页面功能
@@ -1300,10 +836,17 @@ arXiv API → arxiv_daemon.py → papers.db/dict.db
 
 ### Unreleased
 
-- 文档：新增 `docs/`（运维/安全/开发）并在 README 中链接
-- API 文档：补充 `/api/task_status/<task_id>` owner-only 字段说明（包括 `stage`）
-- API 文档：修正上传相关端点补齐 `/api` 前缀，并补充 `/api/uploaded_papers/process`
-- 可观测性：补充可选 Sentry（`ARXIV_SANITY_SENTRY_*`）与 Prometheus metrics（`/metrics`）说明
+### v3.3 - OpenCode 迁移与 LiteLLM 废弃
+
+- 🔄 **LiteLLM → OpenCode**：用 [OpenCode](https://opencode.ai) 替换 LiteLLM 作为统一 LLM 后端。所有文本生成和结构化抽取现在通过 OpenCode HTTP 服务器（`opencode serve`）完成，默认由启动器管理（`ARXIV_SANITY_OPENCODE_MANAGED=true`）
+- 🏗️ **模型别名系统**：新增 `config/model_aliases.py`，将短别名（如 `gpt-5.4`）映射到 OpenCode `provider/model` 规范 ID，并支持自动回退链
+- 🔧 **新增 OpenCode 配置**：`ARXIV_SANITY_OPENCODE_*` 环境变量前缀，覆盖服务地址、端口、认证、超时 — 详见[配置指南](#配置指南)
+- 🩺 **健康/就绪检查**：`/ready` 现在通过 OpenCode `/global/health` 和 `/config/providers` 验证服务健康与必需模型可用性
+- 📄 **文档**：新增 `docs/` 指南（运维/安全/开发）并在 README 中链接
+- 📡 **API 文档**：补充 `/api/task_status/<task_id>` owner-only 字段说明（包括 `stage`）
+- 📡 **API 文档**：修正上传相关端点补齐 `/api` 前缀，并补充 `/api/uploaded_papers/process`
+- 📊 **可观测性**：补充可选 Sentry（`ARXIV_SANITY_SENTRY_*`）与 Prometheus metrics（`/metrics`）说明
+- 🗑️ **已移除**：`config/llm.yml`、`config/llm_template.yml` 及所有 LiteLLM 运行时依赖
 
 ### v3.2 - 上传功能、测试增强与安全加固
 
@@ -1339,7 +882,6 @@ arXiv API → arxiv_daemon.py → papers.db/dict.db
 - 🤖 **模型选择**：总结页面支持多 LLM 模型切换和自动重试
 - 🔍 **增强搜索**：键盘快捷键（Ctrl+K）、高级过滤器、无障碍改进
 - 📊 **统计图表**：每日论文数量柱状图可视化
-- 📦 **LiteLLM 模板**：`llm_template.yml` 含 OpenRouter 免费模型配置
 
 <details>
 <summary>📜 历史版本（v1.0 - v2.4）</summary>

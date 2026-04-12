@@ -22,7 +22,6 @@ import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-import openai
 from loguru import logger
 
 try:
@@ -30,17 +29,41 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional in lightweight test envs
     requests = None
 
+try:
+    from PIL import Image, ImageFile
+    from PIL import features as pil_features
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None
+except ModuleNotFoundError:  # pragma: no cover - optional in lightweight test envs
+    Image = None
+    ImageFile = None
+    pil_features = None
+
+try:
+    import pyvips
+except Exception:  # pragma: no cover - optional native dependency
+    pyvips = None
+
 # Ensure repository root is importable when executing this file directly.
 # e.g. `python tools/paper_summarizer.py` would otherwise miss sibling packages like `config/`.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-# Suppress verbose logs from openai/httpx, only show warnings and errors
-logging.getLogger("openai").setLevel(logging.WARNING)
+# Suppress verbose logs from HTTP clients, only show warnings and errors
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from config import settings
+from config.model_aliases import build_model_candidate_chain, display_model_id
+
+
+def generate_opencode_text(**kwargs):
+    """Import lazily to avoid backend<->paper_summarizer cycles in tooling/tests."""
+
+    from backend.services.opencode_service import generate_text
+
+    return generate_text(**kwargs)
 
 
 def _data_dir() -> str:
@@ -49,14 +72,6 @@ def _data_dir() -> str:
 
 def _summary_dir() -> str:
     return str(settings.summary_dir)
-
-
-def _llm_base_url() -> str:
-    return str(settings.llm.base_url or "")
-
-
-def _llm_api_key() -> str:
-    return str(settings.llm.api_key or "")
 
 
 def _llm_name() -> str:
@@ -81,6 +96,32 @@ def _summary_markdown_source() -> str:
 
 def _summary_html_sources() -> str:
     return str(settings.summary.html_sources or "")
+
+
+def _summary_image_compression_enabled() -> bool:
+    return bool(getattr(settings.summary, "image_compression_enabled", True))
+
+
+def _summary_image_max_long_edge() -> int:
+    return int(getattr(settings.summary, "image_max_long_edge", 0) or 0)
+
+
+def _summary_image_webp_quality() -> int:
+    quality = int(getattr(settings.summary, "image_webp_quality", 86) or 86)
+    return max(1, min(100, quality))
+
+
+def _summary_image_min_savings_bytes() -> int:
+    return int(getattr(settings.summary, "image_min_savings_bytes", 8192) or 0)
+
+
+def _summary_image_skip_below_bytes() -> int:
+    return int(getattr(settings.summary, "image_skip_below_bytes", 32768) or 0)
+
+
+def _looks_like_old_style_raw_pid(pid: str | None) -> bool:
+    value = str(pid or "").strip()
+    return bool(value and "/" not in value and "." not in value and re.fullmatch(r"\d{7}", value))
 
 
 def _mineru_enabled() -> bool:
@@ -125,6 +166,8 @@ def _main_content_min_ratio() -> float:
 
 _RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
 _GPT_VERSIONED_MODEL_RE = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?=$|[._-])", re.IGNORECASE)
+_IMAGE_COMPRESSION_MANIFEST = ".image_compression_manifest.json"
+_IMAGE_COMPRESSION_MANIFEST_VERSION = 1
 
 
 def _require_requests():
@@ -195,15 +238,15 @@ class PaperSummarizer:
     # Note: This only works within a single process. For multi-process safety,
     # consider using file-based locks or distributed locks
     _mineru_lock = threading.Lock()
-    _provider_preflight_cache_lock = threading.Lock()
-    _provider_preflight_cache_ttl_s = 60.0
-    _provider_preflight_cache: dict[tuple[str, str, str], tuple[float, bool]] = {}
 
     def __init__(self):
         self.data_dir = Path(_data_dir())
         self.pdfs_dir = self.data_dir / "pdfs"
         self.mineru_dir = self.data_dir / "mineru"
         self.html_md_dir = self.data_dir / "html_md"
+        self._last_download_error_detail: str | None = None
+        self._compression_manifest_lock = threading.Lock()
+        self._compression_manifest_cache: dict[Path, dict[str, dict]] = {}
 
         # Ensure directories exist
         self.pdfs_dir.mkdir(parents=True, exist_ok=True)
@@ -211,8 +254,450 @@ class PaperSummarizer:
         # Cache HTML->Markdown outputs separately from minerU results
         self.html_md_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize OpenAI client
-        self.client = openai.OpenAI(api_key=_llm_api_key(), base_url=_llm_base_url())
+        # Text generation is delegated to backend.services.opencode_service.
+
+    @staticmethod
+    def _webp_supported() -> bool:
+        if pil_features is None:
+            return False
+        try:
+            return bool(pil_features.check("webp"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _pyvips_available() -> bool:
+        return pyvips is not None
+
+    def image_compression_backend_name(self) -> str:
+        if self._pyvips_available():
+            return "pyvips"
+        if Image is not None:
+            return "pillow"
+        return "unavailable"
+
+    @staticmethod
+    def _image_has_alpha(image) -> bool:
+        if not image:
+            return False
+        if image.mode in ("RGBA", "LA"):
+            try:
+                alpha = image.getchannel("A")
+                min_alpha, _ = alpha.getextrema()
+                return int(min_alpha) < 255
+            except Exception:
+                return True
+        if image.mode == "P" and "transparency" in getattr(image, "info", {}):
+            return True
+        return False
+
+    @staticmethod
+    def _resize_image_for_storage(image):
+        max_long_edge = _summary_image_max_long_edge()
+        if not image or max_long_edge <= 0:
+            return image.copy() if image else image, False
+
+        width, height = image.size
+        longest_edge = max(width, height)
+        if longest_edge <= max_long_edge:
+            return image.copy(), False
+
+        scale = max_long_edge / float(longest_edge)
+        new_size = (
+            max(1, int(round(width * scale))),
+            max(1, int(round(height * scale))),
+        )
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        return image.resize(new_size, resampling), True
+
+    @staticmethod
+    def _compression_manifest_path(images_dir: Path) -> Path:
+        return images_dir / _IMAGE_COMPRESSION_MANIFEST
+
+    def _load_compression_manifest(self, images_dir: Path) -> dict[str, dict]:
+        with self._compression_manifest_lock:
+            cached = self._compression_manifest_cache.get(images_dir)
+            if cached is not None:
+                return dict(cached)
+
+        manifest_path = self._compression_manifest_path(images_dir)
+        manifest_data: dict[str, dict] = {}
+        try:
+            if manifest_path.exists():
+                raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    isinstance(raw, dict)
+                    and int(raw.get("version", 0) or 0) == _IMAGE_COMPRESSION_MANIFEST_VERSION
+                    and isinstance(raw.get("files"), dict)
+                ):
+                    manifest_data = {str(k): v for k, v in raw["files"].items() if isinstance(v, dict)}
+        except Exception as e:
+            logger.trace(f"Failed to read image compression manifest {manifest_path}: {e}")
+            manifest_data = {}
+
+        with self._compression_manifest_lock:
+            self._compression_manifest_cache[images_dir] = dict(manifest_data)
+        return dict(manifest_data)
+
+    def _persist_compression_manifest(self, images_dir: Path, manifest: dict[str, dict]) -> None:
+        cleaned = {}
+        for filename, entry in manifest.items():
+            if not isinstance(entry, dict):
+                continue
+            if not (images_dir / filename).exists():
+                continue
+            cleaned[str(filename)] = entry
+
+        manifest_path = self._compression_manifest_path(images_dir)
+        payload = {
+            "version": _IMAGE_COMPRESSION_MANIFEST_VERSION,
+            "updated_at": time.time(),
+            "files": cleaned,
+        }
+        try:
+            if cleaned:
+                atomic_write_json(manifest_path, payload)
+            else:
+                manifest_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.trace(f"Failed to write image compression manifest {manifest_path}: {e}")
+        finally:
+            with self._compression_manifest_lock:
+                self._compression_manifest_cache[images_dir] = dict(cleaned)
+
+    @staticmethod
+    def _manifest_entry_matches(entry: dict | None, *, size: int, mtime_ns: int) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        try:
+            return (
+                int(entry.get("version", 0) or 0) == _IMAGE_COMPRESSION_MANIFEST_VERSION
+                and int(entry.get("size", -1)) == int(size)
+                and int(entry.get("mtime_ns", -1)) == int(mtime_ns)
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _record_manifest_entry(
+        manifest: dict[str, dict],
+        image_path: Path,
+        *,
+        size: int,
+        mtime_ns: int,
+        status: str,
+    ) -> None:
+        manifest[image_path.name] = {
+            "version": _IMAGE_COMPRESSION_MANIFEST_VERSION,
+            "size": int(size),
+            "mtime_ns": int(mtime_ns),
+            "status": str(status),
+            "updated_at": time.time(),
+        }
+
+    def _should_skip_image_compression(
+        self,
+        image_path: Path,
+        *,
+        size: int,
+        mtime_ns: int,
+        manifest: dict[str, dict],
+    ) -> str | None:
+        suffix = image_path.suffix.lower()
+        if suffix == ".svg":
+            return "skip_svg"
+        if suffix == ".webp":
+            return "skip_webp"
+        min_bytes = _summary_image_skip_below_bytes()
+        if min_bytes > 0 and size < min_bytes:
+            return "skip_small"
+        if self._manifest_entry_matches(manifest.get(image_path.name), size=size, mtime_ns=mtime_ns):
+            return "skip_processed"
+        return None
+
+    @staticmethod
+    def _encode_image_candidate(image, target_suffix: str, *, lossless: bool = False) -> bytes | None:
+        if Image is None or image is None:
+            return None
+
+        suffix = (target_suffix or "").lower()
+        try:
+            with io.BytesIO() as buffer:
+                if suffix == ".webp":
+                    if PaperSummarizer._image_has_alpha(image):
+                        save_image = image.convert("RGBA")
+                    elif image.mode in ("RGB", "L"):
+                        save_image = image.copy()
+                    else:
+                        save_image = image.convert("RGB")
+                    save_kwargs = {"format": "WEBP", "method": 6}
+                    if lossless:
+                        save_kwargs["lossless"] = True
+                        if PaperSummarizer._image_has_alpha(save_image):
+                            save_kwargs["exact"] = True
+                    else:
+                        save_kwargs["quality"] = _summary_image_webp_quality()
+                    save_image.save(buffer, **save_kwargs)
+                elif suffix in (".jpg", ".jpeg"):
+                    save_image = image.convert("RGB")
+                    save_image.save(
+                        buffer,
+                        format="JPEG",
+                        quality=max(_summary_image_webp_quality(), 88),
+                        optimize=True,
+                        progressive=True,
+                        subsampling=0,
+                    )
+                elif suffix == ".png":
+                    if PaperSummarizer._image_has_alpha(image):
+                        save_image = image.convert("RGBA")
+                    elif image.mode in ("RGB", "L"):
+                        save_image = image.copy()
+                    else:
+                        save_image = image.convert("RGB")
+                    save_image.save(buffer, format="PNG", optimize=True, compress_level=9)
+                else:
+                    return None
+                return buffer.getvalue()
+        except Exception as e:
+            logger.trace(f"Failed to encode image candidate {target_suffix}: {e}")
+            return None
+
+    def _build_image_candidates_pillow(self, image_path: Path) -> tuple[dict[str, bytes], bool]:
+        if Image is None:
+            return {}, False
+
+        try:
+            with Image.open(image_path) as img:
+                if getattr(img, "is_animated", False):
+                    return {}, False
+
+                source_suffix = image_path.suffix.lower()
+                working_image, resized = self._resize_image_for_storage(img)
+                try:
+                    candidates: dict[str, bytes] = {}
+                    has_alpha = self._image_has_alpha(working_image)
+                    if source_suffix in {".png", ".bmp", ".tif", ".tiff", ".gif"} or has_alpha:
+                        png_bytes = self._encode_image_candidate(working_image, ".png")
+                        if png_bytes:
+                            candidates[".png"] = png_bytes
+                        if self._webp_supported():
+                            webp_bytes = self._encode_image_candidate(working_image, ".webp", lossless=True)
+                            if webp_bytes:
+                                candidates[".webp"] = webp_bytes
+                    else:
+                        jpg_bytes = self._encode_image_candidate(working_image, ".jpg")
+                        if jpg_bytes:
+                            candidates[".jpg"] = jpg_bytes
+                        if self._webp_supported():
+                            webp_bytes = self._encode_image_candidate(working_image, ".webp", lossless=False)
+                            if webp_bytes:
+                                candidates[".webp"] = webp_bytes
+                    return candidates, resized
+                finally:
+                    try:
+                        working_image.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.trace(f"Failed to open image for Pillow compression {image_path}: {e}")
+            return {}, False
+
+    def _build_image_candidates_vips(self, image_path: Path) -> tuple[dict[str, bytes], bool]:
+        if not self._pyvips_available():
+            return {}, False
+        if image_path.suffix.lower() == ".gif":
+            return {}, False
+
+        try:
+            image = pyvips.Image.new_from_file(str(image_path), access="sequential")
+            source_suffix = image_path.suffix.lower()
+            resized = False
+            max_long_edge = _summary_image_max_long_edge()
+            width = int(image.width)
+            height = int(image.height)
+            if max_long_edge > 0 and max(width, height) > max_long_edge:
+                scale = max_long_edge / float(max(width, height))
+                image = image.resize(scale, kernel="lanczos3")
+                resized = True
+
+            try:
+                has_alpha = bool(image.hasalpha())
+            except Exception:
+                has_alpha = image.bands in (2, 4)
+
+            candidates: dict[str, bytes] = {}
+            if source_suffix in {".png", ".bmp", ".tif", ".tiff", ".gif"} or has_alpha:
+                try:
+                    candidates[".png"] = image.write_to_buffer(".png", compression=9, strip=True)
+                except Exception as e:
+                    logger.trace(f"pyvips PNG encode failed for {image_path}: {e}")
+                try:
+                    candidates[".webp"] = image.write_to_buffer(".webp", lossless=True, effort=6, strip=True)
+                except Exception as e:
+                    logger.trace(f"pyvips lossless WebP encode failed for {image_path}: {e}")
+            else:
+                try:
+                    candidates[".jpg"] = image.write_to_buffer(
+                        ".jpg",
+                        Q=max(_summary_image_webp_quality(), 88),
+                        optimize_coding=True,
+                        strip=True,
+                        interlace=True,
+                    )
+                except Exception as e:
+                    logger.trace(f"pyvips JPEG encode failed for {image_path}: {e}")
+                try:
+                    candidates[".webp"] = image.write_to_buffer(
+                        ".webp",
+                        Q=_summary_image_webp_quality(),
+                        effort=6,
+                        strip=True,
+                    )
+                except Exception as e:
+                    logger.trace(f"pyvips lossy WebP encode failed for {image_path}: {e}")
+            return candidates, resized
+        except Exception as e:
+            logger.trace(f"Failed to open image for pyvips compression {image_path}: {e}")
+            return {}, False
+
+    def _build_image_candidates(self, image_path: Path) -> tuple[dict[str, bytes], bool, str]:
+        if self._pyvips_available():
+            candidates, resized = self._build_image_candidates_vips(image_path)
+            if candidates:
+                return candidates, resized, "pyvips"
+        candidates, resized = self._build_image_candidates_pillow(image_path)
+        if candidates:
+            return candidates, resized, "pillow"
+        return {}, False, ""
+
+    def _compress_cached_image(
+        self,
+        image_path: Path,
+        *,
+        manifest_state: dict[str, dict] | None = None,
+        persist_manifest: bool = True,
+    ) -> Path:
+        if not _summary_image_compression_enabled():
+            return image_path
+        if not image_path.exists() or not image_path.is_file():
+            return image_path
+
+        images_dir = image_path.parent
+        manifest = manifest_state if manifest_state is not None else self._load_compression_manifest(images_dir)
+
+        try:
+            original_stat = image_path.stat()
+        except OSError:
+            return image_path
+
+        original_size = int(original_stat.st_size)
+        original_mtime_ns = int(
+            getattr(
+                original_stat,
+                "st_mtime_ns",
+                int(original_stat.st_mtime * 1_000_000_000),
+            )
+        )
+        skip_reason = self._should_skip_image_compression(
+            image_path,
+            size=original_size,
+            mtime_ns=original_mtime_ns,
+            manifest=manifest,
+        )
+        if skip_reason:
+            self._record_manifest_entry(
+                manifest,
+                image_path,
+                size=original_size,
+                mtime_ns=original_mtime_ns,
+                status=skip_reason,
+            )
+            if persist_manifest and manifest_state is None:
+                self._persist_compression_manifest(images_dir, manifest)
+            return image_path
+
+        candidates, resized, backend = self._build_image_candidates(image_path)
+        if not candidates:
+            self._record_manifest_entry(
+                manifest,
+                image_path,
+                size=original_size,
+                mtime_ns=original_mtime_ns,
+                status="skip_unhandled",
+            )
+            if persist_manifest and manifest_state is None:
+                self._persist_compression_manifest(images_dir, manifest)
+            return image_path
+
+        best_suffix, best_bytes = min(candidates.items(), key=lambda item: len(item[1]))
+        best_size = len(best_bytes)
+        savings = original_size - best_size
+        min_savings = _summary_image_min_savings_bytes()
+        if savings <= 0 or (not resized and savings < min_savings):
+            self._record_manifest_entry(
+                manifest,
+                image_path,
+                size=original_size,
+                mtime_ns=original_mtime_ns,
+                status="skip_no_gain",
+            )
+            if persist_manifest and manifest_state is None:
+                self._persist_compression_manifest(images_dir, manifest)
+            return image_path
+
+        target_path = image_path.with_suffix(best_suffix)
+        temp_fd, temp_path = tempfile.mkstemp(dir=image_path.parent, suffix=target_path.suffix)
+        try:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(best_bytes)
+            os.replace(temp_path, target_path)
+            if target_path != image_path:
+                image_path.unlink(missing_ok=True)
+
+            try:
+                target_stat = target_path.stat()
+                target_mtime_ns = int(
+                    getattr(
+                        target_stat,
+                        "st_mtime_ns",
+                        int(target_stat.st_mtime * 1_000_000_000),
+                    )
+                )
+            except OSError:
+                target_mtime_ns = original_mtime_ns
+
+            manifest.pop(image_path.name, None)
+            self._record_manifest_entry(
+                manifest,
+                target_path,
+                size=best_size,
+                mtime_ns=target_mtime_ns,
+                status=f"compressed_{backend or 'unknown'}",
+            )
+            if persist_manifest and manifest_state is None:
+                self._persist_compression_manifest(images_dir, manifest)
+            logger.trace(
+                f"Compressed image: {image_path.name} -> {target_path.name} "
+                f"({original_size} -> {best_size} bytes, backend={backend or 'unknown'})"
+            )
+            return target_path
+        except Exception as e:
+            logger.trace(f"Failed to persist compressed image {image_path}: {e}")
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            self._record_manifest_entry(
+                manifest,
+                image_path,
+                size=original_size,
+                mtime_ns=original_mtime_ns,
+                status="error_persist",
+            )
+            if persist_manifest and manifest_state is None:
+                self._persist_compression_manifest(images_dir, manifest)
+            return image_path
 
     @staticmethod
     def _should_fallback_llm_error(exc: Exception) -> bool:
@@ -302,26 +787,6 @@ class PaperSummarizer:
         return any(m in msg for m in markers)
 
     @staticmethod
-    def _should_fallback_to_chat_completions_for_responses_error(
-        exc: Exception,
-    ) -> bool:
-        """Detect proxies that expose chat completions but not the Responses API."""
-
-        msg = str(exc or "").lower()
-        markers = [
-            "/responses",
-            "responses api",
-            "not found",
-            "404",
-            "405",
-            "501",
-            "unsupported",
-            "unknown endpoint",
-            "no route",
-        ]
-        return any(marker in msg for marker in markers)
-
-    @staticmethod
     def _build_summary_result(content: str, meta: dict | None = None) -> dict:
         safe_meta = meta if isinstance(meta, dict) else {}
         return {"content": content, "meta": safe_meta}
@@ -381,550 +846,6 @@ class PaperSummarizer:
         return f"transient provider error from {host_display}"
 
     @staticmethod
-    def _describe_empty_llm_response(
-        response,
-        *,
-        response_api: str,
-        finish_reason: str | None,
-        usage,
-    ) -> str:
-        parts = [f"api={response_api}"]
-        if finish_reason:
-            key = "status" if response_api == "responses" else "finish_reason"
-            parts.append(f"{key}={finish_reason}")
-
-        usage_total = None
-        if isinstance(usage, dict):
-            usage_total = usage.get("total_tokens")
-        else:
-            try:
-                usage_total = getattr(usage, "total_tokens", None)
-            except Exception:
-                usage_total = None
-        if usage_total is not None:
-            parts.append(f"usage_total={usage_total}")
-
-        if response_api == "responses":
-            output_types: list[str] = []
-            outputs = None
-            response_dump = None
-            try:
-                response_dump = response.model_dump()  # type: ignore[attr-defined]
-            except Exception:
-                response_dump = None
-            try:
-                outputs = getattr(response, "output", None)
-            except Exception:
-                outputs = None
-            if outputs is None and isinstance(response_dump, dict):
-                outputs = response_dump.get("output")
-            if isinstance(outputs, list):
-                for item in outputs[:4]:
-                    if not isinstance(item, dict):
-                        item_dump = None
-                        try:
-                            item_dump = item.model_dump()  # type: ignore[attr-defined]
-                        except Exception:
-                            item_dump = None
-                        item = item_dump if isinstance(item_dump, dict) else None
-                    if not isinstance(item, dict):
-                        continue
-                    item_type = str(item.get("type") or "?")
-                    content_types: list[str] = []
-                    contents = item.get("content") or []
-                    if isinstance(contents, list):
-                        for part in contents[:4]:
-                            if not isinstance(part, dict):
-                                part_dump = None
-                                try:
-                                    part_dump = part.model_dump()  # type: ignore[attr-defined]
-                                except Exception:
-                                    part_dump = None
-                                part = part_dump if isinstance(part_dump, dict) else None
-                            if isinstance(part, dict):
-                                content_types.append(str(part.get("type") or "?"))
-                    if content_types:
-                        output_types.append(f"{item_type}({','.join(content_types)})")
-                    else:
-                        output_types.append(item_type)
-            if output_types:
-                parts.append(f"output_types={';'.join(output_types)}")
-            elif isinstance(response_dump, dict):
-                dump_keys = sorted(str(k) for k in response_dump.keys())
-                if dump_keys:
-                    parts.append(f"response_keys={','.join(dump_keys[:8])}")
-        else:
-            try:
-                choice_count = len(getattr(response, "choices", None) or [])
-            except Exception:
-                choice_count = None
-            if choice_count is not None:
-                parts.append(f"choices={choice_count}")
-
-        return " ".join(parts)
-
-    @staticmethod
-    def _extract_responses_completed_payload(raw_text: str | None) -> dict | None:
-        """Extract the final `response.completed` payload from an SSE-like text body."""
-
-        text = str(raw_text or "")
-        if not text.strip():
-            return None
-
-        event_name = None
-        data_lines: list[str] = []
-        completed_payload = None
-
-        def _flush_event() -> dict | None:
-            if event_name != "response.completed" or not data_lines:
-                return None
-            try:
-                payload = json.loads("\n".join(data_lines))
-            except Exception:
-                return None
-            if isinstance(payload, dict):
-                return payload
-            return None
-
-        for line in text.splitlines():
-            stripped = line.rstrip("\n")
-            if stripped.startswith("event:"):
-                maybe_payload = _flush_event()
-                if maybe_payload is not None:
-                    completed_payload = maybe_payload
-                event_name = stripped.split(":", 1)[1].strip()
-                data_lines = []
-                continue
-            if stripped.startswith("data:"):
-                data_lines.append(stripped.split(":", 1)[1].strip())
-                continue
-            if not stripped.strip() and event_name is not None:
-                maybe_payload = _flush_event()
-                if maybe_payload is not None:
-                    completed_payload = maybe_payload
-                event_name = None
-                data_lines = []
-
-        maybe_payload = _flush_event()
-        if maybe_payload is not None:
-            completed_payload = maybe_payload
-        return completed_payload
-
-    @classmethod
-    def _extract_responses_text_fields(cls, response) -> tuple[str | None, str | None, object | None]:
-        """Best-effort extraction for normal and proxy-wrapped Responses API outputs."""
-
-        if isinstance(response, str):
-            completed = cls._extract_responses_completed_payload(response)
-        else:
-            completed = None
-
-        response_dump = None
-        if response is not None and not isinstance(response, str):
-            try:
-                response_dump = response.model_dump()  # type: ignore[attr-defined]
-            except Exception:
-                response_dump = None
-        if not isinstance(response_dump, dict):
-            response_dump = None
-
-        output_text = None
-        status = None
-        usage = None
-
-        if response is not None and not isinstance(response, str):
-            try:
-                output_text = getattr(response, "output_text", None)
-            except Exception:
-                output_text = None
-            try:
-                status = getattr(response, "status", None)
-            except Exception:
-                status = None
-            try:
-                usage = getattr(response, "usage", None)
-            except Exception:
-                usage = None
-
-            if response_dump is not None:
-                if not output_text:
-                    maybe_output_text = response_dump.get("output_text")
-                    if isinstance(maybe_output_text, str) and maybe_output_text.strip():
-                        output_text = maybe_output_text.strip()
-                if not status:
-                    maybe_status = response_dump.get("status")
-                    if isinstance(maybe_status, str) and maybe_status.strip():
-                        status = maybe_status.strip()
-                if usage is None and response_dump.get("usage") is not None:
-                    usage = response_dump.get("usage")
-
-            if completed is None:
-                err = None
-                try:
-                    err = getattr(response, "error", None)
-                except Exception:
-                    err = None
-                raw_err = None
-                try:
-                    raw_err = getattr(err, "message", None) if err is not None else None
-                except Exception:
-                    raw_err = None
-                if raw_err is None and response_dump is not None:
-                    dump_error = response_dump.get("error")
-                    if isinstance(dump_error, dict):
-                        maybe_message = dump_error.get("message")
-                        if isinstance(maybe_message, str) and maybe_message.strip():
-                            raw_err = maybe_message
-                completed = cls._extract_responses_completed_payload(raw_err)
-
-        if completed and isinstance(completed, dict):
-            resp_obj = completed.get("response")
-            if isinstance(resp_obj, dict):
-                if not status:
-                    status = resp_obj.get("status")
-                if usage is None:
-                    usage = resp_obj.get("usage")
-                if not output_text:
-                    outputs = resp_obj.get("output") or []
-                    texts: list[str] = []
-                    if isinstance(outputs, list):
-                        for item in outputs:
-                            if not isinstance(item, dict):
-                                continue
-                            contents = item.get("content") or []
-                            if not isinstance(contents, list):
-                                continue
-                            for part in contents:
-                                if not isinstance(part, dict):
-                                    continue
-                                if str(part.get("type") or "") != "output_text":
-                                    continue
-                                text_part = part.get("text")
-                                if isinstance(text_part, str) and text_part:
-                                    texts.append(text_part)
-                    if texts:
-                        output_text = "\n".join(texts).strip()
-
-        return output_text, status, usage
-
-    @staticmethod
-    def _should_use_responses_api(model_name: str | None) -> bool:
-        """Use the Responses API for GPT-5.4+ style versioned OpenAI models."""
-
-        model_name = (model_name or "").strip()
-        if not model_name:
-            return False
-
-        match = _GPT_VERSIONED_MODEL_RE.match(model_name)
-        if not match:
-            return False
-
-        try:
-            major = int(match.group("major"))
-        except (TypeError, ValueError):
-            return False
-
-        minor_raw = match.group("minor")
-        try:
-            minor = int(minor_raw) if minor_raw is not None else None
-        except (TypeError, ValueError):
-            minor = None
-
-        if major > 5:
-            return True
-        if major < 5:
-            return False
-        return minor is not None and minor >= 4
-
-    @staticmethod
-    def _resolve_api_key_value(raw_value: str | None) -> str:
-        value = str(raw_value or "").strip()
-        if not value:
-            return ""
-        if value.startswith("os.environ/"):
-            env_name = value.split("/", 1)[1].strip()
-            resolved = str(os.environ.get(env_name, "") or "").strip()
-            if not resolved:
-                logger.warning(f"Environment variable '{env_name}' is missing for direct Responses route")
-            return resolved
-        return value
-
-    @staticmethod
-    def _detect_route_provider(api_base: str | None) -> str:
-        try:
-            host = (urlparse(str(api_base or "")).netloc or "").lower()
-        except Exception:
-            host = ""
-        if host.endswith("right.codes") or "right.codes" in host:
-            return "rightcode"
-        return ""
-
-    @staticmethod
-    def _candidate_route_prefixes(api_base: str | None) -> list[str]:
-        try:
-            parsed = urlparse(str(api_base or ""))
-            parts = [part for part in parsed.path.split("/") if part]
-        except Exception:
-            parts = []
-        if not parts:
-            return []
-        if re.fullmatch(r"v\d+(?:\.\d+)?", parts[-1], re.IGNORECASE):
-            parts = parts[:-1]
-        if not parts:
-            return []
-
-        prefixes: list[str] = []
-        full_prefix = "/" + "/".join(parts)
-        top_prefix = "/" + parts[0]
-        for prefix in (full_prefix, top_prefix):
-            if prefix and prefix not in prefixes:
-                prefixes.append(prefix)
-        return prefixes
-
-    @staticmethod
-    def _build_rightcode_account_summary_url(api_base: str | None) -> str:
-        try:
-            parsed = urlparse(str(api_base or "").strip())
-        except Exception:
-            return ""
-        if not parsed.scheme or not parsed.netloc:
-            return ""
-        return f"{parsed.scheme}://{parsed.netloc}/account/summary"
-
-    @staticmethod
-    def _load_remote_json(url: str, *, headers: dict[str, str], timeout_s: float) -> dict | None:
-        request_headers = {
-            "Accept": "application/json, text/plain, */*",
-            "User-Agent": "curl/8.5.0",
-        }
-        request_headers.update(headers or {})
-        resp = _request_with_retry(
-            "GET",
-            url,
-            timeout=timeout_s,
-            retries=1,
-            headers=request_headers,
-            allow_redirects=True,
-        )
-        try:
-            resp.raise_for_status()
-            payload = resp.json()
-        finally:
-            try:
-                resp.close()
-            except Exception:
-                pass
-        return payload if isinstance(payload, dict) else None
-
-    @classmethod
-    def _check_rightcode_route_available(cls, api_base: str | None, api_key: str | None) -> bool:
-        summary_url = cls._build_rightcode_account_summary_url(api_base)
-        if not summary_url:
-            return True
-
-        cache_key = ("rightcode", summary_url, str(api_key or ""))
-        now = time.time()
-        with cls._provider_preflight_cache_lock:
-            cached = cls._provider_preflight_cache.get(cache_key)
-            if cached and (now - cached[0]) < cls._provider_preflight_cache_ttl_s:
-                return bool(cached[1])
-
-        available = True
-        try:
-            payload = cls._load_remote_json(
-                summary_url,
-                headers={"Authorization": f"Bearer {str(api_key or '').strip()}"},
-                timeout_s=min(float(_llm_timeout()), 10.0),
-            )
-            if isinstance(payload, dict):
-                prefixes = set(cls._candidate_route_prefixes(api_base))
-                subscriptions = payload.get("subscriptions") or []
-                applicable_remaining_quota = 0.0
-                if isinstance(subscriptions, list):
-                    for sub in subscriptions:
-                        if not isinstance(sub, dict):
-                            continue
-                        try:
-                            remaining = float(sub.get("remaining_quota") or 0.0)
-                        except Exception:
-                            remaining = 0.0
-                        if remaining <= 0.0:
-                            continue
-
-                        available_prefixes = {
-                            str(prefix).strip()
-                            for prefix in (sub.get("available_prefixes") or [])
-                            if str(prefix).strip()
-                        }
-                        if not prefixes or not available_prefixes or prefixes & available_prefixes:
-                            applicable_remaining_quota += remaining
-
-                available = applicable_remaining_quota > 0.0
-        except (TimeoutError, ValueError, json.JSONDecodeError) as exc:
-            logger.warning(f"Rightcode balance precheck failed for {summary_url}: {exc}")
-            available = True
-        except Exception as exc:
-            logger.warning(f"Unexpected Rightcode balance precheck failure for {summary_url}: {exc}")
-            available = True
-
-        with cls._provider_preflight_cache_lock:
-            cls._provider_preflight_cache[cache_key] = (now, available)
-        return available
-
-    @classmethod
-    def _check_direct_route_availability(cls, *, api_base: str | None, api_key: str | None) -> bool:
-        provider = cls._detect_route_provider(api_base)
-        if provider == "rightcode":
-            return cls._check_rightcode_route_available(api_base, api_key)
-        return True
-
-    @classmethod
-    def _resolve_direct_responses_routes(cls, model_name: str | None) -> list[dict]:
-        """Resolve direct upstream routes from `config/llm.yml` for Responses API calls."""
-
-        if not cls._should_use_responses_api(model_name):
-            return []
-
-        try:
-            import yaml
-        except Exception:
-            return []
-
-        try:
-            from config.llm_model_order import default_llm_yml_path
-
-            cfg_path = default_llm_yml_path()
-            text = cfg_path.read_text(encoding="utf-8", errors="ignore")
-            cfg = yaml.safe_load(text)
-        except Exception:
-            return []
-
-        if not isinstance(cfg, dict):
-            return []
-
-        model_list = cfg.get("model_list") or []
-        if not isinstance(model_list, list):
-            return []
-
-        target_name = str(model_name or "").strip()
-        routes: list[dict] = []
-        for item in model_list:
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("model_name") or "").strip() != target_name:
-                continue
-            params = item.get("litellm_params") or {}
-            if not isinstance(params, dict):
-                continue
-
-            base_url = str(params.get("api_base") or "").strip().rstrip("/")
-            api_key = cls._resolve_api_key_value(params.get("api_key"))
-            upstream_model = str(params.get("model") or "").strip()
-            if upstream_model.lower().startswith("openai/"):
-                upstream_model = upstream_model.split("/")[-1].strip()
-            extra_body = params.get("extra_body") if isinstance(params.get("extra_body"), dict) else {}
-            max_tokens = params.get("max_tokens")
-            max_output_tokens = None
-            try:
-                if max_tokens is not None:
-                    max_output_tokens = int(max_tokens)
-            except Exception:
-                max_output_tokens = None
-
-            if not base_url or not api_key:
-                continue
-
-            if not cls._check_direct_route_availability(api_base=base_url, api_key=api_key):
-                logger.info(
-                    f"Skipping direct Responses route for model={target_name} due to provider availability precheck: {base_url}"
-                )
-                continue
-
-            routes.append(
-                {
-                    "base_url": base_url,
-                    "api_key": api_key,
-                    "model": upstream_model or target_name,
-                    "extra_body": dict(extra_body or {}),
-                    "max_output_tokens": max_output_tokens,
-                }
-            )
-
-        return routes
-
-    @classmethod
-    def _resolve_direct_responses_route(cls, model_name: str | None) -> dict | None:
-        """Resolve the first available direct upstream route for Responses API calls."""
-
-        routes = cls._resolve_direct_responses_routes(model_name)
-        return routes[0] if routes else None
-
-    @classmethod
-    def _mark_direct_route_unavailable(cls, *, api_base: str | None, api_key: str | None) -> None:
-        provider = cls._detect_route_provider(api_base)
-        if provider != "rightcode":
-            return
-        summary_url = cls._build_rightcode_account_summary_url(api_base)
-        if not summary_url:
-            return
-        cache_key = (provider, summary_url, str(api_key or ""))
-        with cls._provider_preflight_cache_lock:
-            cls._provider_preflight_cache[cache_key] = (time.time(), False)
-
-    @classmethod
-    def _should_retry_with_alternate_direct_route(cls, *, api_base: str | None, exc: Exception) -> bool:
-        provider = cls._detect_route_provider(api_base)
-        if provider == "rightcode":
-            msg = str(exc or "").lower()
-            markers = [
-                "无可用套餐",
-                "不允许使用余额",
-                "insufficient balance",
-                "no available package",
-                "subscription",
-                "quota exceeded",
-            ]
-            return any(marker in msg for marker in markers)
-        return False
-
-    def _create_chat_completion_no_tools(self, *, model: str, prompt_for_call: str):
-        """Create a chat completion while discouraging tool calls across proxies."""
-
-        messages = [
-            {
-                "role": "system",
-                "content": "You must not call tools/functions. Produce the final answer directly as markdown.",
-            },
-            {"role": "user", "content": prompt_for_call},
-        ]
-        base_kwargs = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.3,
-            "top_p": 0.95,
-            "timeout": _llm_timeout(),
-        }
-
-        try:
-            return self.client.chat.completions.create(
-                **base_kwargs,
-                tool_choice="none",
-            )
-        except Exception as tool_exc:
-            msg = str(tool_exc or "").lower()
-            if "tool_choice" in msg and any(k in msg for k in ("object", "dict", "type")):
-                try:
-                    return self.client.chat.completions.create(
-                        **base_kwargs,
-                        tool_choice={"type": "none"},
-                    )
-                except Exception:
-                    pass
-            if "tool_choice" in msg or "tools" in msg:
-                return self.client.chat.completions.create(**base_kwargs)
-            raise
-
-    @staticmethod
     def _extract_version_from_url(url: str, raw_pid: str) -> str | None:
         """Extract version number from arXiv URL.
 
@@ -945,6 +866,141 @@ class PaperSummarizer:
             return match.group(1)
         return None
 
+    @staticmethod
+    def _normalize_cached_version(value: object) -> str | None:
+        """Normalize a cached version value to a plain integer string."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.lower().startswith("v"):
+            text = text[1:].strip()
+        if not text:
+            return None
+        try:
+            return str(int(text))
+        except Exception:
+            return None
+
+    def _expected_cache_version(self, pid: str, source_pid: str | None = None) -> str | None:
+        """Return the desired paper version for cache freshness checks."""
+        raw_pid, explicit_version = self._split_pid_version(pid)
+        if explicit_version is not None:
+            return str(explicit_version)
+
+        if source_pid:
+            _source_raw_pid, source_version = self._split_pid_version(source_pid)
+            if source_version is not None:
+                return str(source_version)
+
+        latest_version = self._get_latest_version_from_meta(raw_pid or pid)
+        if latest_version is None:
+            return None
+        return str(latest_version)
+
+    def _cached_version_matches(self, expected_version: str | None, cached_version: object) -> bool:
+        """Check whether a cached artifact version matches the requested version."""
+        expected = self._normalize_cached_version(expected_version)
+        if expected is None:
+            return True
+        return self._normalize_cached_version(cached_version) == expected
+
+    def _pdf_meta_path(self, raw_pid: str) -> Path:
+        return self.pdfs_dir / f"{raw_pid}.meta.json"
+
+    def _read_pdf_meta(self, raw_pid: str) -> dict:
+        meta_path = self._pdf_meta_path(raw_pid)
+        if not meta_path.exists():
+            return {}
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_pdf_meta(
+        self,
+        raw_pid: str,
+        *,
+        source_pid: str | None = None,
+        cached_version: str | None = None,
+        final_url: str | None = None,
+    ) -> None:
+        meta = {
+            "updated_at": time.time(),
+        }
+        if source_pid:
+            meta["source_pid"] = source_pid
+        normalized_version = self._normalize_cached_version(cached_version)
+        if normalized_version:
+            meta["cached_version"] = normalized_version
+        if final_url:
+            meta["final_url"] = final_url
+        self._atomic_write_json(self._pdf_meta_path(raw_pid), meta)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_rmtree(path: Path) -> None:
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+
+    def _purge_cached_pdf(self, raw_pid: str) -> None:
+        """Delete stale cached PDF artifacts."""
+        self._safe_unlink(self.pdfs_dir / f"{raw_pid}.pdf")
+        self._safe_unlink(self._pdf_meta_path(raw_pid))
+
+    def _purge_html_cache(self, cache_pid: str) -> None:
+        """Delete stale cached HTML markdown and assets."""
+        self._safe_rmtree(self.html_md_dir / cache_pid)
+
+    def _purge_mineru_cache(self, cache_pid: str) -> None:
+        """Delete stale MinerU markdown and assets."""
+        self._safe_rmtree(self.mineru_dir / cache_pid)
+
+    def _is_cached_pdf_fresh(
+        self,
+        *,
+        pdf_meta: dict | None,
+        expected_version: str | None,
+        source_pid: str | None,
+    ) -> bool:
+        """Check whether a cached PDF can be safely reused."""
+        meta = pdf_meta if isinstance(pdf_meta, dict) else {}
+        cached_source_pid = str(meta.get("source_pid") or "").strip()
+        cached_version = meta.get("cached_version")
+        if source_pid and cached_source_pid and cached_source_pid != str(source_pid).strip():
+            return False
+        return self._cached_version_matches(expected_version, cached_version)
+
+    def _is_html_cache_fresh(
+        self,
+        *,
+        meta: dict | None,
+        expected_version: str | None,
+        source_pid: str | None,
+    ) -> bool:
+        """Check whether cached HTML markdown matches the current source version."""
+        cache_meta = meta if isinstance(meta, dict) else {}
+        cached_source_pid = str(cache_meta.get("source_pid") or "").strip()
+        if source_pid and cached_source_pid and cached_source_pid != str(source_pid).strip():
+            return False
+        return self._cached_version_matches(expected_version, cache_meta.get("cached_version"))
+
+    def _is_mineru_cache_fresh(self, cache_pid: str, *, expected_version: str | None) -> bool:
+        """Check whether cached MinerU output matches the current source version."""
+        mineru_meta = self._read_mineru_meta(cache_pid)
+        return self._cached_version_matches(expected_version, mineru_meta.get("cached_version"))
+
     def download_arxiv_paper(self, pid: str) -> tuple[Path | None, str | None]:
         """
         Download arXiv paper PDF
@@ -957,49 +1013,34 @@ class PaperSummarizer:
             - pdf_path: Downloaded PDF file path, None if failed
             - version: The actual version downloaded (e.g., "3"), None if unknown
         """
+        self._last_download_error_detail = None
         try:
             raw_pid = self._strip_version_suffix(pid)
             source_pid = self._resolve_source_pid(pid)
+            expected_version = self._expected_cache_version(pid, source_pid=source_pid)
             pdf_url = f"https://arxiv.org/pdf/{source_pid}"
             pdf_path = self.pdfs_dir / f"{raw_pid}.pdf"
             cached_version = None
 
-            # If file already exists, try to determine version
+            # Reuse cached PDF only when a trusted sidecar confirms it matches the current version.
             if pdf_path.exists():
                 logger.trace(f"PDF file already exists: {pdf_path}")
+                pdf_meta = self._read_pdf_meta(raw_pid)
+                cached_version = self._normalize_cached_version(pdf_meta.get("cached_version"))
+                if self._is_cached_pdf_fresh(
+                    pdf_meta=pdf_meta,
+                    expected_version=expected_version,
+                    source_pid=source_pid,
+                ):
+                    return pdf_path, cached_version
 
-                # Strategy 1: Try to get version from database metadata
-                db_version = self._get_latest_version_from_meta(pid)
-                if db_version:
-                    cached_version = str(db_version)
-                    logger.trace(f"Using version {cached_version} from database for cached PDF")
-                else:
-                    # Strategy 2: Check existing MinerU meta.json
-                    mineru_meta = self._read_mineru_meta(raw_pid)
-                    if mineru_meta.get("cached_version"):
-                        cached_version = mineru_meta["cached_version"]
-                        logger.trace(f"Using version {cached_version} from MinerU meta")
-                    else:
-                        # Strategy 3: Make a HEAD request to get current version from redirect
-                        try:
-                            head_response = _request_with_retry(
-                                "HEAD",
-                                pdf_url,
-                                allow_redirects=True,
-                                timeout=10,
-                                retries=2,
-                            )
-                            if head_response.ok:
-                                version_from_url = self._extract_version_from_url(head_response.url, raw_pid)
-                                if version_from_url:
-                                    cached_version = version_from_url
-                                    logger.trace(
-                                        f"Detected version {cached_version} from HEAD request: {head_response.url}"
-                                    )
-                        except Exception as e:
-                            logger.trace(f"Failed to determine version from HEAD request: {e}")
-
-                return pdf_path, cached_version
+                logger.debug(
+                    f"Ignoring stale cached PDF for {pid}: "
+                    f"expected_version={expected_version or 'unknown'}, "
+                    f"cached_version={cached_version or 'unknown'}, "
+                    f"cached_source_pid={pdf_meta.get('source_pid') or 'unknown'}"
+                )
+                self._purge_cached_pdf(raw_pid)
 
             # Use atomic file write with temporary file
             logger.trace(f"Downloading paper {source_pid} -> {raw_pid}.pdf ...")
@@ -1042,10 +1083,22 @@ class PaperSummarizer:
                     raise
 
             logger.trace(f"Paper download complete: {pdf_path}")
+            self._write_pdf_meta(
+                raw_pid,
+                source_pid=source_pid,
+                cached_version=cached_version,
+                final_url=locals().get("response").url if "response" in locals() else None,
+            )
             return pdf_path, cached_version
 
         except Exception as e:
-            logger.trace(f"Failed to download paper {pid}: {e}")
+            detail = self._summarize_download_error(
+                e,
+                pdf_url=locals().get("pdf_url"),
+                source_pid=locals().get("source_pid"),
+            )
+            self._last_download_error_detail = detail
+            logger.warning(f"Failed to download paper {pid}: {detail}")
             return None, None
 
     @staticmethod
@@ -1170,6 +1223,16 @@ class PaperSummarizer:
 
         meta = self._get_meta_for_pid(raw_pid)
         if isinstance(meta, dict):
+            if _looks_like_old_style_raw_pid(raw_pid):
+                for key in ("link", "id"):
+                    source_url = str(meta.get(key) or "").strip()
+                    if not source_url:
+                        continue
+                    match = re.search(r"/abs/(?P<idv>[^?#]+)", source_url)
+                    if match:
+                        source_pid = match.group("idv").strip()
+                        if source_pid and "/" in source_pid:
+                            return source_pid
             for key in ("_effective_idv", "_idv"):
                 source_pid = str(meta.get(key) or "").strip()
                 if source_pid:
@@ -1182,7 +1245,72 @@ class PaperSummarizer:
                     return f"{raw_pid}v{int(version)}"
                 except Exception:
                     pass
+
+            for key in ("link", "id"):
+                source_url = str(meta.get(key) or "").strip()
+                if not source_url:
+                    continue
+                match = re.search(r"/abs/(?P<idv>[^?#]+)", source_url)
+                if match:
+                    source_pid = match.group("idv").strip()
+                    if source_pid:
+                        return source_pid
         return raw_pid
+
+    @staticmethod
+    def _summarize_download_error(
+        exc: Exception | str | None,
+        *,
+        pdf_url: str | None = None,
+        source_pid: str | None = None,
+    ) -> str:
+        raw = str(exc or "").strip() or "unknown error"
+        status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        response = getattr(exc, "response", None)
+        if status is None and response is not None:
+            status = getattr(response, "status_code", None)
+
+        response_url = getattr(response, "url", None) if response is not None else None
+        lowered = raw.lower()
+
+        if status is not None:
+            try:
+                code = int(status)
+            except Exception:
+                code = None
+            if code == 404:
+                summary = f"HTTP 404 from arXiv PDF endpoint for {source_pid or 'unknown pid'}"
+            elif code is not None:
+                summary = f"HTTP {code} from arXiv PDF endpoint"
+            else:
+                summary = f"HTTP error from arXiv PDF endpoint ({status})"
+        elif "timeout" in lowered or "timed out" in lowered:
+            summary = "request timed out while downloading PDF"
+        elif any(marker in lowered for marker in ("connection", "dns", "ssl", "tls", "eof")):
+            summary = "network/connectivity error while downloading PDF"
+        else:
+            summary = raw
+
+        details = []
+        if source_pid:
+            details.append(f"source_pid={source_pid}")
+        if pdf_url:
+            details.append(f"url={pdf_url}")
+        if response_url and response_url != pdf_url:
+            details.append(f"final_url={response_url}")
+        if raw != summary:
+            compact = re.sub(r"\s+", " ", raw)
+            if len(compact) > 200:
+                compact = compact[:197].rstrip() + "..."
+            details.append(f"raw={compact}")
+
+        if details:
+            return f"{summary} [{' | '.join(details)}]"
+        return summary
+
+    def get_last_download_error_detail(self) -> str | None:
+        detail = str(self._last_download_error_detail or "").strip()
+        return detail or None
 
     def _resolve_cache_pid(self, pid: str) -> str:
         """Resolve PID to cache key format.
@@ -1352,7 +1480,15 @@ class PaperSummarizer:
             logger.trace(f"Failed to read HTML markdown cache for {cache_pid}: {e}")
             return None
 
-    def _write_html_markdown_cache(self, cache_pid: str, markdown: str, source: str, url: str) -> None:
+    def _write_html_markdown_cache(
+        self,
+        cache_pid: str,
+        markdown: str,
+        source: str,
+        url: str,
+        *,
+        source_pid: str | None = None,
+    ) -> None:
         """Write HTML markdown cache with metadata.
 
         Args:
@@ -1379,6 +1515,8 @@ class PaperSummarizer:
             "source": source,  # ar5iv or arxiv
             "url": url,
         }
+        if source_pid:
+            meta["source_pid"] = source_pid
         if cached_version:
             meta["cached_version"] = cached_version
         self._atomic_write_json(meta_path, meta)
@@ -1392,7 +1530,7 @@ class PaperSummarizer:
             return None, None
         return BeautifulSoup, html_to_markdown
 
-    def _download_image(self, img_url: str, save_path: Path) -> bool:
+    def _download_image(self, img_url: str, save_path: Path) -> Path | None:
         """Download image from URL and save to local path.
 
         Args:
@@ -1400,7 +1538,7 @@ class PaperSummarizer:
             save_path: Local path to save image
 
         Returns:
-            True if download successful, False otherwise
+            Final local image path if download succeeded, otherwise None
         """
         try:
             # Ensure parent directory exists
@@ -1421,7 +1559,7 @@ class PaperSummarizer:
                     response.close()
                 except Exception:
                     pass
-                return False
+                return None
 
             # Write to temporary file first, then atomic rename
             temp_fd, temp_path = tempfile.mkstemp(dir=save_path.parent, suffix=save_path.suffix)
@@ -1436,7 +1574,7 @@ class PaperSummarizer:
                 except FileExistsError:
                     temp_file.unlink()
                     logger.trace(f"Image already exists: {save_path}")
-                    return True
+                    return save_path
 
             except Exception:
                 if Path(temp_path).exists():
@@ -1448,12 +1586,13 @@ class PaperSummarizer:
                 except Exception:
                     pass
 
-            logger.trace(f"Downloaded image: {save_path.name}")
-            return True
+            final_path = self._compress_cached_image(save_path)
+            logger.trace(f"Downloaded image: {final_path.name}")
+            return final_path
 
         except Exception as e:
             logger.trace(f"Error downloading image {img_url}: {e}")
-            return False
+            return None
 
     def _replace_math_nodes(self, soup) -> None:
         # Prefer MathML LaTeX annotations when present (common in ar5iv/arXiv HTML).
@@ -1549,9 +1688,10 @@ class PaperSummarizer:
             img_path = images_dir / img_filename
 
             # Download image
-            if self._download_image(img_url, img_path):
+            downloaded_path = self._download_image(img_url, img_path)
+            if downloaded_path:
                 # Update img tag src to point to local file
-                img_tag["src"] = f"images/{img_filename}"
+                img_tag["src"] = f"images/{downloaded_path.name}"
             else:
                 # Remove img tag if download fails to prevent LLM from referencing broken images
                 logger.trace(f"Removing image tag due to failed download: {img_url}")
@@ -1581,7 +1721,7 @@ class PaperSummarizer:
                     logger.trace(f"HTML not available ({source}), redirected to abstract page: {final_url}")
                     return None, url
 
-                return response.text, url
+                return response.text, final_url
             finally:
                 try:
                     response.close()
@@ -1606,12 +1746,21 @@ class PaperSummarizer:
         # Always use raw PID for storage - arXiv returns latest version automatically
         cache_pid = self._resolve_cache_pid(pid)
         source_pid = self._resolve_source_pid(pid)
+        expected_version = self._expected_cache_version(pid, source_pid=source_pid)
 
         # Check cache first
         cached = self._read_html_markdown_cache(cache_pid)
         if cached:
             meta = self._read_html_meta(cache_pid)
-            return cached, meta.get("source"), cache_pid
+            if self._is_html_cache_fresh(meta=meta, expected_version=expected_version, source_pid=source_pid):
+                return cached, meta.get("source"), cache_pid
+            logger.debug(
+                f"Ignoring stale HTML cache for {pid}: "
+                f"expected_version={expected_version or 'unknown'}, "
+                f"cached_version={meta.get('cached_version') or 'unknown'}, "
+                f"cached_source_pid={meta.get('source_pid') or 'unknown'}"
+            )
+            self._purge_html_cache(cache_pid)
 
         for source in self._parse_html_sources():
             html, url = self._fetch_html_from_source(source_pid, source)
@@ -1621,7 +1770,7 @@ class PaperSummarizer:
             if not markdown:
                 logger.trace(f"HTML parse produced empty markdown for {pid} from {source}")
                 continue
-            self._write_html_markdown_cache(cache_pid, markdown, source, url)
+            self._write_html_markdown_cache(cache_pid, markdown, source, url, source_pid=source_pid)
             return markdown, source, cache_pid
 
         return None, None, cache_pid
@@ -1840,8 +1989,15 @@ class PaperSummarizer:
             # Check if already parsed
             existing_md_path = self._find_mineru_markdown(pdf_name, backend=backend)
             if existing_md_path:
-                logger.trace(f"Markdown file already exists: {existing_md_path}")
-                return existing_md_path
+                if self._is_mineru_cache_fresh(pdf_name, expected_version=cached_version):
+                    logger.trace(f"Markdown file already exists: {existing_md_path}")
+                    return existing_md_path
+                logger.debug(
+                    f"Ignoring stale MinerU cache before parse for {pdf_name}: "
+                    f"expected_version={cached_version or 'unknown'}, "
+                    f"cached_version={self._read_mineru_meta(pdf_name).get('cached_version') or 'unknown'}"
+                )
+                self._purge_mineru_cache(pdf_name)
             else:
                 logger.trace(f"Markdown file not found for {pdf_name} in minerU outputs")
 
@@ -1864,8 +2020,15 @@ class PaperSummarizer:
                 # Check again if already parsed (avoid duplicate work during lock wait)
                 existing_md_path = self._find_mineru_markdown(pdf_name, backend=backend)
                 if existing_md_path:
-                    logger.trace(f"File generated during lock wait: {existing_md_path}")
-                    return existing_md_path
+                    if self._is_mineru_cache_fresh(pdf_name, expected_version=cached_version):
+                        logger.trace(f"File generated during lock wait: {existing_md_path}")
+                        return existing_md_path
+                    logger.debug(
+                        f"Ignoring stale MinerU cache generated during lock wait for {pdf_name}: "
+                        f"expected_version={cached_version or 'unknown'}, "
+                        f"cached_version={self._read_mineru_meta(pdf_name).get('cached_version') or 'unknown'}"
+                    )
+                    self._purge_mineru_cache(pdf_name)
 
                 # Normalize device setting
                 device = (_mineru_device() or "cuda").strip().lower()
@@ -2024,8 +2187,15 @@ class PaperSummarizer:
         # Check if already parsed
         existing_md_path = self._find_mineru_markdown(pdf_name, backend="api")
         if existing_md_path:
-            logger.trace(f"Markdown file already exists: {existing_md_path}")
-            return existing_md_path
+            if self._is_mineru_cache_fresh(pdf_name, expected_version=cached_version):
+                logger.trace(f"Markdown file already exists: {existing_md_path}")
+                return existing_md_path
+            logger.debug(
+                f"Ignoring stale MinerU API cache for {pdf_name}: "
+                f"expected_version={cached_version or 'unknown'}, "
+                f"cached_version={self._read_mineru_meta(pdf_name).get('cached_version') or 'unknown'}"
+            )
+            self._purge_mineru_cache(pdf_name)
 
         # Acquire file lock
         lock_path = self.mineru_dir / f".{pdf_name}.lock"
@@ -2038,8 +2208,15 @@ class PaperSummarizer:
             # Check again after acquiring lock
             existing_md_path = self._find_mineru_markdown(pdf_name, backend="api")
             if existing_md_path:
-                logger.trace(f"File generated during lock wait: {existing_md_path}")
-                return existing_md_path
+                if self._is_mineru_cache_fresh(pdf_name, expected_version=cached_version):
+                    logger.trace(f"File generated during lock wait: {existing_md_path}")
+                    return existing_md_path
+                logger.debug(
+                    f"Ignoring stale MinerU API cache generated during lock wait for {pdf_name}: "
+                    f"expected_version={cached_version or 'unknown'}, "
+                    f"cached_version={self._read_mineru_meta(pdf_name).get('cached_version') or 'unknown'}"
+                )
+                self._purge_mineru_cache(pdf_name)
 
             header = {
                 "Content-Type": "application/json",
@@ -2366,13 +2543,31 @@ class PaperSummarizer:
                 new_ref = f"images/{new_filename}"
                 updated_content = updated_content.replace(old_ref, new_ref)
 
+            compressed_names = set(rename_map.values())
+            compressed_map = {}
+            for current_filename in list(compressed_names):
+                current_path = images_dir / current_filename
+                if not current_path.exists():
+                    continue
+                final_path = self._compress_cached_image(current_path)
+                if final_path.name != current_filename:
+                    compressed_map[current_filename] = final_path.name
+
+            for old_filename, new_filename in compressed_map.items():
+                updated_content = updated_content.replace(f"images/{old_filename}", f"images/{new_filename}")
+
             # Write updated markdown
             self._atomic_write_text(markdown_path, updated_content)
-            logger.trace(f"Updated {len(rename_map)} image references in markdown")
+            logger.trace(
+                f"Updated {len(rename_map)} image references in markdown"
+                + (f" and rewrote {len(compressed_map)} compressed image names" if compressed_map else "")
+            )
 
             # Clean up unreferenced image files (e.g., hash-named files from MinerU API)
-            referenced_images = set(rename_map.values())  # New filenames that are referenced
+            referenced_images = {compressed_map.get(filename, filename) for filename in rename_map.values()}
             for img_file in images_dir.iterdir():
+                if img_file.name == _IMAGE_COMPRESSION_MANIFEST:
+                    continue
                 if img_file.is_file() and img_file.name not in referenced_images:
                     try:
                         img_file.unlink()
@@ -2538,41 +2733,9 @@ class PaperSummarizer:
                     out[key] = val
             return out or None
 
-        # Model try-order: explicit override first, then configured default model,
-        # then optional fallbacks from config.
         requested = (model or "").strip()
         default_model = (_llm_name() or "").strip()
-        fallback_models: list[str] = []
-        try:
-            raw = str(getattr(settings.llm, "fallback_models", "") or "").strip()
-        except Exception:
-            raw = ""
-        mode = raw.lower()
-        if mode in ("", "auto", "yml"):
-            try:
-                from config.llm_model_order import (
-                    compute_auto_fallback_models,
-                    read_llm_yml_model_order,
-                )
-
-                yml_order = read_llm_yml_model_order()
-                anchor = requested or default_model
-                if yml_order:
-                    fallback_models = compute_auto_fallback_models(
-                        yml_order=yml_order,
-                        anchor=anchor,
-                        default_anchor=default_model,
-                    )
-            except Exception:
-                fallback_models = []
-        if not fallback_models:
-            # Non-auto mode (explicit allowlist) or a best-effort fallback when llm.yml is unavailable.
-            fallback_models = list(getattr(settings.llm, "fallback_model_list", []) or [])
-        model_candidates: list[str] = []
-        for m in [requested, default_model, *fallback_models]:
-            m = (m or "").strip()
-            if m and m not in model_candidates:
-                model_candidates.append(m)
+        model_candidates = build_model_candidate_chain(requested, default_model)
 
         # Keep old behavior if no valid model configured.
         if not model_candidates:
@@ -2888,11 +3051,8 @@ Please output strictly according to the following structure:
                     f"Calling {modelid} to generate paper summary... " f"(attempt {idx + 1}/{len(model_candidates)})"
                 )
 
-                # Some providers/proxies may (incorrectly) return tool calls for long prompts.
-                # We do a best-effort guard: forbid tool calls, and if the response still looks
-                # incomplete, retry once with a stronger "no tools, output final markdown" hint.
-                response = None
-                response_api = "chat_completions"
+                # Retry once with a stronger "final markdown only" hint if the first
+                # response looks incomplete. OpenCode is the only backend used here.
                 last_finish_reason = None
                 last_tool_call_count = 0
                 for content_try in range(2):
@@ -2914,146 +3074,39 @@ Please output strictly according to the following structure:
                             prompt_for_call += claude_notice
                         summary_meta["prompt"] = prompt_for_call
 
-                    response = None
-                    error_api_base = _llm_base_url()
+                    opencode_result = None
                     for llm_try in range(2):
                         try:
-                            if self._should_use_responses_api(modelid):
-                                response_api = "responses"
-                                responses_client = self.client
-                                responses_model = modelid
-                                responses_extra_body = {}
-                                error_api_base = _llm_base_url()
-                                # Some OpenAI-compatible gateways expose `/chat/completions`
-                                # but do not correctly normalize `/responses` SSE payloads.
-                                # When `config/llm.yml` contains concrete upstream routes for
-                                # the selected alias, prefer calling those upstreams directly.
-                                direct_routes = self._resolve_direct_responses_routes(modelid)
-                                direct_attempted = False
-                                for route_idx, direct_route in enumerate(direct_routes):
-                                    direct_attempted = True
-                                    error_api_base = direct_route.get("base_url")
-                                    responses_client = openai.OpenAI(
-                                        api_key=direct_route["api_key"],
-                                        base_url=direct_route["base_url"],
-                                    )
-                                    responses_model = direct_route["model"]
-                                    responses_extra_body = dict(direct_route["extra_body"] or {})
-                                    if direct_route.get("max_output_tokens"):
-                                        responses_extra_body.setdefault(
-                                            "max_output_tokens",
-                                            direct_route["max_output_tokens"],
-                                        )
-                                    try:
-                                        response = responses_client.responses.create(
-                                            model=responses_model,
-                                            instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
-                                            input=[
-                                                {
-                                                    "role": "user",
-                                                    "content": prompt_for_call,
-                                                }
-                                            ],
-                                            temperature=0.3,
-                                            top_p=0.95,
-                                            timeout=_llm_timeout(),
-                                            **responses_extra_body,
-                                        )
-                                        break
-                                    except Exception as responses_exc:
-                                        if route_idx < len(
-                                            direct_routes
-                                        ) - 1 and self._should_retry_with_alternate_direct_route(
-                                            api_base=direct_route.get("base_url"),
-                                            exc=responses_exc,
-                                        ):
-                                            self._mark_direct_route_unavailable(
-                                                api_base=direct_route.get("base_url"),
-                                                api_key=direct_route.get("api_key"),
-                                            )
-                                            logger.warning(
-                                                f"Direct Responses route rejected model={modelid} via {direct_route.get('base_url')}, trying alternate route: {responses_exc}"
-                                            )
-                                            continue
-                                        if not self._should_fallback_to_chat_completions_for_responses_error(
-                                            responses_exc
-                                        ):
-                                            raise
-                                        logger.warning(
-                                            f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
-                                        )
-                                        response_api = "chat_completions"
-                                        response = self._create_chat_completion_no_tools(
-                                            model=modelid,
-                                            prompt_for_call=prompt_for_call,
-                                        )
-                                        break
-                                if not direct_attempted:
-                                    error_api_base = _llm_base_url()
-                                    try:
-                                        response = responses_client.responses.create(
-                                            model=responses_model,
-                                            instructions="You must not call tools/functions. Produce the final answer directly as markdown.",
-                                            input=[
-                                                {
-                                                    "role": "user",
-                                                    "content": prompt_for_call,
-                                                }
-                                            ],
-                                            temperature=0.3,
-                                            top_p=0.95,
-                                            timeout=_llm_timeout(),
-                                            **responses_extra_body,
-                                        )
-                                    except Exception as responses_exc:
-                                        if not self._should_fallback_to_chat_completions_for_responses_error(
-                                            responses_exc
-                                        ):
-                                            raise
-                                        logger.warning(
-                                            f"Responses API unavailable for model={modelid}, falling back to chat completions: {responses_exc}"
-                                        )
-                                        response_api = "chat_completions"
-                                        response = self._create_chat_completion_no_tools(
-                                            model=modelid,
-                                            prompt_for_call=prompt_for_call,
-                                        )
-                            else:
-                                response_api = "chat_completions"
-                                error_api_base = _llm_base_url()
-                                response = self._create_chat_completion_no_tools(
-                                    model=modelid,
-                                    prompt_for_call=prompt_for_call,
-                                )
+                            opencode_result = generate_opencode_text(
+                                model=modelid,
+                                system=(
+                                    "Produce the final answer directly as markdown. "
+                                    "Do not call tools or functions. Do not ask for clarification."
+                                ),
+                                prompt=prompt_for_call,
+                                timeout=_llm_timeout(),
+                            )
                             break
                         except Exception as e:
                             if llm_try < 1 and self._is_transient_llm_error(e):
                                 err_text = self._summarize_llm_error(e)
-                                err_origin = self._describe_llm_error_origin(e, api_base=error_api_base)
+                                err_origin = self._describe_llm_error_origin(e)
                                 logger.warning(
                                     f"LLM transient error for model={modelid}, retrying once [{err_origin}]: {err_text}"
                                 )
                                 _sleep_backoff(llm_try, base_s=1.0, cap_s=4.0)
                                 continue
                             raise
-                    if response is None:
+                    if opencode_result is None:
                         raise RuntimeError("LLM call returned no response")
 
-                    # Record minimal LLM response info for meta.json (usage + finish_reason + optional reasoning)
-                    if response_api == "responses":
-                        summary, finish_reason, usage = self._extract_responses_text_fields(response)
-                    else:
-                        try:
-                            usage = getattr(response, "usage", None)
-                        except Exception:
-                            usage = None
-
-                        finish_reason = None
-                        try:
-                            if getattr(response, "choices", None):
-                                finish_reason = getattr(response.choices[0], "finish_reason", None)
-                        except Exception:
-                            finish_reason = None
+                    raw_payload = opencode_result.get("raw") or {}
+                    raw_info = raw_payload.get("info") if isinstance(raw_payload, dict) else {}
+                    if not isinstance(raw_info, dict):
+                        raw_info = {}
+                    summary = str(opencode_result.get("text") or "")
+                    usage = opencode_result.get("usage") or {}
+                    finish_reason = raw_info.get("finish")
                     last_finish_reason = finish_reason
 
                     llm_info = {}
@@ -3061,76 +3114,25 @@ Please output strictly according to the following structure:
                     if usage_dump is not None:
                         llm_info["usage"] = usage_dump
                     if finish_reason is not None:
-                        if response_api == "responses":
-                            llm_info["response_status"] = finish_reason
-                        else:
-                            llm_info["finish_reason"] = finish_reason
-                    llm_info["api"] = response_api
-
-                    # Validate response structure
-                    message = None
-                    if response_api == "responses":
-                        summary = summary
-                    else:
-                        if not response.choices:
-                            logger.trace("LLM returned empty choices")
-                            return self._build_summary_result("# Error\n\nLLM returned no response", summary_meta)
-
-                        message = response.choices[0].message
-                        summary = message.content if message else None
-
-                    # Detect tool calls (OpenAI schema); if present, treat as invalid for this app.
-                    tool_calls = None
-                    try:
-                        tool_calls = getattr(message, "tool_calls", None) if message else None
-                    except Exception:
-                        tool_calls = None
-                    try:
-                        last_tool_call_count = len(tool_calls) if tool_calls else 0
-                    except Exception:
-                        last_tool_call_count = 0
-                    if finish_reason == "tool_calls" or last_tool_call_count > 0:
-                        llm_info["tool_call_count"] = last_tool_call_count
-                        # Some proxies may pack the final markdown into tool call arguments.
-                        extracted = None
-                        try:
-                            extracted = self._extract_markdown_from_tool_calls(tool_calls)
-                        except Exception:
-                            extracted = None
-                        if extracted and isinstance(extracted, str) and extracted.strip():
-                            llm_info["tool_calls_salvaged"] = True
-                            summary = extracted
-                        else:
-                            summary_meta["llm"] = llm_info
-                            if content_try < 1:
-                                continue
-                            raise RuntimeError("LLM returned tool calls instead of content")
-
-                    # Attach reasoning to meta if provider returns it (can be large)
-                    reasoning = None
-                    try:
-                        if message is not None and hasattr(message, "reasoning") and message.reasoning:
-                            reasoning = message.reasoning
-                        elif (
-                            message is not None and hasattr(message, "reasoning_content") and message.reasoning_content
-                        ):
-                            reasoning = message.reasoning_content
-                    except Exception:
-                        reasoning = None
-
-                    if reasoning:
-                        llm_info["reasoning"] = str(reasoning)
+                        llm_info["finish_reason"] = finish_reason
+                    llm_info["api"] = "opencode"
+                    if opencode_result.get("provider"):
+                        llm_info["provider"] = opencode_result.get("provider")
+                    if raw_info.get("id"):
+                        llm_info["message_id"] = raw_info.get("id")
 
                     if llm_info:
                         summary_meta["llm"] = llm_info
 
                     # Record which model succeeded and any prior failed attempts.
-                    summary_meta["llm_model"] = modelid
+                    resolved_model = str(opencode_result.get("resolved_model") or modelid).strip() or modelid
+                    summary_meta["llm_model"] = display_model_id(requested or default_model or resolved_model)
+                    summary_meta["resolved_model"] = resolved_model
                     if attempts:
                         summary_meta["llm_fallback_attempts"] = [
                             *attempts,
                             {
-                                "model": modelid,
+                                "model": resolved_model,
                                 "error": None,
                                 "fallback": idx > 0,
                                 "finish_reason": (str(last_finish_reason) if last_finish_reason is not None else None),
@@ -3140,24 +3142,9 @@ Please output strictly according to the following structure:
                         ]
 
                     if not summary:
-                        logger.warning(
-                            "LLM returned empty content: "
-                            + self._describe_empty_llm_response(
-                                response,
-                                response_api=response_api,
-                                finish_reason=finish_reason,
-                                usage=usage,
-                            )
-                        )
-                        return self._build_summary_result("# Error\n\nLLM returned empty content", summary_meta)
+                        raise RuntimeError("LLM returned empty content")
 
-                    # Log reasoning content if available
-                    if message is not None and hasattr(message, "reasoning") and message.reasoning:
-                        logger.trace(f"Original summary Thinking:\n{message.reasoning}")
-                    elif message is not None and hasattr(message, "reasoning_content") and message.reasoning_content:
-                        logger.trace(f"Original summary Thinking:\n{message.reasoning_content}")
-                    else:
-                        logger.trace(f"Original summary content:\n{summary[:500]}...")
+                    logger.trace(f"Original summary content:\n{summary[:500]}...")
 
                     # Extract content after </think> tag if present
                     if "</think>" in summary:
@@ -3173,7 +3160,7 @@ Please output strictly according to the following structure:
                         raise RuntimeError("LLM returned incomplete summary content")
 
                     logger.trace("Paper summary generation complete")
-                    logger.info(f"Summary succeeded: pid={pid} model={modelid}")
+                    logger.info(f"Summary succeeded: pid={pid} model={resolved_model}")
                     return self._build_summary_result(parsed_summary, summary_meta)
 
             except Exception as e:
@@ -3502,24 +3489,34 @@ Please output strictly according to the following structure:
             # Pre-check if parsing result already exists
             existing_md_path = self._find_mineru_markdown(cache_pid, backend=backend)
             if existing_md_path:
-                logger.trace(f"Found existing parse result: {existing_md_path}")
-                # Read Markdown content directly
-                with open(existing_md_path, encoding="utf-8") as f:
-                    markdown_content = f.read()
+                expected_version = self._expected_cache_version(pid)
+                if self._is_mineru_cache_fresh(cache_pid, expected_version=expected_version):
+                    logger.trace(f"Found existing parse result: {existing_md_path}")
+                    # Read Markdown content directly
+                    with open(existing_md_path, encoding="utf-8") as f:
+                        markdown_content = f.read()
 
-                if markdown_content.strip():
-                    # Step 3: Extract main paper content
-                    main_content = self.extract_main_content(markdown_content)
-                    # Step 4: Generate summary using LLM
-                    logger.debug(f"Summarizing {cache_pid} (mineru) ...")
-                    summary = self.summarize_with_llm(main_content, model=model, pid=pid)
-                    if isinstance(summary.get("meta"), dict):
-                        summary["meta"]["source"] = f"mineru:{backend}"
-                    # Post-process image paths for MinerU source
-                    summary["content"] = self._postprocess_image_paths(summary["content"], cache_pid, source="mineru")
-                    return summary
-                else:
+                    if markdown_content.strip():
+                        # Step 3: Extract main paper content
+                        main_content = self.extract_main_content(markdown_content)
+                        # Step 4: Generate summary using LLM
+                        logger.debug(f"Summarizing {cache_pid} (mineru) ...")
+                        summary = self.summarize_with_llm(main_content, model=model, pid=pid)
+                        if isinstance(summary.get("meta"), dict):
+                            summary["meta"]["source"] = f"mineru:{backend}"
+                        # Post-process image paths for MinerU source
+                        summary["content"] = self._postprocess_image_paths(
+                            summary["content"], cache_pid, source="mineru"
+                        )
+                        return summary
                     logger.trace("Existing Markdown file content is empty, re-parsing")
+                else:
+                    logger.debug(
+                        f"Ignoring stale MinerU cache for {pid}: "
+                        f"expected_version={expected_version or 'unknown'}, "
+                        f"cached_version={self._read_mineru_meta(cache_pid).get('cached_version') or 'unknown'}"
+                    )
+                    self._purge_mineru_cache(cache_pid)
 
             # For uploaded papers, MinerU cache must already exist (created by process_uploaded_pdf)
             if is_uploaded:
@@ -3532,6 +3529,9 @@ Please output strictly according to the following structure:
             logger.debug(f"Downloading {cache_pid}.pdf ...")
             pdf_path, cached_version = self.download_arxiv_paper(cache_pid)
             if not pdf_path:
+                detail = self.get_last_download_error_detail()
+                if detail:
+                    return self._build_summary_result(f"# Error\n\nUnable to download paper PDF: {detail}")
                 return self._build_summary_result("# Error\n\nUnable to download paper PDF")
 
             # Step 2: Parse PDF to Markdown using minerU
@@ -3582,7 +3582,7 @@ Please output strictly according to the following structure:
             return summary
 
         except Exception as e:
-            logger.error(f"Error occurred while generating paper summary: {e}")
+            logger.exception(f"Unhandled error occurred while generating paper summary for {pid}")
             return self._build_summary_result(f"# Error\n\nFailed to generate summary: {str(e)}")
 
 
@@ -4161,64 +4161,72 @@ if __name__ == "__main__":
     import sys
 
     logger.remove()
-    log_level = settings.log_level.upper()
-    logger.add(sys.stderr, level=log_level)
 
     parser = argparse.ArgumentParser(description="Test paper summarizer")
     parser.add_argument("pid", help="Paper ID")
     parser.add_argument("--model", help="Override default model")
+    parser.add_argument("--json", action="store_true", help="Print the full summary result as JSON")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print performance diagnostics to stderr",
+    )
     args = parser.parse_args()
 
-    logger.trace(f"Test paper ID: {args.pid}")
-    if args.model:
-        logger.trace(f"Using model: {args.model}")
+    log_level = "INFO" if args.verbose else settings.log_level.upper()
+    logger.add(sys.stderr, level=log_level)
 
-    # Start timing
     start_time = time.time()
     summary = generate_paper_summary(args.pid, model=args.model)
     end_time = time.time()
 
-    # Calculate speed metrics
+    content = str(summary.get("content") or "")
+    meta = summary.get("meta", {}) if isinstance(summary.get("meta"), dict) else {}
     elapsed_time = end_time - start_time
-    logger.trace("\n" + "=" * 50)
-    logger.trace("Paper summary:")
-    logger.trace("=" * 50)
-    logger.trace(summary.get("content"))
 
-    # Display performance metrics
-    logger.trace("\n" + "=" * 50)
-    logger.trace("Performance Metrics:")
-    logger.trace("=" * 50)
-    logger.trace(f"Total time: {elapsed_time:.2f} seconds")
-
-    meta = summary.get("meta", {})
-    # The key is "llm", not "llm_info"
-    llm_info = meta.get("llm", {})
-    usage = llm_info.get("usage", {})
-
-    if usage:
-        # Try different token count field names (different providers use different names)
-        input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
-        output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
-        total_tokens = usage.get("total_tokens") or (input_tokens + output_tokens)
-
-        logger.trace(f"Input tokens: {input_tokens}")
-        logger.trace(f"Output tokens: {output_tokens}")
-        logger.trace(f"Total tokens: {total_tokens}")
-
-        if elapsed_time > 0:
-            if output_tokens > 0:
-                output_speed = output_tokens / elapsed_time
-                logger.trace(f"Output speed: {output_speed:.2f} tokens/second")
-            if total_tokens > 0:
-                total_speed = total_tokens / elapsed_time
-                logger.trace(f"Total speed: {total_speed:.2f} tokens/second")
-
-        # Display reasoning tokens if available
-        reasoning_tokens = usage.get("reasoning_tokens") or usage.get("cached_tokens")
-        if reasoning_tokens:
-            logger.trace(f"Reasoning tokens: {reasoning_tokens}")
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    elif content:
+        stream = sys.stderr if is_error_summary_content(content) else sys.stdout
+        print(content, file=stream)
     else:
-        logger.trace("No token usage information available")
-        logger.trace(f"Available meta keys: {list(meta.keys())}")
-        logger.trace(f"LLM info: {llm_info}")
+        print("# Error\n\nPaper summarizer returned empty content", file=sys.stderr)
+
+    if args.verbose:
+        logger.info(f"Paper ID: {args.pid}")
+        if args.model:
+            logger.info(f"Requested model: {args.model}")
+        logger.info(f"Total time: {elapsed_time:.2f} seconds")
+
+        llm_info = meta.get("llm", {}) if isinstance(meta.get("llm"), dict) else {}
+        usage = llm_info.get("usage", {}) if isinstance(llm_info.get("usage"), dict) else {}
+        if usage:
+            # Try different token count field names (different providers use different names)
+            input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+            output_tokens = usage.get("completion_tokens") or usage.get("output_tokens") or 0
+            total_tokens = usage.get("total_tokens") or (input_tokens + output_tokens)
+
+            logger.info(f"Input tokens: {input_tokens}")
+            logger.info(f"Output tokens: {output_tokens}")
+            logger.info(f"Total tokens: {total_tokens}")
+
+            if elapsed_time > 0:
+                if output_tokens > 0:
+                    output_speed = output_tokens / elapsed_time
+                    logger.info(f"Output speed: {output_speed:.2f} tokens/second")
+                if total_tokens > 0:
+                    total_speed = total_tokens / elapsed_time
+                    logger.info(f"Total speed: {total_speed:.2f} tokens/second")
+
+            # Display reasoning tokens if available
+            reasoning_tokens = usage.get("reasoning_tokens") or usage.get("cached_tokens")
+            if reasoning_tokens:
+                logger.info(f"Reasoning tokens: {reasoning_tokens}")
+        else:
+            logger.info("No token usage information available")
+            logger.info(f"Available meta keys: {list(meta.keys())}")
+            logger.info(f"LLM info: {llm_info}")
+
+    if not content or is_error_summary_content(content):
+        raise SystemExit(1)
